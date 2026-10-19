@@ -6,7 +6,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
-import { join, posix, sep } from 'node:path';
+import { dirname, join, posix, sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { MACHINE, STAM_HOME } from './config.ts';
 import { settings } from './settings.ts';
@@ -110,9 +110,21 @@ export function parseInWorker(dir: string, files: WorkFile[], limitMs = BUILD_MS
   return new Promise((ok, fail) => {
     const w = new Worker(new URL('./decl-worker.ts', import.meta.url), { workerData: { decl: true, dir, files }, resourceLimits: { maxOldGenerationSizeMb: 1024 } });
     let done = false;
-    const end = (f: () => void) => { if (done) return; done = true; clearTimeout(timer); void w.terminate(); f(); };
+    // The worker's `git cat-file` child, while it runs: terminating the thread doesn't stop it, so it is killed here.
+    let child: number | null = null;
+    const end = (f: () => void) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      void w.terminate();
+      if (child) try { process.kill(child, 'SIGKILL'); } catch {}
+      f();
+    };
     const timer = setTimeout(() => end(() => fail(new DeclError(504, `indexing ${files.length} files took over ${Math.round(limitMs / 1000)}s and was stopped`))), limitMs);
-    w.once('message', (m: { results?: WorkResult[]; error?: string }) => end(() => (m.error ? fail(new DeclError(500, `indexing failed: ${m.error}`)) : ok(m.results ?? []))));
+    w.on('message', (m: { results?: WorkResult[]; error?: string; pid?: number | null }) => {
+      if ('pid' in m) { child = m.pid ?? null; return; }
+      end(() => (m.error ? fail(new DeclError(500, `indexing failed: ${m.error}`)) : ok(m.results ?? [])));
+    });
     w.once('error', (e) => end(() => fail(new DeclError(500, `indexing failed: ${e.message}`))));
     w.once('exit', (code) => end(() => fail(new DeclError(500, `the indexer exited (${code})`))));
   });
@@ -232,14 +244,48 @@ export function rank(ix: Loaded, name: string, from?: string): { matches: Match[
 const IDENT = /^[\p{L}\p{Nl}$_#][\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}$_]{0,199}$/u;
 const git_ = (args: string[], cwd: string) => git(args, cwd).then((s) => s.trim());
 
-// The checkout of `settings.itsa.repos` that holds an absolute path on this machine, with the path inside it.
-function repoOfFile(file: string): { repo: string; checkout: string; rel: string } | null {
+// The nearest folder at or above `file` holding a `.git` entry: a checkout's or a worktree's root.
+function gitTopOf(file: string): string | null {
+  for (let dir = dirname(file); ; ) {
+    if (existsSync(join(dir, '.git'))) return dir;
+    const up = dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+}
+
+// The linked worktree of `root`'s repo that holds an absolute path, or null. The path's nearest `.git` root is
+// asked for its common dir: it is a linked worktree of that repo only when the common dir is the checkout's own,
+// which also stops a separate clone or another repo's worktree (the same folder name) from matching.
+async function worktreeHit(root: string, real: string): Promise<{ checkout: string; rel: string } | null> {
+  const top = gitTopOf(real);
+  if (!top) return null;
+  try {
+    const [repoCommon, common, toplevel] = await Promise.all([
+      git_(['rev-parse', '--path-format=absolute', '--git-common-dir'], root),
+      git_(['rev-parse', '--path-format=absolute', '--git-common-dir'], top),
+      git_(['rev-parse', '--show-toplevel'], top),
+    ]);
+    if (realpathSync(common) !== realpathSync(repoCommon)) return null;
+    const tl = realpathSync(toplevel);
+    if (!(real === tl || real.startsWith(tl + sep))) return null;
+    return { checkout: tl, rel: real.slice(tl.length + 1).split(sep).join('/') };
+  } catch {
+    return null;
+  }
+}
+
+// The checkout of `settings.itsa.repos`, or a linked worktree of one, that holds an absolute path on this machine,
+// with the path inside it. A worktree is indexed at its own root and HEAD, not the main checkout's.
+async function repoOfFile(file: string): Promise<{ repo: string; checkout: string; rel: string } | null> {
   let real: string;
   try { real = realpathSync(file); } catch { return null; }
   for (const [repo, path] of Object.entries(settings().itsa.repos)) {
     let root: string;
     try { root = realpathSync(path); } catch { continue; }
     if (real.startsWith(root + sep)) return { repo, checkout: root, rel: real.slice(root.length + 1).split(sep).join('/') };
+    const wt = await worktreeHit(root, real);
+    if (wt) return { repo, checkout: wt.checkout, rel: wt.rel };
   }
   return null;
 }
@@ -262,7 +308,7 @@ export async function request(human: boolean, q: URLSearchParams, waitMs = WAIT_
   try {
     if (q.has('file')) {
       const host = q.get('host') ?? MACHINE;
-      const hit = host === MACHINE ? repoOfFile(q.get('file') ?? '') : null;
+      const hit = host === MACHINE ? await repoOfFile(q.get('file') ?? '') : null;
       if (!hit) return { status: 200, body: { state: 'no-repo' } };
       ({ repo, checkout } = hit);
       from = hit.rel;

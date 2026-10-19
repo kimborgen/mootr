@@ -12,6 +12,7 @@ export const STATES: { state: string; label: string; text: string }[] = [
   { state: 'blocked', label: 'Blocked', text: 'Stopped at a prompt in its terminal, a permission or a question. Open it to answer.' },
   { state: 'errored', label: 'Errored', text: 'Its harness hit an error. Open it to see what failed.' },
   { state: 'paused', label: 'Paused', text: 'Paused with its conversation kept. Resume it from its menu.' },
+  { state: 'resting', label: 'Resting', text: 'Idle for a long while or waiting on something slow: its harness is stopped and its session kept. Mail, a notice, or a prompt wakes it. The badge says what it waits for and when it wakes.' },
   { state: 'shut_down', label: 'Shut down', text: 'Not running: shut down or archived. Listed under Stopped.' },
 ]
 

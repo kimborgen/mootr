@@ -12,9 +12,11 @@
 //   per model and type: median and p75 over closed ITSAs, grouped by the ITSA's worker config and by
 //             the agent type with the most working time on it
 // Time is in seconds. Agents without items show usage cost and null time.
+import type { StatementSync } from 'node:sqlite';
 import * as db from './db.ts';
 import * as itsa from './itsa.ts';
-import { attributor, compute, COST_NOTE } from './issue-costs.ts';
+import { buildAttribution, computeSteps, COST_NOTE } from './issue-costs.ts';
+import { due, runSync, runSliced } from './slice.ts';
 import { EFFORT_KEYS } from './retro.ts';
 import { isReviewerType, reviewerTypes } from './agent-types.ts';
 import { accountFor } from './accounts.ts';
@@ -151,22 +153,23 @@ export function wallShares(spans: Window[]): number[] {
   return out;
 }
 
-// The items of one agent at a time, clipped to the window, each with its wall share in `seconds`
-// (concurrent items split a stretch evenly; est_cost_usd stays prorated to the clipped time).
-function* clippedByAgent(d: ReturnType<typeof db.open>, since: string, to: string): Generator<Clipped[]> {
+// The agents that have items (a probe per agent on the primary key, not a scan of every item); the window
+// is applied per agent.
+function itemAgents(d: ReturnType<typeof db.open>): string[] {
+  return (
+    d
+      .prepare('WITH RECURSIVE ids(a) AS (SELECT MIN(agent_id) FROM activity_items UNION ALL SELECT (SELECT MIN(agent_id) FROM activity_items WHERE agent_id > a) FROM ids WHERE a IS NOT NULL) SELECT a FROM ids WHERE a IS NOT NULL')
+      .all() as { a: string }[]
+  ).map((r) => r.a);
+}
+
+// One agent's items clipped to the window, each with its wall share in `seconds` (concurrent items
+// split a stretch evenly; est_cost_usd stays prorated to the clipped time).
+function clippedFor(stmt: StatementSync, agent: string, since: string, to: string): Clipped[] {
   const from = Date.parse(since);
   const until = Date.parse(to);
-  const rows = d
-    .prepare(`SELECT agent_id, kind, wait_kind, start, "end", est_cost_usd, category FROM activity_items WHERE kind != 'text' AND start < ? AND "end" > ? ORDER BY agent_id`)
-    .iterate(to, since) as unknown as Iterable<ItemRow>;
-  let agent: string | null = null;
-  let batch: Clipped[] = [];
-  for (const r of rows) {
-    if (r.agent_id !== agent) {
-      if (batch.length) yield withShares(batch);
-      batch = [];
-      agent = r.agent_id;
-    }
+  const batch: Clipped[] = [];
+  for (const r of stmt.all(agent, to, since) as unknown as ItemRow[]) {
     const full = (Date.parse(r.end) - Date.parse(r.start)) / 1000;
     const s = Math.max(Date.parse(r.start), from);
     const e = Math.min(Date.parse(r.end), until);
@@ -174,7 +177,18 @@ function* clippedByAgent(d: ReturnType<typeof db.open>, since: string, to: strin
     const seconds = (e - s) / 1000;
     batch.push({ ...r, start: new Date(s).toISOString(), end: new Date(e).toISOString(), seconds, est_cost_usd: (r.est_cost_usd * seconds) / full });
   }
-  if (batch.length) yield withShares(batch);
+  return withShares(batch);
+}
+
+// The window's items an agent at a time, pausing between agents once a slice is used (src/slice.ts).
+// The reads are short queries, so no cursor is open across a pause.
+function* clippedByAgent(d: ReturnType<typeof db.open>, since: string, to: string): Generator<Clipped[] | null> {
+  const stmt = d.prepare(`SELECT agent_id, kind, wait_kind, start, "end", est_cost_usd, category FROM activity_items WHERE agent_id = ? AND kind != 'text' AND start < ? AND "end" > ?`);
+  for (const id of itemAgents(d)) {
+    const batch = clippedFor(stmt, id, since, to);
+    if (batch.length) yield batch;
+    if (due()) yield null;
+  }
 }
 
 function withShares(batch: Clipped[]): Clipped[] {
@@ -182,7 +196,47 @@ function withShares(batch: Clipped[]): Clipped[] {
   return batch.map((it, i) => ({ ...it, seconds: shares[i] }));
 }
 
-export function activityStats(opts: Options = {}) {
+export const activityStats = (opts: Options = {}) => runSync(statsSteps(opts));
+// The same report in slices of a few ms, for the daemon's request path (src/slice.ts, S-2094).
+export const activityStatsSliced = (opts: Options = {}, wrap?: Parameters<typeof runSliced>[1]) => runSliced(statsSteps(opts), wrap);
+
+// The report the daemon serves (S-2094): sliced so no request holds the event loop, and kept for FRESH_MS
+// per (by, days, closed) so a page polling it reads a memo. Past FRESH_MS the last report is served at
+// once while one refresh runs in the background (at most one per key); past STALE_MS a caller waits.
+export const ACTIVITY_FRESH_MS = 30_000;
+export const ACTIVITY_STALE_MS = 10 * 60_000;
+// Keys kept: by x days x closed is a handful in use; a caller's odd `days` can't grow the map.
+const MEMO_KEYS = 32;
+const memo = new Map<string, { at: number; value: ReturnType<typeof activityStats> }>();
+const refreshing = new Map<string, Promise<ReturnType<typeof activityStats>>>();
+export const activityMemoSize = () => memo.size;
+export const resetActivityMemo = () => (memo.clear(), refreshing.clear());
+// Settles when no refresh is running (a test ends its database after it).
+export const activityRefreshIdle = () => Promise.allSettled([...refreshing.values()]);
+export async function activityStatsCached(opts: Options = {}, wrap?: Parameters<typeof runSliced>[1], now = Date.now()): Promise<ReturnType<typeof activityStats>> {
+  const key = `${opts.by ?? 'agent'}|${opts.days ?? ''}|${opts.closed ? 1 : 0}`;
+  const have = memo.get(key);
+  if (have && now - have.at < ACTIVITY_FRESH_MS) return have.value;
+  let run = refreshing.get(key);
+  if (!run) {
+    run = activityStatsSliced(opts, wrap).then((value) => {
+      // Stamped with the caller's clock, so a test can step it; the oldest keys go past MEMO_KEYS.
+      memo.set(key, { at: now, value });
+      while (memo.size > MEMO_KEYS) memo.delete(memo.keys().next().value!);
+      return value;
+    });
+    refreshing.set(key, run);
+    const done = () => void (refreshing.get(key) === run && refreshing.delete(key));
+    run.then(done, done);
+  }
+  if (have && now - have.at < ACTIVITY_STALE_MS) {
+    run.catch(() => {});
+    return have.value;
+  }
+  return run;
+}
+
+function* statsSteps(opts: Options = {}) {
   const by = opts.by ?? 'agent';
   const now = opts.now ?? Date.now();
   // The window defaults to 30 days, so a request never reads the whole history.
@@ -204,17 +258,22 @@ export function activityStats(opts: Options = {}) {
   }
 
   if (by === 'agent') {
-    const { rows, categories } = agentRows(clippedByAgent(d, since, to), agents, usage, usageAcct, ctx);
+    const { rows, categories } = yield* agentRows(clippedByAgent(d, since, to), agents, usage, usageAcct, ctx);
     return { note: COST_NOTE, by, since, rows, categories, labels: activityLabels() };
   }
 
   // ITSA state is read before the item pass, so the streamed items are the only open query.
-  const attribute = attributor();
-  const c = compute({ days, now });
+  const attribute = buildAttribution().attribute;
+  // weekly_percent is not part of the activity rows, and its worth estimate costs over 100 ms the first time.
+  const c = yield* computeSteps({ days, now, worthMid: () => null });
   const categoryOf = new Map(itsa.statuses().map((s) => [s.name, s.category as string]));
   const perItsa = new Map<string, Split>();
   const agentWork = new Map<string, Map<string, number>>();
   for (const batch of clippedByAgent(d, since, to)) {
+    if (!batch) {
+      yield;
+      continue;
+    }
     for (const it of batch) {
       for (const { itsaId, share } of attribute(it.agent_id, Date.parse(it.start))) {
         if (!perItsa.has(itsaId)) perItsa.set(itsaId, splitZero());
@@ -234,50 +293,61 @@ export function activityStats(opts: Options = {}) {
     if (!REVIEW.has(categoryOf.get(x.from ?? '') ?? '') || !ACTIVE_OR_READY.has(categoryOf.get(x.to ?? '') ?? '')) continue;
     moves.set(e.itsa_id, (moves.get(e.itsa_id) ?? 0) + 1);
   }
+  if (due()) yield;
   const reviewers = reviewersByItsa(d, agents, c.items);
+  if (due()) yield;
 
   // Roll-up time over the ITSA tree, each node's own counted once.
   const children = new Map<string, string[]>();
   for (const x of c.items.values()) if (x.parent_id && c.items.has(x.parent_id)) add2(children, x.parent_id, x.id);
+  const rolled = new Map<string, Split>();
   const rollup = (id: string): Split => {
+    const memo = rolled.get(id);
+    if (memo) return memo;
     const t = splitZero();
     const own = perItsa.get(id);
     if (own) mergeSplit(t, own);
     for (const k of children.get(id) ?? []) mergeSplit(t, rollup(k));
+    rolled.set(id, t);
     return t;
   };
 
-  const itsaRows = [...c.items.values()]
+  const kept = [...c.items.values()]
     .filter((x) => !opts.closed || x.category === 'closed')
-    .filter((x) => !since || (x.closed_at ? x.closed_at >= since : perItsa.has(x.id) || (x.own.cost_usd ?? 0) > 0))
-    .map((x) => {
-      const own = perItsa.get(x.id) ?? splitZero();
-      const total = rollup(x.id);
-      const work = [...(agentWork.get(x.id) ?? [])].sort((a, b) => b[1] - a[1]);
-      // The type is the most-working agent that is not a reviewer type (ring members included).
-      const topWorker = work.find(([id]) => !isReviewerType(agents.get(id)?.type ?? ''));
-      const topAgent = topWorker ? agents.get(topWorker[0]) : undefined;
-      return {
-        key: x.key,
-        kind: x.kind,
-        title: x.title,
-        status: x.status,
-        category: x.category,
-        config: x.config,
-        type: topAgent?.type ?? null,
-        created_at: new Date(x.created).toISOString(),
-        closed_at: x.closed_at,
-        lead_s: x.closed_at ? Math.round((Date.parse(x.closed_at) - x.created) / 1000) : null,
-        own: { ...round(own), cost_usd: round6(x.own.cost_usd), modes: modesOf(ctx, x.accounts) },
-        total: { ...round(total), cost_usd: round6(x.total.cost_usd) },
-        review_moves: moves.get(x.id) ?? 0,
-        reviewer_agents: reviewers.get(x.id)?.size ?? 0,
-        review_rounds: (moves.get(x.id) ?? 0) + (reviewers.get(x.id)?.size ?? 0),
-        // Who worked on it, and their own working time there, most first (S-226).
-        agents: work.map(([id, s]) => ({ id, name: agents.get(id)?.name ?? id, working_s: Math.round(s) })),
-      };
-    })
-    .sort((a, b) => b.total.cost_usd - a.total.cost_usd || a.key.localeCompare(b.key));
+    .filter((x) => !since || (x.closed_at ? x.closed_at >= since : perItsa.has(x.id) || (x.own.cost_usd ?? 0) > 0));
+  const rowOf = (x: (typeof kept)[number]) => {
+    const own = perItsa.get(x.id) ?? splitZero();
+    const total = rollup(x.id);
+    const work = [...(agentWork.get(x.id) ?? [])].sort((a, b) => b[1] - a[1]);
+    // The type is the most-working agent that is not a reviewer type (ring members included).
+    const topWorker = work.find(([id]) => !isReviewerType(agents.get(id)?.type ?? ''));
+    const topAgent = topWorker ? agents.get(topWorker[0]) : undefined;
+    return {
+      key: x.key,
+      kind: x.kind,
+      title: x.title,
+      status: x.status,
+      category: x.category,
+      config: x.config,
+      type: topAgent?.type ?? null,
+      created_at: new Date(x.created).toISOString(),
+      closed_at: x.closed_at,
+      lead_s: x.closed_at ? Math.round((Date.parse(x.closed_at) - x.created) / 1000) : null,
+      own: { ...round(own), cost_usd: round6(x.own.cost_usd), modes: modesOf(ctx, x.accounts) },
+      total: { ...round(total), cost_usd: round6(x.total.cost_usd) },
+      review_moves: moves.get(x.id) ?? 0,
+      reviewer_agents: reviewers.get(x.id)?.size ?? 0,
+      review_rounds: (moves.get(x.id) ?? 0) + (reviewers.get(x.id)?.size ?? 0),
+      // Who worked on it, and their own working time there, most first (S-226).
+      agents: work.map(([id, s]) => ({ id, name: agents.get(id)?.name ?? id, working_s: Math.round(s) })),
+    };
+  };
+  const itsaRows = [];
+  for (const x of kept) {
+    itsaRows.push(rowOf(x));
+    if (due()) yield;
+  }
+  itsaRows.sort((a, b) => b.total.cost_usd - a.total.cost_usd || a.key.localeCompare(b.key));
 
   if (by === 'itsa') return { note: COST_NOTE, by, since, rows: itsaRows };
 
@@ -344,7 +414,7 @@ export function activityLabels(): Record<string, string> {
 
 // The agents' rows and the overall category totals. The totals sum the unrounded per-agent times, then
 // round once, so small agents' fractions are not lost (S-225).
-function agentRows(batches: Iterable<Clipped[]>, agents: Map<string, { name: string; harness: string; model: string | null; type: string | null }>, usage: Map<string, number>, usageAcct: Map<string, Map<string, number>>, ctx: Ctx) {
+function* agentRows(batches: Iterable<Clipped[] | null>, agents: Map<string, { name: string; harness: string; model: string | null; type: string | null }>, usage: Map<string, number>, usageAcct: Map<string, Map<string, number>>, ctx: Ctx) {
   const accounts = new Map<string, string>();
   const accountOf = (id: string): string => {
     if (!accounts.has(id)) accounts.set(id, accountFor(agents.get(id) ?? { harness: '' }) ?? '');
@@ -352,16 +422,23 @@ function agentRows(batches: Iterable<Clipped[]>, agents: Map<string, { name: str
   };
   const per = new Map<string, { s: Split; c: Cats; first: number; last: number; est: number; n: number }>();
   const overall = catsZero();
-  for (const it of flatten(batches)) {
-    if (!per.has(it.agent_id)) per.set(it.agent_id, { s: splitZero(), c: catsZero(), first: Infinity, last: -Infinity, est: 0, n: 0 });
-    const p = per.get(it.agent_id)!;
-    addItem(p.s, it, it.seconds);
-    addCategory(p.c, it, accountOf(it.agent_id));
-    p.first = Math.min(p.first, Date.parse(it.start));
-    p.last = Math.max(p.last, Date.parse(it.end));
-    p.est += it.est_cost_usd;
-    p.n++;
+  for (const batch of batches) {
+    if (!batch) {
+      yield;
+      continue;
+    }
+    for (const it of batch) {
+      if (!per.has(it.agent_id)) per.set(it.agent_id, { s: splitZero(), c: catsZero(), first: Infinity, last: -Infinity, est: 0, n: 0 });
+      const p = per.get(it.agent_id)!;
+      addItem(p.s, it, it.seconds);
+      addCategory(p.c, it, accountOf(it.agent_id));
+      p.first = Math.min(p.first, Date.parse(it.start));
+      p.last = Math.max(p.last, Date.parse(it.end));
+      p.est += it.est_cost_usd;
+      p.n++;
+    }
   }
+  if (due()) yield;
   for (const p of per.values()) {
     for (const [k, v] of Object.entries(p.c.top_s)) add(overall.top_s, k, v);
     for (const [k, v] of Object.entries(p.c.leaf_s)) add(overall.leaf_s, k, v);
@@ -369,38 +446,37 @@ function agentRows(batches: Iterable<Clipped[]>, agents: Map<string, { name: str
     for (const [k, m] of p.c.top_cost_by_account) for (const [a, v] of m) addAcct(overall.top_cost_by_account, k, a, v);
   }
   const ids = new Set([...per.keys(), ...usage.keys()]);
-  const rows = [...ids]
-    .map((id) => {
-      const a = agents.get(id);
-      const p = per.get(id);
-      return {
-        agent: a?.name ?? id,
-        id,
-        harness: a?.harness ?? null,
-        model: a?.model ?? null,
-        type: a?.type ?? null,
-        items: p?.n ?? 0,
-        // No transcript yet: time is unknown, not zero.
-        wall_s: p && p.n ? Math.round((p.last - p.first) / 1000) : null,
-        working_s: p && p.n ? Math.round(p.s.working_s) : null,
-        waiting_s: p && p.n ? Math.round(p.s.waiting_s) : null,
-        working_by_kind: p ? roundAll(p.s.working_by_kind) : null,
-        waiting_by_top: p ? roundAll(p.s.waiting_by_top) : null,
-        waiting_by_kind: p ? roundAll(p.s.waiting_by_kind) : null,
-        cost_usd: round6(usage.get(id) ?? 0),
-        modes: modesOf(ctx, usageAcct.get(id) ?? new Map()),
-        item_est_cost_usd: round6(p?.est ?? 0),
-        item_est_modes: modesOf(ctx, new Map([[accountOf(id), p?.est ?? 0]])),
-        categories: roundCats(p?.c ?? catsZero(), ctx),
-      };
-    })
-    .sort((a, b) => (b.cost_usd - a.cost_usd) || a.agent.localeCompare(b.agent));
+  const rowOf = (id: string) => {
+    const a = agents.get(id);
+    const p = per.get(id);
+    return {
+      agent: a?.name ?? id,
+      id,
+      harness: a?.harness ?? null,
+      model: a?.model ?? null,
+      type: a?.type ?? null,
+      items: p?.n ?? 0,
+      // No transcript yet: time is unknown, not zero.
+      wall_s: p && p.n ? Math.round((p.last - p.first) / 1000) : null,
+      working_s: p && p.n ? Math.round(p.s.working_s) : null,
+      waiting_s: p && p.n ? Math.round(p.s.waiting_s) : null,
+      working_by_kind: p ? roundAll(p.s.working_by_kind) : null,
+      waiting_by_top: p ? roundAll(p.s.waiting_by_top) : null,
+      waiting_by_kind: p ? roundAll(p.s.waiting_by_kind) : null,
+      cost_usd: round6(usage.get(id) ?? 0),
+      modes: modesOf(ctx, usageAcct.get(id) ?? new Map()),
+      item_est_cost_usd: round6(p?.est ?? 0),
+      item_est_modes: modesOf(ctx, new Map([[accountOf(id), p?.est ?? 0]])),
+      categories: roundCats(p?.c ?? catsZero(), ctx),
+    };
+  };
+  const rows = [];
+  for (const id of ids) {
+    rows.push(rowOf(id));
+    if (due()) yield;
+  }
+  rows.sort((a, b) => (b.cost_usd - a.cost_usd) || a.agent.localeCompare(b.agent));
   return { rows, categories: roundCats(overall, ctx) };
-}
-
-// The items of each batch in turn, one agent's batch at a time.
-function* flatten<T>(batches: Iterable<T[]>): Generator<T> {
-  for (const batch of batches) yield* batch;
 }
 
 // The ITSA keys and branch names a reviewer's first prompt names (S-244). A key is S-N on whole tokens

@@ -85,6 +85,7 @@ before(async () => {
   db.open();
   agent('a2', 'cos');
   settings.setSetting('chiefOfStaff', 'cos');
+  settings.setSetting('itsa', { ...settings.settings().itsa, repos: { stam2: process.cwd() } });
   // A local origin and a checkout of it with processes/demo.yaml on main.
   tmp = mkdtempSync(join(tmpdir(), 'stam-process-proposal-repo-'));
   origin = join(tmp, 'origin.git');

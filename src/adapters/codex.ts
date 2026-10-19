@@ -33,7 +33,7 @@ import type { Adapter, ErrorClass, HookResult, LaunchSpec } from './types.ts';
 import * as tmux from '../tmux.ts';
 import { render, humanMailPrompt } from '../templates.ts';
 import { schedulePush } from '../mail.ts';
-import { onIdle } from '../lifecycle.ts';
+import { onIdle, dropRestRequest } from '../lifecycle.ts';
 import { orgPrompt, managerCostPrompt } from '../org.ts';
 import { instructionsPrompt, extraMcpServers, linkSkills, agentsSkillsDir } from '../instructions.ts';
 import { replaceHookWaits, clearHookWaits, type HookWait } from './hook-waits.ts';
@@ -559,6 +559,8 @@ function onStatus(agentId: string, status: any, c?: Conn): void {
       const flags: string[] = status.activeFlags ?? [];
       if (flags.includes('waitingOnApproval')) return set(agentId, 'blocked', 'approval', 'status');
       if (flags.includes('waitingOnUserInput')) return set(agentId, 'blocked', 'question', 'status');
+      // A new turn: the rest its last turn asked for no longer holds (S-2237).
+      if (a.activity === 'idle' || a.activity === 'waiting') dropRestRequest(agentId);
       if (a.activity !== 'working') set(agentId, 'working', null, 'status');
       return;
     }

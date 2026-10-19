@@ -62,10 +62,21 @@ export const stories: Story[] = [{
     'A mark stamps once when its state changes (the ring, the owned ITSA\'s chip, the unread badge), and a row nudges once when its owned issue changes status, further when it starts waiting on you. Each goes through the motion gate (' + ds('Motion') + '): nothing moves while the tree scrolls, for an off-screen row, under reduced motion, or with that kind off in Settings › Motion (S-698).',
     'Mail sent between two rows the tree shows flies a small envelope along the indent gutter from the sender\'s row to the recipient\'s unread badge, which stamps as it lands; mail to or from you travels to the top of the list, and an end that is scrolled away is clipped to the list\'s edge (S-699, see `Sidebar mail motion`).',
     'Roots sort the executive assistant first, then a chief of staff, then by creation time; children sort by creation time. Stopped agents sort by last update, newest first, and at most 40 show.',
+    'A resting agent (S-1969) keeps its row: a dashed ring with a dash pip, and the resting badge after its name, the wake time alone (`~14:20`, local; none when unknown) with the full line in its tooltip. It counts as live, so its other marks stay.',
     "Colour never carries a state alone: the mark's pip and ring style do too, and each badge has an icon or a count (" + ds('State vocabulary') + ').',
   ],
   states: [
     { name: 'Fixture agents, every state', data: { itsas: [itsa('i1', 'fx-dev', 'in_progress'), itsa('i2', 'fx-cos', 'needs_input'), itsa('i3', 'fx-cos', 'in_progress')] }, setup: ui({ stoppedOpen: false }), render: () => <Side><Tree /></Side> },
+    {
+      name: 'Resting agents',
+      data: { agents: [
+        agent({ id: 'r-0', name: 'fixture-lead', role: 'manager', activity: 'idle' }),
+        agent({ id: 'r-1', name: 'fixture-pr-wait', role: 'developer', parents: ['r-0'], lifecycle: 'paused', activity: null, resting: { reason: 'wait', waits: [{ id: 'rw1', kind: 'event', target: null, detail: 'PR #12', since: '2026-10-01T09:00:00.000Z', until: null }], expected_wake: new Date(Date.now() + 3 * 3600_000).toISOString() } }),
+        agent({ id: 'r-2', name: 'fixture-no-wake', role: 'reviewer', parents: ['r-0'], lifecycle: 'paused', activity: null, resting: { reason: 'wait', waits: [{ id: 'rw2', kind: 'agent', target: 'r-0', detail: null, since: '2026-10-01T09:00:00.000Z', until: null }], expected_wake: null } }),
+        agent({ id: 'r-3', name: 'fixture-idle', role: 'standing', parents: ['r-0'], lifecycle: 'paused', activity: null, resting: { reason: 'idle', waits: [], expected_wake: null } }),
+      ] },
+      setup: ui(), render: () => <Side><Tree /></Side>,
+    },
     { name: 'Nested', data: { agents: NESTED }, setup: ui({ treeFocus: 'n-dev' }), render: () => <Side><Tree /></Side> },
     { name: 'A parent folded', data: { agents: NESTED }, setup: ui({ collapsed: { 'n-mgr': true } }), render: () => <Side><Tree /></Side> },
     {

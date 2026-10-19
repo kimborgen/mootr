@@ -45,6 +45,29 @@ the trim; S-1280's trim dropped one and the rule read as its opposite (S-1307).
 | `blocks/retro/10-retro-record.md` | for improve and instruction items | S-1228 | S-1280 | 2026-10-16 |
 | `blocks/type-developer/10-developer-change.md` | Rebase onto a freshly fetched | S-767, S-765 | S-1280 | 2026-10-16 |
 | `docs/itsa-design.md` | Walk an agent's children or descendants only through `src/tree.ts` (`childrenOf`, `descendantsOf`) | S-1379, S-1405 | S-1391 | 2026-10-17 |
+| `blocks/type-reviewer/20-reviewer-checks.md` | A test fixture must reach the changed path | S-1780, S-1904, S-789 | S-2077 | 2026-10-19 |
+| `blocks/type-reviewer/20-reviewer-checks.md` | `git grep` every changed name, label, export and state | S-2015, S-2029, S-1649 | S-2077 | 2026-10-19 |
+| `blocks/type-reviewer/20-reviewer-checks.md` | trace both directions of the mixed old/new period | S-1878, S-1920, S-1921, S-1865, S-1935 | S-2077 | 2026-10-19 |
+| `blocks/type-reviewer/20-reviewer-checks.md` | Read files at the reviewed sha | S-1954 | S-2077 | 2026-10-19 |
+| `blocks/type-reviewer/20-reviewer-checks.md` | `git diff MAINTIP HEAD --stat` | S-1733 | S-2077 | 2026-10-19 |
+| `blocks/type-manager/30-manager-mail-wait.md` | Brief a reviewer with the PR, branch and full head only | S-1870, S-1998, S-1954 | S-2077 | 2026-10-19 |
+| `blocks/type-manager/30-manager-mail-wait.md` | one consistent view (one fd for `fstat` and read) | S-1952, S-2017 | S-2077 | 2026-10-19 |
+| `blocks/type-manager/30-manager-mail-wait.md` | require fail-closed parsing | S-1846 | S-2077 | 2026-10-19 |
+| `blocks/type-manager/30-manager-mail-wait.md` | names `test/run.sh export` | S-1901 | S-2077 | 2026-10-19 |
+| `blocks/type-manager/30-manager-mail-wait.md` | Archive a developer only after its own done mail | S-1787 | S-2077 | 2026-10-19 |
+| `blocks/type-developer/40-developer-before-report.md` | Before you call a change local | S-2009, S-1798, S-1821, S-2000 | S-2077 | 2026-10-19 |
+| `blocks/type-developer/40-developer-before-report.md` | builds aside, renames, and gitignores each temp name | S-1782, S-1783 | S-2077 | 2026-10-19 |
+| `blocks/type-developer/40-developer-before-report.md` | push nothing unless your manager asks | S-1804 | S-2077 | 2026-10-19 |
+| `blocks/type-developer/40-developer-before-report.md` | Where the task and this brief differ, the task wins | S-840 | S-2077 | 2026-10-19 |
+| `templates/ring-turn.md` | split on whether a residual race blocks | S-1935, S-1882 | S-2077 | 2026-10-19 |
+| `templates/ring-turn.md` | names the shell checks it couldn't run | S-1923, S-1912 | S-2077 | 2026-10-19 |
+| `docs/pull-requests.md` | Moving or splitting a doc into `docs/` ships it | S-1901, S-1908 | S-2077 | 2026-10-19 |
+| `docs/testing.md` | mirrors the production path | S-789, S-1904 | S-2077 | 2026-10-19 |
+| `blocks/type-reviewer-opus/20-reviewer-opus-checks.md` | A test fixture must reach the changed path | S-1780, S-1904, S-789 | S-2077 | 2026-10-19 |
+| `blocks/type-reviewer-opus/20-reviewer-opus-checks.md` | `git grep` every changed name, label, export and state | S-2015, S-2029, S-1649 | S-2077 | 2026-10-19 |
+| `blocks/type-reviewer-opus/20-reviewer-opus-checks.md` | trace both directions of the mixed old/new period | S-1878, S-1920, S-1921, S-1865, S-1935 | S-2077 | 2026-10-19 |
+| `blocks/type-reviewer-opus/20-reviewer-opus-checks.md` | Read files at the reviewed sha | S-1954 | S-2077 | 2026-10-19 |
+| `blocks/type-reviewer-opus/20-reviewer-opus-checks.md` | `git diff MAINTIP HEAD --stat` | S-1733 | S-2077 | 2026-10-19 |
 
 S-1391 measured (S-1405, S-1447): the predicted effect held for new calls, which went through `src/tree.ts`, and
 missed the existing copies. The grep gate covered only the `db.childrenOf(` call, so attribution, activity-summary,

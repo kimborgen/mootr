@@ -1,7 +1,7 @@
 #!/bin/sh
 # Local human login (S-613): with auth.localHuman on, a page's secret whose name root vouched for with
 # coreutils (`install -d -m 755 DIR DIR/UID && install -m 644 /dev/null DIR/UID/NAME`; here a test folder and this user standing in for root)
-# logs stam's own page on 127.0.0.1 in as the human. Checked: off by default (login 404, no folder given); a
+# logs stam's own page on 127.0.0.1 in as the human. Checked: off in an existing home (login 404, no folder given); a
 # login without stam's Origin, from another port, or cross-site is refused; the name alone, a made-up secret,
 # and a reused one are refused; a session passes humanOnly and human writes, with auth.humanStrict too;
 # the shared token and x-stam-human still don't; a session token sent as a peer's relay (x-stam-local) isn't
@@ -40,7 +40,7 @@ upgrade() {
   case "$_o" in *' 101 '*) echo yes ;; *) echo no ;; esac
 }
 
-echo "-- off by default"
+echo "-- off in an existing home (test/lib.sh writes settings.json, so S-2121 pins it off)"
 [ "$(curl -s "$URL/api/human/login" | jget "d['enabled']")" = False ] || fail "login wasn't reported off"
 [ "$(login "$(vouched)")" = 404 ] || fail "a login with the setting off wasn't 404: $(cat "$TEST_TMP/body")"
 

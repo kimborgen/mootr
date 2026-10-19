@@ -15,6 +15,8 @@ process.env.STAM_HOME = stamHome;
 process.env.HOME = home;
 const proj = join(home, 'projects');
 const outside = join(home, 'elsewhere');
+const worktrees = join(stamHome, 'worktrees');
+const wt = join(worktrees, 'app-dev');
 let files, roots, server, base;
 
 before(async () => {
@@ -43,7 +45,16 @@ before(async () => {
   symlinkSync(outside, join(proj, 'app', 'out'));
   symlinkSync(join(outside, 'secret.txt'), join(proj, 'app', 'link.txt'));
   symlinkSync(join(proj, 'app', '.env'), join(proj, 'app', 'envlink.txt'));
-  roots = files.realRoots(null);
+  // A linked git worktree of the checkout, where the agents' trees live (S-2101).
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8' });
+  git('init', '-q', '-b', 'main', join(proj, 'app'));
+  git('-C', join(proj, 'app'), 'add', '-A');
+  git('-C', join(proj, 'app'), 'commit', '-q', '-m', 'one');
+  mkdirSync(worktrees, { recursive: true });
+  git('-C', join(proj, 'app'), 'worktree', 'add', '-q', '-b', 'dev', wt);
+  writeFileSync(join(wt, 'wt.txt'), 'worktree file');
+  writeFileSync(join(wt, '.env'), 'SECRET=WT');
+  roots = files.realRoots([proj, join(stamHome, 'attachments'), worktrees]);
   server = createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
     try {
@@ -68,8 +79,8 @@ const code = (p) => {
 };
 const get = (p, headers = {}, q = '') => fetch(`${base}/?path=${encodeURIComponent(p)}${q}`, { headers });
 
-test('the default roots are ~/projects and the mail attachments', () => {
-  assert.deepEqual(roots.map((r) => r.replace(/^.*\//, '')), ['projects', 'attachments']);
+test('the default roots are ~/projects, the mail attachments and the worktrees', () => {
+  assert.deepEqual(roots.map((r) => r.replace(/^.*\//, '')), ['projects', 'attachments', 'worktrees']);
   assert.equal(files.realRoots(['/nonexistent-root']).length, 0);
   assert.equal(files.realRoots([outside]).length, 1);
 });
@@ -115,6 +126,17 @@ test('the deny list holds inside a root, also through a link', () => {
   assert.equal(files.denied(join(proj, 'app', 'a.txt')), false);
 });
 
+test('a file in a worktree reads, and the deny list still holds inside it', async () => {
+  assert.equal(code(join(wt, 'wt.txt')), 200);
+  assert.equal(await (await get(join(wt, 'wt.txt'))).text(), 'worktree file');
+  assert.equal(code(join(wt, '.env')), 403);
+  assert.equal(code(join(wt, 'server.pem')), 403);
+  assert.equal(files.denied(join(wt, 'wt.txt')), false);
+  assert.equal(files.denied(join(wt, '.env')), true);
+  // Another folder in STAM_HOME (a token, say) stays shut.
+  assert.equal(code(join(stamHome, 'token')), 403);
+});
+
 test('a listing has name, kind, size and mtime, and leaves out denied entries', () => {
   const entries = files.listDir(files.resolveIn(join(proj, 'app'), roots));
   const names = entries.map((e) => e.name);
@@ -125,7 +147,7 @@ test('a listing has name, kind, size and mtime, and leaves out denied entries', 
   assert.equal(a.size, 11);
   assert.ok(a.mtime > 0);
   assert.equal(entries.find((e) => e.name === 'out').kind, 'symlink');
-  assert.deepEqual(files.listRoots(roots).roots.map((r) => r.name), ['projects', 'attachments']);
+  assert.deepEqual(files.listRoots(roots).roots.map((r) => r.name), ['projects', 'attachments', 'worktrees']);
 });
 
 test('a file is served with the safe headers and a type by extension and sniff', async () => {

@@ -77,7 +77,7 @@ describe('downloadBlob', () => {
   it('cancels mid-stream once the bytes pass the cap, whatever the header says', async () => {
     const { res, cancel } = bulky(3, DOWNLOAD_MAX / 2)
     vi.stubGlobal('fetch', vi.fn(async () => res))
-    await expect(downloadBlob('m', '/a.zip')).rejects.toThrow('too large to download')
+    await expect(downloadBlob('m', '/a.zip')).rejects.toThrow('Over 500 MB is too large to download')
     expect(cancel).toHaveBeenCalled()
   })
   it('passes the abort signal to fetch', async () => {

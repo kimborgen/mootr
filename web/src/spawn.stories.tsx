@@ -1,5 +1,6 @@
 import { SpawnPanel, HarnessMark, spawnMenu } from './spawn'
 import { byName } from './stories/fixtures'
+import { PERMISSION_MODES } from './stories/settingsFixtures'
 import { OnMount, Row } from './stories/helpers'
 import { ds, reply, type Story } from './stories/types'
 
@@ -25,6 +26,7 @@ const REGISTRY = {
 const ROUTES = {
   'GET /api/registry': REGISTRY,
   'GET /api/config/settings': { text: JSON.stringify({ spawnDefaults: { preset: 'standard', cwd: '~' } }) },
+  'GET /api/permission-modes': PERMISSION_MODES,
 }
 const click = (el: HTMLElement, text: string) => [...el.ownerDocument.querySelectorAll<HTMLElement>('.menu [role^=menuitem]')].find((b) => b.textContent?.includes(text))?.click()
 const openMenu = (base = {}) => () => { void spawnMenu(12, 12, base) }
@@ -65,7 +67,7 @@ export const stories: Story[] = [{
   code: ['web/src/spawn.tsx#SpawnPanel', 'web/src/spawn.tsx#spawnPanelOpen', 'web/src/spawn.tsx#closeSpawnPanel'],
   rules: [
     'A row is `--size-row-menu`; on a phone `--size-hit-touch` (' + ds('Density') + '). The sheet sits at `--z-modal`.',
-    'Bypass permissions uses the `danger` tone and says it never asks; Auto mode is the default.',
+    "Permissions defaults to Follow settings: the row shows the mode Settings › Permission modes give the chosen harness and type, and the add sends no `permission_mode`, so the agent follows the settings. Picking Ask (Claude Code only), Auto, or Bypass sends that mode as the human's own pick, which the agent keeps. Bypass uses the `danger` tone, says it never asks, and shows a warning under the row; a harness change drops a pick the new harness does not offer.",
     'The focus returns to the row after a pick, and ArrowUp and ArrowDown move between rows, so the form works by keyboard alone.',
     'Standing (pauses when idle instead of finishing) and Workspace (a personal notes folder, kept when the agent is archived) are sent only when ticked; ticking Standing ticks Workspace, which stays changeable.',
     'Name is limited to lowercase letters, digits and hyphens as it is typed.',
@@ -75,6 +77,7 @@ export const stories: Story[] = [{
     { name: 'Model options open', height: 700, routes: ROUTES, render: () => <><OnMount run={pick('Model')} /><SpawnPanel /></> },
     { name: 'Harness options open', height: 700, routes: ROUTES, render: () => <><OnMount run={pick('Harness')} /><SpawnPanel /></> },
     { name: 'Standing with a workspace', height: 760, routes: ROUTES, render: () => <><OnMount run={(el) => { openPanel(el); setTimeout(() => [...el.ownerDocument.querySelectorAll<HTMLInputElement>('.spawn-panel .sp-check input')].find((i) => i.parentElement?.textContent?.startsWith('Standing'))?.click(), 80) }} /><SpawnPanel /></> },
+    { name: 'Bypass picked', height: 760, routes: ROUTES, render: () => <><OnMount run={(el) => { openPanel(el); setTimeout(() => el.ownerDocument.querySelector<HTMLElement>('.sp-row[data-pick="Permissions"]')?.click(), 80); setTimeout(() => click(el, 'Bypass'), 140) }} /><SpawnPanel /></> },
     { name: 'Add fails', height: 700, routes: { ...ROUTES, 'POST /api/agents': reply(400, { error: 'fixture: the folder does not exist' }) },
       render: () => <><OnMount run={(el) => { openPanel(el); setTimeout(() => el.ownerDocument.querySelector<HTMLElement>('.spawn-panel button[type=submit]')?.click(), 80) }} /><SpawnPanel /></> },
   ],

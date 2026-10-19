@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { diffHref, diffKey, diffTitle, parseDiffKey, parseDiffLink } from './diffKey'
+import { diffHref, diffKey, diffTitle, parseDiffKey, parseDiffLink, parsePatchKey, patchKey } from './diffKey'
 import { validKey, viewMeta } from '../views/registry'
 
 describe('diff keys', () => {
@@ -25,5 +25,20 @@ describe('diff keys', () => {
     expect(validKey('diff:stam2')).toBe(false)
     expect(diffTitle(512)).toBe('PR #512')
     expect(viewMeta('diff:stam2#512').title).toBe('PR #512')
+  })
+})
+
+describe('patch keys (S-2103)', () => {
+  it('builds and parses patch:HASH', () => {
+    expect(patchKey('1a2b3c4d5e6f7081')).toBe('patch:1a2b3c4d5e6f7081')
+    expect(parsePatchKey('patch:1a2b3c4d5e6f7081')).toBe('1a2b3c4d5e6f7081')
+  })
+  it('refuses what is not a patch key', () => {
+    for (const k of ['patch:', 'patch:xyz', 'patch:1A2B3C4D5E6F7081', 'patch:1a2b3c4d', 'patch:1a2b3c4d5', 'patch:1a2b3c4d5e6f7081a', 'patch:1a2b3c4d5e6f7081#2', 'diff:stam2#5']) expect(parsePatchKey(k)).toBeNull()
+  })
+  it('is a valid view key, titled with its hash', () => {
+    expect(validKey('patch:1a2b3c4d5e6f7081')).toBe(true)
+    expect(validKey('patch:nope')).toBe(false)
+    expect(viewMeta('patch:1a2b3c4d5e6f7081').title).toBe('Patch 1a2b3c4d5e6f7081')
   })
 })

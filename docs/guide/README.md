@@ -144,7 +144,7 @@ Set `A_HARNESS`, `B_HARNESS`, or `HARNESS` with a matching model to run them on 
 
 ## Logging in as the human, locally
 
-Agents run as your Unix user, so a token in a file or URL isn't proof that a person is at the keyboard. The opt-in setting `auth.localHuman` (default off) adds a login page on `http://127.0.0.1:7878/`. It shows a one-time command, which you run in your own terminal:
+Agents run as your Unix user, so a token in a file or URL isn't proof that a person is at the keyboard. The setting `auth.localHuman` adds a login page on `http://127.0.0.1:7878/`. It shows a one-time command, which you run in your own terminal:
 
 ```sh
 sudo /usr/bin/install -d -m 755 /run/stam-human /run/stam-human/UID && sudo /usr/bin/install -m 644 /dev/null /run/stam-human/UID/N
@@ -152,7 +152,7 @@ sudo /usr/bin/install -d -m 755 /run/stam-human /run/stam-human/UID && sudo /usr
 
 The page fills in `UID` (your user id) and `N` (a one-time name). The daemon accepts the login only if that file is owned by root, which an agent without root can't make. The command runs the system `install`, not `stam`, so the command itself isn't code your user owns. Run it in a fresh terminal you trust, outside mootr, not in a mootr web shell.
 
-Set `"auth": { "localHuman": true }` in `settings.json` in your mootr home, then follow the page.
+A fresh install has it on. An install from before it became the default has `"localHuman": false` written into `auth` in `settings.json` on its next start, so it keeps working as before; set it to `true` there to turn the login on. Through `tailscale serve`, the setting changes nothing.
 
 Residual risk: this blocks the obvious path, not a compromised shell. An agent running as your user can wrap `sudo` (a function or alias in your shell rc files, or a wrapper earlier on `PATH`) and intercept the command. It can also read the browser's stored session or drive the browser while you're logged in. For real isolation, run the agents as another Unix user.
 

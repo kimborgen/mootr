@@ -154,7 +154,7 @@ test('a manager may work in the checkout', () => {
   assert.equal(ws.spawnWorkspaceRefusal(developer(), atCheckout) !== null, true, 'the developer is held to it');
 });
 
-test('the live deploy checkout is named by STAM_DEPLOY_REPO, else the repo settings, else ~/projects/stam2', () => {
+test('the live deploy checkout is named by STAM_DEPLOY_REPO, else the release source, else ~/projects/stam2', () => {
   assert.equal(ws.deployCheckout(), checkout);
   delete process.env.STAM_DEPLOY_REPO;
   try {
@@ -207,4 +207,16 @@ test('a base ref cuts the worktree from it; no base is unchanged; an unknown ref
   assert.equal(git('-C', repo, 'worktree', 'list'), before, 'no worktree is added');
   assert.equal(existsSync(join(process.env.STAM_HOME, 'worktrees', 'based-based-bad')), false);
   assert.equal(git('-C', repo, 'branch', '--list', 'stam/based-bad').trim(), '', 'no branch is made');
+});
+
+test('the live deploy checkout does not follow settings or the PR target (S-2083)', async () => {
+  const settingsMod = await import('../src/settings.ts');
+  delete process.env.STAM_DEPLOY_REPO;
+  const before = ws.deployCheckout();
+  try {
+    settingsMod.setSetting('itsa', { ...settingsMod.settings().itsa, repos: { other: checkout, stam2: checkout }, prOpen: { ...settingsMod.settings().itsa.prOpen, repo: 'other' } });
+    assert.equal(ws.deployCheckout(), before);
+  } finally {
+    process.env.STAM_DEPLOY_REPO = checkout;
+  }
 });

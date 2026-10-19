@@ -66,7 +66,7 @@ function watchPerms() {
 // Deep links from `stam web` (#agent=NAME, #view=config, #view=work, #view=system, #view=process, #view=swipe), an ITSA by
 // its key (#itsa=S-12), and a notification's tap or a link to a thread (#thread=ID). Read at
 // startup, and again whenever the hash changes with the app open.
-const HASH_VIEWS = ['config', 'work', 'system', 'process', 'usage', 'swipe'] as const
+const HASH_VIEWS = ['config', 'work', 'system', 'process', 'usage', 'swipe', 'inbox'] as const
 // `#view=files` opens the Files world, and `#file=HOST:PATH[#Lline]` one file (S-1526), and `#diff=REPO:N` one PR's diff (S-1531).
 const HASH_VIEWS_ALL = [...HASH_VIEWS, 'files'] as const
 function openHash(h: URLSearchParams) {

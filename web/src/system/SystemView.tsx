@@ -19,6 +19,7 @@ import { flushSync } from 'react-dom'
 import { AnimatePresence, MotionConfig } from 'motion/react'
 import { openInbox, selectAgent, selectIssue, selectThread, showView } from '../actions'
 import { costTitle, k, live, money, model, stateLabel, STATE_COLOR, stateOf } from '../format'
+import { RestBadge } from '../waits'
 import { Glyph, PlainGlyph } from '../Glyph'
 import { Icon } from '../Icon'
 import { HarnessMark } from '../spawn'
@@ -909,7 +910,7 @@ function Panel({ m, cols, fields, ctx, narrow, onClose, onFocus }: { m: CardMode
           {/* Its own unread: a folded card's stack also counts its subtree's. */}
           <tr><th scope="row">Unread</th><td>{own ? <button type="button" className="sv-linkish" onClick={() => (a ? openInbox(a.id) : openHumanInbox())}>{own} unread</button> : <span className="muted">none</span>}</td></tr>
           {a ? <>
-            <tr><th scope="row">State</th><td><span className="sv-state"><span className="dot" style={{ background: `var(--st-${STATE_COLOR[stateOf(a)] ?? 'off'})` }} />{stateLabel(a)}</span></td></tr>
+            <tr><th scope="row">State</th><td><span className="sv-state"><span className="dot" style={{ background: `var(--st-${STATE_COLOR[stateOf(a)] ?? 'off'})` }} />{stateLabel(a)}</span>{a.resting ? <> <RestBadge a={a} /></> : null}</td></tr>
             <tr><th scope="row">Context</th><td>{k(a.context_tokens)} of {k(d.thresholds.enforceTokens)}</td></tr>
             {a.cost ? <tr><th scope="row">Cost</th><td title={costTitle(a.cost, kids > 0)}>{money(a.cost.own.api ?? a.cost_usd ?? 0)}{kids ? <span className="muted"> · tree {money(a.cost.tree.api ?? 0)}</span> : null}</td></tr> : null}
             {kids ? <tr><th scope="row">Children</th><td>{kids}</td></tr> : null}

@@ -6,22 +6,26 @@ import { openFile } from '../files/open'
 import { DeclPicker, isPhone, type DeclPickState } from '../decl/DeclPicker'
 import { DeclFail, hasDecl, lookupDecl, type DeclMatch } from '../decl/declApi'
 import type { DeclHit, DeclSide } from '../decl/declExt'
-import { fetchDiffList, fetchSide } from './diffApi'
-import { parseDiffKey } from './diffKey'
+import { sourceForKey, type DiffSource } from './diffSource'
 import {
   chips, currentFile, reviewChip, isShown, readViewed, shownFiles, splitPath, startFilter, stepChange, stepFile, toggleClass, toggleFile, viewedKey, withViewed, writeViewed,
   type DiffFileItem, type DiffList, type Filter,
 } from './diffModel'
 import { FileDiff } from './FileDiff'
+import { PatchDiff } from './PatchDiff'
 import type { DiffEditorViews, DiffMode } from './mergeEditor'
 
-// The PR diff view, `diff:REPO#N` (S-1531, the web half of the PR diff viewer S-1019): a header with the shas and the Meat
-// chips, a file list (a left column on a wide pane, a sheet on a narrow one), and each file's diff. Entry points are S-1533.
+// The diff view (S-1531, the web half of the PR diff viewer S-1019): one diff, read through a `DiffSource` — today a
+// PR's, from `diff:REPO#N` (S-2102) — with a header with the shas and the Meat chips, a file list (a left column on a
+// wide pane, a sheet on a narrow one), and each file's diff. Entry points are S-1533.
 // `onEditor` receives each drawn file's CodeMirror views (and null when they go). Go to declaration (S-1532) is built in:
-// a Ctrl/Cmd-click or tap on an identifier looks it up at the head (or, on deleted lines, the merge base) and jumps with
-// `goTo`, shows a picker, or shows the lines of a declaration outside the PR with Open file.
+// a Ctrl/Cmd-click or tap on an identifier looks it up where the source says (the head, or the merge base on deleted
+// lines) and jumps with `goTo`, shows a picker, or shows the lines of a declaration outside the PR with Open file.
 export interface DiffViewProps {
   viewKey: string
+  // Where the diff comes from. A `diff:REPO#N` key builds a `PrSource`; a caller with its own source (a later PR's
+  // `PatchSource`) passes it in instead.
+  source?: DiffSource
   onEditor?: (views: DiffEditorViews | null, path: string) => void
   // Receives the view's `goTo`, for callers (and tests) that jump without a click.
   apiRef?: (api: DiffViewApi | null) => void
@@ -48,8 +52,21 @@ export const SPLIT_MIN = 900
 // Where a change lands below the top of the scrolling column: under the file's sticky header.
 const CHANGE_OFFSET = 56
 
-export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
-  const ref = useMemo(() => parseDiffKey(viewKey), [viewKey])
+// The diff view last pointed at or focused, so j/k and n/p move only that one when two are visible (S-1918).
+let lastActive: HTMLElement | null = null
+// Whether `el` is the view the keyboard belongs to: the one with the event's target inside, else the last-active one, else
+// the first visible one.
+function keyOwner(el: HTMLElement, t: HTMLElement | null): boolean {
+  const views = [...document.querySelectorAll<HTMLElement>('.dv')].filter((v) => v.checkVisibility?.() !== false)
+  if (views.length < 2) return true
+  const inside = t && t !== document.body ? views.find((v) => v.contains(t)) : undefined
+  return el === (inside ?? (lastActive && views.includes(lastActive) ? lastActive : views[0]))
+}
+
+export function DiffView({ viewKey, source, onEditor, apiRef }: DiffViewProps) {
+  // `source` feeds the effects below, so a caller passing one must give it a stable identity (a `useMemo`, or a value
+  // built once), or every render would reload the diff.
+  const src = useMemo(() => source ?? sourceForKey(viewKey), [source, viewKey])
   const [st, setSt] = useState<State>({ s: 'loading' })
   const [tries, setTries] = useState(0)
   const [flt, setFlt] = useState<Filter>(startFilter)
@@ -58,22 +75,23 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
   const [width, setWidth] = useState(() => (typeof window === 'undefined' ? 0 : window.innerWidth))
   const [sheet, setSheet] = useState(false)
   const [reviewOpen, setReviewOpen] = useState(false)
+  const [textOpen, setTextOpen] = useState(false)
   const [active, setActive] = useState(0)
   const root = useRef<HTMLDivElement>(null)
   const main = useRef<HTMLDivElement>(null)
   const prefs = useCodePrefs()
 
   useEffect(() => {
-    if (!ref) return
+    if (!src) return
     const ctl = new AbortController()
     setSt({ s: 'loading' })
     setReviewOpen(false)
     setFlt(startFilter())
-    fetchDiffList(ref.repo, ref.pr, ctl.signal).then(
+    src.loadList(ctl.signal).then(
       (list) => setSt({ s: 'ok', list }),
       (err) => { if (!ctl.signal.aborted) setSt({ s: 'error', err }) })
     return () => ctl.abort()
-  }, [ref, tries])
+  }, [src, tries])
 
   // The pane's width, not the window's: a narrow pane in a wide window gets the narrow layout.
   useEffect(() => {
@@ -86,22 +104,24 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
   }, [st.s])
   const wide = width >= LIST_MIN
   const splitOk = width >= SPLIT_MIN
-  const mode: DiffMode = splitOk && pref === 'split' ? 'split' : 'unified'
   const pickMode = (m: DiffMode) => { setPref(m); try { localStorage.setItem(MODE_KEY, m) } catch { /* private window */ } }
 
   const list = st.s === 'ok' ? st.list : null
   const files = list?.files ?? []
   const shown = useMemo(() => shownFiles(files, flt), [files, flt])
-  const refs = useMemo(() => (list ? { repo: list.repo, pr: list.pr, head: list.head, base: list.base } : null), [list])
+  const scope = src?.scope ?? ''
+  const refs = list && src ? src.sideRef(list) : null
+  // A diff drawn from its own hunks (a pasted patch's file) has no sides to show beside each other: it is unified.
+  const mode: DiffMode = refs && splitOk && pref === 'split' ? 'split' : 'unified'
 
   const mark = (f: DiffFileItem, on: boolean) => {
-    if (!list) return
+    if (!list || !scope) return
     // Read, change, write: another tab's marks made since this one loaded are kept.
-    const next = withViewed(readViewed(), viewedKey(list.repo, list.pr, f), on)
+    const next = withViewed(readViewed(), viewedKey(scope, f), on)
     writeViewed(next)
     setViewed(next)
   }
-  const isViewed = (f: DiffFileItem) => !!list && viewed.has(viewedKey(list.repo, list.pr, f))
+  const isViewed = (f: DiffFileItem) => !!scope && viewed.has(viewedKey(scope, f))
 
   // Go to declaration: the file and line a jump goes to, files a jump opened although viewed, and the picker.
   const [target, setTarget] = useState<{ path: string; line: number; side: DeclSide; n: number } | null>(null)
@@ -197,23 +217,25 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
       : files.find((x) => (x.oldPath ?? x.path) === m.path && x.status !== 'added' && !x.denied)
     if (f) { setDecl(null); goTo(f.path, m.line, side); return }
     setDecl({ ...ui, state: { s: 'one', match: m, lines: null, openNote: ui.root ? `Opens the live checkout on ${ui.root.host}, which can differ from the PR.` : undefined } })
-    if (!refs) return
+    if (!src || !list) return
     const ctl = declCtl.current
-    fetchSide(refs, m.path, side, ctl?.signal).then((sd) => {
+    src.loadSide(list, m.path, side, ctl?.signal).then((sd) => {
       const lines = sd.kind === 'text' ? sd.text.split('\n').slice(m.line - 1, m.line - 1 + DECL_LINES) : [m.text]
       setDecl((d) => (d && d.state.s === 'one' && d.state.match === m ? { ...d, state: { ...d.state, lines } } : d))
     }, () => setDecl((d) => (d && d.state.s === 'one' && d.state.match === m ? { ...d, state: { ...d.state, lines: [m.text] } } : d)))
   }
   const onDecl = (f: DiffFileItem, hit: DeclHit) => {
-    if (!list) return
+    if (!list || !src) return
     declCtl.current?.abort()
     const ctl = new AbortController()
     declCtl.current = ctl
     const ui: DeclUi = { name: hit.name, side: hit.side, anchor: { x: hit.x, y: hit.y, top: hit.top }, phone: isPhone(), state: { s: 'loading' } }
     setDecl(ui)
-    const sha = hit.side === 'base' ? list.mergeBase : list.head
     const from = hit.side === 'base' ? f.oldPath ?? f.path : f.path
-    lookupDecl({ repo: list.repo, sha, name: hit.name, from }, { signal: ctl.signal, onBuilding: () => setDecl((d) => (d === ui || d?.state.s === 'loading' ? { ...ui, state: { s: 'building' } } : d)) }).then((r) => {
+    const q = src.declQuery(list, hit.side, hit.name, from)
+    // A source with no declaration lookup (an unresolved patch file) says so quietly.
+    if (!q) { setDecl({ ...ui, state: { s: 'none' } }); return }
+    lookupDecl(q, { signal: ctl.signal, onBuilding: () => setDecl((d) => (d === ui || d?.state.s === 'loading' ? { ...ui, state: { s: 'building' } } : d)) }).then((r) => {
       if (ctl.signal.aborted) return
       const found = r.state === 'ready' ? r.matches : []
       const at: DeclUi = { ...ui, root: r.state === 'ready' ? r.root : undefined }
@@ -227,8 +249,21 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
       setDecl({ ...ui, state: { s: 'error', message: e instanceof DeclFail ? e.message : 'Could not look up the declaration.' } })
     })
   }
-  const hasName = (name: string, side: DeclSide) => (list ? hasDecl({ repo: list.repo, sha: side === 'base' ? list.mergeBase : list.head, name }) : Promise.resolve(false))
+  const hasName = (name: string, side: DeclSide) => {
+    const q = list && src ? src.declQuery(list, side, name) : null
+    return q ? hasDecl(q) : Promise.resolve(false)
+  }
   const closeDecl = useCallback(() => { declCtl.current?.abort(); setDecl(null) }, [])
+
+  // The view last pointed at or focused owns the keys when two are open.
+  useEffect(() => {
+    const el = root.current
+    if (!el) return
+    const mark = () => { lastActive = el }
+    el.addEventListener('pointerdown', mark, true)
+    el.addEventListener('focusin', mark)
+    return () => { el.removeEventListener('pointerdown', mark, true); el.removeEventListener('focusin', mark); if (lastActive === el) lastActive = null }
+  }, [st.s])
 
   // j/k and n/p, when the keyboard isn't in a field or another pane.
   useEffect(() => {
@@ -238,6 +273,7 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
       if (t && (t.closest('input, textarea, select, [contenteditable="true"]') || t.closest('.cm-panels'))) return
       if (t && t !== document.body && !root.current.contains(t)) return
       if (root.current.checkVisibility?.() === false) return
+      if (!keyOwner(root.current, t)) return
       const k = e.key
       if (k === 'j') stepTo(1)
       else if (k === 'k') stepTo(-1)
@@ -258,13 +294,21 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
   }, [sheet])
 
   useEffect(() => {
+    if (!textOpen) return
+    const on = (e: KeyboardEvent) => { if (e.key === 'Escape') setTextOpen(false) }
+    window.addEventListener('keydown', on)
+    return () => window.removeEventListener('keydown', on)
+  }, [textOpen])
+  useEffect(() => { if (wide) setTextOpen(false) }, [wide])
+
+  useEffect(() => {
     if (!reviewOpen) return
     const on = (e: KeyboardEvent) => { if (e.key === 'Escape') setReviewOpen(false) }
     window.addEventListener('keydown', on)
     return () => window.removeEventListener('keydown', on)
   }, [reviewOpen])
 
-  if (!ref) return <div className="dv"><div className="dv-note">Not a diff link.</div></div>
+  if (!src) return <div className="dv"><div className="dv-note">Not a diff link.</div></div>
 
   const total = files.length
   const fileList = (
@@ -290,15 +334,15 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
     <div className="dv" ref={root} data-wide={wide ? '1' : '0'} data-mode={mode} style={{ ['--code-font-size' as string]: `var(${prefs.size})` }}>
       <header className="dv-head">
         <div className="dv-title">
-          <strong>PR #{ref.pr}</strong>
-          <span className="dv-repo muted">{ref.repo}</span>
-          {list && <span className="dv-shas mono muted">head {short(list.head)} · base {short(list.base)}</span>}
+          <strong>{src.title}</strong>
+          <span className="dv-repo muted">{src.provenance}</span>
+          {list?.shas && <span className="dv-shas mono muted" title={`head ${list.shas.head} · base ${list.shas.base}`}>head {short(list.shas.head)}<span className="dv-sha-base"> · base {short(list.shas.base)}</span></span>}
           {list && <span className="dv-count" aria-live="polite">{shown.length} of {total} files</span>}
-          {list && (() => {
+          {list && list.review !== undefined && (() => {
             const c = reviewChip(list.review)
             return (
-              <button type="button" className="dv-review" data-tone={c.tone} aria-expanded={reviewOpen} title={c.detail} onClick={() => setReviewOpen((o) => !o)}>
-                <span className="dv-review-label">{c.label}</span>{c.by && <span className="dv-review-by">{c.by}</span>}
+              <button type="button" className="dv-review" data-tone={c.tone} aria-expanded={reviewOpen} title={c.detail} aria-label={c.detail} onClick={() => setReviewOpen((o) => !o)}>
+                <span className="dv-review-label dv-review-long">{c.label}</span><span className="dv-review-label dv-review-short" aria-hidden>{c.short}</span>{c.by && <span className="dv-review-by">{c.by}</span>}
               </button>
             )
           })()}
@@ -307,19 +351,20 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
         {list && (
           <div className="dv-controls">
             <button type="button" className="dv-btn dv-meat" aria-pressed={flt.meat} onClick={() => setFlt((x) => ({ ...x, meat: !x.meat }))} title="Hide tests, lockfiles and generated files">Meat {flt.meat ? '●' : '○'}</button>
+            {!wide && <button type="button" className="dv-btn dv-text" aria-expanded={textOpen} aria-haspopup="dialog" title="Wrap and text size" onClick={() => setTextOpen((o) => !o)}>Aa · Wrap {prefs.wrap ? '●' : '○'}</button>}
             {chips(files, flt).map((c) => (
               <button key={c.cls} type="button" className="dv-btn dv-chip" aria-pressed={c.hidden} disabled={!flt.meat} onClick={() => setFlt((x) => toggleClass(c.cls, x))} title={c.hidden ? `Show ${c.label.toLowerCase()}` : `Hide ${c.label.toLowerCase()}`}>
                 {c.label} {c.count}{c.hidden ? ' hidden' : ''}
               </button>
             ))}
             <span className="dv-spacer" />
-            {splitOk && (
+            {refs && splitOk && (
               <span className="seg dv-mode" role="group" aria-label="Diff layout">
                 <button type="button" className={mode === 'split' ? 'on' : ''} aria-pressed={mode === 'split'} onClick={() => pickMode('split')}>Split</button>
                 <button type="button" className={mode === 'unified' ? 'on' : ''} aria-pressed={mode === 'unified'} onClick={() => pickMode('unified')}>Unified</button>
               </span>
             )}
-            <span className="codeprefs"><CodePrefButtons prefs={prefs} /></span>
+            {wide && <span className="codeprefs"><CodePrefButtons prefs={prefs} /></span>}
           </div>
         )}
       </header>
@@ -333,12 +378,17 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
               <button type="button" className="dv-btn dv-touch" onClick={() => setTries((n) => n + 1)}>Try again</button>
             </div>
           )}
-          {list && total === 0 && <div className="dv-note muted">No files changed in this PR.</div>}
+          {list && total === 0 && <div className="dv-note muted">{list.empty}</div>}
           {list && total > 0 && shown.length === 0 && <div className="dv-note muted">All {total} files are hidden. Turn Meat off or show a class above.</div>}
           {list && refs && shown.map((f) => (
             <FileDiff
               key={f.path} scroller={main} file={f} refs={refs} mode={mode} wrap={prefs.wrap} viewed={isViewed(f)} onViewed={(on) => mark(f, on)} onHide={() => setFlt((x) => toggleFile(f, x))} onEditor={onEditor}
               onDecl={(hit) => onDecl(f, hit)} hasDecl={hasName} forceOpen={forced.has(f.path)} target={target?.path === f.path ? target : undefined} onTarget={(n) => { landed.current = n; pin.current?.() }}
+            />
+          ))}
+          {list && !refs && src && shown.map((f) => (
+            <PatchDiff
+              key={f.path} file={f} lines={src.hunks(list, f) ?? []} wrap={prefs.wrap} viewed={isViewed(f)} onViewed={(on) => mark(f, on)} onHide={() => setFlt((x) => toggleFile(f, x))} forceOpen={forced.has(f.path)}
             />
           ))}
         </div>
@@ -355,6 +405,15 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
           onPick={(m) => land(m, decl.side, decl)}
           onOpen={decl.root ? (m) => { const r = decl.root!; closeDecl(); openFile(r.host, `${r.path}/${m.path}`, m.line) } : undefined}
         />
+      )}
+      {textOpen && !wide && (
+        <>
+          <div className="dv-scrim" onClick={() => setTextOpen(false)} />
+          <div className="dv-text-pop" role="dialog" aria-label="Wrap and text size">
+            <div className="dv-sheet-head"><strong>Text</strong><button type="button" className="dv-btn dv-touch" onClick={() => setTextOpen(false)}>Close</button></div>
+            <div className="dv-text-body codeprefs"><CodePrefButtons prefs={prefs} /></div>
+          </div>
+        </>
       )}
       {reviewOpen && list && (
         <>

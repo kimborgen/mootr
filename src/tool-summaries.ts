@@ -18,11 +18,11 @@ import * as db from './db.ts';
 import { settings, onSettingsChange } from './settings.ts';
 import { apiKey } from './credits.ts';
 import { recordSpend } from './decide.ts';
+import { complete } from './llm/index.ts';
 import { systemHeld } from './budgets.ts';
 import { configHash } from './config-hash.ts';
 import { toolSummaryConfig, TOOL_SUMMARY_FIELDS, type ToolSummaryConfig } from './tiny-models.ts';
 
-const base = () => process.env.STAM_OPENROUTER_URL ?? 'https://openrouter.ai/api/v1';
 const PURPOSE = 'tool-summary';
 const TIMEOUT_MS = 15_000;
 // Calls at once, and calls waiting beyond those; the oldest batch's calls drop off the queue's end.
@@ -176,38 +176,29 @@ async function summarize(j: Job, signal: AbortSignal): Promise<void> {
   // A spent system budget or no OpenRouter key: nothing is asked, and not remembered as failed,
   // so a fixed key or a new budget window summarises the call on a later request.
   if (systemHeld() || !key) return;
-  let data: any;
+  let data;
   try {
-    const res = await fetch(`${base()}/chat/completions`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: c.model,
-        messages: [
-          { role: 'system', content: c.instructions },
-          { role: 'user', content: callText(j.call) },
-        ],
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'tool_summary',
-            strict: true,
-            schema: {
-              type: 'object',
-              properties: { tool: { type: 'string', description: TOOL_SUMMARY_FIELDS.tool }, doing: { type: 'string', description: TOOL_SUMMARY_FIELDS.doing } },
-              required: ['tool', 'doing'],
-              additionalProperties: false,
-            },
-          },
+    data = await complete({
+      model: c.model,
+      messages: [
+        { role: 'system', content: c.instructions },
+        { role: 'user', content: callText(j.call) },
+      ],
+      jsonSchema: {
+        name: 'tool_summary',
+        strict: true,
+        schema: {
+          type: 'object',
+          properties: { tool: { type: 'string', description: TOOL_SUMMARY_FIELDS.tool }, doing: { type: 'string', description: TOOL_SUMMARY_FIELDS.doing } },
+          required: ['tool', 'doing'],
+          additionalProperties: false,
         },
-        max_tokens: 80,
-        temperature: 0,
-        usage: { include: true },
-      }),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]),
+      },
+      maxTokens: 80,
+      temperature: 0,
+      signal,
+      timeoutMs: TIMEOUT_MS,
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    data = await res.json();
   } catch (e) {
     const canceled = signal.aborted;
     // A canceled call was turned off, not failed; it is asked again once the step is back on.
@@ -215,10 +206,9 @@ async function summarize(j: Job, signal: AbortSignal): Promise<void> {
     db.addEvent('stam', canceled ? 'tool-summary:canceled' : 'tool-summary:error', { agent: j.agent, call: j.call.id, error: e instanceof Error ? e.message : String(e) });
     return;
   }
-  const usage = data?.usage ?? {};
-  const model = String(data?.model ?? c.model);
-  recordSpend(PURPOSE, model, Number(usage.cost) || 0, Number(usage.prompt_tokens) || 0, Number(usage.completion_tokens) || 0);
-  const s = parseToolSummary(data?.choices?.[0]?.message?.content, c.maxWords);
+  const model = data.model;
+  recordSpend(PURPOSE, model, data.costUsd ?? 0, data.usage.inputTokens, data.usage.outputTokens);
+  const s = parseToolSummary(data.text, c.maxWords);
   if (!s) {
     failed.add(failedAt(j.key, j.cfg));
     db.addEvent('stam', 'tool-summary:refused', { agent: j.agent, call: j.call.id });

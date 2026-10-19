@@ -23,7 +23,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function release(R, name, tool, edit = (src) => src) {
   const dir = join(R, name);
   mkdirSync(dir, { recursive: true });
-  for (const d of ['bin', 'src', 'templates', 'package.json']) cpSync(join(root, d), join(dir, d), { recursive: true });
+  for (const d of ['bin', 'src', 'scripts', 'templates', 'package.json']) cpSync(join(root, d), join(dir, d), { recursive: true });
   symlinkSync(join(root, 'node_modules'), join(dir, 'node_modules'));
   const src = edit(readFileSync(join(dir, 'src/mcp.ts'), 'utf8')).replace('export const tools: Tool[] = [\n', `export const tools: Tool[] = [\n  ${tool},\n`);
   assert.notEqual(src, readFileSync(join(root, 'src/mcp.ts'), 'utf8'));

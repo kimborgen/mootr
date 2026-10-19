@@ -33,7 +33,7 @@ export const stories: Story[] = [{
     'Calm at rest: nothing moves, pulses or spins while the system is quiet, and every motion shows one real event (mail sent, a spend, a status change, a spawn, an archive). The view is exempt from the usual motion rules (' + ds('In stam') + '), and follows `.claude/skills/system-view-motion`.',
     'Motion is `transform` and `opacity`, placed by Motion on springs whose lengths are shares of `--duration-slow`; a mail flight is 400 to 880 ms by distance (`--duration-flight` is the longest hop, four slows), and a roll takes `--duration-tick` (two slows), and a count bump or a stack sheet landing takes `--duration-slow`. Reduced motion zeroes these tokens, so every change is instant, except a mode switch, which crossfades the old picture into the new over `--duration-crossfade` (220 ms) instead of moving anything. A card that got mail keeps a mark for `--duration-mark` instead of a flight.',
     'Every card, wire and sheet is keyed by its agent or mail, so the same object moves: a layout change glides cards to their new places, a spawn grows out of its parent, an archive shrinks back into its nearest card still shown.',
-    'The mark is the harness hue (`--h-claude`, `--h-codex`, `--h-opencode`) inside a state ring in the status vocabulary: working `--st-working`, idle `--st-idle`, blocked `--st-blocked`, errored `--st-errored`, paused `--st-paused`. A colour is never the only channel: the state is in the card\'s label too (' + ds('In stam') + ').',
+    'The mark is the harness hue (`--h-claude`, `--h-codex`, `--h-opencode`) inside a state ring in the status vocabulary: working `--st-working`, idle `--st-idle`, blocked `--st-blocked`, errored `--st-errored`, paused `--st-paused`, resting `--st-resting` (its card\'s panel adds the resting badge: what it waits for and when it wakes). A colour is never the only channel: the state is in the card\'s label too (' + ds('In stam') + ').',
     'A card is `--size-card` wide (the pane minimum less the `space-6` gutter). The pan and zoom run from 0.35 to 2, Fit returns to the whole picture, and below 0.8 a card draws as a chip at screen size so its name stays readable.',
     'Past 60 agents the desktop folds the managers; the phone always folds those below the first level. A manager stays open while it, or anyone under it, is blocked, errored, or has an ITSA waiting on the human. A fold control shows how many agents it hides, with a dot per state.',
     'On a phone the header keeps the agent counts and the day\'s spend; the switch, Fit and Find sit on a row of their own at `--size-hit-touch`, and a far card or an orb keeps a finger-sized hit area however far out. Double-tap zooms in by 2, and at the most zoom returns to Fit.',
@@ -114,6 +114,11 @@ export const stories: Story[] = [{
     },
     { name: 'No agents yet', data: { ...systemData('small'), agents: [], itsas: [], attention: [] }, routes: USAGE_ROUTES, render: () => scene('tree') },
     { name: 'Agents loading', data: { ...systemData('small'), loaded: { agents: false, mail: true, itsas: true } }, routes: USAGE_ROUTES, render: () => scene('tree') },
+    {
+      name: 'A resting card selected', routes: USAGE_ROUTES,
+      data: (() => { const d = systemData('small'); return { ...d, agents: (d.agents ?? []).map((a) => (a.id === 'sv-dev' ? { ...a, lifecycle: 'paused', activity: null, resting: { reason: 'wait' as const, waits: [{ id: 'rw', kind: 'event', target: null, detail: 'PR #1234 checks and review from the fixture-reviewer-with-a-very-long-name, then the merge queue', since: '2026-10-01T09:00:00.000Z', until: null }], expected_wake: '2026-10-30T14:20:00.000Z' } } : a)) } })(),
+      render: () => scene('tree', async (a) => { if (await a.drawn()) q<HTMLElement>('[data-card="sv-dev"]')?.click() }),
+    },
     { name: 'No usage yet', data: systemData('small'), routes: { 'GET /api/usage': reply(503, { error: 'fixture: usage unreachable' }) }, render: () => scene('tree') },
   ],
 }]

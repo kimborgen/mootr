@@ -5,7 +5,7 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempHome, tempDir } from './tmphome.mjs';
 
@@ -21,7 +21,7 @@ const put = (rel, content) => {
   writeFileSync(join(checkout, rel), content);
 };
 const commit = (msg) => (git(checkout, 'add', '-A'), git(checkout, 'commit', '-q', '-m', msg), git(checkout, 'rev-parse', 'HEAD').trim());
-let s, d, sha1, sha2;
+let s, d, sha1, sha2, wt, wtSha, otherWt;
 
 const ask = (q, human = true, wait) => d.request(human, new URLSearchParams(q), wait);
 const fails = async (q, status, human = true) => {
@@ -66,6 +66,23 @@ before(async () => {
   sha1 = commit('one');
   put('src/util.ts', 'export function helper() { return 2 }\nexport function shared() {}\nexport function added() {}\n');
   sha2 = commit('two');
+  // A linked worktree of the checkout, where the agents' trees live (S-2101), and a worktree of a repo that
+  // is not configured, to prove the git linkage (not a name) decides.
+  wt = join(stamHome, 'worktrees', 'checkout-wt');
+  mkdirSync(join(stamHome, 'worktrees'), { recursive: true });
+  git(checkout, 'worktree', 'add', '-q', '-b', 'wt', wt);
+  writeFileSync(join(wt, 'src', 'wt.ts'), 'export function fromWorktree() { return 1 }\n');
+  git(wt, 'add', '-A');
+  git(wt, 'commit', '-q', '-m', 'wt');
+  wtSha = git(wt, 'rev-parse', 'HEAD').trim();
+  const other = join(root, 'other');
+  git(root, 'init', '-q', '-b', 'main', other);
+  mkdirSync(join(other, 'src'), { recursive: true });
+  writeFileSync(join(other, 'src', 'o.ts'), 'export const OTHER = 1;\n');
+  git(other, 'add', '-A');
+  git(other, 'commit', '-q', '-m', 'o');
+  otherWt = join(stamHome, 'worktrees', 'other-wt');
+  git(other, 'worktree', 'add', '-q', '-b', 'owt', otherWt);
   writeFileSync(join(stamHome, 'settings.json'), JSON.stringify({ itsa: { repos: { app: checkout } } }));
   s.settingsChanged();
 });
@@ -193,4 +210,42 @@ test('a build that runs too long stops its worker with a clear error', async () 
   await assert.rejects(d.parseInWorker(checkout, files, 1), (e) => (assert.equal(e.status, 504), assert.match(e.message, /took over 0s and was stopped/), true));
   const ok = await d.parseInWorker(checkout, files);
   assert.equal(ok[0].path, 'src/app.ts');
+});
+
+test('a worker stopped at the timeout takes its git child with it (S-1918)', async () => {
+  // A `git` that records its pid and then waits, so the worker's cat-file child is still running when the limit hits.
+  const bin = tempDir('stam-decl-fakegit-');
+  const pidFile = join(bin, 'pid');
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\necho $$ > '${pidFile}'\nexec sleep 60\n`);
+  chmodSync(join(bin, 'git'), 0o755);
+  const was = process.env.PATH;
+  process.env.PATH = `${bin}:${was}`;
+  try {
+    const files = [{ path: 'src/app.ts', blob: 'a'.repeat(40) }];
+    const run = d.parseInWorker(checkout, files, 3000);
+    // Wait on the state (the child started), not on time; the limit is generous for a slow worker start.
+    const started = new Promise((res) => { const t = setInterval(() => { if (existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim()) { clearInterval(t); res(); } }, 20); });
+    await Promise.race([started, run.catch(() => {})]);
+    await assert.rejects(run, (e) => (assert.equal(e.status, 504), true));
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    assert.ok(pid > 0, 'the child started');
+    // Killed counts: the worker thread is gone, so nobody reaps the child and it stays a zombie (state Z) until the process ends.
+    const gone = () => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /, '')[0] === 'Z'; } catch { return true; } };
+    for (let i = 0; i < 100 && !gone(); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(gone(), 'the cat-file child is dead after the timeout');
+  } finally { process.env.PATH = was; }
+});
+
+test("a file in a linked worktree is indexed at the worktree's HEAD; another repo's worktree is no-repo", async () => {
+  const r = await ask({ host: 'decl-test-box', file: join(wt, 'src/wt.ts'), name: 'fromWorktree' });
+  assert.equal(r.body.state, 'ready');
+  assert.equal(r.body.sha, wtSha, "the worktree's own HEAD, not the main checkout's");
+  assert.equal(r.body.from, 'src/wt.ts');
+  assert.equal(r.body.root.path, realpathSync(wt));
+  assert.deepEqual(names(r.body), ['src/wt.ts:1:function']);
+  // The main checkout still indexes its own HEAD.
+  const main = await ask({ host: 'decl-test-box', file: join(checkout, 'src/app.ts'), name: 'added' });
+  assert.equal(main.body.sha, sha2);
+  // A worktree of a repo that is not in itsa.repos matches nothing.
+  assert.deepEqual((await ask({ host: 'decl-test-box', file: join(otherWt, 'src/o.ts'), name: 'OTHER' })).body, { state: 'no-repo' });
 });

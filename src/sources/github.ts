@@ -231,8 +231,12 @@ async function pollNumber(s: GithubSubject, prev: any | null, prevEtags: Record<
         const stsBody = status.status === 200 ? (status.body?.statuses ?? []).map(slimStatus) : keep ? (state.headStatuses ?? []) : [];
         state.headRuns = runsBody;
         state.headStatuses = stsBody;
+        // The status list is known when this poll read it, or an earlier poll of this head did (a snapshot from before this
+        // field counts as known). On a new head whose status fetch failed it is not: the run list alone is no pass (S-1918).
+        const statusKnown = status.status === 200 || (keep && (state.statusesHead === undefined || state.statusesHead === head));
+        state.statusesHead = statusKnown ? head : null;
         const c = checksState(runsBody, stsBody);
-        state.checks = c.state;
+        state.checks = !statusKnown && c.state === 'success' ? 'pending' : c.state;
         state.failing = c.failing;
         state.checksHead = head;
         // The latest check run to finish or status to post: a re-run that fails again has a later one.

@@ -25,6 +25,11 @@ const DIR = join(STAM_HOME, 'embedder');
 // STAM_EMBED_IDLE_MS shortens it, for measuring the unload.
 const IDLE_MS = Number(process.env.STAM_EMBED_IDLE_MS) || 10 * 60_000;
 export const BATCH = 16;
+// Texts sent to the worker per model run. onnxruntime keeps the largest activation buffers it
+// has needed for the life of the worker (a CPU memory arena), so a run of 16 padded texts holds
+// about 1 GB of native memory (S-2127); one text per run holds about 200 MB and embeds as fast,
+// since there is no padding to the batch's longest text.
+export const RUN_BATCH = 1;
 // Only the first characters of a text are embedded.
 export const CHARS = 2000;
 
@@ -218,7 +223,8 @@ function ensureInstallTimer(): void {
 
 function getWorker(): Worker {
   if (worker) return worker;
-  worker = new Worker(new URL('./embed-worker.ts', import.meta.url), { workerData: { entry: entryPath() } });
+  // STAM_EMBED_WORKER replaces the worker file, for a test that must not load the model.
+  worker = new Worker(process.env.STAM_EMBED_WORKER ?? new URL('./embed-worker.ts', import.meta.url), { workerData: { entry: entryPath() } });
   worker.on('message', ({ id, vecs, error }: { id: number; vecs?: Float32Array[]; error?: string }) => {
     const p = pending.get(id);
     if (!p) return;
@@ -281,7 +287,7 @@ export async function embed(texts: string[]): Promise<Float32Array[] | null> {
   }
   try {
     const out: Float32Array[] = [];
-    for (let i = 0; i < texts.length; i += BATCH) out.push(...(await runLocal(texts.slice(i, i + BATCH))));
+    for (let i = 0; i < texts.length; i += RUN_BATCH) out.push(...(await runLocal(texts.slice(i, i + RUN_BATCH))));
     return out;
   } catch (e) {
     console.error(`embedder: ${e instanceof Error ? e.message : e}`);

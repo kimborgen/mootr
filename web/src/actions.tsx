@@ -7,12 +7,14 @@ import { live, plainSubject } from './format'
 import { Glyph, PlainGlyph } from './Glyph'
 import * as shell from './shell/layout'
 import { spawnMenu } from './spawn'
+import { followsSettings } from './permission-modes'
 import { assistant, byId, chiefAssistants, chiefsOfStaff, childrenOf, getData, hasPendingPermission, isArchivedThread, isDeferredThread, refresh, refreshSlow, setData, threadWaitsOnHuman, type Data } from './store'
 import { showMenu, toast, type MenuItem } from './ui/menu'
 import { getUi, setUi } from './ui/state'
 import type { Agent, PlainShell, Thread, UploadFile } from './types'
 import { choiceOf, defaultView, keyFor, swapForDefault, type AgentViewChoice } from './views/agent-view-choice'
 import { doneFocus } from './mail/mailFocus'
+import { inboxOrder } from './mail/inbox-order'
 
 // Each agent has its own world in main: usually just its terminal, plus the tabs the
 // user adds there.
@@ -69,7 +71,11 @@ export function openBeside(id: string) {
 export function openFor(id: string, key: string) { if (shell.currentWorld() !== id) selectAgent(id, { asDefault: !choiceOf(key) }); shell.open('main', key) }
 export const openInbox = (id: string) => openFor(id, 'mail:' + id)
 // Settings, usage, the Work page, the system view, and the process view are worlds of their own, like an agent's or a thread's.
-export const openWorld = (name: 'config' | 'inventory' | 'usage' | 'work' | 'system' | 'process' | 'swipe' | 'files') => { doneFocus(); shell.showAgentWorld('w:' + name) }
+export const openWorld = (name: 'config' | 'inventory' | 'usage' | 'work' | 'system' | 'process' | 'swipe' | 'files' | 'inbox') => {
+  doneFocus()
+  shell.showAgentWorld('w:' + name)
+  if (name === 'inbox') focusInboxList()
+}
 // An agent type's page, `w:type:NAME`.
 export const openType = (name: string) => { doneFocus(); shell.showAgentWorld('w:type:' + name) }
 // An issue's own world, `w:itsa:ID`, as Settings and Usage are worlds of their own.
@@ -87,6 +93,111 @@ export function selectThread(tid: string | null | undefined) {
   // The thread takes the page: the assistant's overlay closes, since its conversation may be where the link was (S-378).
   openAssistant(false)
   shell.showAgentWorld('t:' + tid)
+}
+
+// The Inbox page (`w:inbox`, S-2054) opens a thread in one pane to the list's right: the first
+// opens it as a split, and each later one takes that pane's place, so splits never stack. On a
+// phone there is one pane at a time, so the thread is pushed as the world `t:ID` and back returns.
+const inboxPanes = () => {
+  const ls = shell.leaves(shell.mainWorld().root)
+  const list = ls.find((l) => l.tabs.includes('inbox'))
+  return { list, right: ls.find((l) => l !== list && l.tabs.some((k) => k.startsWith('thread:'))) }
+}
+// The thread showing in the Inbox page's pane, if any.
+export const inboxThread = (): string | null => {
+  const a = inboxPanes().right?.active
+  return a?.startsWith('thread:') ? a.slice(7) : null
+}
+// A phone shows the world's focused pane alone, and the layout is shared with the desktop, where a thread's pane
+// takes focus: the phone puts the list's pane back in front, so the page opens, and returns, as a list.
+function focusInboxList() {
+  const list = inboxPanes().list
+  if (shell.isPhone() && list && shell.mainWorld().focused !== list.id) shell.setFocus('main', list.id)
+}
+// The saved queue: the rows as the list showed them when a thread opened, each with its state then. Advancing walks
+// it, so opening a thread can drop it from the list (Unread marks it read) or the chip can change, and the queue stays.
+type Queue = { order: string[]; from: Map<string, string> }
+let queue: Queue = { order: [], from: new Map() }
+const snapshot = (order: string[]): Queue => ({ order, from: new Map(order.map((t) => [t, stateOf(t)])) })
+export function openInboxThread(tid: string) {
+  if (shell.isPhone() || shell.currentWorld() !== 'w:inbox') {
+    if (shell.currentWorld() === 'w:inbox') focusInboxList()
+    return selectThread(tid)
+  }
+  queue = snapshot(inboxOrder())
+  showInboxThread(tid)
+}
+// Shows a thread in the Inbox page's pane, without taking a new queue.
+function showInboxThread(tid: string) {
+  if (tid !== shownMail) { priorMail = shownMail; shownMail = tid }
+  openAssistant(false)
+  const key = 'thread:' + tid
+  const { list, right } = inboxPanes()
+  const has = shell.leaves(shell.mainWorld().root).find((l) => l.tabs.includes(key))
+  if (right) {
+    const old = right.tabs.filter((k) => k.startsWith('thread:') && k !== key)
+    if (has === right) shell.activate('main', right.id, key)
+    // The thread's tab was moved elsewhere (into the list's pane, say): it comes back into the reusable pane.
+    else if (has) shell.move(key, 'main', right.id, null)
+    else shell.open('main', key, { pane: right.id })
+    for (const k of old) shell.close(k)
+  } else if (has && list) shell.move(key, 'main', list.id, null, 'right')
+  else shell.open('main', key, { pane: list?.id, split: 'right' })
+}
+// In the Inbox page, the thread after `tid` in the list as shown (its chip, search and groups), else in the inbox:
+// opens it in the pane and returns true; false when none is left.
+export function advanceInbox(tid: string): boolean {
+  // The saved queue minus the rows completed since it was taken: a row archived or deferred since (here, or in
+  // another pane) is passed over. A thread the queue doesn't hold walks the list as it is now.
+  const saved = queue.order.includes(tid) ? queue : snapshot(inboxOrder())
+  const shown = saved.order.filter((t) => t === tid || saved.from.get(t) === stateOf(t))
+  const next = nextMail(shown.includes(tid) ? shown.map((t) => ({ thread_id: t })) : mailOrder(getData()), tid, priorMail)
+  if (!next) return false
+  showInboxThread(next)
+  // `tid` is leaving the list (archived or deferred right after this): the queue drops it, and the rest waits for the next advance.
+  queue = { order: saved.order.filter((t) => t !== tid), from: saved.from }
+  return true
+}
+// Closes the Inbox page's thread pane (nothing is left to open next).
+function closeInboxThread() {
+  for (const k of inboxPanes().right?.tabs ?? []) shell.close(k)
+}
+// The Inbox page's keys (S-2189). `j` and `k` open the row below or above the open one, in the list as shown;
+// with none open, the first or the last.
+export function stepInbox(dir: 1 | -1) {
+  const order = inboxOrder()
+  const cur = inboxThread()
+  const i = cur ? order.indexOf(cur) : -1
+  const next = i < 0 ? (dir > 0 ? order[0] : order.at(-1)) : order[i + dir]
+  if (next !== undefined) openInboxThread(next)
+}
+const stateOf = (tid: string) => (isArchivedThread(tid) ? 'archived' : isDeferredThread(tid) ? 'deferred' : 'inbox')
+// The newest archive or defer the keys made, recorded when the key is pressed: where the thread came from, and the
+// request that moves it. Only the newest counts, so an older request's answer never replaces it.
+let lastTriage: { tid: string; from: string; sent: Promise<void> } | null = null
+// `e` archives and `d` defers the open thread: as the row's buttons do, the next row opens. On the Archived or
+// Deferred list the same key restores the thread, as the header's button does.
+export function triageInboxThread(tid: string, verb: 'archive' | 'defer'): Promise<void> {
+  const from = stateOf(tid)
+  const sent = verb === 'archive' ? toggleThreadArchived(tid) : toggleThreadDeferred(tid)
+  lastTriage = { tid, from, sent }
+  return sent
+}
+// `z`: puts the newest archived or deferred thread back where it came from, and opens it when it returns to the list.
+// It waits for that thread's own request first, so the server sees the two in order; a request that failed leaves nothing to undo.
+export async function undoInboxTriage() {
+  const l = lastTriage
+  if (!l) return
+  lastTriage = null
+  await l.sent
+  const now = stateOf(l.tid)
+  if (now === l.from) return
+  if (l.from === 'inbox') {
+    if (now === 'archived') await setThreadArchived(l.tid, false)
+    else await setThreadDeferred(l.tid, false)
+    openInboxThread(l.tid)
+  } else if (l.from === 'archived') await setThreadArchived(l.tid, true)
+  else await setThreadDeferred(l.tid, true)
 }
 
 // The human's threads the list counts as unread: the threads in the inbox, not the archive or the deferred ones.
@@ -172,6 +283,11 @@ export function openFromSwipe(tid: string) {
   fromSwipe = tid
 }
 function advanceFrom(tid: string) {
+  // In the Inbox page the next thread takes the pane to the list's right.
+  if (shell.currentWorld() === 'w:inbox' && !shell.isPhone()) {
+    if (!advanceInbox(tid)) { shownMail = null; closeInboxThread() }
+    return
+  }
   if (fromSwipe === tid) { fromSwipe = null; shownMail = null; openWorld('swipe'); return }
   // A thread closed from the Deferred list moves on within that list, as the inbox does within its own.
   const d = getData()
@@ -243,10 +359,12 @@ const ACTION_PENDING: Record<string, { pending: string; settled: (a: Agent, p?: 
   'reconnect-mcp': { pending: 'reconnecting', settled: settledNow },
 }
 
-export async function setMode(a: Agent, mode: 'auto' | 'bypass') {
-  if (!confirm(`Switch ${a.name} to ${mode === 'bypass' ? 'bypass permissions: it runs every action without asking' : 'auto mode'}? It restarts after its current step.`)) return false
+// 'settings' makes the agent follow Settings › Permission modes again; the others are its own pick.
+export async function setMode(a: Agent, mode: 'auto' | 'bypass' | 'default' | 'settings') {
+  const to = mode === 'bypass' ? 'bypass permissions: it runs every action without asking' : mode === 'default' ? 'ask mode: the harness asks before each action' : mode === 'settings' ? 'the mode Settings give it' : 'auto mode'
+  if (!confirm(`Switch ${a.name} to ${to}? It restarts after its current step.`)) return false
   await agentChange(a, {
-    pending: 'switching mode', patch: { permission_mode: mode }, settled: (p) => p?.permission_mode === mode,
+    pending: 'switching mode', patch: mode === 'settings' ? { permission_source: 'settings' } : { permission_mode: mode, permission_source: 'manual' }, settled: (p) => (mode === 'settings' ? followsSettings(p ?? {}) : p?.permission_mode === mode),
     send: () => api('POST', `/api/agents/${a.id}/permission-mode`, { mode }).then(() => refresh()), failed: "Couldn't switch the mode",
   })
   return true

@@ -22,7 +22,7 @@ interface TabDef { label: string; icon: IconName; page?: () => void; render: (le
 export const TABS: Record<string, TabDef> = {
   agents: { label: 'Agents', icon: 'users', render: () => <Tree /> },
   issues: { label: 'Issues', icon: 'list-checks', page: () => openWorld('work'), render: (left) => <><IssuesSide leftRef={left} pane /><ReqSide /></> },
-  mail: { label: 'Mail', icon: 'mail', render: (left) => <MailSide leftRef={left} pane /> },
+  mail: { label: 'Mail', icon: 'mail', page: () => openWorld('inbox'), render: (left) => <MailSide leftRef={left} pane /> },
   history: { label: 'History', icon: 'clock', render: () => <HistorySide /> },
   cost: { label: 'Cost', icon: 'gauge', page: () => openWorld('usage'), render: () => <CostSide /> },
   machines: { label: 'Machines', icon: 'server', render: () => <MachinesSide pane /> },

@@ -2,6 +2,8 @@
 // several opens a picker listing them. One document-level handler (main.tsx), so every place that renders
 // mail Markdown gets it. Actions are registered by prefix: `itsa:ID`, `settings:KEY`.
 import { openWorld } from '../actions'
+import { openDiff } from '../files/open'
+import { parseDiffKey } from '../diff/diffKey'
 import * as shell from '../shell/layout'
 import { showMenu } from '../ui/menu'
 import type { RefTarget } from './refs'
@@ -10,6 +12,7 @@ const actions = new Map<string, (arg: string) => void>()
 export const registerRefAction = (prefix: string, fn: (arg: string) => void) => { actions.set(prefix, fn) }
 
 registerRefAction('itsa', (id) => shell.showAgentWorld('w:itsa:' + id))
+registerRefAction('diff', (arg) => { const d = parseDiffKey('diff:' + arg); if (d) openDiff(d.repo, d.pr) })
 // The keys ConfigView reads to open a section, plus an event for when Settings is already on screen (Search.tsx does the same).
 registerRefAction('settings', (key) => {
   try { localStorage.setItem('stam/settings-section', key); localStorage.removeItem('stam/settings-item') } catch {}

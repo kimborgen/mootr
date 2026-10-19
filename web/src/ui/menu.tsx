@@ -94,8 +94,12 @@ function Menu({ m }: { m: MenuState }) {
   const key = (e: React.KeyboardEvent) => {
     const bs = [...ref.current!.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')]
     const at = bs.indexOf(document.activeElement as HTMLButtonElement)
-    if (e.key === 'ArrowDown') { e.preventDefault(); bs[(at + 1) % bs.length]?.focus() }
-    if (e.key === 'ArrowUp') { e.preventDefault(); bs[(at - 1 + bs.length) % bs.length]?.focus() }
+    // Up and Down move between lines, options and date or number steps in these fields, so the menu
+    // leaves them alone there; from a one-line text field (the Columns search) they still reach the items (S-1997).
+    const t = e.target
+    const steps = t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLInputElement && /^(date|time|datetime-local|month|week|number|range)$/.test(t.type))
+    if (e.key === 'ArrowDown' && !steps) { e.preventDefault(); bs[(at + 1) % bs.length]?.focus() }
+    if (e.key === 'ArrowUp' && !steps) { e.preventDefault(); bs[(at - 1 + bs.length) % bs.length]?.focus() }
     // In a text field Home and End move the caret, so the menu leaves them to the browser.
     const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement
     if (e.key === 'Home' && !typing) bs[0]?.focus()

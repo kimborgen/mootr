@@ -41,6 +41,20 @@ const time = (label, fn) => {
   return r;
 };
 for (const by of ['agent', 'itsa', 'model', 'type']) time(`activityStats by=${by}`, () => stats.activityStats({ by, days, now: f.now }));
+// The same reports in slices, as the daemon serves them (S-2094): the wall time and the longest slice, the block a request sees.
+for (const by of ['agent', 'itsa', 'model', 'type']) {
+  let max = 0;
+  const t0 = performance.now();
+  await stats.activityStatsSliced({ by, days, now: f.now }, (run) => {
+    const t = performance.now();
+    try {
+      return run();
+    } finally {
+      max = Math.max(max, performance.now() - t);
+    }
+  });
+  console.log(`sliced by=${by}`.padEnd(28), `${Math.round(performance.now() - t0)} ms wall, longest slice ${Math.round(max)} ms`);
+}
 const ic = await import('../src/issue-costs.ts');
 time('issue-costs attributor()', () => ic.attributor());
 time('issue-costs compute()', () => ic.compute({ days, now: f.now }));

@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rm } from 'node:fs/promises';
 import { STAM_HOME } from './config.ts';
+import { derivedRepoParent, derivedRepoPath } from './default-repo.ts';
 import { testHome } from './test-env.ts';
 
 const execFileAsync = promisify(execFile);
@@ -279,14 +280,14 @@ export function dirInUse(dir: string): boolean {
 }
 
 // The main checkout, whose Claude scratch dir the janitor never takes: STAM_REPO, else the repo
-// settings name for stam2 (a release's checkout, or the checkout a dev daemon runs from; the
+// settings name first (a release's checkout, or the checkout a dev daemon runs from; the
 // caller passes it, since this module must not import settings.ts: the CLI loads it, and
 // settings pulls in the adapters and their npm deps, which a first deploy hasn't installed), else
-// ~/projects/stam2.
+// the checkout this code runs from (default-repo.ts), else ~/projects/stam2.
 function mainCheckout(settingsRepo?: string): string {
   if (process.env.STAM_REPO) return process.env.STAM_REPO;
   if (settingsRepo) return settingsRepo;
-  return join(homedir(), 'projects', 'stam2');
+  return derivedRepoPath() || join(homedir(), 'projects', 'stam2');
 }
 
 // Removes the Claude Code scratch dir of an archived agent whose cwd was `cwd`, unless another live
@@ -333,7 +334,9 @@ export async function removeAgentScratchDirs(agent: { id: string; name: string }
     try { return realpathSync(p); } catch { return resolve(p); }
   };
   const live = liveDirs.filter(Boolean).map(real);
-  const protectedDirs = [homedir(), mainCheckout(), join(homedir(), 'projects')].map(real);
+  // ~/projects stays protected whatever the checkout's own folder is: a janitor must never take a dev folder.
+  const projects = derivedRepoParent();
+  const protectedDirs = [homedir(), mainCheckout(), join(homedir(), 'projects'), ...(projects ? [projects] : [])].map(real);
   for (const base of roots) {
     let names: string[] = [];
     try { names = readdirSync(base); } catch { continue; }
@@ -346,7 +349,7 @@ export async function removeAgentScratchDirs(agent: { id: string; name: string }
           continue;
         }
         const rd = real(dir);
-        if (protectedDirs.some((p) => rd === p || p.startsWith(rd + '/') || rd.startsWith(join(homedir(), 'projects') + '/'))) {
+        if (protectedDirs.some((p) => rd === p || p.startsWith(rd + '/') || [join(homedir(), 'projects'), projects].some((q) => q && rd.startsWith(q + '/')))) {
           out.push(`${dir}: refused, protected`);
           continue;
         }

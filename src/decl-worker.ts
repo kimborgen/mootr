@@ -29,6 +29,9 @@ function parserFor(lang: DeclLang, dialect?: string): LRParser {
 // Reads the blobs in order through one `git cat-file --batch`: each answer is `<sha> blob <size>\n<bytes>\n`.
 async function* blobs(dir: string, ids: string[]): AsyncGenerator<Buffer> {
   const p = spawn('git', ['cat-file', '--batch'], { cwd: dir, stdio: ['pipe', 'pipe', 'ignore'] });
+  // The parent kills the child itself when it stops this worker: a terminated thread doesn't reap what it spawned.
+  parentPort?.postMessage({ pid: p.pid });
+  p.once('close', () => parentPort?.postMessage({ pid: null }));
   p.stdin.end(ids.join('\n') + '\n');
   let buf: Buffer = Buffer.alloc(0);
   let want = -1;

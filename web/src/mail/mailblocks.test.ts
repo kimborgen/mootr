@@ -274,3 +274,72 @@ describe('reference links in mail', () => {
     expect(div.querySelector('[data-ref-pick], [data-ref-act]')).toBeNull()
   })
 })
+
+describe('diff rows (S-2099)', () => {
+  const rows = (patch: string) => { const d = document.createElement('div'); d.innerHTML = mb.renderMail(`${F}diff\n${patch}\n${F}`); return d; };
+  const copy = (d: HTMLElement) => Array.from(d.querySelectorAll('.l')).map((l) => l.textContent).join('\n');
+
+  it('counts a tab as 4 columns of indent', () => {
+    const l = rows('--- a/x\n+++ b/x\n@@ -1 +1 @@\n+\t\tdeep\n+  two').querySelectorAll<HTMLElement>('.l');
+    expect(l[1].style.getPropertyValue('--ind')).toBe('8');
+    expect(l[2].style.getPropertyValue('--ind')).toBe('2');
+    expect(l[0].style.getPropertyValue('--ind')).toBe('0');
+  });
+  it('keeps file headers out of the rows', () => {
+    const d = rows('diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b');
+    expect(copy(d)).toBe('@@ -1 +1 @@\n-a\n+b');
+  });
+  it('keeps empty changed lines and puts the marker in its own span', () => {
+    const d = rows('--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n+\n-\n ctx');
+    const l = d.querySelectorAll('.l');
+    expect(l[1].textContent).toBe('+');
+    expect(l[1].querySelector('.m')?.textContent).toBe('+');
+    expect(l[2].textContent).toBe('-');
+    expect(l[3].textContent).toBe(' ctx');
+  });
+  it('escapes markup and survives long tokens', () => {
+    const long = 'x'.repeat(500);
+    const d = rows(`--- a/x\n+++ b/x\n@@ -1 +1 @@\n+<img src=x onerror=alert(1)>${long}`);
+    expect(d.querySelector('img')).toBeNull();
+    expect(d.querySelectorAll('.l')[1].textContent).toBe(`+<img src=x onerror=alert(1)>${long}`);
+  });
+  it('copies back the exact patch lines', () => {
+    const patch = '@@ -1,3 +1,3 @@\n context\n-\told\n+\tnew <b>\n ünï';
+    expect(copy(rows(`--- a/x\n+++ b/x\n${patch}`))).toBe(patch);
+  });
+});
+
+describe('diff block (S-2100)', () => {
+  const block = (patch: string) => { const d = document.createElement('div'); d.innerHTML = mb.renderMail(`${F}diff\n${patch}\n${F}`); return d; };
+  const many = (files: number, rows: number) => Array.from({ length: files }, (_, i) => `diff --git a/f${i} b/f${i}\n--- a/f${i}\n+++ b/f${i}\n@@ -1 +1 @@\n${Array.from({ length: rows - 1 }, (_, j) => `+l${j}`).join('\n')}`).join('\n');
+
+  it('opens every file when the diff fits the phone cap', () => {
+    const d = block(many(3, 6));
+    expect(d.querySelectorAll('details.mb-file[open]').length).toBe(3);
+  });
+  it('opens only the first file when it does not', () => {
+    const d = block(many(4, 6));
+    const f = Array.from(d.querySelectorAll('details.mb-file'));
+    expect(f.map((x) => x.hasAttribute('open'))).toEqual([true, false, false, false]);
+  });
+  it('puts the counts header beside the folds, never inside a summary', () => {
+    const d = block(many(2, 4));
+    expect(d.querySelector('.mb-dhead .mb-dsum')?.textContent).toBe('2 files · +6 −0');
+    expect(d.querySelector('summary .mb-dhead')).toBeNull();
+    expect(d.querySelector('.mb-dhead')?.parentElement).toBe(d.querySelector('.mb-diff'));
+    expect(d.querySelector('.mb-dopen')?.hasAttribute('hidden')).toBe(true);
+  });
+  it('has one scroller with a label and keyboard focus', () => {
+    const d = block(many(2, 4));
+    const s = d.querySelectorAll('.mb-dscroll');
+    expect(s.length).toBe(1);
+    expect(s[0].getAttribute('tabindex')).toBe('0');
+    expect(s[0].getAttribute('aria-label')).toBe('Diff, 2 files');
+    expect(s[0].querySelectorAll('details.mb-file').length).toBe(2);
+  });
+  it('splits the path into a folder and a name', () => {
+    const d = block('--- a/web/src/a.ts\n+++ b/web/src/a.ts\n@@ -1 +1 @@\n+x');
+    expect(d.querySelector('.mb-dir')?.textContent).toBe('web/src/');
+    expect(d.querySelector('.mb-name')?.textContent).toBe('a.ts');
+  });
+});

@@ -19,18 +19,29 @@ export interface DiffFileItem {
 }
 // The stam reviewer's verdict on the PR (S-1917, `review` of the list): absent or null when none is known.
 export interface DiffReview { verdict: 'approve' | 'changes'; by: string | null; summary: string | null; at: string | null; head: string; stale: boolean }
-export interface DiffList { repo: string; pr: number; head: string; base: string; mergeBase: string; files: DiffFileItem[]; review?: DiffReview | null }
+// The commits a diff is pinned to. Sides are fetched with `head` and `base`; a declaration on a deleted line is looked
+// up at `mergeBase`, which is where the diff starts from.
+export interface DiffShas { head: string; base: string; mergeBase: string }
+// A diff's loaded files (S-2103): what a PR's diff and a pasted patch have in common, so the view reads nothing
+// PR-specific off it. `shas` is null for a diff not pinned to commits (a patch); `review` is absent when the source has
+// no reviews at all (a patch) and null when it has none to report (a PR with no verdict); `empty` is what the view says
+// when there are no files.
+export interface DiffList { files: DiffFileItem[]; shas: DiffShas | null; review?: DiffReview | null; empty: string }
+// `GET /api/diff`'s answer (S-1530): one PR's files and the commits they were pinned to.
+export interface PrList { repo: string; pr: number; head: string; base: string; mergeBase: string; files: DiffFileItem[]; review?: DiffReview | null }
 
 // What the header's verdict chip says: its text, its look (`ok`, `bad`, or `none` for muted, which a verdict on another head
 // always is: the list's head can lag or lead the poller's) and the longer line for its title and sheet. The wording never claims more than the `stam/review` status backs.
-export interface ReviewChip { tone: 'ok' | 'bad' | 'none'; label: string; by: string | null; detail: string }
+// `short` is the label for a narrow pane: the same verdict in fewer words, so the reviewer's name keeps room.
+export interface ReviewChip { tone: 'ok' | 'bad' | 'none'; label: string; short: string; by: string | null; detail: string }
 export function reviewChip(r: DiffReview | null | undefined): ReviewChip {
-  if (!r) return { tone: 'none', label: 'no review', by: null, detail: 'No stam review has been posted on this PR.' }
+  if (!r) return { tone: 'none', label: 'no review', short: 'no review', by: null, detail: 'No stam review has been posted on this PR.' }
   const word = r.verdict === 'approve' ? 'approved' : 'changes requested'
   const who = r.by ? ` by ${r.by}` : ''
   const head = r.stale ? ` on another head (${r.head.slice(0, 7)}), not the one shown` : ` on the head shown (${r.head.slice(0, 7)})`
   const detail = `${word[0].toUpperCase()}${word.slice(1)}${who}${head}.${r.summary ? ` ${r.summary}` : ''}`
-  return { tone: r.stale ? 'none' : r.verdict === 'approve' ? 'ok' : 'bad', label: r.stale ? `${word} · another head` : word, by: r.by, detail }
+  const short = r.verdict === 'approve' ? 'approved' : 'changes'
+  return { tone: r.stale ? 'none' : r.verdict === 'approve' ? 'ok' : 'bad', label: r.stale ? `${word} · another head` : word, short: r.stale ? `${short} · other head` : short, by: r.by, detail }
 }
 
 export const CLASSES: FileClass[] = ['tests', 'lockfiles', 'generated', 'docs']
@@ -88,10 +99,11 @@ export function toggleFile(f: DiffFileItem, flt: Filter): Filter {
 export const toggleClass = (cls: FileClass, flt: Filter): Filter => ({ ...flt, hidden: { ...flt.hidden, [cls]: !flt.hidden[cls] } })
 
 // --- Viewed marks ---------------------------------------------------------------------------------------------------
-// Kept in this viewer's localStorage. A mark is keyed by repo, PR, path and the file's head blob, so it resets only
-// when that file changes (a deleted file has no head blob: its base blob stands in, with a marker).
-export function viewedKey(repo: string, pr: number, f: Pick<DiffFileItem, 'path' | 'headBlob' | 'baseBlob'>): string {
-  return `${repo}#${pr}:${f.path}@${f.headBlob ?? (f.baseBlob ? 'deleted-' + f.baseBlob : 'none')}`
+// Kept in this viewer's localStorage. A mark is keyed by the diff's scope (`REPO#N` for a PR, `patch:HASH` for a
+// pasted patch, S-2102), the path and the file's head blob, so it resets only when that file changes (a deleted file
+// has no head blob: its base blob stands in, with a marker).
+export function viewedKey(scope: string, f: Pick<DiffFileItem, 'path' | 'headBlob' | 'baseBlob'>): string {
+  return `${scope}:${f.path}@${f.headBlob ?? (f.baseBlob ? 'deleted-' + f.baseBlob : 'none')}`
 }
 
 const VIEWED = 'stam/diff-viewed'

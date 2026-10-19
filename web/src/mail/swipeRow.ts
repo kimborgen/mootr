@@ -3,7 +3,8 @@
 // vertical drag snaps back. The row is translated directly, over the archive affordance
 // the row markup draws behind it. HTML drag and drop doesn't follow a finger, so this is
 // pointer events, as touchRank does for ranking.
-export function swipeRow(root: HTMLElement, width: number, onSwipe: (row: HTMLElement) => void): () => void {
+// `onRight`, when given, takes a pull to the right past half the reveal the same way (the Inbox page defers with it).
+export function swipeRow(root: HTMLElement, width: number, onSwipe: (row: HTMLElement) => void, onRight?: (row: HTMLElement) => void): () => void {
   const down = (e: PointerEvent) => {
     if (e.pointerType === 'mouse') return
     const row = (e.target as Element).closest?.<HTMLElement>('.mrow')
@@ -24,12 +25,13 @@ export function swipeRow(root: HTMLElement, width: number, onSwipe: (row: HTMLEl
     }
     const up = () => {
       reset()
-      if (decided && dx <= -width / 2) {
+      const far = decided && (dx <= -width / 2 ? onSwipe : onRight && dx >= width / 2 ? onRight : null)
+      if (far) {
         // A swipe shouldn't also open the thread the finger lifted over.
         const stop = (ev: Event) => ev.stopPropagation()
         row.addEventListener('click', stop, { capture: true, once: true })
         setTimeout(() => row.removeEventListener('click', stop, true), 400)
-        onSwipe(row)
+        far(row)
       }
     }
     const move = (ev: PointerEvent) => {
@@ -43,7 +45,7 @@ export function swipeRow(root: HTMLElement, width: number, onSwipe: (row: HTMLEl
         decided = true
       }
       ev.preventDefault()
-      dx = Math.max(-width, Math.min(0, mx))
+      dx = Math.max(-width, Math.min(onRight ? width : 0, mx))
       row.style.transform = `translateX(${dx}px)`
     }
     addEventListener('pointermove', move)

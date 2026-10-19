@@ -19,6 +19,7 @@
 // estimate in attribution.ts, mid); null when uncalibrated or without subscription spend.
 // Computed on request in one pass over the samples and events.
 import * as db from './db.ts';
+import { due, runSync } from './slice.ts';
 import * as itsa from './itsa.ts';
 import * as tree from './tree.ts';
 import { settings } from './settings.ts';
@@ -112,6 +113,8 @@ interface Options {
   display?: Ctx;
 }
 
+// Samples read per page: about 6 ms of attribution each, so a slice ends soon after the budget.
+const SAMPLE_PAGE = 500;
 const ACTIVE_CATEGORIES = new Set(['active', 'review']);
 
 function isSubscription(account: string): boolean {
@@ -274,7 +277,10 @@ export function buildAttribution(data: AttributionData = readAttributionData()):
   return { items, managers, attribute };
 }
 
-export function compute(opts: Options = {}): Computed {
+export const compute = (opts: Options = {}): Computed => runSync(computeSteps(opts));
+
+// compute() as a generator that pauses between pages of samples (S-2094): see src/slice.ts.
+export function* computeSteps(opts: Options = {}): Generator<void, Computed> {
   const now = opts.now ?? Date.now();
   const since = opts.days == null ? null : new Date(now - opts.days * 86_400_000).toISOString();
   const d = db.open();
@@ -289,30 +295,37 @@ export function compute(opts: Options = {}): Computed {
     if (!starts.has(k)) starts.set(k, windowStart(account, w, now));
     return starts.get(k)!;
   };
-  const sampleSql = since
-    ? 'SELECT agent_id, account, harness, model, bucket, cost_usd, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write FROM usage_samples WHERE bucket >= ?'
-    : 'SELECT agent_id, account, harness, model, bucket, cost_usd, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write FROM usage_samples';
-  for (const s of d.prepare(sampleSql).all(...(since ? [since] : [])) as unknown as Sample[]) {
-    add(all, s);
-    const split = attribute(s.agent_id, Date.parse(s.bucket));
-    if (!split.length) {
-      add(unattributed, s);
-      continue;
+  // The samples a page at a time by rowid, so a sliced run never holds the whole table.
+  const sampleSql = `SELECT rowid AS rid, agent_id, account, harness, model, bucket, cost_usd, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write FROM usage_samples WHERE rowid > ?${since ? ' AND bucket >= ?' : ''} ORDER BY rowid LIMIT ${SAMPLE_PAGE}`;
+  const samplePage = d.prepare(sampleSql);
+  let rid = 0;
+  for (;;) {
+    const page = samplePage.all(...(since ? [rid, since] : [rid])) as unknown as (Sample & { rid: number })[];
+    if (!page.length) break;
+    rid = page[page.length - 1].rid;
+    for (const s of page) {
+      add(all, s);
+      const split = attribute(s.agent_id, Date.parse(s.bucket));
+      if (!split.length) {
+        add(unattributed, s);
+        continue;
+      }
+      const t = Date.parse(s.bucket);
+      const inWin = isSubscription(s.account) ? WINS.filter((w) => t >= winStart(s.account, w)) : [];
+      const config = `${s.harness} · ${s.model || 'unknown'}`;
+      const manager = managers.has(s.agent_id);
+      for (const { itsaId, share } of split) {
+        const x = items.get(itsaId)!;
+        add(x.own, s, share);
+        x.agents.set(s.agent_id, (x.agents.get(s.agent_id) ?? 0) + s.cost_usd * share);
+        x.configs.set(config, (x.configs.get(config) ?? 0) + s.cost_usd * share);
+        if (!manager) x.workerConfigs.set(config, (x.workerConfigs.get(config) ?? 0) + s.cost_usd * share);
+        else x.manager += s.cost_usd * share;
+        x.accounts.set(s.account, (x.accounts.get(s.account) ?? 0) + s.cost_usd * share);
+        for (const w of inWin) x.inWindow[w].set(s.account, (x.inWindow[w].get(s.account) ?? 0) + s.cost_usd * share);
+      }
     }
-    const t = Date.parse(s.bucket);
-    const inWin = isSubscription(s.account) ? WINS.filter((w) => t >= winStart(s.account, w)) : [];
-    const config = `${s.harness} · ${s.model || 'unknown'}`;
-    const manager = managers.has(s.agent_id);
-    for (const { itsaId, share } of split) {
-      const x = items.get(itsaId)!;
-      add(x.own, s, share);
-      x.agents.set(s.agent_id, (x.agents.get(s.agent_id) ?? 0) + s.cost_usd * share);
-      x.configs.set(config, (x.configs.get(config) ?? 0) + s.cost_usd * share);
-      if (!manager) x.workerConfigs.set(config, (x.workerConfigs.get(config) ?? 0) + s.cost_usd * share);
-      else x.manager += s.cost_usd * share;
-      x.accounts.set(s.account, (x.accounts.get(s.account) ?? 0) + s.cost_usd * share);
-      for (const w of inWin) x.inWindow[w].set(s.account, (x.inWindow[w].get(s.account) ?? 0) + s.cost_usd * share);
-    }
+    if (due()) yield;
   }
 
   // Totals: each ITSA's own plus every descendant's own, each once (the parent links form a tree).
@@ -323,23 +336,26 @@ export function compute(opts: Options = {}): Computed {
       children.get(x.parent_id)!.push(x);
     }
   }
-  const totalOf = (x: Item): Tot => {
-    const t = zero();
-    add(t, x.own);
-    for (const c of children.get(x.id) ?? []) add(t, totalOf(c));
-    return t;
-  };
-  // Adds x and every descendant's per-account spend (all time, and inside the current windows) into root.
-  const accountsOf = (x: Item, root: Item): void => {
-    for (const [a, c] of x.accounts) root.totalAccounts.set(a, (root.totalAccounts.get(a) ?? 0) + c);
-    for (const w of WINS) for (const [a, c] of x.inWindow[w]) root.totalInWindow[w].set(a, (root.totalInWindow[w].get(a) ?? 0) + c);
-    for (const c of children.get(x.id) ?? []) accountsOf(c, root);
+  // Each ITSA folds its children's totals into its own once, children first, so a deep tree costs one pass.
+  const folded = new Set<string>();
+  const fold = (x: Item): void => {
+    if (folded.has(x.id)) return;
+    folded.add(x.id);
+    add(x.total, x.own);
+    for (const [a, c] of x.accounts) x.totalAccounts.set(a, (x.totalAccounts.get(a) ?? 0) + c);
+    for (const w of WINS) for (const [a, c] of x.inWindow[w]) x.totalInWindow[w].set(a, (x.totalInWindow[w].get(a) ?? 0) + c);
+    for (const c of children.get(x.id) ?? []) {
+      fold(c);
+      add(x.total, c.total);
+      for (const [a, v] of c.totalAccounts) x.totalAccounts.set(a, (x.totalAccounts.get(a) ?? 0) + v);
+      for (const w of WINS) for (const [a, v] of c.totalInWindow[w]) x.totalInWindow[w].set(a, (x.totalInWindow[w].get(a) ?? 0) + v);
+    }
   };
   for (const x of items.values()) {
-    x.total = totalOf(x);
-    accountsOf(x, x);
+    fold(x);
     x.config = topKey(x.workerConfigs) ?? topKey(x.configs);
     x.weekly_percent = weeklyPercent(x, worthMid);
+    if (due()) yield;
   }
   return { items, unattributed, all, since };
 }

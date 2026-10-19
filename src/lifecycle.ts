@@ -17,6 +17,7 @@ import { adapters } from './adapters/index.ts';
 import { render, renderWithRetro, withRetroReminder } from './templates.ts';
 import { cleanupWorkspace, type Workspace } from './workspace.ts';
 import { markCompacted, idleCompactIfDue } from './context.ts';
+import { markCold } from './cache-cold.ts';
 import { typeOf } from './agent-class.ts';
 import { compactorProcesses, dirProcesses, removeAgentScratchDirs, removeClaudeScratch, removeReviewDir, removeReviewTmpDir, reviewDirOf, reviewTmpForSpawn, stopAndConfirm } from './proctree.ts';
 import { isReviewerType } from './agent-types.ts';
@@ -142,6 +143,7 @@ export async function startHarness(a: db.Agent, prompt: string | undefined, resu
   const pending = a.pending_action && JSON.parse(a.pending_action).type === 'compact' ? a.pending_action : null;
   db.updateAgent(a.id, { lifecycle: held ? 'paused' : 'active', activity: 'starting', activity_detail: prompt ? 'with prompt' : resume ? 'resuming' : null, pending_action: pending });
   db.addEvent(a.id, resume ? 'resume' : 'spawn', { argv: spec.argv, prompt: Boolean(prompt) });
+  if (resume) markCold(a, 'wake');
   const text = prompt;
   const gate = () => {
     if (!launchCurrent(a.id, gen)) return false;
@@ -152,12 +154,12 @@ export async function startHarness(a: db.Agent, prompt: string | undefined, resu
     return false;
   };
   // The prompt goes in after launch, through the harness's own channel, never on a command line.
-  const launched = adapter.afterLaunch(db.getAgent(a.id)!, prompt, { resume, admit: prompt ? gate : undefined });
+  const launched = adapter.afterLaunch(db.getAgent(a.id)!, prompt, { resume, admit: prompt ? gate : undefined, current: () => launchCurrent(a.id, gen) });
   // S-759: a spawn's first prompt is delivered (or was kept back as a notice) once afterLaunch
   // settles, so record that. A daemon restart mid-spawn leaves it 'starting' with no marker,
   // which the first reconcile pass re-delivers (recoverFirstPrompt).
   launched.then(() => {
-    if (kind === 'spawn') db.addEvent(a.id, 'first-prompt:delivered');
+    if (kind === 'spawn' && launchCurrent(a.id, gen)) db.addEvent(a.id, 'first-prompt:delivered');
   }).catch(() => {});
   launched.catch((e) => {
     db.addEvent(a.id, 'launch-error', String(e));
@@ -501,6 +503,7 @@ async function reconnectIfQuiet(a: db.Agent): Promise<void> {
 
 // Called when an agent's turn ends. It may also be the last of its MCP scope to go idle.
 export async function onIdle(agentId: string): Promise<void> {
+  restTurnEnded(agentId);
   const a = db.getAgent(agentId);
   if (!a) return;
   // A pending reconnect stays set until reconnectIfQuiet runs it for the whole scope.
@@ -569,16 +572,18 @@ export function unpause(a: db.Agent, opts: { by: string; force?: boolean } = { b
 
 // Unpauses within serial(), once nothing holds the agent. `text` is what it is told. Mail
 // and notices that waited while it was blocked go in after, as for any idle agent.
-export async function resumeNow(id: string, text: string): Promise<string> {
+// `delivered` waits for the harness to take `text` (or keep it back at the gate) before returning, and
+// fails with the launch error otherwise: for a prompt a person typed, whose loss must not read as sent (S-2034).
+export async function resumeNow(id: string, text: string, delivered = false): Promise<string> {
   const release = acquire(db.getAgent(id)!, 'resume');
   try {
-    return await resumeNowLocked(id, text);
+    return await resumeNowLocked(id, text, delivered);
   } finally {
     release();
   }
 }
 
-async function resumeNowLocked(id: string, text: string): Promise<string> {
+async function resumeNowLocked(id: string, text: string, delivered: boolean): Promise<string> {
   const a = db.getAgent(id)!;
   assertNotTakenOver(a);
   if (a.lifecycle !== 'paused') throw new Error(`${a.name} is ${a.lifecycle}`);
@@ -588,7 +593,8 @@ async function resumeNowLocked(id: string, text: string): Promise<string> {
   // Its terminal went down with the tmux server while it was paused: resume it.
   if (a.workspace && !tmux.hasSession(id)) {
     if (!a.session_id) throw new Error(`${a.name} has no session to resume`);
-    await startHarness(db.getAgent(id)!, text, true, 'unpause');
+    const { launched } = await startHarness(db.getAgent(id)!, text, true, 'unpause');
+    if (delivered) await launched;
     db.addEvent(id, 'unpause');
     schedulePush(id);
     return 'active';
@@ -655,9 +661,9 @@ function churning(id: string, now: number): boolean {
 
 // The soonest future time a stam-held wait is expected to wake the agent: a wake_me's fire time, a
 // wait_for timeout, or its expect_minutes. Null with no known time.
-function expectedWake(a: db.Agent, now: number): number | null {
+function expectedWake(waits: db.Wait[], now: number): number | null {
   let soonest: number | null = null;
-  for (const w of db.listWaits(a.id)) {
+  for (const w of waits) {
     let data: { expect_at?: string } = {};
     try {
       data = w.data ? JSON.parse(w.data) : {};
@@ -668,6 +674,21 @@ function expectedWake(a: db.Agent, now: number): number | null {
     }
   }
   return soonest;
+}
+
+// What the API reports for a resting agent (S-2034): why it rests, what it waits for and when it is
+// expected to wake (ISO, null with no known time). Null for any other agent. Read live from its waits,
+// so a wait added or cleared while it rests shows at once.
+export type Resting = { reason: 'idle' | 'wait'; waits: { id: string; kind: string; target: string | null; detail: string | null; since: string; until: string | null }[]; expected_wake: string | null };
+
+export function restingOf(a: db.Agent, waits: db.Wait[]): Resting | null {
+  if (!isResting(a)) return null;
+  const wake = expectedWake(waits, Date.now());
+  return {
+    reason: waits.length ? 'wait' : 'idle',
+    waits: waits.map((w) => ({ id: w.id, kind: w.kind, target: w.target, detail: w.detail, since: w.since, until: w.until })),
+    expected_wake: wake ? new Date(wake).toISOString() : null,
+  };
 }
 
 const restTypeKey = (a: db.Agent): string => {
@@ -693,16 +714,104 @@ function restPlan(a: db.Agent, now = Date.now()): RestPlan | null {
   return plan && !tmux.hasClients(a.id) ? plan : null;
 }
 
+// S-2158: the rest rules count idle time from the agent's last turn that acted, so a manager whose
+// turns only read a child's notice or a mail still rests. A turn acts when it calls a tool outside
+// QUIET_TOOLS; one whose start no hook reported (OpenCode, a daemon restart) counts as acting, so its
+// clock is idle_since as before. idle_since itself keeps its meaning for its other readers.
+const QUIET_TOOLS = new Set([
+  'Read', 'Grep', 'Glob', 'LS', 'NotebookRead', 'ToolSearch', 'TodoWrite', 'WebFetch', 'WebSearch', 'Skill',
+  'read_mail', 'list_inbox', 'read_thread', 'search', 'search_mail', 'find_agents', 'whoami', 'registry_info', 'usage_info', 'activity_info', 'itsa_get', 'itsa_list', 'layout_get', 'list_subscriptions',
+  // A wait it declares is read by restPlan already; declaring one is no action.
+  'wait_for', 'wait_done', 'wake_me', 'watch_pr', 'unwatch_pr', 'subscribe', 'unsubscribe',
+]);
+const quietTool = (tool: string) => QUIET_TOOLS.has(/^mcp__stam__(.+)$/.exec(tool)?.[1] ?? tool);
+// The time each agent's rest clock counts from, when a quiet turn left it before idle_since.
+const restClocks = new Map<string, string>();
+// The clock a running turn carries while it has called only quiet tools.
+const quietTurns = new Map<string, string | null>();
+
+// A turn starts: idleSince is the agent's idle_since before it, null if it wasn't idle.
+export function restTurnStarted(id: string, idleSince: string | null): void {
+  if (quietTurns.has(id)) return; // a prompt typed into a running turn
+  quietTurns.set(id, restClocks.get(id) ?? idleSince);
+  restRequests.delete(id); // a new turn makes its own request, if any
+}
+
+export function restToolUsed(id: string, tool: string): void {
+  if (quietTool(tool)) return;
+  quietTurns.set(id, null);
+  // Should its turn end go unreported, the older clock is gone already.
+  restClocks.delete(id);
+}
+
+// A turn ends, on any harness's authoritative turn end (onIdle): closes its rest-clock state, and
+// starts the delay of a rest its turn requested.
+export function restTurnEnded(id: string, delayMs = REST_REQUEST_DELAY_MS): void {
+  const clock = quietTurns.get(id);
+  quietTurns.delete(id);
+  if (clock) restClocks.set(id, clock);
+  else restClocks.delete(id);
+  const r = restRequests.get(id);
+  if (!r) return;
+  r.notBefore = Date.now() + delayMs;
+  const t = setTimeout(() => {
+    rest(id).catch((e) => db.addEvent(id, 'standing:rest-error', String(e)));
+  }, delayMs);
+  t.unref?.();
+}
+
+// An archived or forgotten agent's turns are over.
+export function restForget(id: string): void {
+  restClocks.delete(id);
+  quietTurns.delete(id);
+  restRequests.delete(id);
+}
+
+// S-2237: `rest: true` on wait_for or wake_me asks stam to rest the agent when its turn ends, skipping
+// rest.graceMinutes and rest.afterMinutes. Every restPlan guard and the churn guard still hold; a held
+// request waits for the sweep. It counts from REST_REQUEST_DELAY_MS after the turn end, and lasts until
+// the agent's next turn starts (restTurnStarted, dropRestRequest) or its wait clears or fires (a repeating
+// wake_me moves its `until`). It lives in memory: a daemon restart drops it, and the timing rules rest
+// the agent as before.
+type RestRequest = { wait: string; until: string | null; notBefore: number | null };
+const restRequests = new Map<string, RestRequest>();
+const REST_REQUEST_DELAY_MS = 3_000; // lets the harness finish its turn-end hook before it stops
+
+export function requestRest(id: string, w: db.Wait): void {
+  restRequests.set(id, { wait: w.id, until: w.until, notBefore: null });
+  db.addEvent(id, 'standing:rest-requested', { wait: w.id });
+}
+
+// A turn starts on a harness whose turns stam doesn't follow tool by tool (Codex's app server, OpenCode).
+export function dropRestRequest(id: string): void {
+  restRequests.delete(id);
+}
+
+// The agent's open rest request, for tests.
+export const restRequestOf = (id: string): Readonly<RestRequest> | undefined => restRequests.get(id);
+
+function restRequested(id: string, waits: db.Wait[], now: number): boolean {
+  const r = restRequests.get(id);
+  return !!r && r.notBefore != null && now >= r.notBefore && waits.some((w) => w.id === r.wait && w.until === r.until);
+}
+
+// When the rest rules count its idle time from.
+export function restClock(a: db.Agent): string {
+  const clock = restClocks.get(a.id);
+  return clock && clock < a.idle_since! ? clock : a.idle_since!;
+}
+
 // The timing rules, for an agent nothing else keeps up.
 function restRule(a: db.Agent, waits: db.Wait[], now: number): RestPlan | null {
-  const idle = now - Date.parse(a.idle_since!);
+  const idle = now - Date.parse(restClock(a));
   const reason = waits.length ? 'wait' : 'idle';
-  const wake = expectedWake(a, now);
+  const wake = expectedWake(waits, now);
   // Woken this often lately: chatty notices would restart it again and again. Standing agents too.
   if (churning(a.id, now)) return null;
   // S-897: a standing agent idle this long rests whatever it waits for.
   if (a.standing && idle >= standingIdleMs()) return { reason, wake };
   if (!restEnabled()) return null;
+  if (restRequested(a.id, waits, now)) return { reason, wake };
   const { after, grace } = restMs();
   // A manager with children at work (stam's 'children' wait) hears from them at any time, so its wake times say little.
   const busyChildren = waits.some((w) => w.kind === 'children' && w.source === 'stam');
@@ -787,7 +896,9 @@ function retryWake(a: db.Agent, e: unknown): void {
 // Starts a resting agent again, for mail, a notice or an assigned ITSA waiting for it. A hold
 // besides the rest (a pause, a cost blocker) keeps it down. `timed` marks a backoff retry: a
 // wake for mail while a retry is pending is skipped, so only timed retries count toward the limit.
-export function wakeResting(id: string, why: string, timed = false): Promise<string> {
+// `text` is what it is told instead of the standing-wake prompt: the human's prompt from the web view (S-2034),
+// which the wake waits to see delivered, failing with the launch error if it isn't.
+export function wakeResting(id: string, why: string, timed = false, text?: string): Promise<string> {
   return serial(id, async () => {
     if (!timed && wakeRetries.has(id)) return 'retry pending';
     const a = db.getAgent(id);
@@ -804,7 +915,7 @@ export function wakeResting(id: string, why: string, timed = false): Promise<str
     }
     db.addEvent(id, 'standing:wake', { why });
     try {
-      const r = await resumeNow(id, render('standing-wake', { why, cwd: a.cwd }));
+      const r = await resumeNow(id, text ?? render('standing-wake', { why, cwd: a.cwd }), text != null);
       cancelWakeRetry(id);
       return r;
     } catch (e) {
@@ -1184,7 +1295,7 @@ async function askFinalRound(a: db.Agent, opts: { force?: boolean; discard?: boo
 // turn or can't be asked, so a pending archive can't wait forever. Called each reconcile tick.
 // A failure is recorded and the pending is cleared (no retry loop); only a stop that couldn't be
 // confirmed yet — a session that may still stop on its own — is put back, backing off.
-export async function runDueArchives(now = Date.now(), agents: db.Agent[] = db.listAgents()): Promise<void> {
+export async function runDueArchives(now = Date.now(), agents: db.Agent[] = db.listPendingAgents()): Promise<void> {
   for (const a of agents) {
     const p = pendingStop(a);
     if (p?.type === 'shutdown') {
@@ -1398,6 +1509,7 @@ async function archiveLocked(a: db.Agent, opts: { force?: boolean; discard?: boo
   try {
     db.updateAgent(a.id, { lifecycle: 'archived', activity: 'unknown', activity_detail: result, pending_action: null, paused_by: withoutRest(a) });
     forgetLessons(a.id);
+    restForget(a.id);
     // An archived grantee loses the workspaces shared with it; an archived owner's grants stay (S-896).
     db.open().prepare('DELETE FROM workspace_grants WHERE grantee_id = ?').run(a.id);
   // An archived successor no longer holds the agent it took over from: that one gets its
@@ -1418,7 +1530,7 @@ async function archiveLocked(a: db.Agent, opts: { force?: boolean; discard?: boo
   }
   // The agent's Claude Code scratch dir under /tmp/claude-<uid>, once the archive has gone through (S-604).
   if (a.harness === 'claude') {
-    const msg = removeClaudeScratch(a.cwd, db.listAgents().filter((b) => b.id !== a.id && b.lifecycle !== 'archived').map((b) => b.cwd), settings().itsa?.repos?.stam2);
+    const msg = removeClaudeScratch(a.cwd, db.listAgents().filter((b) => b.id !== a.id && b.lifecycle !== 'archived').map((b) => b.cwd));
     if (msg !== 'no scratch dir') console.error(`archive ${a.name}: ${msg}`);
   }
   // The worktrees and scratch clones the agent made under ~/.cache/stam-wt and ~/.cache/stam-test (S-733).

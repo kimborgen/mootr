@@ -68,6 +68,8 @@ ARCH=$(api main POST /api/register '{"name":"old-exp","role":"test","harness":"c
 LOCAL=$(api twin POST /api/register '{"name":"old-local","role":"test","harness":"claude"}' x | jget "d['id']")
 for pair in "main $ARCH" "twin $LOCAL"; do
   set -- $pair
+  # An archive asks for the final round (S-1043): file it, so the turn end below archives at once.
+  api "$1" POST "/api/agents/$2/retro-final" "{\"by\":\"$2\",\"effort\":{\"testing\":100}}" >/dev/null
   api "$1" POST "/api/agents/$2/archive" "{\"by\":\"$2\",\"force\":true}" >/dev/null
   hook "$1" "$2" '{"hook_event_name":"Stop","last_assistant_message":"done"}' >/dev/null
   archived() { [ "$(api "$1" GET "/api/agents/$2" | jget "d['lifecycle']")" = archived ]; }

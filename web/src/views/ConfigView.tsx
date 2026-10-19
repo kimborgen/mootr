@@ -26,6 +26,7 @@ import { chiefAssistants, loadThresholds, refresh, useData } from '../store'
 import { toast } from '../ui/menu'
 import type { Agent } from '../types'
 import { TypesSettings, type AgentType } from './TypesSettings'
+import { PermissionModesSettings } from './PermissionModesSettings'
 import { McpSettings, type Servers } from './McpSettings'
 import { ModelPicker } from './ModelPicker'
 import { WorkColumnsSettings } from './WorkColumnsSettings'
@@ -507,6 +508,11 @@ export function ConfigView() {
           </div>
         </>
       )
+    },
+    permissions() {
+      const types = Object.fromEntries(Object.entries(reg.types ?? {}).filter(([, t]) => t.harness).map(([n, t]) => [n, { harness: t.harness }]))
+      return <PermissionModesSettings value={s.permissionModes as { harness?: Record<string, string>; types?: Record<string, string> } | undefined} types={types} harnesses={Object.keys(reg.harnesses)} rev={rev}
+        set={(next) => set('permissionModes', next)} readOnly={ro('permissionModes')} why={why} />
     },
     agents() {
       const presets = Object.entries(reg.presets)

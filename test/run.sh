@@ -64,6 +64,7 @@ compress-unit
 cost-display
 cost-notices
 db-synchronous
+db-user-version
 decision-fence
 decl-index
 default-read-stale
@@ -71,9 +72,9 @@ delegate-peer-parent
 developer-cap-unit
 diff-api
 doc-citations
+doc-shas
 embed-unit
 events-unit
-export
 export-overrides
 feedback-unit
 github-poller-unit
@@ -197,6 +198,7 @@ activity
 activity-classify
 activity-readers
 activity-rules
+activity-load
 activity-stats
 activity-info
 activity-warming
@@ -243,6 +245,7 @@ check-playwright-unit
 child-notices
 chromium-lock
 claude-dialog-unit
+claude-ghost-unit
 claude-permissions
 claude-view
 claude-view-unit
@@ -253,6 +256,7 @@ write-timeout-thread-unit
 mail-recipients-index
 default-read-stale
 db-synchronous
+db-user-version
 tree
 permission-requests-index
 tmux-clients
@@ -267,6 +271,7 @@ compress
 config-guard
 config-patch
 context
+cos
 cost
 cost-display
 cost-fallback
@@ -295,6 +300,7 @@ permission-modes
 permission-modes-unit
 delegate-peer-parent
 files-unit
+default-repo-unit
 diff-api
 decl-index
 diff-api-route
@@ -313,6 +319,7 @@ failed-notice
 fastpath
 feedback
 feedback-unit
+first-prompt-ghost
 first-prompt-recover
 forget
 story-check-unit
@@ -353,6 +360,7 @@ itsa-unit
 human-owner
 human-relay
 local-human
+local-default
 local-human-unit
 ticket-unit
 human-strict
@@ -370,6 +378,7 @@ light-list-unit
 limits
 linear-poller
 linear-poller-unit
+llm-layer
 m1
 m2
 m5
@@ -406,6 +415,7 @@ mcp-itsa-ref
 mcp-proxy
 mcp-reconnect
 mcp-registry
+mcp-ring-submit
 mcp-send-mail
 mcp-servers
 mcp-slack-unit
@@ -491,6 +501,7 @@ workspace-share-unit
 worktree-deps-unit
 reviewer-ring
 reviewer-spawn
+doc-shas
 swallowed-wait
 review-dir-cleanup
 reviewer-types
@@ -500,6 +511,7 @@ ring-split
 ring-verdict-line
 ring-peer
 rules
+run-flags
 run-skip
 run-timeout
 samples
@@ -522,6 +534,7 @@ tool-names
 spawn-usage
 developer-cap-unit
 developer-cap
+developer-cap-peer
 spawn-worktree-unit
 stale-working
 stall
@@ -544,6 +557,8 @@ turn-harden-unit
 compress-unit
 mail-embed-unit
 statusline-cache-unit
+statusline-post-unit
+cache-cold-unit
 steps
 steps-unit
 suggest-input
@@ -556,6 +571,8 @@ test-hooks
 test-slot
 tmphome-unit
 tmux-snapshot-unit
+tmux-snapshot-async-unit
+agent-reads-unit
 tmux-env-unit
 token-scope
 tools
@@ -661,6 +678,7 @@ cmd() {
     mail-recipients-index) echo "node --test test/mail-recipients-index.test.mjs" ;;
     default-read-stale) echo "node --test test/default-read-stale.test.mjs" ;;
     db-synchronous) echo "node --test test/db-synchronous.test.mjs" ;;
+    db-user-version) echo "node --test test/db-user-version.test.mjs" ;;
     tree) echo "node --test test/tree.test.mjs" ;;
     permission-requests-index) echo "node --test test/permission-requests-index.test.mjs" ;;
     tmux-clients) echo "node --test test/tmux-clients.test.mjs" ;;
@@ -692,6 +710,8 @@ cmd() {
     mail-embed-unit) echo "node --test test/mail-embed.test.mjs" ;;
     compact-restart-unit) echo "node --test test/compact-restart.test.mjs" ;;
     tmux-snapshot-unit) echo "node --test test/tmux-snapshot.test.mjs" ;;
+    tmux-snapshot-async-unit) echo "node --test test/tmux-snapshot-async.test.mjs" ;;
+    agent-reads-unit) echo "node --test test/agent-reads.test.mjs" ;;
     tmux-env-unit) echo "node --test test/tmux-env.test.mjs" ;;
     janitor-sweep) echo "node --test test/janitor-sweep.test.mjs" ;;
     orphan-procs) echo "node --test test/orphan-procs.test.mjs" ;;
@@ -722,6 +742,7 @@ cmd() {
     db-backup-lock) echo "node --test test/db-backup-lock.test.mjs" ;;
     withdraw-peers-unit) echo "node --test test/withdraw-peers.test.mjs" ;;
     files-unit) echo "node --test test/files.test.mjs" ;;
+    default-repo-unit) echo "node --test test/default-repo.test.mjs" ;;
     diff-api) echo "node --test test/diff-api.test.mjs" ;;
     decl-index) echo "node --test test/decl-index.test.mjs" ;;
     delegate-peer-parent) echo "node --test test/delegate-peer-parent.test.mjs" ;;
@@ -750,6 +771,7 @@ cmd() {
     mcp-import) echo "node --test test/mcp-import.test.mjs" ;;
     inventory-block-unit) echo "node --test test/inventory-block.test.mjs" ;;
     mcp-registry) echo "node --test test/mcp-registry.test.mjs" ;;
+    mcp-ring-submit) echo "node --test test/mcp-ring-submit.test.mjs" ;;
     model-catalog) echo "node --test test/model-catalog.test.mjs" ;;
     mcp-auth) echo "node --test test/mcp-auth.test.mjs" ;;
     mcp-slack-unit) echo "node --test test/mcp-slack.test.mjs" ;;
@@ -807,6 +829,7 @@ cmd() {
     activity) echo "node --test test/activity.test.mjs" ;;
     activity-readers) echo "node --test test/activity-readers.test.mjs" ;;
     activity-rules) echo "node --test test/activity-rules.test.mjs" ;;
+    activity-load) echo "node --test test/activity-load.test.mjs" ;;
     activity-stats) echo "node --test test/activity-stats.test.mjs" ;;
     activity-info) echo "node --test test/activity-info.test.mjs" ;;
     activity-warming) echo "node --test test/activity-warming.test.mjs" ;;
@@ -838,10 +861,13 @@ cmd() {
     fastpath) echo "node --test test/fastpath.test.mjs" ;;
     machines-unit) echo "node --test test/machines.test.mjs" ;;
     statusline-cache-unit) echo "node --test test/statusline-cache.test.mjs" ;;
+    statusline-post-unit) echo "node --test test/statusline-post.test.mjs" ;;
+    cache-cold-unit) echo "node --test test/cache-cold.test.mjs" ;;
     steps-unit) echo "node --test test/steps.test.mjs" ;;
     tmphome-unit) echo "node --test test/tmphome.test.mjs" ;;
     agent-view-unit) echo "node --test test/agent-view.test.mjs" ;;
     agent-view-default) echo "node --test test/agent-view-default.test.mjs" ;;
+    doc-shas) echo "node --test test/doc-shas.test.mjs" ;;
     swallowed-wait) echo "node --test test/swallowed-wait.test.mjs" ;;
     developer-cap-unit) echo "node --test test/developer-cap-unit.test.mjs" ;;
     spawn-worktree-unit) echo "node --test test/spawn-worktree-unit.test.mjs" ;;
@@ -860,9 +886,11 @@ cmd() {
     codex-no-rollout) echo "node --test test/codex-no-rollout.test.mjs" ;;
     claude-view-unit) echo "node --test test/claude-view.test.mjs" ;;
     claude-dialog-unit) echo "node --test test/claude-dialog.test.mjs" ;;
+    claude-ghost-unit) echo "node --test test/claude-ghost.test.mjs" ;;
     suggest-input-unit) echo "node --test test/claude-input.test.mjs" ;;
     layout-unit) echo "node --test test/layout-ops.test.mjs" ;;
     light-list-unit) echo "node --test test/light-list.test.mjs" ;;
+    llm-layer) echo "node --test test/llm-layer.test.mjs" ;;
     guard-unit) echo "node --test test/guard.test.mjs" ;;
     proctree-unit) echo "node --test test/proctree.test.mjs" ;;
     process) echo "node --test test/process.test.mjs" ;;
@@ -901,6 +929,7 @@ for a in "$@"; do
     --smoke | --live) smoke=1 ;;
     --parallel) parallel=1 ;;
     -h | --help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "test/run.sh: unknown flag $a; usage: test/run.sh [--smoke|--live] [--parallel] [NAME...] (test/run.sh -h). A single light test takes no flag: test/run.sh NAME (docs/testing.md)" >&2; exit 2 ;;
     *) a=${a#test/}; a=${a#e2e-}; a=${a%.sh}; a=${a%.test.mjs}; tests="$tests $a"; explicit=1 ;;
   esac
 done

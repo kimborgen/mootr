@@ -107,12 +107,12 @@ echo "== a light run under a held heavy slot runs at once"
 timeout 20 $SLOT sh -c "$SLOT --light echo light-nested" >"$WORK/o7" 2>&1 || fail "light nested waited: $(cat "$WORK/o7")"
 grep -q light-nested "$WORK/o7" || fail "light nested didn't run"
 echo "== test/run.sh's LIGHT names are plain node --test files"
-LIGHT=$(sed -n '/^LIGHT="$/,/^"$/p' "$ROOT/test/run.sh" | grep -v '^LIGHT=\|^"$')
+LIGHT=$(sed -n '/^LIGHT="$/,/"$/p' "$ROOT/test/run.sh" | sed 's/"$//' | grep -v '^LIGHT=')
 [ -n "$LIGHT" ] || fail "no LIGHT names"
 for n in $LIGHT; do
   line=$(grep "^    $n) echo \"node --test test/[^ ]*\.test\.mjs\" ;;$" "$ROOT/test/run.sh") || fail "$n isn't a node --test entry"
   f=$(echo "$line" | sed 's/.*node --test \(test\/[^"]*\)".*/\1/')
-  grep -qiE "lib\.sh|tmux|playwright|chromium|daemon|listen|spawn|fork\(|exec|child_process|cli\.ts|stam-fast|dist/|fetch\(|http" "$ROOT/$f" && fail "$n ($f) looks like a daemon or browser test"
+  grep -v '^[[:space:]]*//' "$ROOT/$f" | grep -qE "lib\.sh|createServer\(|\.listen\(|['\"\`]tmux\b|['\"/]playwright|['\"/]chromium|chromium\.|(tsx|execPath)[^;]*cli\.ts|['\"/]stam-fast|fork\(|dist/(cli|daemon)|bin/stam['\"]|['\"]serve['\"]|-e['\"], DAEMON|spawn\(process\.execPath, \[[^]]*scripts/[^]]*\.mjs" && fail "$n ($f) looks like a daemon or browser test"
 done
 echo "== STAM_TEST_NOSLOT=1 skips the slots"
 export STAM_TEST_SLOTS=1

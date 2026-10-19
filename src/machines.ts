@@ -209,6 +209,12 @@ export function tick(now = Date.now(), statfs: (path: string) => { blocks: numbe
   return sample;
 }
 
+// The newest sample, or null before the first tick. Its ts is when it was read: a failed read leaves the
+// old one here, so a caller checks the age (S-2120).
+export function latestSample(): Sample | null {
+  return buffer.at(-1) ?? null;
+}
+
 // This machine's current reading: one tick if nothing has been sampled yet.
 export function snapshot(now = Date.now()): MachineReading {
   if (!buffer.length) tick(now);

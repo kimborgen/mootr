@@ -8,10 +8,10 @@ import { Icon } from './Icon'
 import { usePhone } from './ui/phone'
 import { byId, getData, permThread, useData } from './store'
 import { openItsa, StatusGlyph, statusLabel, topOwned, waitsOnHuman } from './itsa/itsa'
-import type { Agent, Itsa, Wait } from './types'
+import type { Agent, Itsa, Resting, Wait } from './types'
 
 const RANK = ['human', 'agent', 'children', 'job', 'timer', 'event']
-const rank = (w: Wait) => (RANK.indexOf(w.kind) + RANK.length + 1) % (RANK.length + 1)
+const rank = (w: Pick<Wait, 'kind'>) => (RANK.indexOf(w.kind) + RANK.length + 1) % (RANK.length + 1)
 export const WAIT_ICON: Record<string, string> = { human: 'user', agent: 'reply', children: 'network', job: 'terminal', timer: 'clock', event: 'radio' }
 
 export const waitsOf = (a: Agent) => [...(a.waits ?? [])].sort((x, y) => rank(x) - rank(y))
@@ -22,11 +22,42 @@ export function left(t: string) {
   return s < 3600 ? Math.max(0, Math.ceil(s / 60)) + 'm' : s < 86400 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd'
 }
 
-export function waitLabel(w: Wait) {
+export function waitLabel(w: Pick<Wait, 'kind' | 'target' | 'detail' | 'until'>) {
   if (w.kind === 'agent') { const t = w.target ? byId(w.target) : undefined; return w.detail ?? `${t?.name ?? w.target ?? 'an agent'}'s reply` }
   if (w.kind === 'timer' && w.until) return `timer ${clock(w.until)}`
   return w.detail ?? (w.kind === 'human' ? 'you' : w.target ? `${w.kind} ${w.target}` : w.kind)
 }
+
+// When a resting agent is expected to wake, in the viewer's local clock: `14:20` today, `Tue 14:20` another day.
+export function wakeAt(iso: string, now = Date.now()) {
+  const d = new Date(iso), n = new Date(now)
+  const sameDay = d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate()
+  return sameDay ? clock(iso) : `${d.toLocaleDateString([], { weekday: 'short' })} ${clock(iso)}`
+}
+
+// What a resting agent says of itself, in parts: `resting`, what it waits for (its top wait, and how many more), and
+// `wakes ~14:20`. With no known wake time the last part is left out; an agent resting idle, with no wait, says `idle`.
+export function restParts(r: Resting, now = Date.now()): { wait: string; wake: string | null } {
+  const ws = [...r.waits].sort((x, y) => rank(x) - rank(y))
+  const wait = ws.length ? `waits for ${waitLabel(ws[0])}${ws.length > 1 ? ` +${ws.length - 1}` : ''}` : 'idle'
+  return { wait, wake: r.expected_wake ? `wakes ~${wakeAt(r.expected_wake, now)}` : null }
+}
+export const restText = (r: Resting, now?: number) => { const p = restParts(r, now); return ['resting', p.wait, p.wake].filter(Boolean).join(' · ') }
+
+// The resting badge: the state's own mark, and what it waits for and when it wakes. `full` (the details page, the system
+// panel) wraps and says it all; `compact` (a tab, a tree row, a Work chip) shows the wake time alone and leaves the full
+// line to its title; `icon` (a tight tab) is the mark alone. The title and `aria-label` hold the full line in every mode.
+export type RestMode = 'full' | 'compact' | 'icon'
+export function RestBadge({ a, mode = 'full' }: { a: Agent; mode?: RestMode }) {
+  const r = a.resting
+  if (!r) return null
+  const text = restText(r)
+  const p = restParts(r)
+  return <span className={`badge rest-badge ${mode}`} data-rest={a.id} data-mode={mode} title={`${a.name}: ${text}; mail, a notice or a prompt wakes it`} aria-label={text} role="img">
+    <Icon name="moon" size="xs" />{mode === 'full' ? <span>{text.replace(/^resting · /, '')}</span> : mode === 'compact' && p.wake ? `~${wakeAt(r.expected_wake!)}` : null}</span>
+}
+// What a tab's fit measures for a resting agent: the badge's text changes its width.
+const restSig = (a: Agent) => 'rest:' + (a.resting?.expected_wake ? wakeAt(a.resting.expected_wake) : '')
 
 // Where a wait's link goes: the agent it waits for, or the permission request's thread.
 function go(w: Wait): (() => void) | null {
@@ -261,9 +292,11 @@ export function WaitBadges({ id, tabKey = id }: { id: string; tabKey?: string })
   const wrap = useRef<HTMLSpanElement>(null)
   // What the fit was measured against: the kinds and counts of the waits. A change in them starts
   // the fit again, so a shorter list is measured fresh (S-1659).
-  const fit = useTabFit(tabKey, ws.map((w) => w.kind).join(), wrap, '.itsa-chips')
+  const fit = useTabFit(tabKey, a?.resting ? restSig(a) : ws.map((w) => w.kind).join(), wrap, '.itsa-chips')
   // The popover lives only while the folded badge is on a desktop: any other fit closes it.
   const { pop, setPop, open, popRef, badgeRef, toggle } = useBadgePop(wrap, !phone && fit === 'folded' && ws.length > 0)
+  // A resting agent has one badge: the wake time, then the mark alone, then none (the thin bar holds it).
+  if (a?.resting) return <span ref={wrap} className="wait-badges">{fit === 'none' ? null : <RestBadge a={a} mode={fit === 'each' ? 'compact' : 'icon'} />}</span>
   if (!ws.length || fit === 'none') return <span ref={wrap} className="wait-badges" />
   if (fit === 'each') return <span ref={wrap} className="wait-badges"><KindBadges ws={ws} phone={phone} /></span>
   // Folded: the top wait's icon and the total, warning-coloured if any kind is a wait on the human.
@@ -331,7 +364,8 @@ export function WaitThinBar({ k }: { k?: string | null }) {
   const a = id ? byId(id) : undefined
   const ws = a && a.lifecycle === 'active' ? badgeWaits(a) : []
   const xs = id ? topOwned(getData().itsas, id) : []
+  const showRest = fit === 'none' && !!a?.resting
   const showWaits = fit === 'none' && ws.length > 0, showChips = chipFit === 'none' && xs.length > 0
-  if (!showWaits && !showChips) return null
-  return <div className={`wait-thin${showChips ? ' has-chips' : ''}`}>{showWaits ? <KindBadges ws={ws} phone={phone} /> : null}{showChips ? <Chips xs={xs} /> : null}</div>
+  if (!showWaits && !showChips && !showRest) return null
+  return <div className={`wait-thin${showChips ? ' has-chips' : ''}`}>{showRest && a ? <RestBadge a={a} mode="compact" /> : null}{showWaits ? <KindBadges ws={ws} phone={phone} /> : null}{showChips ? <Chips xs={xs} /> : null}</div>
 }

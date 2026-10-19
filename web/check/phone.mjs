@@ -13,6 +13,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { findPlaywright } from './find-playwright.mjs';
 import { PROCESSES } from './process-fixture.mjs';
 import { routeFiles } from './files-fixture.mjs';
+import { failureDetail } from './failure-detail.mjs';
 
 const [base, out, ...flags] = process.argv.slice(2);
 if (!base || !out) { console.error('usage: node phone.mjs BASE_URL OUT_DIR [--webkit] [--only=360-light]'); process.exit(2); }
@@ -85,9 +86,9 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
   const home = async () => { await p.goto('about:blank'); await p.goto(origin + '/#token=' + token); await p.waitForSelector('#tree .node', { timeout: 20000 }); };
   const step = async (name, fn) => {
     try { await fn(); } catch (e) {
-      check(tag, name, false, e.message.split('\n')[0]);
+      check(tag, name, false, failureDetail(e.message));
       await p.screenshot({ path: `${out}/failed-${name.replace(/\W+/g, '-')}-${tag}.png` }).catch(() => {});
-      await home().catch((e2) => check(tag, `${name}: reload after the failure`, false, e2.message.split('\n')[0]));
+      await home().catch((e2) => check(tag, `${name}: reload after the failure`, false, failureDetail(e2.message)));
     }
   };
 
@@ -252,7 +253,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     const pop = p.locator('.menu.popover[role=dialog]');
     await pop.waitFor();
     check(tag, 'legend: the ? opens a sheet within the screen', await inViewport(pop));
-    check(tag, 'legend: it lists every state', await pop.locator('[data-legend]').count() === 8);
+    check(tag, 'legend: it lists every state', await pop.locator('[data-legend]').count() === 9);
     await shot('legend');
     await layout('legend');
     await pop.evaluate((el) => { el.scrollTop = el.scrollHeight; });
@@ -703,7 +704,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await layout('add panel');
     await p.locator('.spawn-panel [data-pick="Permissions"]').tap();
     await p.waitForTimeout(200);
-    check(tag, 'a row opens its options as a sheet over the panel', await p.locator('.menu [role=menuitemradio]').count() === 2 && await inViewport(p.locator('.menu')));
+    check(tag, 'a row opens its options as a sheet over the panel', await p.locator('.menu [role=menuitemradio]').count() === 4 && await inViewport(p.locator('.menu')));
     await shot('add-option');
     await layout('add option');
     await p.locator('.menu [role=menuitemradio]:has-text("Bypass")').tap();
@@ -2010,7 +2011,8 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
   // count badge, its failed files, a picker between processes, and a node's ITSAs in a bottom
   // sheet that opens the ITSA as the Work page does. The route is stubbed (process-fixture.mjs).
   // The Files world and the file view (S-1526): the tree opens, rows are touch targets, a file opens at its
-  // line, a long line scrolls inside the code block and never the page, and Markdown renders with a Source toggle.
+  // line, a long line wraps on a phone by default (S-2103) and scrolls inside the code block with Wrap off, and
+  // Markdown renders with a Source toggle.
   await step('files view', async () => {
     await p.evaluate(() => { location.hash = 'view=files'; });
     await p.waitForSelector('.fl .fl-machine');
@@ -2024,8 +2026,17 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.locator('.fl-row', { hasText: 'long.ts' }).first().tap();
     await p.waitForSelector('.codeview .cm-line');
     check(tag, 'files: a file opens in the code viewer with line numbers', (await p.locator('.cm-lineNumbers .cm-gutterElement').allInnerTexts()).filter(Boolean).slice(0, 2).join() === '1,2');
-    const m = await p.locator('.cm-scroller').evaluate((e) => ({ sw: e.scrollWidth, cw: e.clientWidth, ox: getComputedStyle(e).overflowX }));
-    check(tag, 'files: a long line scrolls inside the editor', m.sw > m.cw && m.ox !== 'visible', m);
+    // Wrap starts on at a phone width (S-2103): the long line wraps, so the editor has no sideways overflow. The Wrap
+    // toggle still turns that off, and then the line scrolls inside the code block as it always did.
+    const scroller = () => p.locator('.cm-scroller').evaluate((e) => ({ sw: e.scrollWidth, cw: e.clientWidth, ox: getComputedStyle(e).overflowX }));
+    const m = await scroller();
+    check(tag, 'files: a long line wraps by default on a phone', m.sw <= m.cw, m);
+    await p.locator('.codeview-bar button', { hasText: 'Wrap' }).tap();
+    await p.waitForFunction(() => { const e = document.querySelector('.cm-scroller'); return !!e && e.scrollWidth > e.clientWidth }).catch(() => {});
+    const off = await scroller();
+    check(tag, 'files: with Wrap off a long line scrolls inside the editor', off.sw > off.cw && off.ox !== 'visible', off);
+    await p.locator('.codeview-bar button', { hasText: 'Wrap' }).tap();
+    await p.waitForFunction(() => { const e = document.querySelector('.cm-scroller'); return !!e && e.scrollWidth <= e.clientWidth }).catch(() => {});
     check(tag, 'files: the code toolbar buttons are touch targets', await p.locator('.codeview-bar button').evaluateAll((els) => els.length > 0 && els.every((e) => e.getBoundingClientRect().height >= 44)));
     await p.locator('.codeview-bar button', { hasText: 'Find' }).tap();
     await p.waitForSelector('.cm-search input');
@@ -2076,7 +2087,10 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.evaluate(() => { location.hash = 'diff=fixture:7'; });
     await p.waitForSelector('.dv .dv-count', { timeout: 30000 });
     check(tag, 'diff: the header names the PR', (await p.locator('.dv-title strong').innerText()) === 'PR #7');
-    check(tag, 'diff: the header shows the short head and base shas', /^head [0-9a-f]{7} · base [0-9a-f]{7}$/.test(await p.locator('.dv-shas').innerText()));
+    // S-1918: the narrow header shows the head sha only (both are in its title), and folds Wrap and the text size into one button.
+    check(tag, 'diff: the narrow header shows the short head sha only, both shas in its title', /^head [0-9a-f]{7}$/.test(await p.locator('.dv-shas').innerText()) && /^head [0-9a-f]{40} · base [0-9a-f]{40}$/.test((await p.locator('.dv-shas').getAttribute('title')) ?? ''));
+    const aa = await p.locator('.dv-text').boundingBox();
+    check(tag, 'diff: one "Aa · Wrap" button on screen replaces the Wrap and A−/A+ buttons', (await p.locator('.dv-text').innerText()).startsWith('Aa · Wrap') && !!aa && aa.x >= 0 && aa.x + aa.width <= 360 && await p.locator('.dv-controls .codeprefs').count() === 0, JSON.stringify(aa));
     check(tag, 'diff: Meat hides the test and the lockfile ("7 of 9 files")', (await p.locator('.dv-count').innerText()) === '7 of 9 files');
     // S-1917: the fixture PR isn't watched, so the chip says "no review"; it stays one line inside the viewport.
     const rv = await p.locator('.dv-review').boundingBox();
@@ -3028,6 +3042,27 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     const onReq = (r) => { if (new URL(r.url()).pathname.startsWith('/api') && fromStories(r)) apis.push(r.url()); };
     p.on('request', onReq);
     try {
+      // A resting agent's badge (S-2110): a 96 px tab gives the name its room (the badge folds to its mark), and a long wait wraps
+      // inside the full badge in the details page and the system view's sheet instead of painting outside it.
+      await p.goto(origin + '/stories?frame=wait-mark&state=10&theme=light');
+      await p.waitForSelector('.tab .rest-badge');
+      await p.waitForTimeout(400);
+      const tabFit = await p.evaluate(() => {
+        const tab = document.querySelector('.tab').getBoundingClientRect(), b = document.querySelector('.tab .rest-badge'), r = b.getBoundingClientRect();
+        const min = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--size-tab-name-min')) || 0;
+        return { mode: b.dataset.mode, inside: r.left >= tab.left - 0.5 && r.right <= tab.right + 0.5, label: document.querySelector('.tab .label').clientWidth, min };
+      });
+      check(tag, 'stories: a resting agent in a 96 px tab folds to its mark and keeps the name its room', tabFit.mode === 'icon' && tabFit.inside && tabFit.label >= tabFit.min - 0.5, JSON.stringify(tabFit));
+      const wrapped = () => document.querySelectorAll('.rest-badge.full').length > 0 && [...document.querySelectorAll('.rest-badge.full')].every((b) => {
+        const r = b.getBoundingClientRect(), t = b.querySelector('span').getBoundingClientRect();
+        return r.height > 20 && t.top >= r.top - 0.5 && t.bottom <= r.bottom + 0.5 && t.right <= r.right + 0.5 && r.right <= innerWidth && b.scrollWidth <= b.clientWidth + 1;
+      });
+      await p.goto(origin + '/stories?frame=agent-details&state=10&theme=light');
+      await p.waitForSelector('.rest-badge.full');
+      check(tag, 'stories: a long wait wraps inside the resting badge in the details page', await p.evaluate(wrapped));
+      await p.goto(origin + '/stories?frame=system-view&state=14&theme=light');
+      await p.waitForSelector('.sv-state ~ .rest-badge.full, .sv-facts .rest-badge.full', { state: 'attached', timeout: 15000 });
+      check(tag, 'stories: a long wait wraps inside the resting badge in the system view\'s sheet', await p.evaluate(wrapped));
       await p.goto(origin + '/stories');
       await p.waitForSelector('.sb-doc h1');
       await p.waitForSelector('.sb-frame iframe');
@@ -3048,6 +3083,51 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
         const t = document.querySelector('.mc-struct'), li = t.querySelector('.mc-opts li');
         return t.scrollWidth <= t.clientWidth && li.scrollWidth <= li.clientWidth;
       }));
+      // The inline diff's rows wrap (S-2099): a long line takes several visual lines, nothing scrolls sideways, and a selection copies back the patch lines.
+      // The same rows at a desktop width too, where a long line wraps once it passes the column.
+      const phoneSize = p.viewportSize();
+      for (const [width, state, name, long] of [[null, 1, 'deep indent', 'node.children.length'], [null, 2, 'long identifier', 'aVeryLongGeneratedIdentifier'], [1280, 2, 'long identifier at 1280 px', 'aVeryLongGeneratedIdentifier']]) {
+        await p.setViewportSize(width ? { width, height: 900 } : phoneSize);
+        await p.goto(origin + `/stories?frame=diff&state=${state}&theme=light`);
+        await p.waitForSelector('.mb-diff .l.add');
+        const r = await p.evaluate((needle) => {
+          const d = document.querySelector('.mb-diff');
+          const row = [...d.querySelectorAll('.l.add')].find((l) => l.textContent.includes(needle));
+          const lh = parseFloat(getComputedStyle(row).lineHeight);
+          const sel = getSelection(), range = document.createRange();
+          range.selectNodeContents(d.querySelector('pre code'));
+          sel.removeAllRanges(); sel.addRange(range);
+          const copied = sel.toString().replace(/\n$/, '');
+          const patch = [...d.querySelectorAll('pre code .l')].map((l) => l.textContent).join('\n');
+          return { lines: row.getBoundingClientRect().height / lh, over: [d, ...d.querySelectorAll('pre')].some((e) => e.scrollWidth > e.clientWidth), copied, patch };
+        }, long);
+        check(tag, `stories: a ${name} diff row wraps onto several lines`, r.lines > 1.5, String(r.lines));
+        check(tag, `stories: a ${name} diff block has no sideways overflow`, !r.over);
+        check(tag, `stories: a selection of the ${name} diff copies back the patch lines`, r.copied === r.patch, JSON.stringify(r.copied).slice(0, 200));
+      }
+      // The bounded block (S-2100): one scroller capped at the phone's 18 lines and half the screen, the first file open, a summary that sticks.
+      await p.goto(origin + '/stories?frame=diff&state=7&theme=light');
+      await p.waitForSelector('.mb-dscroll');
+      const huge = await p.evaluate(() => {
+        const s = document.querySelector('.mb-dscroll'), f = s.querySelector('details.mb-file'), sum = f.querySelector('summary');
+        s.scrollTop = 200;
+        const top = sum.getBoundingClientRect().top - s.getBoundingClientRect().top;
+        return { cap: s.clientHeight <= innerHeight / 2 + 1, scrolls: s.scrollHeight > s.clientHeight, pos: getComputedStyle(sum).position, top, scrollers: document.querySelectorAll('.mb-dscroll').length, label: s.getAttribute('aria-label') };
+      });
+      check(tag, 'stories: a huge diff is one scroller within half the screen', huge.cap && huge.scrolls && huge.scrollers === 1, JSON.stringify(huge));
+      check(tag, 'stories: a file summary sticks at the top of the diff scroller', huge.pos === 'sticky' && Math.abs(huge.top) <= 1, JSON.stringify(huge));
+      // A file summary paints the surface its block sits on: the ITSA comment story's pane, not the page.
+      for (const theme of ['light', 'dark']) {
+        await p.goto(origin + `/stories?frame=diff&state=9&theme=${theme}`);
+        await p.waitForSelector('.mb-dscroll summary');
+        const bg = await p.evaluate(() => ({ sum: getComputedStyle(document.querySelector('.mb-dscroll summary')).backgroundColor, pane: getComputedStyle(document.querySelector('.comment-fixture')).backgroundColor }));
+        check(tag, `stories: a diff file summary in an ITSA comment matches its surface (${theme})`, bg.sum === bg.pane, JSON.stringify(bg));
+      }
+      await p.goto(origin + '/stories?frame=diff&state=6&theme=light');
+      await p.waitForSelector('.mb-dscroll');
+      const many = await p.evaluate(() => ({ open: [...document.querySelectorAll('.mb-dscroll details.mb-file')].map((d) => d.open), head: document.querySelector('.mb-dsum').textContent }));
+      check(tag, 'stories: a long many-file diff opens only its first file', many.open[0] && many.open.slice(1).every((o) => !o) && /^9 files/.test(many.head), JSON.stringify(many));
+      await p.setViewportSize(phoneSize);
       await p.goto(origin + '/stories');
       await p.waitForSelector('.sb-doc h1');
       await p.waitForSelector('.sb-frame iframe');

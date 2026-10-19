@@ -78,7 +78,7 @@ function routes(w: World): Record<string, unknown> {
     ...(w.thread ? { [`GET /api/itsas/${w.id}/thread`]: { items: w.thread } } : {}),
     [`GET /api/itsas/${w.id}/threads`]: w.about ?? [],
     ...(w.cost ? { [`GET /api/itsas/${w.id}/cost`]: w.cost } : {}),
-    ...(w.activity ? { 'GET /api/activity?by=itsa': ACTIVITY(x.key) } : {}),
+    ...(w.activity ? { [`GET /api/activity?by=itsa&itsa=${x.key}`]: ACTIVITY(x.key) } : {}),
   }
 }
 const FULL: World = { all: TREE, id: 'fx-i-911', view: { body: BODY, summary: 'Replace the three index files with one segment store.' }, thread: THREAD, about: ABOUT, cost: COST, activity: true }

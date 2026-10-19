@@ -2,15 +2,15 @@
 // one on storage. It runs on the ITSA home, where gh is: it fetches the branch from storage into a
 // scratch ref (or, with no storage remote, takes the checkout's local branch), pushes it to origin, and opens the PR, or replaces the body of the open PR for that
 // head. With an ITSA it links the PR and the branch to it. The body is the one docs/pull-requests.md
-// describes. Names come from settings.itsa.prOpen, so a test can point them at throwaway repos.
+// describes. Before any push it runs the merge gate's stories and export-overrides checks (S-1942).
+// Names come from settings.itsa.prOpen, so a test can point them at throwaway repos.
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 import { MACHINE } from './config.ts';
-import { parseGates, runTestName } from '../scripts/gate.mjs';
-import { STORIES_FORM, storiesUnchanged, storiesUnchangedLine } from '../scripts/story-check.mjs';
+import { checkRangeAsync } from '../scripts/story-check.mjs';
 import * as itsa from './itsa.ts';
 import { HUMAN } from './mail.ts';
 import { processProposalOf } from './retro-loop.ts';
@@ -18,7 +18,7 @@ import { itsaRefusal, mayEditItsa } from './mail-visibility.ts';
 import * as db from './db.ts';
 import { branchScope, foreignRefusal, localScope } from './branch-scope.ts';
 import { peerByName, peerCall, type Via } from './peers.ts';
-import { settings } from './settings.ts';
+import { primaryRepoName, settings } from './settings.ts';
 import { defaultGithubRepo, originRepo } from './github-repo.ts';
 import { isAncestor, noteSynced, readSyncState } from './pr-sync.ts';
 import { mirrorPrHead, storageRemote } from './pr-mirror.ts';
@@ -48,6 +48,8 @@ export interface PrOpenConfig {
   github: string;
   // The branch a PR merges into; never pushed from.
   base: string;
+  // The timeout of each git and tar call of the stories and overrides checks (default CHECK_GIT_MS); a test sets it small.
+  checkTimeoutMs?: number;
 }
 
 export interface PrOpened {
@@ -68,13 +70,18 @@ export const PR_OPEN_PEER_MS = 240_000;
 
 export function prOpenConfig(): PrOpenConfig {
   const s = settings();
-  const { repo: repoName, storage, origin, gh, github } = s.itsa.prOpen;
+  const { storage, origin, gh, github } = s.itsa.prOpen;
+  const repoName = primaryRepoName(s.itsa);
   const repo = s.itsa.repos[repoName];
   if (!repo) throw new Error(`pr_open: no repo ${repoName} in settings.itsa.repos`);
   return { repoName, repo, storage, origin, gh, github: github || originRepo(repo, origin) || '', base: s.itsa.mainBranch };
 }
 
-function checkInput(cfg: PrOpenConfig, input: PrOpenInput): void {
+// The merge gate's parser, loaded on first use: the public export drops scripts/gate.mjs (export/exclude.txt), and a
+// static import would stop its daemon at start (S-2140).
+const gate = () => import('../scripts/gate.mjs');
+
+async function checkInput(cfg: PrOpenConfig, input: PrOpenInput): Promise<void> {
   const branch = String(input.branch ?? '');
   if (!BRANCH.test(branch) || branch.startsWith('-') || branch.includes('..') || branch.endsWith('/') || branch.endsWith('.lock')) {
     throw new Error(`a branch name is letters, digits, . _ / and -, not starting with -: ${branch}`);
@@ -87,19 +94,19 @@ function checkInput(cfg: PrOpenConfig, input: PrOpenInput): void {
     if (!lines[i]?.startsWith(label)) throw new Error(`the PR body starts with the lines ITSA:, Gates:, Deploy: (docs/pull-requests.md); line ${i + 1} must start with ${label}`);
   });
   // The Gates line parses as merge-pr.mjs parses it, so an unknown token is refused here, not after review (S-1292).
-  parseGates(input.body);
-  // A Stories: unchanged line the stories gate would reject fails here, not after a review round-trip (S-914).
-  const stories = storiesUnchangedLine(input.body);
-  if (stories !== undefined && !storiesUnchanged(input.body)) {
-    throw new Error(`the PR body's Stories line "${stories}" needs a reason: write it as ${STORIES_FORM} (docs/pull-requests.md)`);
-  }
+  (await gate()).parseGates(input.body);
 }
 
-// Runs git in the repo. A failure carries git's own message.
-async function git(cfg: PrOpenConfig, args: string[]): Promise<string> {
+// A call that ran past its timeout (S-1942): pr_open refuses it, rather than passing or hanging.
+const timedOut = (what: string, ms: number): Error => Object.assign(new Error(`${what} timed out after ${ms / 1000} s`), { timedOut: true });
+
+// Runs git in the repo. A failure carries git's own message; with `timeout`, a call that runs past it is killed and
+// rejects with timedOut set.
+async function git(cfg: PrOpenConfig, args: string[], timeout?: number): Promise<string> {
   try {
-    return (await run('git', args, { cwd: cfg.repo, maxBuffer: 16 << 20 })).stdout.trim();
+    return (await run('git', args, { cwd: cfg.repo, maxBuffer: 16 << 20, timeout })).stdout.trim();
   } catch (e: any) {
+    if (e.killed && timeout) throw timedOut(`git ${args[0]}`, timeout);
     throw new Error(`git ${args[0]} failed: ${String(e.stderr ?? e.message).trim()}`);
   }
 }
@@ -153,6 +160,7 @@ export function runTestNames(runSh: string): Set<string> {
 // gate only after review, so it is refused here. The names are read from the head's run.sh (the tree the gate tests,
 // so a PR that adds a test and its name passes), fetched into this checkout by openPr.
 async function checkRunNames(cfg: PrOpenConfig, body: string, head: string): Promise<void> {
+  const { parseGates, runTestName } = await gate();
   const names = parseGates(body).flatMap((g) => (g.argv[1] === 'test/run.sh' ? g.argv.slice(2) : []));
   if (names.length === 0) return;
   let runSh: string;
@@ -171,6 +179,81 @@ async function checkRunNames(cfg: PrOpenConfig, body: string, head: string): Pro
   }
 }
 
+// The merge gate's stories step and export-overrides step, run here before any push (S-1942), so a PR the gate would
+// refuse is refused now. Stories: story-check.mjs over the PR's own changes, the diff from the merge base of origin's base
+// branch (fetched into a scratch ref) and the head (S-1818, S-1964). Overrides (S-858): a shipped doc or template the branch
+// changes needs its export/overrides port in the same branch, and the branch's own export/apply-overrides.mjs --check passes
+// on its tree, archived out of git into the scratch dir. Both name what to fix; the overrides check runs only when the
+// branch touches a tree the export ships, so the usual PR pays for the stories check alone.
+// The time each git and tar call of the stories and overrides checks may take, and the overrides' --check (S-1942).
+const CHECK_GIT_MS = 30_000;
+const CHECK_CHECK_MS = 60_000;
+// The shipped trees: a branch that changes one of them runs the overrides check.
+const SHIPPED_DIRS = ['docs', 'export', 'templates', 'blocks', 'registry'];
+const SHIPPED_TREE = new RegExp(`^(${SHIPPED_DIRS.join('|')})/`);
+type Manifest = { docs?: Record<string, string>; templates?: Record<string, string> };
+async function checkTree(cfg: PrOpenConfig, body: string, head: string, dir: string): Promise<void> {
+  const baseRef = `refs/stam/pr-open-base/${basename(dir)}`;
+  const problems: string[] = [];
+  try {
+    const ms = cfg.checkTimeoutMs ?? CHECK_GIT_MS;
+    await git(cfg, ['fetch', '--no-tags', cfg.origin, `+refs/heads/${cfg.base}:${baseRef}`], ms);
+    // The gate's per-PR rules (S-830), and the tip's missing-story rule for the components this PR adds or changes:
+    // the PR's own changes, not the structure of a base it is behind on (S-1942).
+    for (const e of await checkRangeAsync(baseRef, head, { cwd: cfg.repo, body, mode: 'branch', timeoutMs: ms })) problems.push(`stories: ${e}`);
+    const changed = (await git(cfg, ['diff', '--name-only', '--no-renames', `${baseRef}...${head}`], ms)).split('\n').filter(Boolean);
+    if (changed.some((p) => SHIPPED_TREE.test(p))) problems.push(...(await overridesProblems(cfg, head, changed, dir)));
+  } catch (e: any) {
+    // A check that ran out of time is refused, never passed (S-1942): the caller runs pr_open again.
+    if (e?.timedOut) throw new Error(`pr_open refuses: the stories and overrides check timed out (${e.message}); run pr_open again`);
+    throw e;
+  } finally {
+    await git(cfg, ['update-ref', '-d', baseRef]).catch(() => {});
+  }
+  if (problems.length) throw new Error(`pr_open refuses: ${problems.join('; ')}`);
+}
+
+// The export overrides problems of a branch (S-858): the ports its shipped edits lack, and the branch's own --check.
+async function overridesProblems(cfg: PrOpenConfig, head: string, changed: string[], dir: string): Promise<string[]> {
+  const tar = join(dir, 'tree.tar');
+  const tree = join(dir, 'tree');
+  const ms = cfg.checkTimeoutMs ?? CHECK_GIT_MS;
+  // What --check reads, named by the head's own manifest and doc-patches.json, so a new patch target is archived with the
+  // rest (S-1942): the export tree, the registry, each patched file, each shipped doc, and each template's text.
+  const listed = JSON.parse(await git(cfg, ['show', `${head}:export/overrides/manifest.json`], ms)) as Manifest;
+  const patched = Object.keys(JSON.parse(await git(cfg, ['show', `${head}:export/overrides/doc-patches.json`], ms)));
+  const shipped = [...Object.keys(listed.docs ?? {}).map((n) => `docs/${n}`), ...Object.keys(listed.templates ?? {}).flatMap((n) => [`templates/${n}.md`, `blocks/${n}/`])];
+  const needed = (await git(cfg, ['ls-tree', '-r', '--name-only', head], ms)).split('\n').filter((p) => p.startsWith('export/') || p === 'registry/defaults.json' || patched.includes(p) || shipped.some((s) => p.startsWith(s)));
+  await git(cfg, ['archive', '--format=tar', '-o', tar, head, ...needed], ms);
+  mkdirSync(tree);
+  await run('tar', ['-x', '-f', tar, '-C', tree], { timeout: ms }).catch((e: any) => {
+    throw e.killed ? timedOut('tar', ms) : e;
+  });
+  const manifest = JSON.parse(readFileSync(join(tree, 'export/overrides/manifest.json'), 'utf8')) as Manifest;
+  const problems: string[] = [];
+  for (const name of Object.keys(manifest.docs ?? {})) {
+    const doc = `docs/${name}`;
+    const port = `export/overrides/docs/${name}`;
+    if (changed.includes(doc) && !changed.includes(port)) {
+      problems.push(`${doc} is shipped and this branch edits it, but not its public version ${port}: port the edit there and set the sha256 of the new ${doc} under "docs" in export/overrides/manifest.json (sha256sum ${doc})`);
+    }
+  }
+  for (const name of Object.keys(manifest.templates ?? {})) {
+    const port = `export/overrides/templates/${name}.md`;
+    const edited = changed.find((p) => p === `templates/${name}.md` || p.startsWith(`blocks/${name}/`));
+    if (edited && !changed.includes(port)) {
+      problems.push(`${edited} is shipped and this branch edits it, but not its generic override ${port}: port the edit there and refresh export/overrides/manifest.json (node scripts/refresh-derived.mjs prints the block diff to port)`);
+    }
+  }
+  try {
+    await run(process.execPath, [join(tree, 'export/apply-overrides.mjs'), '--check', tree], { cwd: tree, timeout: CHECK_CHECK_MS });
+  } catch (e: any) {
+    if (e.killed) throw timedOut('export/apply-overrides.mjs --check', CHECK_CHECK_MS);
+    problems.push(`export/apply-overrides.mjs --check fails on the branch: ${String(e.stderr ?? e.message).trim()}`);
+  }
+  return problems;
+}
+
 // Fetches the branch from storage (or, with `local`, takes the checkout's own branch), pushes it to origin, and opens or updates the PR, then mirrors its head to
 // storage as refs/pull/N/head (S-1347; a failed mirror never fails the open). The mirror is for a branch that came from
 // storage: a `local` open (a developer on the home) skips it unless the storage setting names a remote, so a stopped
@@ -183,7 +266,7 @@ export async function openPr(cfg: PrOpenConfig, input: PrOpenInput, local = fals
 }
 
 async function openOrUpdate(cfg: PrOpenConfig, input: PrOpenInput, local: boolean): Promise<PrOpened> {
-  checkInput(cfg, input);
+  await checkInput(cfg, input);
   const branch = input.branch;
   const title = input.title.trim();
   const dir = mkdtempSync(join(tmpdir(), 'stam-pr-open-'));
@@ -204,6 +287,7 @@ async function openOrUpdate(cfg: PrOpenConfig, input: PrOpenInput, local: boolea
     else source = `refs/heads/${branch}`;
     const head = await git(cfg, ['rev-parse', '--verify', source]);
     await checkRunNames(cfg, input.body, head);
+    await checkTree(cfg, input.body, head, dir);
     // The lease expects origin's current sha (empty when the branch is new), so a push can't clobber
     // a commit that landed on origin since the check, nor one that landed since the fetch.
     const current = (await git(cfg, ['ls-remote', '--heads', cfg.origin, `refs/heads/${branch}`])).split('\t')[0] ?? '';

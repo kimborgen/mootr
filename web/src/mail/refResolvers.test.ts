@@ -22,8 +22,12 @@ describe('the app resolvers', () => {
   })
   it('offers the repos the matching links name and each ITSA, so several make a picker', () => {
     const t = numberTargets('494')
-    expect(t.map((x) => x.label)).toEqual(['example/repo#494', 'S-1 Title S-1'])
+    expect(t.map((x) => x.label)).toEqual(['example/repo#494', 'View diff example/repo#494', 'S-1 Title S-1'])
     expect(t.at(-1)?.action).toBe('itsa:i1')
+  })
+  it('adds View diff for a pull request of a served repo, never for another repo (S-1918)', () => {
+    expect(numberTargets('494')[1]).toMatchObject({ label: 'View diff example/repo#494', action: 'diff:stam2#494' })
+    expect(numberTargets('12').map((x) => x.label)).toEqual(['other/repo#12', 'S-2 Title S-2'])
   })
   it('leaves a number no ITSA carries alone', () => {
     expect(numberTargets('999999')).toEqual([])

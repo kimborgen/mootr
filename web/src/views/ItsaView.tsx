@@ -252,7 +252,7 @@ function ActivityBlock({ k, tick }: { k: string; tick: unknown }) {
   const [row, setRow] = useState<ItsaActivity | null>(null)
   useEffect(() => {
     let live = true
-    api<ItsaActivityReport>('GET', '/api/activity?by=itsa').then((r) => { if (live) setRow(activityOf(r, k)) }, () => {})
+    api<ItsaActivityReport>('GET', `/api/activity?by=itsa&itsa=${encodeURIComponent(k)}`).then((r) => { if (live) setRow(activityOf(r, k)) }, () => {})
     return () => { live = false }
   }, [k, tick])
   if (!row) return null

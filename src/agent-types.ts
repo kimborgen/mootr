@@ -38,6 +38,8 @@ export interface AgentType {
   // unless the spawner passes `worktree` itself. The developer type ships with it, so a manager
   // that forgets the flag can't leave a developer committing in the live deploy checkout.
   worktree?: boolean | null;
+  // Agents of the type are standing agents unless the spawner says otherwise (the cos type ships with it).
+  standing?: boolean | null;
   // The first prompt, with {{task}} (the spawner's prompt), {{name}}, {{type}}, {{parent}},
   // {{cwd}}, {{branch}}, {{next_steps}} (the type's lane steps from processes/, S-925), and any
   // variables the spawner passes.

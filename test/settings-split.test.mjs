@@ -4,7 +4,7 @@
 // Throwaway STAM_HOMEs, no daemon: `node --test test/settings-split.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, utimesSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, utimesSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tempHome } from './tmphome.mjs';
@@ -149,6 +149,43 @@ test('ensureSettings on the home still adds every default', () => {
   s.ensureSettings();
   const disk = JSON.parse(readFileSync(file, 'utf8'));
   assert.ok(disk.context && disk.itsa);
+});
+
+// S-2121: local login is on for a fresh install; a file from before, with no auth.localHuman, is pinned off.
+test('ensureSettings: a fresh install has local login on, an existing one is pinned off', () => {
+  rmSync(file, { force: true });
+  s.settingsChanged();
+  s.ensureSettings();
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).auth.localHuman, true);
+  assert.equal(s.settings().auth.localHuman, true);
+  // Before the pin, or with it lost (a corrupt file at start, a patch that replaces auth), a missing value reads as off.
+  save({ auth: { humanStrict: true } });
+  assert.equal(s.settings().auth.localHuman, false);
+  save({});
+  assert.equal(s.settings().auth.localHuman, false);
+  save({ auth: { humanStrict: true } });
+  s.ensureSettings();
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).auth, { humanStrict: true, localHuman: false });
+  s.settingsChanged();
+  assert.equal(s.settings().auth.localHuman, false);
+  save({ peers: [] });
+  s.ensureSettings();
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).auth.localHuman, false);
+  // auth.localHuman is a local key: a non-home peer is pinned in its own file, and the home's cache can't undo it.
+  save({ home: 'other', auth: { humanStrict: true } });
+  cache({ auth: { localHuman: true, sharedTokenClaims: false } });
+  s.ensureSettings();
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).auth.localHuman, false);
+  s.settingsChanged();
+  assert.equal(s.settings().auth.localHuman, false);
+  assert.equal(s.settings().auth.sharedTokenClaims, false);
+  rmSync(cacheFile, { force: true });
+  // A value already set is kept, either way.
+  for (const v of [true, false]) {
+    save({ auth: { localHuman: v } });
+    s.ensureSettings();
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).auth.localHuman, v);
+  }
 });
 
 test('a patch of retro or resourceWarn keeps the file\'s lastDigest and lastWarned', () => {

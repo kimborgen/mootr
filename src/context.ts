@@ -7,6 +7,7 @@ import { settings } from './settings.ts';
 import { render, renderWithRetro, withRetroReminder } from './templates.ts';
 import { queueNotice } from './mail.ts';
 import { requestCompaction } from './lifecycle.ts';
+import { markCold } from './cache-cold.ts';
 
 const measureNext = new Set<string>();
 const idleCompacted = new Map<string, string>();
@@ -20,6 +21,8 @@ export function historyOf(a: db.Agent): string {
 
 // Called after a compaction, so the next size report becomes the post-compaction size.
 export function markCompacted(agentId: string): void {
+  const a = db.getAgent(agentId);
+  if (a) markCold(a, 'compaction');
   measureNext.add(agentId);
 }
 

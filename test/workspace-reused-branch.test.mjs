@@ -25,6 +25,7 @@ before(async () => {
   git(repo, ['add', '.']);
   git(repo, ['commit', '-qm', 'base']);
   git(repo, ['push', '-q', 'origin', 'HEAD:main']);
+  (await import('../src/settings.ts')).setSetting('peers', [{ name: 'storage', url: 'http://storage:7878', token: 't' }]);
   ({ createWorkspace } = await import('../src/workspace.ts'));
 });
 after(() => rmSync(base, { recursive: true, force: true }));

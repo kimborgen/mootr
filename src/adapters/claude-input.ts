@@ -3,6 +3,30 @@
 
 const RULE = /^\s*[─━]{3,}/;
 
+// What a multi-row match may involve: printable ASCII, the no-break space and the ❯ mark of the box,
+// and characters whose width is certain (kana, without the combining marks U+3099 and U+309A, CJK ideographs, Hangul syllables and fullwidth forms,
+// 2 columns each). Emoji and their joiners, variation selectors, combining marks and other scripts
+// have a width the terminals and Claude Code may disagree on, so a wrap that involves one can't be
+// told from literal spaces: it never matches, and `inputBox` gives no text.
+const UNSURE = /[^\u0020-\u007e\u00a0\u276f\u3041-\u3096\u309b-\u30ff\u4e00-\u9fff\uac00-\ud7a3\uff01-\uff60]/u;
+
+// Terminal columns a string fills: combining marks, zero-width characters and variation selectors
+// take none, East Asian wide and fullwidth characters and emoji take two, everything else one.
+export function displayWidth(s: string): number {
+  let n = 0;
+  for (const ch of s) {
+    const c = ch.codePointAt(0)!;
+    if (/^[\p{M}\p{Cf}]$/u.test(ch) || (c >= 0xfe00 && c <= 0xfe0f)) continue;
+    const wide =
+      (c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0x303e) || (c >= 0x3041 && c <= 0x33ff) || (c >= 0x3400 && c <= 0x4dbf) ||
+      (c >= 0x4e00 && c <= 0xa4cf) || (c >= 0xa960 && c <= 0xa97f) || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) ||
+      (c >= 0xfe30 && c <= 0xfe6f) || (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x1f300 && c <= 0x1faff) ||
+      (c >= 0x20000 && c <= 0x3fffd);
+    n += wide ? 2 : 1;
+  }
+  return n;
+}
+
 // Where the box is: the last line starting with its prompt mark (❯, or ! in bash mode), and the
 // lines it wrapped onto, up to the rule under it or a blank line. Claude Code draws the box
 // between two rules; a completion menu's highlighted row also starts with ❯ and may draw under
@@ -46,8 +70,9 @@ export function inputBox(lines: string[], width?: number): { mark: string; text:
   const pad = ' '.repeat([...lead].length + 2);
   let text: string | undefined = /^[ \u00a0]/.test(first) ? first.slice(1) : first;
   let prev = lines[box.at];
+  if (box.end > box.at + 1 && UNSURE.test(lines.slice(box.at, box.end).join(''))) return { mark, text: undefined };
   for (const l of lines.slice(box.at + 1, box.end)) {
-    if (width && [...prev].length === width) text += l;
+    if (width && displayWidth(prev) === width) text += l;
     else if (l.startsWith(pad) && l[pad.length] !== ' ') text += l.slice(pad.length);
     else text = undefined;
     if (text === undefined) break;
@@ -103,23 +128,35 @@ export function inputShows(lines: string[], text: string, width?: number): boole
   const [, lead, mark, first] = /^(\s*)([❯!])(.*)$/.exec(lines[box.at])!;
   if (mark !== (bash ? '!' : '❯')) return false;
   const pad = ' '.repeat([...lead].length + 2);
-  const cols = (s: string) => [...s].length;
+  const cols = displayWidth;
   const seg0 = /^[ \u00a0]/.test(first) ? first.slice(1) : first;
   if (!want.startsWith(seg0)) return false;
   let pos = seg0.length;
   let prev = lines[box.at];
   for (const l of lines.slice(box.at + 1, box.end)) {
-    if (!width) return false;
-    let seg: string;
-    if (cols(prev) === width) seg = l;
-    else {
-      if (!l.startsWith(pad) || /^[ \u00a0]/.test(l.slice(pad.length))) return false;
-      seg = l.slice(pad.length);
+    if (!width || UNSURE.test(text + lines.slice(box.at, box.end).join(''))) return false;
+    // The row after a full one is either the terminal's autowrap, as is, or Claude Code's own break
+    // inside a word too long for a row (a long path), which starts with the padding: both are read,
+    // and the one that spells the text wins.
+    const padded = () => {
+      if (!l.startsWith(pad) || /^[ \u00a0]/.test(l.slice(pad.length))) return undefined;
+      const rest = l.slice(pad.length);
+      // A word too long for a row breaks inside it once the row is full (width - 2 columns, as the
+      // box pads both sides), with nothing dropped.
+      if (cols(prev) >= width - 2 && want.startsWith(rest, pos)) return rest;
       const run = /^ */.exec(want.slice(pos))![0].length;
       const word = /^[^ ]*/.exec(want.slice(pos + run))![0];
-      if (run ? cols(prev) + run + cols(word) <= width - 1 : cols(prev) < width - 1) return false;
+      if (run ? cols(prev) + run + cols(word) <= width - 1 : cols(prev) < width - 1) return undefined;
       pos += run;
+      return rest;
+    };
+    const start = pos;
+    let seg = cols(prev) === width && l && want.startsWith(l, pos) ? l : undefined;
+    if (seg === undefined) {
+      pos = start;
+      seg = padded();
     }
+    if (seg === undefined) return false;
     if (!seg || !want.startsWith(seg, pos)) return false;
     pos += seg.length;
     prev = l;

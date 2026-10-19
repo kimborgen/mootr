@@ -185,6 +185,8 @@ export function createRing(input: {
 }
 
 export function submit(ringRef: string, agentId: string, text: string, agree: boolean, verdict?: string): string {
+  // The daemon's guard as well as the MCP tool's: an older MCP process sends no text when it passes `body` (S-1919).
+  if (!text.trim()) throw new Error('text is required: your findings for the ring, as a non-empty string');
   let r = get(ringRef);
   if (!r) throw new Error(`no ring ${ringRef}`);
   if (r.status !== 'running') throw new Error(`ring ${r.name} is ${r.status}`);

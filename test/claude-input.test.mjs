@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { inputBox, inputShows, inputProblem, aroundBox, sameAround, bashInputRecorded, menuUnderBox } from '../src/adapters/claude-input.ts';
+import { displayWidth, inputBox, inputShows, inputProblem, aroundBox, sameAround, bashInputRecorded, menuUnderBox } from '../src/adapters/claude-input.ts';
 
 const pane = (...box) => ['  fake-claude · claude-haiku-5-5 · auto mode', '> earlier prompt', ...box];
 
@@ -52,7 +52,9 @@ test('word wrap: spaces may go missing only at a break where the next word would
   assert.equal(inputShows(pane('❯ echo aaaa', '  bbbb'), 'echo aaaa bbbb', 40), false);
   // No space at a break that isn't a full row: a character went missing.
   assert.equal(inputShows(pane('❯ echo aaa', '  bbbb'), 'echo aaaxbbbb', 12), false);
-  assert.equal(inputShows(pane('❯ echo aaa', '  bbbb'), 'echo aaabbbb', 12), false);
+  assert.equal(inputShows(pane('❯ echo aa', '  bbbb'), 'echo aabbbb', 12), false);
+  // A word wider than a row breaks inside it at 2 columns under the width, with nothing dropped.
+  assert.equal(inputShows(pane('❯ echo aaa', '  bbbb'), 'echo aaabbbb', 12), true);
 });
 
 test('the box is the last prompt line; around it is the rest of the screen, footer aside', () => {
@@ -150,3 +152,63 @@ test('a bash-mode command is found in the transcript rows appended after Enter, 
   assert.equal(bashInputRecorded('not json\n', '! ls'), 'none');
 });
 
+
+// S-1984: in a 40-column pane the 116-character `! node …/export.mjs --push --commit SHA` line
+// breaks inside its long words (Claude Code 2.1.303 breaks a word wider than a row once the row is
+// full, which is 2 columns under the pane width), and the continuation rows start with the padding.
+test('real Claude Code: a bash line with words wider than the pane', () => {
+  const t = '! node /home/dev/projects/stam2/export/export.mjs --push --commit ccd4a114d2723395b45b9fed4ad5f1b2ca2e26aa';
+  const narrow = real('12-bash-long-token-narrow');
+  assert.equal(inputShows(narrow, t, 40), true);
+  // A changed character, a dropped one, a missing mode mark, or no width never matches.
+  assert.equal(inputShows(narrow, t.replace('ccd4a114', 'ccd4a115'), 40), false);
+  assert.equal(inputShows(narrow, t.replace('--push ', '--push  '), 40), false);
+  assert.equal(inputShows(narrow, t.slice(1).trimStart(), 40), false);
+  assert.equal(inputShows(narrow, t, undefined), false);
+  assert.equal(inputShows(narrow, t + 'x', 40), false);
+});
+
+// Wide characters fill two columns, so rows break by display width. A multi-row match is allowed only
+// for printable ASCII and characters of certain width (kana, CJK, Hangul, fullwidth): anything else
+// (emoji and their joiners, variation selectors, combining marks, other scripts) is refused.
+test('word wrap: only characters of certain width may wrap', () => {
+  assert.equal(displayWidth('界a'), 3);
+  // Plain ASCII and CJK wraps are accepted. Width 12: "❯ 界界界界" fills 2 + 8 = 10 columns.
+  assert.equal(inputShows(pane('❯ echo aaa', '  bbbb'), 'echo aaabbbb', 12), true);
+  assert.equal(inputShows(pane('❯ 界界界界', '  界界'), '界界界界界界', 12), true);
+  assert.equal(inputShows(pane('❯ 界界界界', '  界界'), '界界界界界x', 12), false);
+  assert.equal(inputShows(pane('❯ 界界', '  界界'), '界界界界', 12), false);
+  assert.deepEqual(inputBox(pane('❯ 界界界界', '  界界'), 12), { mark: '❯', text: '界界界界界界' });
+  assert.deepEqual(inputBox(pane('❯ echo aaa', '  bbbb'), 12), { mark: '❯', text: 'echo aaabbbb' });
+  // Refused in a wrap, in the box rows or in the suggestion: emoji, ZWJ, variation selectors (FE0F and
+  // FE0E), skin tones, flags, keycaps, combining marks, other scripts. inputBox gives no text.
+  const refused = ['😀', '👩‍💻', '❤️', '🖥︎', '👍\u{1f3fd}', '🇳🇴', '1️⃣', 'é', 'é́', 'ж', 'か\u3099', '\u309a'];
+  for (const c of refused) {
+    const text = c + 'abcdefghi';
+    const rows = pane('❯ ' + c + 'abcdefg', '  hi');
+    assert.equal(inputShows(rows, text, 12), false, c);
+    assert.deepEqual(inputBox(rows, 12), { mark: '❯', text: undefined }, c);
+    // A cluster split across the row boundary.
+    const split = pane('❯ abcdefgh' + c.slice(0, 1), '  ' + c.slice(1) + 'ij');
+    assert.equal(inputShows(split, 'abcdefgh' + c + 'ij', 12), false, c);
+    assert.deepEqual(inputBox(split, 12), { mark: '❯', text: undefined }, c);
+  }
+  // The reviewer's cases: the second row's padding could be read as two literal spaces.
+  assert.equal(inputShows(pane('❯ 👩‍💻abcd', '  ef'), '👩‍💻abcd  ef', 10), false);
+  assert.equal(inputShows(pane('❯ 🖥︎abcdef', '  gh'), '🖥︎abcdef  gh', 10), false);
+  // U+3099 and U+309A combine with the kana before them (the reviewers' case, both readings: the
+  // row is full at width 10, and the padding could be two literal spaces).
+  for (const m of ['\u3099', '\u309a']) {
+    const t = 'か' + m + 'abcdef';
+    assert.equal(inputShows(pane('❯ ' + t, '  gh'), t + '  gh', 10), false);
+    assert.equal(inputShows(pane('❯ ' + t, '  gh'), t + 'gh', 10), false);
+    assert.deepEqual(inputBox(pane('❯ ' + t, '  gh'), 10), { mark: '❯', text: undefined });
+  }
+  assert.equal(inputShows(pane('❯ がabcdef', '  gh'), 'がabcdefgh', 10), true);
+  // A suggestion with an emoji elsewhere makes the wrap refuse too.
+  assert.equal(inputShows(pane('❯ echo aaa', '  bbbb'), 'echo aaabbbb 😀', 12), false);
+  // On a single row they still match exactly.
+  assert.equal(inputShows(pane('❯ 👩‍💻 hi'), '👩‍💻 hi', 40), true);
+  assert.equal(inputShows(pane('❯ 🖥︎ hi'), '🖥︎ hi', 40), true);
+  assert.deepEqual(inputBox(pane('❯ 😀 hi'), 40), { mark: '❯', text: '😀 hi' });
+});

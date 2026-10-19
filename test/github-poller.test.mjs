@@ -412,3 +412,29 @@ test('a new head whose status fetch fails keeps nothing of the old head: no copi
   r = await poll('github:o/r#1', held);
   assert.equal(github.reviewVerdict(r.state.headStatuses), 'approve');
 });
+
+test('a new head whose status fetch fails but whose check runs pass is not "checks passed" (S-1918)', async () => {
+  seedOpenPr('sha1');
+  let held = (await poll('github:o/r#1', { state: null, etags: {} })).held;
+  // A push: sha2's check runs all pass, but its status call fails, so the status list is unknown.
+  seedOpenPr('sha2');
+  fake.update({ checkRuns: { 'o/r@sha2': [{ name: 'build', status: 'completed', conclusion: 'success', completed_at: '2026-10-19T10:00:00Z' }] }, failStatus: { 'o/r@sha2': true } });
+  let r = await poll('github:o/r#1', held);
+  assert.equal(r.state.checksHead, 'sha2');
+  assert.equal(r.state.checks, 'pending', 'the run list alone is no pass');
+  assert.ok(!types(r).includes('checks.completed'), `no early pass: ${types(r)}`);
+  // The same head again, the status still failing: still nothing.
+  r = await poll('github:o/r#1', r.held);
+  assert.ok(!types(r).includes('checks.completed'));
+  // The status list comes back with a pending gate: pending; then it passes and the pass is emitted once.
+  const gate = (state, at) => ({ state, statuses: [{ context: 'stam/gates', state, updated_at: at, created_at: at }] });
+  fake.update({ failStatus: { 'o/r@sha2': false }, statuses: { 'o/r@sha2': gate('success', '2026-10-19T10:05:00Z') } });
+  r = await poll('github:o/r#1', r.held);
+  assert.equal(r.state.checks, 'success');
+  assert.deepEqual(types(r).filter((t) => t === 'checks.completed'), ['checks.completed']);
+  // A later failed status fetch on this head keeps what was seen of it: known, still a pass, no second event.
+  fake.update({ failStatus: { 'o/r@sha2': true } });
+  r = await poll('github:o/r#1', r.held);
+  assert.equal(r.state.checks, 'success');
+  assert.ok(!types(r).includes('checks.completed'));
+});

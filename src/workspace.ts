@@ -4,7 +4,8 @@ import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { MACHINE, STAM_HOME } from './config.ts';
-import { settings } from './settings.ts';
+import { storageRemoteFallback } from './settings.ts';
+import { derivedRepoPath } from './default-repo.ts';
 import { depsCachePath, depsKey, ensureCacheReadOnly, fillDeps, linkDepsOutcome, linkDepsOutcomeAsync, type LinkOutcome, retireDamagedCache, touchDepsUsed, warmDeps } from './deploy.ts';
 import type { AgentType } from './agent-types.ts';
 
@@ -218,7 +219,7 @@ export function createWorkspace(spec: WorkspaceSpec, agentName: string, fetched?
       const path = join(STAM_HOME, 'worktrees', `${basename(repo)}-${agentName}`);
       const branch = spec.branch ?? `stam/${agentName}`;
       if (!spec.branch) {
-        const why = reusedBranchRefusal(repo, branch);
+        const why = reusedBranchRefusal(repo, branch, ['origin', storageRemoteFallback(['storage'])].filter(Boolean));
         if (why) throw new Error(why);
       }
       // A base that doesn't resolve fails here, before any worktree exists.
@@ -294,15 +295,13 @@ const isLinkedWorktree = (dir: string): boolean => {
 
 // The live deploy checkout (S-627): the repo the deploy watcher deploys from
 // (scripts/deploy-on-merge.mjs), where a deploy holds while it isn't a clean main. The watcher
-// names it with STAM_DEPLOY_REPO; else the repo settings name for stam2 (a release records the
-// checkout it came from, and a checkout is its own); else ~/projects/stam2, the watcher's default.
+// names it with STAM_DEPLOY_REPO; else the release source (a release records the checkout it came from,
+// and a checkout is its own), whatever settings or pr_open target; else ~/projects/stam2.
 export function deployCheckout(): string {
   if (process.env.STAM_DEPLOY_REPO) return resolve(process.env.STAM_DEPLOY_REPO);
   try {
-    const repo = settings().itsa?.repos?.stam2;
-    if (repo) return resolve(repo);
   } catch {}
-  return join(homedir(), 'projects', 'stam2');
+  return derivedRepoPath() || join(homedir(), 'projects', 'stam2');
 }
 
 // Why a spawn that wanted its own worktree may not use the resolved workspace `ws`, or null when it

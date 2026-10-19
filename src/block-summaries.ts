@@ -12,10 +12,10 @@ import * as db from './db.ts';
 import { settings, onSettingsChange } from './settings.ts';
 import { apiKey } from './credits.ts';
 import { recordSpend } from './decide.ts';
+import { complete } from './llm/index.ts';
 import { systemHeld } from './budgets.ts';
 import { configHash } from './config-hash.ts';
 
-const base = () => process.env.STAM_OPENROUTER_URL ?? 'https://openrouter.ai/api/v1';
 const PURPOSE = 'block-summary';
 // The shipped system prompt, the default of the editable one in Settings › Tiny models (src/tiny-models.ts).
 export const SUMMARY_PROMPT =
@@ -147,28 +147,19 @@ async function summarize(job: Job, signal: AbortSignal): Promise<void> {
     failed.set(job.hash, job.config);
     return;
   }
-  let data: any;
+  let data;
   try {
-    const res = await fetch(`${base()}/chat/completions`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: m,
-        messages: [
-          {
-            role: 'system',
-            content: job.prompt,
-          },
-          { role: 'user', content: job.title ? `Block: ${job.title}\n\n${job.text.slice(0, TEXT_CHARS)}` : job.text.slice(0, TEXT_CHARS) },
-        ],
-        max_tokens: 120,
-        temperature: 0,
-        usage: { include: true },
-      }),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]),
+    data = await complete({
+      model: m,
+      messages: [
+        { role: 'system', content: job.prompt },
+        { role: 'user', content: job.title ? `Block: ${job.title}\n\n${job.text.slice(0, TEXT_CHARS)}` : job.text.slice(0, TEXT_CHARS) },
+      ],
+      maxTokens: 120,
+      temperature: 0,
+      signal,
+      timeoutMs: TIMEOUT_MS,
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    data = await res.json();
   } catch (e) {
     const canceled = signal.aborted;
     // A canceled call was turned off, not failed; the block is asked again if the model returns.
@@ -179,14 +170,13 @@ async function summarize(job: Job, signal: AbortSignal): Promise<void> {
     });
     return;
   }
-  const usage = data?.usage ?? {};
-  recordSpend(PURPOSE, String(data?.model ?? m), Number(usage.cost) || 0, Number(usage.prompt_tokens) || 0, Number(usage.completion_tokens) || 0);
-  const s = cleanSummary(data?.choices?.[0]?.message?.content);
+  recordSpend(PURPOSE, data.model, data.costUsd ?? 0, data.usage.inputTokens, data.usage.outputTokens);
+  const s = cleanSummary(data.text);
   if (!s) {
     failed.set(job.hash, job.config);
     return;
   }
-  db.setBlockSummary(job.hash, s, String(data?.model ?? m), job.config);
+  db.setBlockSummary(job.hash, s, data.model, job.config);
 }
 
 // The model's answer as a summary: one line, without Markdown marks, a "Summary:" label, or extra

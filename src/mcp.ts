@@ -259,11 +259,13 @@ export const tools: Tool[] = [
           model: x.model,
           machine: x.machine,
           capabilities: x.capabilities ? JSON.parse(x.capabilities) : null,
-          state: x.lifecycle === 'active' ? x.activity : x.lifecycle,
+          // A resting agent is live: it wakes on mail, a notice or a prompt, so it isn't reported as 'paused'.
+          state: x.resting ? 'resting' : x.lifecycle === 'active' ? x.activity : x.lifecycle,
+          ...(x.resting ? { resting: { reason: x.resting.reason, expected_wake: x.resting.expected_wake } } : {}),
           ...(x.standing ? { standing: true } : {}),
           ...(x.personal_workspace ? { personal_workspace: x.personal_workspace, workspace: basename(x.personal_workspace) } : {}),
           ...(x.standing && x.load ? { load: x.load } : {}),
-          ...(x.lifecycle === 'paused' ? { paused_by: [...(x.paused_by ? JSON.parse(x.paused_by) : []), ...(x.blockers?.length ? ['stam'] : [])] } : {}),
+          ...(x.lifecycle === 'paused' && !x.resting ? { paused_by: [...(x.paused_by ? JSON.parse(x.paused_by) : []), ...(x.blockers?.length ? ['stam'] : [])] } : {}),
           ...(x.waits?.length ? { waits: x.waits.map((w: any) => ({ id: w.id, kind: w.kind, target: w.target, detail: w.detail, since: w.since, until: w.until })) } : {}),
           ...(x.blockers?.length ? { blockers: x.blockers.map((b: any) => ({ kind: b.kind, account: b.account, reason: b.reason, since: b.since, clear: b.clear })) } : {}),
         })),
@@ -560,13 +562,13 @@ export const tools: Tool[] = [
     name: 'agent_control',
     group: 'agents',
     description:
-      'Control yourself or one of your children: pause, unpause, shutdown, archive (shut down and remove its worktree), resume, restart, reconnect-mcp, set-visibility, set-child-notices (how much you hear about your children\'s finished turns: "turn", "tree-idle", or "none"; blocked and errored children always reach you). The chief of staff can also adopt any agent as its parent. Shutdown, archive, and restart wait until the agent finishes its current step. Every archive asks the agent for its final retro round and waits for its next turn end, bounded by settings.archive.finalRoundMinutes (default 3); a wrap-up pushed while the agent runs a step can get one more turn, with a fresh finalRoundMinutes deadline, because the harness may hold it for the next turn; archive with force only skips the turn-alive check for an agent whose harness is gone, and archive with discard removes uncommitted worktree changes. The executive assistant controls every agent, and alone can also set-parent (parent: an agent, or "none" for top-level), rename (name), make one chief-of-staff, kill (stop now), and forget (remove a stopped agent from the registry).',
+      'Control yourself or one of your children: pause, unpause, shutdown, archive (shut down and remove its worktree), resume, restart, reconnect-mcp, set-visibility, set-child-notices (how much you hear about your children\'s finished turns: "turn", "tree-idle", or "none"; blocked and errored children always reach you). cancel removes a developer spawn that is still queued for a slot, by its name in agent (not an agent yet, so no agent id): its caller, the caller\'s parents, and the chief of staff may cancel it; a spawn already granted a slot is refused, and a name that isn\'t queued is a 404. Cancel runs on the machine that queued it. The chief of staff can also adopt any agent as its parent. Shutdown, archive, and restart wait until the agent finishes its current step. Every archive asks the agent for its final retro round and waits for its next turn end, bounded by settings.archive.finalRoundMinutes (default 3); a wrap-up pushed while the agent runs a step can get one more turn, with a fresh finalRoundMinutes deadline, because the harness may hold it for the next turn; archive with force only skips the turn-alive check for an agent whose harness is gone, and archive with discard removes uncommitted worktree changes. The executive assistant controls every agent, and alone can also set-parent (parent: an agent, or "none" for top-level), rename (name), make one chief-of-staff, kill (stop now), and forget (remove a stopped agent from the registry).',
     inputSchema: {
       type: 'object',
       properties: {
         self,
         agent: { type: 'string', description: 'Id or name of the agent.' },
-        action: { type: 'string', enum: ['pause', 'unpause', 'shutdown', 'archive', 'resume', 'restart', 'reconnect-mcp', 'adopt', 'set-visibility', 'set-child-notices', 'set-parent', 'rename', 'chief-of-staff', 'kill', 'forget'] },
+        action: { type: 'string', enum: ['pause', 'unpause', 'shutdown', 'archive', 'resume', 'restart', 'reconnect-mcp', 'adopt', 'set-visibility', 'set-child-notices', 'set-parent', 'rename', 'chief-of-staff', 'kill', 'forget', 'cancel'] },
         note: { type: 'string', description: 'For resume and restart: a note the agent receives.' },
         force: { type: 'boolean', description: 'For archive: do not wait for the agent\'s current step. A forced pending archive whose harness is gone runs at once, skipping the turn-alive check; it still asks the agent for its final round, bounded by settings.archive.finalRoundMinutes, and a forced archive of a live agent waits for that extra turn too. It also discards uncommitted worktree changes. For unpause: clear its cost blockers too.' },
         discard: { type: 'boolean', description: 'For archive: discard the agent\'s uncommitted worktree changes. Every archive asks the agent for its final retro round and waits for its next turn end, at most settings.archive.finalRoundMinutes (default 3), before archiving.' },
@@ -578,6 +580,11 @@ export const tools: Tool[] = [
       required: ['agent', 'action'],
     },
     run: async (a) => {
+      // A queued spawn has no agent yet: its name is the path (S-2134).
+      if (a.action === 'cancel') {
+        const r = await api('POST', `/api/slot-queue/${a.agent}/cancel`, { by: me(a) });
+        return text(`${r.name}: queued spawn cancelled on ${r.machine}`);
+      }
       const r = await api('POST', `/api/agents/${a.agent}/${a.action}`, { by: me(a), note: a.note, reason: a.note, force: a.force, discard: a.discard, visibility: a.visibility, child_notices: a.child_notices, parent: a.parent, name: a.name });
       return text(`${r.agent.name}: ${r.result}`);
     },
@@ -703,7 +710,13 @@ export const tools: Tool[] = [
       },
       required: ['ring', 'text', 'agree'],
     },
-    run: async (a) => text((await api('POST', `/api/rings/${a.ring}/submit`, { by: me(a), text: a.text, agree: a.agree, verdict: a.verdict })).result),
+    // A parameter this schema lacks (`body`, say) would post an empty verdict with no findings (S-1919): name it, and the expected `text`.
+    run: async (a) => {
+      const unknown = Object.keys(a).filter((k) => !['self', 'ring', 'text', 'agree', 'verdict'].includes(k));
+      if (unknown.length) throw new Error(`ring_submit has no parameter ${unknown.join(', ')}: put your findings in text`);
+      if (typeof a.text !== 'string' || !a.text.trim()) throw new Error('text is required: your findings for the ring, as a non-empty string');
+      return text((await api('POST', `/api/rings/${a.ring}/submit`, { by: me(a), text: a.text, agree: a.agree, verdict: a.verdict })).result);
+    },
   },
   {
     name: 'ring_decide',
@@ -801,17 +814,18 @@ export const tools: Tool[] = [
         timeout_minutes: { type: 'number', description: 'Give up after this many minutes.' },
         expect_minutes: { type: 'number', description: 'Optional: about how many minutes until you expect the answer. Nothing fires then; it tells stam how long you will likely wait, so a long wait lets your harness rest until the answer wakes you.' },
         note: { type: 'string', description: 'What you wait for, shown as your wait detail.' },
+        rest: { type: 'boolean', description: 'Optional: true asks stam to stop your harness as soon as this turn ends, instead of after the usual idle minutes, to free its memory; the answer, mail or a notice wakes you, with your conversation resumed. Pass it for a long wait with nothing to do meanwhile; leave it out when you expect an answer within minutes. stam keeps you up anyway while something still needs you.' },
       },
       required: ['on'],
     },
     run: async (a) => {
       // Only the declared parameters go to the daemon, and an unknown one is named rather than
       // sent: the daemon reads `from` as the identity a request acts as (S-302).
-      const known = ['self', 'on', 'target', 'thread', 'filter', 'timeout_minutes', 'expect_minutes', 'note'];
+      const known = ['self', 'on', 'target', 'thread', 'filter', 'timeout_minutes', 'expect_minutes', 'note', 'rest'];
       const unknown = Object.keys(a ?? {}).filter((k) => !known.includes(k));
-      if (unknown.length) throw new Error(`wait_for has no parameter ${unknown.map((k) => `'${k}'`).join(', ')}; its parameters are on, target (the agent to wait for, an id or name), thread, filter, timeout_minutes, expect_minutes, note`);
+      if (unknown.length) throw new Error(`wait_for has no parameter ${unknown.map((k) => `'${k}'`).join(', ')}; its parameters are on, target (the agent to wait for, an id or name), thread, filter, timeout_minutes, expect_minutes, note, rest`);
       if (a.on === 'agent' && !a.target) throw new Error("wait_for on 'agent' needs target (an agent id or name)");
-      const w = await api<any>('POST', `/api/agents/${me(a)}/waits/declared`, { on: a.on, target: a.target, thread: a.thread, filter: a.filter, timeout_minutes: a.timeout_minutes, expect_minutes: a.expect_minutes, note: a.note, by: me(a) });
+      const w = await api<any>('POST', `/api/agents/${me(a)}/waits/declared`, { on: a.on, target: a.target, thread: a.thread, filter: a.filter, timeout_minutes: a.timeout_minutes, expect_minutes: a.expect_minutes, note: a.note, rest: a.rest, by: me(a) });
       return text(`Waiting (${w.id}) for ${w.detail}${w.until ? `, timing out at ${w.until}` : ''}.${w.kind === 'human' && w.target ? ` It is about your request ${w.target}, so it clears when that request is answered or closed.` : ''} Clear it with wait_done ${w.id}.`);
     },
   },
@@ -839,6 +853,7 @@ export const tools: Tool[] = [
         every_minutes: { type: 'number', description: 'Repeated, every this many minutes.' },
         cron: { type: 'string', description: 'Repeated, on a 5-field cron schedule.' },
         note: { type: 'string', description: 'What to send back when it fires.' },
+        rest: { type: 'boolean', description: 'Optional: true asks stam to stop your harness as soon as this turn ends, instead of after the usual idle minutes, to free its memory; the wake-up, mail or a notice wakes you, with your conversation resumed. Pass it for a long wait with nothing to do meanwhile; leave it out when it fires within minutes. stam keeps you up anyway while something still needs you.' },
       },
       required: ['note'],
     },
@@ -1913,7 +1928,8 @@ function canary(bin: string): Promise<boolean> {
     child.on('exit', () => done(false));
     child.stdout.on('data', (d) => {
       out += d;
-      const line = out.split('\n').find((l) => l.includes('"id":"canary"'));
+      // Whole lines only: the answer is larger than a pipe chunk, so its first read is a half line.
+      const line = out.split('\n').slice(0, -1).find((l) => l.includes('"id":"canary"'));
       if (!line) return;
       try {
         done((JSON.parse(line).result?.tools?.length ?? 0) > 0);

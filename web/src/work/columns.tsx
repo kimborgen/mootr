@@ -4,6 +4,7 @@
 import type { ReactNode } from 'react'
 import { selectAgent } from '../actions'
 import { Glyph } from '../Glyph'
+import { RestBadge } from '../waits'
 import { Icon, type IconName } from '../Icon'
 import { HEALTH, StatusGlyph, statusLabel, toneVar } from '../itsa/itsa'
 import { byId } from '../store'
@@ -47,7 +48,7 @@ export function Agents({ row, list }: { row: WorkRow; list?: Agent[] }) {
   const rest = agents.slice(AGENTS_INLINE)
   return <span className="w-agents" data-cell="agents">{agents.slice(0, AGENTS_INLINE).map((a) => (
     <button key={a.id} type="button" className="w-agent" data-agent={a.id} title={`Open ${a.name}`}
-      onClick={(e) => { e.stopPropagation(); selectAgent(a.id) }}><Glyph agent={a} /><span>{a.name}</span></button>))}
+      onClick={(e) => { e.stopPropagation(); selectAgent(a.id) }}><Glyph agent={a} /><span>{a.name}</span>{a.resting ? <RestBadge a={a} mode="compact" /> : null}</button>))}
     {rest.length ? <span className="w-link-more" title={rest.map((a) => a.name).join(', ')}>+{rest.length}</span> : null}</span>
 }
 

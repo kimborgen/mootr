@@ -31,6 +31,8 @@ export function startFakeGithub(opts = {}) {
     statuses: {},
     // `OWNER/REPO@SHA` -> true: that head's check runs and statuses answer 404, as a failed call does.
     failChecks: {},
+    // `OWNER/REPO@SHA` -> true: only that head's statuses answer 404; its check runs answer as usual.
+    failStatus: {},
     reviews: {},
     comments: {},
     events: {},
@@ -121,6 +123,7 @@ function route(url, parts, data) {
   if (rest[0] === 'pulls' && rest.length === 3 && rest[2] === 'reviews') return data.reviews[key(owner, repo, rest[1])] ?? [];
   if (rest[0] === 'pulls' && rest.length === 2) return data.pulls[key(owner, repo, rest[1])];
   if (rest[0] === 'commits' && rest.length === 3 && data.failChecks[`${rk}@${rest[1]}`]) return undefined;
+  if (rest[0] === 'commits' && rest.length === 3 && rest[2] === 'status' && data.failStatus[`${rk}@${rest[1]}`]) return undefined;
   if (rest[0] === 'commits' && rest.length === 3 && rest[2] === 'check-runs') return { total_count: (data.checkRuns[`${rk}@${rest[1]}`] ?? []).length, check_runs: data.checkRuns[`${rk}@${rest[1]}`] ?? [] };
   if (rest[0] === 'commits' && rest.length === 3 && rest[2] === 'status') return data.statuses[`${rk}@${rest[1]}`] ?? { state: 'pending', statuses: [] };
   return undefined;

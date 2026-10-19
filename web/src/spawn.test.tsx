@@ -102,3 +102,27 @@ describe('standing and workspace choices', () => {
     expect(await send()).toMatchObject({ workspace: true })
   })
 })
+
+describe('permission mode choice', () => {
+  const send = async () => {
+    const fetchMock = vi.fn(async (_u: string, init?: { method?: string }) => ({ ok: init?.method === 'POST', status: init?.method === 'POST' ? 200 : 500, json: async () => (init?.method === 'POST' ? { id: 'a1', name: 'x', cwd: '/x', model: null } : {}) }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }))
+    await act(async () => { document.querySelector<HTMLButtonElement>('.spawn-panel button[type=submit]')!.click() })
+    const post = fetchMock.mock.calls.find((c) => c[1]?.method === 'POST')!
+    return JSON.parse((post[1] as unknown as { body: string }).body) as Record<string, unknown>
+  }
+  it('leaves permission_mode out unless the human picks one (S-2071)', async () => {
+    await openPanel()
+    expect(document.querySelector('.spawn-panel [data-pick="Permissions"] .sp-value')?.textContent).toContain('Settings')
+    expect('permission_mode' in (await send())).toBe(false)
+  })
+  it('sends the mode the human picks, and warns about bypass', async () => {
+    await openPanel()
+    await act(async () => { document.querySelector<HTMLElement>('.spawn-panel [data-pick="Permissions"]')!.click() })
+    const item = [...document.querySelectorAll<HTMLElement>('.menu [role^=menuitem]')].find((i) => i.textContent?.startsWith('Bypass'))!
+    await act(async () => { item.click() })
+    expect(document.querySelector('.spawn-panel .sp-warn')?.textContent).toContain('without asking')
+    expect(await send()).toMatchObject({ permission_mode: 'bypass' })
+  })
+})

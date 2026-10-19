@@ -2,6 +2,7 @@
 // memory for six hours, and the harness models the registry knows, with the prices it holds.
 // The catalogue is fetched asynchronously; a failed refresh keeps the last one it got.
 import { registry } from './registry.ts';
+import { openrouter } from './llm/openrouter.ts';
 
 const TTL_MS = 6 * 3600_000;
 
@@ -16,25 +17,8 @@ export interface CatalogModel {
 let cache: { at: number; models: CatalogModel[] } | null = null;
 let inflight: Promise<CatalogModel[]> | null = null;
 
-// The base URL is overridable so a test can stub the call (STAM_OPENROUTER_URL, as credits.ts).
-const base = () => process.env.STAM_OPENROUTER_URL ?? 'https://openrouter.ai/api/v1';
-
-// OpenRouter prices are strings in USD per token; a missing or non-numeric one is unknown.
-function perMillion(v: unknown): number | null {
-  if (v == null || v === '') return null;
-  const n = Number(v);
-  return Number.isFinite(n) && n >= 0 ? Number((n * 1e6).toFixed(6)) : null;
-}
-
-async function fetchOpenRouter(): Promise<CatalogModel[]> {
-  const res = await fetch(`${base()}/models`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(10_000), redirect: 'manual' });
-  if (!res.ok) throw new Error(`OpenRouter answered HTTP ${res.status} for its models`);
-  const json: any = await res.json().catch(() => ({}));
-  const data: any[] = Array.isArray(json?.data) ? json.data : [];
-  return data
-    .filter((m) => typeof m?.id === 'string')
-    .map((m) => ({ id: m.id, name: typeof m.name === 'string' && m.name ? m.name : m.id, in: perMillion(m.pricing?.prompt), out: perMillion(m.pricing?.completion) }));
-}
+// The catalogue is the OpenRouter adapter's (src/llm/openrouter.ts), which a test stubs with STAM_OPENROUTER_URL.
+const fetchOpenRouter = (): Promise<CatalogModel[]> => openrouter.listModels!();
 
 // The OpenRouter catalogue: from memory while it is under six hours old, else fetched once
 // for every caller that asks meanwhile. When the fetch fails, the last catalogue stands.

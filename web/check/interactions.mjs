@@ -1,6 +1,6 @@
 // Browser checks of the web UI's drag and send interactions, with real mouse drags (HTML5
 // drag and drop through Playwright) and the keyboard:
-//   node web/check/interactions.mjs BASE_URL OUT_DIR [tabs] [rank] [spawn] [types] [tools] [steps] [archive] [cos] [mail] [search] [suggest] [itsa] [board] [work] [legend] [itsalinks] [itsachip] [term] [machines] [system] [rules] [back] [attention] [assistant] [layout] [requirements]
+//   node web/check/interactions.mjs BASE_URL OUT_DIR [tabs] [rank] [spawn] [types] [tools] [steps] [archive] [cos] [mail] [search] [suggest] [itsa] [board] [work] [legend] [itsalinks] [itsachip] [term] [machines] [system] [rules] [back] [attention] [assistant] [layout] [requirements] [permissions]
 // BASE_URL carries the token (web/check/daemon.sh prints one); the checks write (mail, an
 // assistant), so it must be a throwaway daemon. With no flow named, tabs, rank, and spawn
 // run; spawn adds agents with no prompt, so it costs nothing; cos and mail post to a paused agent, free; assistant runs on the fake
@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { findPlaywright } from './find-playwright.mjs';
 
 const [base, out, ...flows] = process.argv.slice(2);
-if (!base || !out) { console.error('usage: node interactions.mjs BASE_URL OUT_DIR [tabs] [rank] [spawn] [types] [tools] [steps] [archive] [cos] [mail] [search] [itsa] [board] [work] [legend] [term] [machines] [rules] [back] [attention] [assistant] [layout]'); process.exit(2); }
+if (!base || !out) { console.error('usage: node interactions.mjs BASE_URL OUT_DIR [tabs] [rank] [spawn] [types] [tools] [steps] [archive] [cos] [mail] [search] [itsa] [board] [work] [legend] [term] [machines] [rules] [back] [attention] [assistant] [layout] [permissions]'); process.exit(2); }
 if (!flows.length) flows.push('tabs', 'rank', 'spawn', 'types', 'tools', 'steps', 'archive', 'cos', 'mail', 'maillink', 'search', 'suggest', 'itsa', 'board', 'work', 'legend', 'itsalinks', 'itsachip', 'itsamail', 'itsabeside', 'term', 'machines', 'system', 'rules', 'back', 'attention', 'layout', 'retros');
 mkdirSync(out, { recursive: true });
 
@@ -96,7 +96,7 @@ async function page(size = { width: 1500, height: 900 }, allow = null, theme = '
   await ctx.route('**/api/voice', (r) => (r.request().url().endsWith('/api/voice') ? r.fulfill({ contentType: 'application/json', body: '{"configured":false}' }) : r.fallback()));
   // The page's saves of settings, instructions, templates and types are the human's: the test key goes with them.
   // An approval of a suggested input is the human's too (S-429), so it goes with the test key.
-  if (testHuman) await ctx.route(/\/api\/(config|templates|types)\/|\/api\/permissions\/[^/]+\/answer$|\/api\/requirements\/asks\/[\w-]+\/drop$/, (r) => (r.request().method() === 'GET' ? r.fallback() : r.continue({ headers: { ...r.request().headers(), 'x-stam-test-human': testHuman } })));
+  if (testHuman) await ctx.route(/\/api\/(config|templates|types)\/|\/api\/permission-modes\/apply$|\/api\/permissions\/[^/]+\/answer$|\/api\/requirements\/asks\/[\w-]+\/drop$/, (r) => (r.request().method() === 'GET' ? r.fallback() : r.continue({ headers: { ...r.request().headers(), 'x-stam-test-human': testHuman } })));
   await ctx.addInitScript((t) => { try { localStorage.setItem('stam/theme', t); } catch {} }, theme);
   const p = await ctx.newPage();
   p.setDefaultTimeout(8000);
@@ -538,7 +538,7 @@ async function spawnFlow() {
   check(await p.evaluate(() => document.activeElement?.dataset.pick) === 'Type', 'the panel focuses its first row, the type');
   const value = (k) => p.locator(`.spawn-panel [data-pick="${k}"] .sp-value`).innerText();
   await p.keyboard.press('ArrowDown');
-  same([await value('Type'), await value('Harness'), await value('Model'), await value('Effort'), await value('Permissions')], ['None', 'Claude Code', 'sonnet 5.5', 'medium', 'Auto mode'], 'it starts from the defaults, with no type');
+  same([await value('Type'), await value('Harness'), await value('Model'), await value('Effort'), await value('Permissions')], ['None', 'Claude Code', 'sonnet 5.5', 'medium', 'Settings: Auto'], 'it starts from the defaults, with no type');
   await shot(p, 'spawn-4-panel');
   // Harness: Enter opens its options with the current one checked; pick OpenCode.
   await p.keyboard.press('Enter');
@@ -559,7 +559,7 @@ async function spawnFlow() {
   check(fold.some((t) => t.includes('/work.')), 'Folder offers the running agents\' folders', fold);
   await p.locator('.menu [role=menuitemradio]').filter({ hasText: '/work.' }).first().click();
   await pick('Parent', 'helper');
-  await pick('Permissions', 'Bypass permissions');
+  await pick('Permissions', 'Bypass');
   same([await value('Model'), await value('Effort'), await value('Parent'), await value('Permissions')], ['haiku 5.5', 'low', 'helper', 'Bypass'], 'the rows show what was picked');
   // A taken name: the error shows in the panel, which stays open.
   await p.locator('.spawn-panel .sp-field input').first().fill('helper');
@@ -745,6 +745,63 @@ async function itsaBeside() {
     check(await cur() === 't:' + tid, `${theme} phone: Back returns to the thread`, await cur());
     await ph.context().close();
   }
+}
+
+// --- Settings › Permission modes (S-2071) -------------------------------------------------
+// Each harness offers only its modes; bypass asks first and shows a warning; an agent that follows
+// the settings is listed as stale after the change, and Apply switches it and says so.
+async function permissionsFlow() {
+  console.log('# permissions');
+  const p = await page();
+  const before = await api('/api/permission-modes');
+  const made = await api('/api/agents', { method: 'POST', body: JSON.stringify({ harness: 'claude', model: 'claude-haiku-5-5', name: 'perm-ui-check' }) });
+  await p.locator('#open-config').first().click();
+  await p.waitForSelector('.settings-view');
+  await p.locator('.settings-nav .item:has-text("Permission modes")').click();
+  await p.waitForSelector('[data-harness=claude]');
+  const opts = (sel) => p.locator(`${sel} option`).evaluateAll((os) => os.map((o) => o.value));
+  same(await opts('[data-harness=claude]'), ['default', 'auto', 'bypass'], 'Claude Code offers Ask, Auto, and Bypass');
+  same(await opts('[data-harness=codex]'), ['auto', 'bypass'], 'Codex does not offer Ask');
+  same(await opts('[data-harness=opencode]'), ['auto', 'bypass'], 'OpenCode does not offer Ask');
+  check((await opts('[data-type=developer]'))[0] === 'inherit', 'a type can follow its harness');
+  await shot(p, 'permissions-1-settings');
+
+  // Declining the bypass warning changes nothing.
+  await p.locator('[data-harness=claude]').selectOption('bypass');
+  await sleep(500);
+  same((await api('/api/permission-modes')).settings.harness.claude, before.settings.harness.claude, 'declining the bypass warning saves nothing');
+  check(await p.locator('[data-harness=claude]').inputValue() === before.settings.harness.claude, 'and the select snaps back');
+
+  // Accepting saves it, warns, and lists the agent that follows the settings.
+  p.removeAllListeners('dialog');
+  p.on('dialog', (d) => d.accept());
+  await p.locator('[data-harness=claude]').selectOption('bypass');
+  await p.waitForSelector('[data-bypass-warning]');
+  same((await api('/api/permission-modes')).settings.harness.claude, 'bypass', 'accepting saves bypass for Claude Code');
+  await p.waitForSelector(`[data-agent=${made.name}]`);
+  check(/Auto → Bypass/.test(await p.locator(`[data-agent=${made.name}]`).innerText()), 'the agent is listed with its current and wanted mode');
+  await shot(p, 'permissions-2-stale');
+  await p.locator('.perm-stale .btn.primary').click();
+  await p.waitForSelector('[data-apply-result]');
+  check(/Switched \d+ agent/.test(await p.locator('[data-apply-result]').innerText()) && (await p.locator('[data-apply-result]').innerText()).includes(made.name), 'Apply lists the agents it switched');
+  await shot(p, 'permissions-3-applied');
+  for (let i = 0; i < 40 && (await api(`/api/agents/${made.id}`)).permission_mode !== 'bypass'; i++) await sleep(250);
+  same((await api(`/api/agents/${made.id}`)).permission_mode, 'bypass', 'the agent runs bypass');
+
+  // Back to what it was.
+  await p.locator('[data-harness=claude]').selectOption(before.settings.harness.claude);
+  await p.waitForFunction(() => !document.querySelector('[data-bypass-warning]'));
+  await api(`/api/agents/${made.id}/kill`, { method: 'POST' });
+  await p.context().close();
+
+  // The phone: the section and the stale list fit 360 px with no sideways scroll.
+  const ph = await page({ width: 360, height: 780 });
+  await ph.evaluate(() => localStorage.setItem('stam/settings-section', 'permissions'));
+  await ph.locator('#open-config, [aria-label=Settings]').first().click();
+  await ph.waitForSelector('[data-harness=claude]');
+  check(await ph.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), 'the section has no sideways scroll at 360 px');
+  await shot(ph, 'permissions-4-phone');
+  await ph.context().close();
 }
 
 async function typesFlow() {
@@ -1139,7 +1196,7 @@ async function cos() {
     // The prompt input: the stam icon's menu picks the assistant or helper. The overlay's close
     // steps back in the history; wait for that, or the pop closes the menu it just opened.
     await p.waitForTimeout(1500);
-    await p.locator('#tree .node:has(.name:text-is("kid"))').first().click();
+    await p.locator('#tree .node:has(.name:text-is("kid"))').first().locator('.name').click();
     await p.waitForTimeout(1500);
     const bottom = p.locator('#w-bottom .composer');
     const btn = bottom.locator('.cmp-asst');
@@ -2601,7 +2658,7 @@ async function legend() {
     await q.click();
     const pop = p.locator('.menu.popover[role=dialog]');
     check(await pop.isVisible(), `${theme}: the ? opens the legend`);
-    same(await pop.locator('[data-legend]').evaluateAll((els) => els.map((e) => e.dataset.legend)), ['working', 'starting', 'waiting', 'idle', 'blocked', 'errored', 'paused', 'shut_down'], `${theme}: the legend lists every state`);
+    same(await pop.locator('[data-legend]').evaluateAll((els) => els.map((e) => e.dataset.legend)), ['working', 'starting', 'waiting', 'idle', 'blocked', 'errored', 'paused', 'resting', 'shut_down'], `${theme}: the legend lists every state`);
     // Colour is never the only signal: the states that share a hue differ in shape.
     const shapes = await pop.locator('[data-legend] .glyph').evaluateAll((els) => els.map((e) => [e.dataset.state, getComputedStyle(e.querySelector('.ring')).borderTopStyle, getComputedStyle(e.querySelector('.ring')).borderTopWidth,
       e.querySelector('.pip') ? (e.querySelector('.pip svg')?.innerHTML ?? (getComputedStyle(e.querySelector('.pip')).boxShadow.includes('inset') ? 'hollow' : 'dot')) : 'none'].join(' ')));
@@ -3891,6 +3948,7 @@ for (const f of flows) {
   else if (f === 'archive') await archive();
   else if (f === 'spawn') await spawnFlow();
   else if (f === 'types') await typesFlow();
+  else if (f === 'permissions') await permissionsFlow();
   else if (f === 'tools') await toolsFlow();
   else if (f === 'modelpicker') await modelPicker();
   else if (f === 'steps') await stepsFlow();

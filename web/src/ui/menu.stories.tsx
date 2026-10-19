@@ -26,7 +26,7 @@ const trigger = <button className="icon-btn" aria-label="More"><Icon name="ellip
 export const stories: Story[] = [{
   name: 'Context menu',
   group: 'Primitives',
-  what: 'The one context menu: rows of actions with an icon, a shortcut hint, sections, separators, radio or checkbox ticks, disabled and danger rows. On a phone the same menu is a sheet at the bottom. Arrow keys, Home, End, and Escape move through it.',
+  what: 'The one context menu: rows of actions with an icon, a shortcut hint, sections, separators, radio or checkbox ticks, disabled and danger rows. On a phone the same menu is a sheet at the bottom. Arrow keys, Home, End, and Escape move through it; in a field that uses them (a textarea, a select, a date or number field, or for Home and End any text field) those keys stay with the field (S-1884, S-1997).',
   when: "A right-click or long-press on an agent row, a pane, or a tab; a row's ⋯ button; the composer's recipient picker; the spawn menu.",
   code: ['web/src/ui/menu.tsx#showMenu', 'web/src/ui/menu.tsx#MenuItem', 'web/src/ui/menu.tsx#MenuLayer', 'web/src/ui/menu.tsx#hideMenu'],
   rules: [

@@ -17,6 +17,7 @@ export const stories: Story[] = [{
   when: 'The Settings world (`w:config`), opened with the gear button in the header (**Settings**), the Settings command in the palette, a search hit for a setting, the Usage page\'s link to the Spending section, or Edit in Settings on an agent\'s Instructions tab, which names a section and an item. On a daemon that is not the settings home, shared settings are read-only, or are sent to the home when it knows the home\'s page.',
   code: ['web/src/views/ConfigView.tsx#ConfigView', 'web/src/settings-scope.ts#scopeOf', 'web/src/settings-scope.ts#readOnly', 'web/src/settings-save.ts#buildPatch', 'web/src/settings-save.ts#savePeer'],
   rules: [
+    'Permission modes (`PermissionModesSettings`, its own story) sets the mode new agents start in per harness and per agent type, through the `permissionModes` settings key, and applies a change to the running agents that follow the settings.',
     'The Sidebar section (`SidebarSettings`, its own story) edits the desktop sidebar layout live, through the `sidebarPanes` settings record rather than the Save path of the other sections.',
     'Spending › OpenRouter budgets sets two caps on the one OpenRouter credit: Agents (`cost.accounts.openrouter.budget`) and System (`cost.accounts["openrouter-system"].budget`, created with the match `{ harness: "stam" }` on first use; the agents account, if missing, is created matching `{ harness: "opencode", model: "openrouter/" }`). Each is an amount in USD and a period (day, week, month, or until raised); empty removes the cap, and the period waits for an amount. System reserve (`cost.openrouterSystemReserveUsd`, default 1 USD) is the credit kept for stam\'s own calls when there is no system budget. Only the settings home writes them.',
     'The section list is `240px` wide with `--size-row-menu` rows; the form column is at most `760px`, with `--space-8` side padding. At 760 px or narrower the list becomes a row of tabs above the form, each `--size-hit-touch` tall, and every setting row stacks its label over its control (' + ds('Density') + ').',
@@ -44,6 +45,7 @@ export const stories: Story[] = [{
       routes: { ...settingsRoutes(), ...SAVE_ASKS },
       render: () => page(pressIn('Mail to you', 'Everything')),
     },
+    { name: 'Permission modes', routes: settingsRoutes(), render: () => page(openSection('Permission modes')) },
     { name: 'Tiny models', routes: settingsRoutes(), render: () => page(openSection('Tiny models')) },
     { name: 'Spending', routes: settingsRoutes(), render: () => page(openSection('Spending')) },
     { name: 'Spending: OpenRouter budgets set', routes: settingsRoutes(undefined, { ...SETTINGS, cost: { ...SETTINGS.cost, accounts: { ...SETTINGS.cost.accounts, openrouter: { match: { harness: 'opencode', model: 'openrouter/' }, budget: { usd: 50, per: 'month' } }, 'openrouter-system': { match: { harness: 'stam' }, budget: { usd: 3, per: 'day' } } } } }), render: () => page(openSection('Spending')) },

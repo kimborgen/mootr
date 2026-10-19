@@ -69,22 +69,23 @@ describe('per-file overrides', () => {
 
 describe('viewed marks', () => {
   beforeEach(() => localStorage.clear())
-  it('are keyed by repo, PR, path and head blob', () => {
+  it('are keyed by the diff scope, path and head blob', () => {
     const a = f('src/a.ts')
-    expect(viewedKey('stam2', 5, a)).toBe('stam2#5:src/a.ts@h-src/a.ts')
-    expect(viewedKey('stam2', 6, a)).not.toBe(viewedKey('stam2', 5, a))
-    expect(viewedKey('other', 5, a)).not.toBe(viewedKey('stam2', 5, a))
-    expect(viewedKey('stam2', 5, { ...a, headBlob: 'changed' })).not.toBe(viewedKey('stam2', 5, a))
+    expect(viewedKey('stam2#5', a)).toBe('stam2#5:src/a.ts@h-src/a.ts')
+    expect(viewedKey('stam2#6', a)).not.toBe(viewedKey('stam2#5', a))
+    expect(viewedKey('other#5', a)).not.toBe(viewedKey('stam2#5', a))
+    expect(viewedKey('patch:abc', a)).toBe('patch:abc:src/a.ts@h-src/a.ts')
+    expect(viewedKey('stam2#5', { ...a, headBlob: 'changed' })).not.toBe(viewedKey('stam2#5', a))
   })
   it('a deleted file is keyed by its base blob', () => {
-    expect(viewedKey('r', 1, { path: 'x', baseBlob: 'bb' })).toBe('r#1:x@deleted-bb')
+    expect(viewedKey('r#1', { path: 'x', baseBlob: 'bb' })).toBe('r#1:x@deleted-bb')
   })
   it('persist per viewer and reset when the file changes', () => {
     const a = f('src/a.ts')
-    writeViewed(withViewed(readViewed(), viewedKey('r', 1, a), true))
-    expect(readViewed().has(viewedKey('r', 1, a))).toBe(true)
-    expect(readViewed().has(viewedKey('r', 1, { ...a, headBlob: 'new' }))).toBe(false)
-    writeViewed(withViewed(readViewed(), viewedKey('r', 1, a), false))
+    writeViewed(withViewed(readViewed(), viewedKey('r#1', a), true))
+    expect(readViewed().has(viewedKey('r#1', a))).toBe(true)
+    expect(readViewed().has(viewedKey('r#1', { ...a, headBlob: 'new' }))).toBe(false)
+    writeViewed(withViewed(readViewed(), viewedKey('r#1', a), false))
     expect(readViewed().size).toBe(0)
   })
   it('survive a storage that throws', () => {
@@ -146,6 +147,9 @@ describe('reviewChip (S-1917)', () => {
     const old = reviewChip(r({ stale: true }))
     expect(old.tone).toBe('none')
     expect(old.label).toContain('another head')
+    expect(old.short).toBe('approved · other head')
+    expect(reviewChip(r({ verdict: 'changes', stale: true })).short).toBe('changes · other head')
+    expect(reviewChip(r({ verdict: 'changes' })).short).toBe('changes')
     expect(reviewChip(null)).toMatchObject({ tone: 'none', label: 'no review' })
     expect(reviewChip(undefined).label).toBe('no review')
   })

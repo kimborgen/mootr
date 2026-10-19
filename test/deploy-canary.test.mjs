@@ -172,12 +172,11 @@ test('real regressions still fail the judge: rebuild stalls, a slow release, all
   assert.deepEqual(judge(canaryConfig({ STAM_CANARY_STALL_FACTOR: '100' }), base, run({ stallMs: 674 * 40 })), []);
 });
 
-test("the canary's worst case counts the rerun, and fits the watcher's canary timeout (S-1862)", async () => {
+// The bound against the watcher's canary timeout lives in deploy-watch-unit, next to the watcher it reads (S-1862).
+test("the canary's worst case counts the rerun (S-1862)", () => {
   const c = canaryConfig({});
   const once = canaryWorst({ ...c, rerun: false });
   assert.equal(canaryWorst(c) - once, c.startMs + c.loadMs + 15_000 + 5 * 5000);
-  const { config } = await import(join(ROOT, 'scripts/deploy-on-merge.mjs'));
-  assert.ok(canaryWorst(c) < config({}).timeout.canary);
 });
 
 test('the same release against itself passes, and leaves nothing behind', async () => {

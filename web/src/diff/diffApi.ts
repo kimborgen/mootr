@@ -1,7 +1,7 @@
 // The page's side of the PR diff API (S-1530, `GET /api/diff` and `GET /api/diff/file`). A file's two sides are
 // fetched with the `head` and `base` shas the list returned, so a push after the list doesn't change them under the view.
 import { token } from '../api'
-import type { DiffList } from './diffModel'
+import type { PrList } from './diffModel'
 
 export class DiffFail extends Error {
   status: number
@@ -19,7 +19,7 @@ async function fail(r: Response): Promise<DiffFail> {
 
 export const diffListUrl = (repo: string, pr: number): string => `/api/diff?repo=${encodeURIComponent(repo)}&pr=${pr}`
 
-export async function fetchDiffList(repo: string, pr: number, signal?: AbortSignal): Promise<DiffList> {
+export async function fetchDiffList(repo: string, pr: number, signal?: AbortSignal): Promise<PrList> {
   const r = await fetch(diffListUrl(repo, pr), { signal, headers: headers() })
   if (!r.ok) throw await fail(r)
   return r.json()

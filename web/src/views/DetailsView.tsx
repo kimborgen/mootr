@@ -9,8 +9,9 @@ import { HARNESS, ago, k, live, model, money, stateLabel } from '../format'
 import { byId, useData } from '../store'
 import { showMenu } from '../ui/menu'
 import type { Agent } from '../types'
-import { clock, left, WAIT_ICON, WaitLink, waitsOf } from '../waits'
+import { clock, left, RestBadge, WAIT_ICON, WaitLink, waitsOf } from '../waits'
 import { Loading } from '../Loading'
+import { followsSettings } from '../permission-modes'
 
 interface AgentFile { name: string; text: string }
 interface AgentEvent { type: string; ts: string; data?: string | null }
@@ -116,13 +117,13 @@ export function DetailsView({ id }: { id: string }) {
   const kids = agents.filter((x) => (x.parents ?? []).includes(a.id))
   const ctx = a.context_tokens ?? 0
   const max = thresholds.enforceTokens
-  const mode = picked ?? (a.permission_mode === 'bypass' ? 'bypass' : 'auto')
+  const mode = picked ?? (followsSettings(a) ? 'settings' : a.permission_mode ?? 'auto')
   const act = async (name: string) => {
     setBusy(name)
     await agentAction(a, name)
     setBusy(null)
   }
-  const changeMode = async (to: 'auto' | 'bypass') => {
+  const changeMode = async (to: 'auto' | 'bypass' | 'default' | 'settings') => {
     setPicked(to)
     if (!(await setMode(a, to))) setPicked(null)
   }
@@ -138,6 +139,7 @@ export function DetailsView({ id }: { id: string }) {
         <button className="icon-btn" title="More actions" style={{ marginLeft: 'auto' }} onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left - 160, r.bottom + 4, agentMenu(a), e.currentTarget) }}><Icon name="ellipsis" /></button>
       </h2>
       <div className="sub">{stateLabel(a)}{a.activity_detail ? ' · ' + a.activity_detail : ''}{a.role ? ' · ' + a.role : ''}</div>
+      {a.resting ? <div className="sub"><RestBadge a={a} /></div> : null}
       <div className="actions-row">
         {live(a) ? (
           <>
@@ -168,11 +170,15 @@ export function DetailsView({ id }: { id: string }) {
         <dt>Permissions</dt>
         <dd>
           {live(a) ? (
-            <select value={mode} onChange={(e) => void changeMode(e.target.value as 'auto' | 'bypass')}>
+            <select value={mode} onChange={(e) => void changeMode(e.target.value as 'auto' | 'bypass' | 'default' | 'settings')}>
+              <option value="settings">Follow settings</option>
+              {a.harness === 'claude' ? <option value="default">Ask</option> : null}
               <option value="auto">Auto mode</option>
               <option value="bypass">Bypass permissions</option>
             </select>
           ) : a.permission_mode}
+          {followsSettings(a) ? <span className="muted"> · {a.permission_mode}, from Settings</span> : null}
+          {mode === 'bypass' ? <div className="sp-warn" role="alert">Bypass runs every action without asking.</div> : null}
         </dd>
         <dt>Child notices</dt>
         <dd>

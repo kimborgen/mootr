@@ -56,6 +56,7 @@ before(async () => {
   work = join(d, 'work');
   git(d, ['clone', '-q', join(d, 'origin.git'), 'work']);
   git(work, ['remote', 'add', 'storage', join(d, 'storage.git')]);
+  (await import('../src/settings.ts')).setSetting('itsa', { ...(await import('../src/settings.ts')).settings().itsa, repos: { stam2: work } });
   cfg = { repoName: 'stam2', repo: work, storage: 'storage', origin: 'origin', gh: join(base, 'bin', 'gh'), github: 'example/stam', base: 'main' };
   sync = await import('../src/pr-sync.ts');
   pr = await import('../src/pr-open.ts');

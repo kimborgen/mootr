@@ -17,7 +17,7 @@ agent() { curl -s -X "$1" -H "authorization: Bearer $(cat "$STAM_HOME/token")" -
 field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const v=process.argv[1].split(".").reduce((o,k)=>o?.[k],JSON.parse(s));console.log(v??"")})' "$1"; }
 # An agent is spawned without starting a model: the fake Claude Code above runs nothing.
 spawn() { agent POST /api/agents "{\"name\":\"$1\",\"harness\":\"claude\",\"model\":\"claude-sonnet-5-5\",\"cwd\":\"$TEST_TMP\",\"role\":\"test\"}" | field id; }
-indexed() { "$STAM" embedder status | grep -q "indexed: mail: $1\$"; }
+indexed() { "$STAM" embedder status | grep -Eq "^indexed: (.*, )?mail: $1(,.*)?\$"; }
 
 PM=$(spawn pm)
 [ -n "$PM" ] || fail "spawn pm"

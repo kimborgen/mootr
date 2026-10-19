@@ -31,7 +31,7 @@ const server = createServer((req, res) => {
   res.end(JSON.stringify({ data }));
 });
 
-let db, codex, opencode;
+let db, codex, opencode, lifecycle;
 const tick = () => new Promise((r) => setTimeout(r, 50));
 const jobs = (id) => db.listWaits(id).map((w) => `${w.kind}:${w.source}:${w.target}`).sort().join(' ');
 const activity = (id) => db.getAgent(id).activity;
@@ -44,6 +44,7 @@ before(async () => {
   await import('../src/adapters/index.ts');
   codex = await import('../src/adapters/codex.ts');
   opencode = await import('../src/adapters/opencode.ts');
+  lifecycle = await import('../src/lifecycle.ts');
   db.open();
   db.createAgent({ id: 'cx', name: 'cx', role: 'dev', machine: 'x', harness: 'codex', model: null, effort: null, cwd: '/tmp', parent_id: null, session_id: 'T' });
   db.createAgent({ id: 'oc', name: 'oc', role: 'dev', machine: 'x', harness: 'opencode', model: null, effort: null, cwd: '/tmp/oc', parent_id: null, session_id: 'ses_main' });
@@ -199,4 +200,48 @@ test("OpenCode: a child that finishes while the server is being read isn't reviv
   ev('session.execution.started', { sessionID: 'ses_main' });
   ev('session.execution.succeeded', { sessionID: 'ses_main' });
   assert.equal(jobs('oc'), '', 'no wait comes back at the next turn');
+});
+
+// S-2237: a rest request (rest: true) counts from each harness's authoritative turn end, and the next
+// turn's start drops it, while the wait that asked is still open.
+const asked = (id) => {
+  const w = db.addWait({ agent_id: id, kind: 'human', source: 'declared', detail: 'a long wait' });
+  lifecycle.requestRest(id, w);
+  return w;
+};
+
+test("Codex: the app-server's turn end starts a rest request's delay and closes the turn; the next turn drops it", () => {
+  const c = conn();
+  const n = (method, p) => codex.onNotification('cx', c, method, { threadId: 'T', ...p });
+  app.terminals = [];
+  app.threads = {};
+  db.updateAgent('cx', { activity: 'idle' });
+  lifecycle.restTurnStarted('cx', db.getAgent('cx').idle_since); // Codex's UserPromptSubmit hook
+  n('thread/status/changed', { status: { type: 'active', activeFlags: [] } });
+  const w = asked('cx');
+  assert.equal(lifecycle.restRequestOf('cx').notBefore, null);
+  n('thread/status/changed', { status: { type: 'idle' } });
+  assert.ok(lifecycle.restRequestOf('cx').notBefore > Date.now(), 'its delay runs from the turn end');
+  // A second turn, through its hook and the app-server, while the wait is still open.
+  lifecycle.restTurnStarted('cx', db.getAgent('cx').idle_since);
+  assert.equal(lifecycle.restRequestOf('cx'), undefined, 'the turn state was closed, so the next start drops it');
+  lifecycle.requestRest('cx', w);
+  n('thread/status/changed', { status: { type: 'active', activeFlags: [] } });
+  assert.equal(lifecycle.restRequestOf('cx'), undefined, "the app-server's turn start drops it too");
+  n('thread/status/changed', { status: { type: 'idle' } });
+  assert.equal(lifecycle.restRequestOf('cx'), undefined);
+  assert.ok(db.listWaits('cx').some((x) => x.id === w.id));
+  db.clearWait(w.id);
+});
+
+test("OpenCode: an execution's end starts a rest request's delay; the next execution drops it", () => {
+  db.updateAgent('oc', { activity: 'idle' });
+  ev('session.execution.started', { sessionID: 'ses_main' });
+  const w = asked('oc');
+  ev('session.execution.succeeded', { sessionID: 'ses_main' });
+  assert.ok(lifecycle.restRequestOf('oc').notBefore > Date.now());
+  ev('session.execution.started', { sessionID: 'ses_main' });
+  assert.equal(lifecycle.restRequestOf('oc'), undefined);
+  ev('session.execution.succeeded', { sessionID: 'ses_main' });
+  db.clearWait(w.id);
 });

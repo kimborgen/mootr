@@ -10,11 +10,13 @@
 //   1. an added or changed component file exports a component no story's `code` lists,
 //   2. a story's `code` link doesn't resolve (checked for every story, not only changed ones),
 //   3. a component file changed but the stories that cover it didn't, unless the PR body has
-//      `Stories: unchanged, REASON` (or `unchanged: REASON`, `unchanged. REASON`, `unchanged for X`; S-914).
+//      `Stories: unchanged, REASON` (or `unchanged: REASON`, `unchanged. REASON`, `unchanged for X`; S-914),
+//      or `Stories: X updated; unchanged for Y, REASON` (S-1964). The PR's own changes are the diff from the
+//      merge base of BASE and HEAD, so a branch behind BASE isn't blamed for BASE's changes (S-1818).
 //   4. a motion file changed with no web/check/*.mjs browser check in the PR, unless the PR body has
 //      `Motion check: none, REASON` (S-1281). Runs in the per-PR modes only, since it needs the PR's body.
 // Stories, tests, and web/src/stories/** are never components.
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -92,10 +94,12 @@ export function exportedComponents(src) {
 
 const declares = (src, name) => new RegExp(`\\b(function|const|let|class|interface|type)\\s+${name}\\b`).test(src);
 
-// The first `Stories: unchanged` line of a PR body (a bullet counts too), or undefined. pr_open reads it
-// to refuse a malformed one up front (S-914).
+// The first Stories line of a PR body that claims unchanged stories (a bullet counts too), or undefined. It is
+// `Stories: unchanged`, or a line that names updated stories and then the unchanged ones, `Stories: X updated;
+// unchanged for Y, because …` (S-1964). pr_open reads it to refuse a malformed one up front (S-914).
+const UNCHANGED_LINE = /^Stories:\s*unchanged\b|^Stories:.*\bupdated\b.*\bunchanged\b/;
 export function storiesUnchangedLine(body) {
-  return String(body ?? '').split(/\r?\n/).map((l) => l.trim().replace(/^[-*]\s+/, '')).find((l) => /^Stories:\s*unchanged\b/.test(l));
+  return String(body ?? '').split(/\r?\n/).map((l) => l.trim().replace(/^[-*]\s+/, '')).find((l) => UNCHANGED_LINE.test(l));
 }
 
 // The accepted form (S-914): `unchanged`, then a separator, then a reason that doesn't start with one.
@@ -103,7 +107,7 @@ export function storiesUnchangedLine(body) {
 // `unchanged-ish` are refused. A bare `unchanged` has no reason, and `mostly unchanged` isn't the line.
 export function storiesUnchanged(body) {
   const line = storiesUnchangedLine(body);
-  return line !== undefined && /^Stories:\s*unchanged(?:\s*[,:;]\s*|\s*[.—-]\s+|\s*—\s*|\s+for\s+)[^\s,:;.—-]/.test(line);
+  return line !== undefined && /^unchanged(?:\s*[,:;]\s*|\s*[.—-]\s+|\s*—\s*|\s+for\s+)[^\s,:;.—-]/.test(line.slice(line.search(/\bunchanged\b/)));
 }
 
 // The form a refused Stories line is shown next to, so a developer can copy it (S-914).
@@ -131,8 +135,11 @@ export function motionExempt(body) {
 // MODE splits the check (S-830) so a merge train can run it per PR and on its tip: 'full' (the default)
 // runs everything, 'exempt' runs only the per-PR rules (3 and 4, which need the PR's body), and 'structural'
 // runs only the checks that are about the tree as a whole (rules 1 and 2). gate.mjs runs 'exempt' per PR.
+// 'branch' (S-1942) is 'exempt' plus rule 1 for the components the PR adds or changes only: what pr_open
+// refuses before a push, without blaming the base's own components.
 export function checkStories({ files, changed, body, renames = {}, mode = 'full' }) {
-  const structural = mode !== 'exempt';
+  const structural = mode !== 'exempt' && mode !== 'branch';
+  const ownStructure = structural || mode === 'branch';
   const exempt = mode !== 'structural';
   const errors = [];
   const links = []; // { story, file, symbol }
@@ -152,7 +159,7 @@ export function checkStories({ files, changed, body, renames = {}, mode = 'full'
   for (const p of changed) {
     if (!isComponentFile(p) || files[p] === undefined) continue;
     const missing = exportedComponents(files[p]).filter((c) => !listed(p, c));
-    if (structural) {
+    if (ownStructure) {
       for (const c of missing) {
         errors.push(`${p}: the component ${c} has no story. Add a story whose code lists '${p}#${c}' to ${p.replace(/\.tsx$/, '.stories.tsx')} (docs/stories.md).`);
       }
@@ -165,6 +172,10 @@ export function checkStories({ files, changed, body, renames = {}, mode = 'full'
     }
   }
   if (exempt) {
+    // A Stories line that claims unchanged stories needs its reason (S-914), when a component changed: a PR that
+    // changes no component passes the stories step whatever its line says. pr_open runs this same check (S-1942).
+    const claim = storiesUnchangedLine(body);
+    if (claim !== undefined && changed.some(isComponentFile) && !storiesUnchanged(body)) errors.push(`the Stories line "${claim}" needs a reason: write it as ${STORIES_FORM} (docs/pull-requests.md)`);
     // Rule 4 (S-1281): a motion change needs a browser check in the same PR, or the PR's own exemption.
     const motion = changed.filter(isMotionFile);
     if (motion.length && !changed.some(isBrowserCheck) && !motionExempt(body)) {
@@ -180,17 +191,83 @@ function git(args, cwd) {
   return r.stdout;
 }
 
-// Reads HEAD's web/src sources and the paths changed from BASE to HEAD in the repo at CWD.
+// The merge base of BASE and HEAD (BASE itself when they have none in common), so the diff below is the PR's own (S-1818).
+function mergeBase(base, head, cwd) {
+  const r = spawnSync('git', ['merge-base', base, head], { cwd, encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : base;
+}
+
+// Reads HEAD's web/src sources and the paths changed from the merge base of BASE and HEAD to HEAD, in the repo at CWD.
 export function checkRange(base, head, { cwd = ROOT, body = '', mode = 'full' } = {}) {
   const names = (a) => git(a, cwd).split('\n').filter(Boolean);
+  const from = mergeBase(base, head, cwd);
   const paths = names(['ls-tree', '-r', '--name-only', head, '--', SRC]).filter((p) => /\.tsx?$/.test(p));
   const files = {};
   for (const p of paths) files[p] = git(['show', `${head}:${p}`], cwd);
-  const changed = names(['diff', '--name-only', '--no-renames', '--diff-filter=AM', base, head]);
+  const changed = names(['diff', '--name-only', '--no-renames', '--diff-filter=AM', from, head]);
   const renames = {};
-  for (const l of names(['diff', '--name-status', '-M', '--diff-filter=R', base, head])) {
+  for (const l of names(['diff', '--name-status', '-M', '--diff-filter=R', from, head])) {
     const [, from, to] = l.split('\t');
     renames[to] = from;
+  }
+  return checkStories({ files, changed, body, renames, mode });
+}
+
+// checkRange without blocking, for pr_open on the ITSA home, where the daemon must keep answering (S-1942). The
+// same rules run on the same reads: git runs as child processes, each with a timeout, and a call that runs past
+// it rejects with `timedOut` set, so the caller can refuse with a clear message rather than pass silently.
+function gitAsync(args, { cwd, input, timeoutMs }) {
+  return new Promise((resolveRun, reject) => {
+    const child = spawn('git', args, { cwd });
+    const out = [];
+    const err = [];
+    const timer = setTimeout(() => {
+      child.kill();
+      const e = new Error(`git ${args[0]} timed out after ${timeoutMs / 1000} s`);
+      e.timedOut = true;
+      reject(e);
+    }, timeoutMs);
+    child.stdout.on('data', (d) => out.push(d));
+    child.stderr.on('data', (d) => err.push(d));
+    // A child that exits before its input is read is a broken pipe here; its exit code is the failure, so ignore it.
+    child.stdin.on('error', () => {});
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolveRun(Buffer.concat(out));
+      else reject(new Error(`git ${args.join(' ')} failed: ${Buffer.concat(err).toString().trim()}`));
+    });
+    child.stdin.end(input ?? '');
+  });
+}
+
+// The blobs `head:PATH` for each path, read in one `git cat-file --batch` (the output is `OID TYPE SIZE`, the content, a newline).
+function blobsOf(buf, paths) {
+  const files = {};
+  let i = 0;
+  for (const p of paths) {
+    const nl = buf.indexOf(0x0a, i);
+    const [, type, size] = buf.toString('utf8', i, nl).split(' ');
+    if (type === 'missing') throw new Error(`git cat-file: ${p} is missing`);
+    i = nl + 1;
+    files[p] = buf.toString('utf8', i, i + Number(size));
+    i += Number(size) + 1;
+  }
+  return files;
+}
+
+export async function checkRangeAsync(base, head, { cwd = ROOT, body = '', mode = 'full', timeoutMs = 30_000 } = {}) {
+  const text = (args, input) => gitAsync(args, { cwd, input, timeoutMs }).then((b) => b.toString('utf8'));
+  const names = async (a) => (await text(a)).split('\n').filter(Boolean);
+  // As mergeBase: BASE itself when the two share no history (S-1818).
+  const from = await text(['merge-base', base, head]).then((s) => s.trim() || base, (e) => { if (e.timedOut) throw e; return base; });
+  const paths = (await names(['ls-tree', '-r', '--name-only', head, '--', SRC])).filter((p) => /\.tsx?$/.test(p));
+  const files = blobsOf(await gitAsync(['cat-file', '--batch'], { cwd, input: paths.map((p) => `${head}:${p}\n`).join(''), timeoutMs }), paths);
+  const changed = await names(['diff', '--name-only', '--no-renames', '--diff-filter=AM', from, head]);
+  const renames = {};
+  for (const l of await names(['diff', '--name-status', '-M', '--diff-filter=R', from, head])) {
+    const [, old, now] = l.split('\t');
+    renames[now] = old;
   }
   return checkStories({ files, changed, body, renames, mode });
 }

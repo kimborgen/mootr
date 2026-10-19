@@ -10,6 +10,7 @@ import { resetDiffRepos } from '../diff/diffRepos'
 import { ds, type Story, type StoryState } from '../stories/types'
 import type { Itsa } from '../types'
 import * as mb from './mailblocks'
+import s2077Diff from './s2077-diff.fixture.md?raw'
 import { Rendered } from './Rendered'
 import { registerAppRefResolvers } from './refResolvers'
 
@@ -50,8 +51,8 @@ function Mail({ md, thread = [], answer = false, source = true }: { md: string; 
     {source && <div className="md" dangerouslySetInnerHTML={{ __html: src }} />}
   </div>
 }
-const st = (name: string, md: string, o: { thread?: string[]; answer?: boolean; source?: boolean; data?: StoryState['data'] } = {}): StoryState =>
-  ({ name, data: { itsas: ITSAS, ...o.data }, render: () => <Mail md={md} thread={o.thread} answer={o.answer} source={o.source} /> })
+const st = (name: string, md: string, o: { thread?: string[]; answer?: boolean; source?: boolean; data?: StoryState['data']; tall?: boolean } = {}): StoryState =>
+  ({ name, data: { itsas: ITSAS, ...o.data }, render: () => o.tall ? <div style={{ minHeight: 640 }}><Mail md={md} thread={o.thread} answer={o.answer} source={o.source} /></div> : <Mail md={md} thread={o.thread} answer={o.answer} source={o.source} /> })
 
 const MAIL = '[`docs/mail-components.md`](https://github.com/kimborgen/mootr/blob/main/docs/mail-components.md)'
 const SRC = 'web/src/mail/mailblocks.ts'
@@ -169,8 +170,17 @@ export const stories: Story[] = [
      st('Open', '<details open><summary>The decision log</summary>\n\nWe kept the old index because the new one is **slower** on example.com.\n\n</details>')]),
   block('Diff', 'A unified diff with one fold per file and +/− counts.',
     'A `diff` (also `patch`) fence holding a unified diff.', ['diff'],
-    ['Added and removed lines take the `--status-success-bg` and `--status-error-bg` fills with the matching `-fg` ink; hunk headers are `--text-muted`.', 'The whole diff folds, every file closed, once its total passes 12 lines; the file header shows its path and its `+` and `−` counts.'],
+    ['Added and removed lines take the `--status-success-bg` and `--status-error-bg` fills with the matching `-fg` ink; hunk headers are `--text-muted`.', 'Rows wrap (`pre-wrap`, `overflow-wrap: anywhere`) and never scroll sideways. The `+`, `-` or space marker is the row\'s first character, so copying gives back the patch lines. Continuations hang `--diff-hang` past the code\'s own indent (a tab counts 4), capped at `--diff-ind-max`; the tint covers every visual line.','A header row reads `N files · +a −d`, with a hidden Open slot at its right; it is a sibling of the folds, never inside a summary. The folds sit in one vertical scroller, capped at `--size-diff-cap` (32 lines, `--size-diff-cap-phone` 18 on a phone) and at 50dvh, with no overscroll containment, so a swipe at its end moves the page; it takes focus with the keyboard.', 'Every file opens when the whole diff is 18 rows or fewer; otherwise only the first does. A file summary shows a muted folder that ellipsizes first, the file name in semibold, and its `+` and `−` counts, and stays at the scroller\'s top while its file scrolls; under touch it is `--size-hit-touch` high.', 'In a list card\'s clipped preview the block is inert: a tap opens the mail. In an open mail and an ITSA comment a click inside the block never reaches the card.'],
     [st('Two files', fence('diff', 'diff --git a/src/sync.ts b/src/sync.ts\n--- a/src/sync.ts\n+++ b/src/sync.ts\n@@ -1,4 +1,5 @@\n export function sync() {\n-  upload(file)\n+  retry(3, () => upload(file))\n+  log("synced")\n }\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1,2 @@\n+export const fixture = true\n+export const retries = 3')),
+     st('Deep indent', fence('diff', 'diff --git a/src/deep.ts b/src/deep.ts\n--- a/src/deep.ts\n+++ b/src/deep.ts\n@@ -1,2 +1,3 @@\n function walk() {\n-\t\t\t\tif (node.children.length > 0 && node.children.every((child) => visited.has(child.id))) return done(node)\n+\t\t\t\tif (node.children.length > 0 && node.children.every((child) => visited.has(child.id)) && !node.pending) return done(node)\n }')),
+     st('Long identifier', fence('diff', 'diff --git a/src/id.ts b/src/id.ts\n--- a/src/id.ts\n+++ b/src/id.ts\n@@ -1 +1 @@\n-const a = 1\n+const aVeryLongGeneratedIdentifier_' + 'abcdefghij'.repeat(40) + ' = 2')),
+     st('Unicode', fence('diff', 'diff --git a/docs/ø.md b/docs/ø.md\n--- a/docs/ø.md\n+++ b/docs/ø.md\n@@ -1 +1 @@\n-Blåbærsyltetøy på brød\n+Blåbærsyltetøy 🫐 på brød — 日本語のテキストもここで折り返されます')),
+     st('Headerless', fence('diff', '@@ -3,3 +3,4 @@\n keep\n-old line\n+new line\n+another line that is long enough to wrap on a phone screen at three hundred sixty pixels')),
+     st('S-2077 comment', s2077Diff),
+     st('Many files', fence('diff', Array.from({ length: 9 }, (_, i) => `diff --git a/web/src/area${i}/module${i}.ts b/web/src/area${i}/module${i}.ts\n--- a/web/src/area${i}/module${i}.ts\n+++ b/web/src/area${i}/module${i}.ts\n@@ -1,3 +1,4 @@\n const a${i} = ${i}\n-const b = 1\n+const b = 2\n+const c = 3`).join('\n')), { tall: true }),
+     st('One huge file', fence('diff', 'diff --git a/src/huge.ts b/src/huge.ts\n--- a/src/huge.ts\n+++ b/src/huge.ts\n@@ -1,0 +1,120 @@\n' + Array.from({ length: 120 }, (_, i) => `+const line${i + 1} = ${i + 1}`).join('\n')), { source: false, tall: true }),
+     { name: 'In a card preview, inert', data: { itsas: ITSAS }, render: () => <div className="story-pad"><div className="mc-text md" dangerouslySetInnerHTML={{ __html: mb.renderMail(fence('diff', 'diff --git a/src/huge.ts b/src/huge.ts\n--- a/src/huge.ts\n+++ b/src/huge.ts\n@@ -1,0 +1,40 @@\n' + Array.from({ length: 40 }, (_, i) => `+const line${i + 1} = ${i + 1}`).join('\n'))) }} /></div> },
+     { name: 'In an ITSA comment', data: { itsas: ITSAS }, render: () => <div className="story-pad" style={{ minHeight: 640 }}><div className="comment-fixture" style={{ background: 'var(--surface-pane)', ['--mb-surface' as string]: 'var(--surface-pane)' }}><Rendered text={s2077Diff} /></div></div> },
      st('Long, folded', fence('diff', 'diff --git a/src/long.ts b/src/long.ts\n--- a/src/long.ts\n+++ b/src/long.ts\n@@ -1,0 +1,20 @@\n' + Array.from({ length: 20 }, (_, i) => `+const line${i + 1} = ${i + 1}`).join('\n')))]),
   block('Code block', 'Any other fenced block: a copy button on hover and syntax highlighting from stam\'s tokens.',
     'A fenced block, with a language tag for highlighting. Untagged blocks are guessed only when the guess is confident.', ['highlight', 'handleCopy'],

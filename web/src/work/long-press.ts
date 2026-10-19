@@ -5,7 +5,7 @@
 // mouse (a narrow desktop pane shows the same cards) right-clicks instead.
 import { useEffect, useRef, type MouseEvent, type PointerEvent } from 'react'
 import { LONG_PRESS_MS, LONG_PRESS_SLOP, showCellMenu } from './cell-menu'
-import { clearPress, markPress } from './press-flag'
+import { clearPress, markPress, refreshPress } from './press-flag'
 import type { HeaderLive } from './header-menu'
 import type { WorkRow } from './model'
 
@@ -40,7 +40,7 @@ export function useCellPress(live: HeaderLive | undefined, row: WorkRow) {
         const s = start.current
         if (s && Math.hypot(e.clientX - s.x, e.clientY - s.y) > LONG_PRESS_SLOP) cancel()
       },
-      onPointerUp: cancel,
+      onPointerUp() { cancel(); refreshPress() },
       onPointerCancel: cancel,
       // A mouse's right-click opens our menu. Android Chrome's own long-press fires contextmenu too, and may
       // cancel the pointer before our timer: a touch contextmenu opens the menu at once, unless the timer did.

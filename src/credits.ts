@@ -3,9 +3,6 @@
 // as a subscription-like entry (the Usage view and the usage_info MCP tool show it), and
 // mails the human once per top-up when the remaining balance drops below
 // cost.openrouterWarnUsd.
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { STAM_HOME } from './config.ts';
 import * as db from './db.ts';
 import { settings, humanMailAllows } from './settings.ts';
 import { render } from './templates.ts';
@@ -15,6 +12,7 @@ import { onReading } from './rules.ts';
 import { reconcile, snapshot } from './reconcile.ts';
 import { evaluateBudgets } from './budgets.ts';
 import { setCreditPoller } from './credit-poller.ts';
+import { openrouter, openRouterKey } from './llm/openrouter.ts';
 
 const POLL_MS = 5 * 60_000;
 // A turn ended just now, so the balance just moved: refresh it, but not more often than this.
@@ -22,18 +20,10 @@ const TURN_COOLDOWN_MS = 60_000;
 let lastPoll = 0;
 let polling = false;
 
-// The base URL is overridable so a test can stub the two calls.
-const base = () => process.env.STAM_OPENROUTER_URL ?? 'https://openrouter.ai/api/v1';
-
-// The key OpenCode uses; providerEnv in adapters/opencode.ts reads the same file. Exported
-// for the decision model (src/decide.ts), which bills the same OpenRouter account.
-export function apiKey(): string | undefined {
-  try {
-    return readFileSync(join(STAM_HOME, 'opencode.env'), 'utf8').match(/^OPENROUTER_API_KEY=(.*)$/m)?.[1].trim() || undefined;
-  } catch {
-    return undefined;
-  }
-}
+// The key OpenCode uses; providerEnv in adapters/opencode.ts reads the same file. Read by the LLM
+// layer's OpenRouter adapter (src/llm/openrouter.ts) and exported for the stam model calls that
+// check it first.
+export const apiKey = openRouterKey;
 
 // An agent that spends OpenRouter credit.
 function usesOpenRouter(a: db.Agent): boolean {
@@ -59,20 +49,6 @@ interface Entry {
   pending?: boolean;
 }
 
-const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-
-// A GET that yields the parsed body, or null when the call fails or answers non-2xx (a
-// 401/403 on /credits, say, or a 429/500). The caller keeps the last valid reading.
-async function get(path: string, headers: Record<string, string>): Promise<any | null> {
-  try {
-    const res = await fetch(path, { headers, signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
-  }
-}
-
 function stored(): Entry | undefined {
   const row = db.open().prepare("SELECT data FROM subscriptions WHERE name = 'openrouter'").get() as { data: string } | undefined;
   if (!row) return undefined;
@@ -95,7 +71,7 @@ function write(entry: Entry): void {
 // The error probe (cost-probes.ts): GET /key with the key OpenCode uses. True when it answers.
 export async function probeKey(): Promise<boolean> {
   const key = apiKey();
-  return key != null && (await get(`${base()}/key`, { authorization: `Bearer ${key}` })) != null;
+  return key != null && (await openrouter.keyLimit!(key)) != null;
 }
 
 // One poll at a time. Fetches the account's total credits and usage, and the key's own
@@ -109,27 +85,27 @@ export async function pollCredits(): Promise<void> {
   polling = true;
   lastPoll = Date.now();
   try {
-    const headers = { authorization: `Bearer ${key}` };
     const prev = stored();
     const pending = snapshot(); // before /credits is read: later reports wait for the next poll
-    const c = await get(`${base()}/credits`, headers);
+    // A failed or non-2xx call (a 401/403 on /credits, say, or a 429/500) is null; the last valid reading is kept.
+    const c = await openrouter.balance!(key);
     // The account's billed spend since the last reading corrects the ledger (reconcile.ts),
     // right when /credits returns, so nothing recorded during the /key call is read as billed.
-    const billedUsed = num(c?.data?.total_usage);
+    const billedUsed = c?.used ?? null;
     if (billedUsed != null) reconcile(pending, billedUsed);
-    const k = await get(`${base()}/key`, headers);
-    const total = num(c?.data?.total_credits) ?? prev?.credits?.total ?? null;
-    const used = num(c?.data?.total_usage) ?? prev?.credits?.used ?? null;
+    const k = await openrouter.keyLimit!(key);
+    const total = c?.total ?? prev?.credits?.total ?? null;
+    const used = c?.used ?? prev?.credits?.used ?? null;
     // /key succeeding while its limit is absent means there is no cap: clear it, don't keep it.
-    const keyLimit = k ? num(k.data?.limit) : prev?.credits?.key_limit ?? null;
-    const keyRemaining = k ? num(k.data?.limit_remaining) : prev?.credits?.key_remaining ?? null;
+    const keyLimit = k ? k.limit : prev?.credits?.key_limit ?? null;
+    const keyRemaining = k ? k.remaining : prev?.credits?.key_remaining ?? null;
     const account = total != null && used != null ? total - used : null;
     const remaining = account != null && keyRemaining != null ? Math.min(account, keyRemaining) : account ?? keyRemaining;
     if (remaining == null) return; // nothing valid this time: leave the last entry as it is
     const next = await nextWarning(prev, remaining, total, keyLimit);
     // When the balance was last fetched whole: both calls answered this poll. A partial or
     // failed poll keeps the earlier time, so the cost rules never read old figures as fresh.
-    const fetched = num(c?.data?.total_credits) != null && num(c?.data?.total_usage) != null && k != null;
+    const fetched = c?.total != null && c?.used != null && k != null;
     const observed_at = fetched ? new Date().toISOString() : (prev?.credits?.observed_at ?? null);
     write({ credits: { total, used, remaining, key_limit: keyLimit, key_remaining: keyRemaining, observed_at }, ...next });
   } catch {}

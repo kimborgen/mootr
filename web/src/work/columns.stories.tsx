@@ -45,7 +45,7 @@ export const stories: Story[] = [{
   when: 'In every row of the Work table (`w:work`) at 900 px and wider, and in the Needs-you group above it. The agents and links also appear on the glance\'s cards.',
   code: ['web/src/work/columns.tsx#WORK_COLUMNS', 'web/src/work/columns.tsx#Agents', 'web/src/work/columns.tsx#LinkChip'],
   rules: [
-    'Agents shows the first two as mark and name, each a button that opens the agent, then "+N" with the rest named in its title; none shows a muted dash. The mark is the agent mark, so its ring carries the state.',
+    'Agents shows the first two as mark and name, each a button that opens the agent, then "+N" with the rest named in its title; none shows a muted dash. The mark is the agent mark, so its ring carries the state. A resting agent adds a compact badge, the wake time alone (`~14:20`, local; just the moon when it is unknown), with the full line in the title.',
     'Links are split by kind, each its own column, two inline then "+N". A link is an icon and a label: a branch\'s name (a branch has no URL, so it is not a link), "PR #14" or "#14" for GitHub, a test or preview link\'s id, else the host. A test link is one whose system or id names test, staging, or preview. A PR adds a word from the watch, most telling first: merged, closed, draft, changes asked, checks failing, checks running, approved, checks passing, open.',
     'A PR of a repo the diff API serves (S-1533) opens the diff view in a pane on a click or tap, and its title says so; the GitHub page stays one Ctrl-, Cmd- or Shift-click away, and in the cell menu (a right-click on the cell, a long-press on a phone card\'s chip) beside "View diff". Any other PR, an issue or another link opens its URL in a new tab as before. The chip keeps its size, so the row does not move when the served repos arrive.',
     'Review reads the branch link\'s recorded verdict (approved, changes requested, commented) and Tests its result ("212 passed", or "2 failed of 14" in the error tone); the words carry the meaning, and the tone is only a second channel (' + ds('State vocabulary') + ').',
@@ -61,6 +61,11 @@ export const stories: Story[] = [{
         { label: 'one', node: <Agents row={row(FULL)} list={agentsOf('fx-dev')} /> },
         { label: 'two', node: <Agents row={row(FULL)} list={agentsOf('fx-dev', 'fx-review')} /> },
         { label: 'four, two more named in the title', node: <Agents row={row(FULL)} list={agentsOf('fx-dev', 'fx-review', 'fx-ops', 'fx-wait')} /> },
+      ]} />) },
+    { name: 'Agents: resting', render: () => (
+      <Row items={[
+        { label: 'one resting, the wake time beside its name', node: <Agents row={row(FULL)} list={[{ ...AGENTS.find((a) => a.id === 'fx-paused')!, resting: { reason: 'wait', waits: [{ id: 'rw1', kind: 'event', target: null, detail: 'PR #12', since: '2026-10-01T09:00:00.000Z', until: null }], expected_wake: new Date(Date.now() + 3 * 3600_000).toISOString() } }]} /> },
+        { label: 'one resting, with a working one', node: <Agents row={row(FULL)} list={[AGENTS.find((a) => a.id === 'fx-dev')!, { ...AGENTS.find((a) => a.id === 'fx-paused')!, resting: { reason: 'idle', waits: [], expected_wake: null } }]} /> },
       ]} />) },
     { name: 'Each kind of link', render: () => (
       <Row items={FULL.links!.map((l) => ({ label: l.system, node: <LinkChip l={l} className="w-link-body" /> }))} />) },

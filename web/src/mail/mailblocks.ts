@@ -8,6 +8,7 @@ import type { HLJSApi } from 'highlight.js';
 import type { TokenizerAndRendererExtension } from 'marked';
 import { icon } from '../icons';
 import { refLinks } from './refs';
+import { parsePatch, type PatchRow } from './parsePatch';
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
 const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, (c) => ESCAPES[c]);
@@ -103,35 +104,22 @@ function metrics(text: string): string | false {
 }
 
 // --- Diff ---------------------------------------------------------------------------
-// A unified diff, one fold per file with its counts. Short diffs open; long ones fold.
+// A unified diff: a header with the counts over one scroller of folds, one per file.
+const DIFF_OPEN_ROWS = 18;
 function diff(text: string): string {
-  interface DiffFile { path: string; lines: string[]; add: number; del: number }
-  const files: DiffFile[] = [];
-  let f!: DiffFile;
-  const start = (path: string) => { f = { path, lines: [], add: 0, del: 0 }; files.push(f); };
-  // A `+++` header names the file its `---` opened; one without a `---` before it opens its own (S-2084: a hand-written diff of new text).
-  let minus = false;
-  for (const line of text.replace(/\n$/, '').split('\n')) {
-    const was = minus;
-    minus = false;
-    const g = line.match(/^diff --git a\/(.*?) b\/(.*)$/);
-    if (g) { start(g[2]); continue; }
-    if (/^(index |new file mode|deleted file mode|similarity index|rename (from|to) )/.test(line) && f) continue;
-    if (line.startsWith('--- ')) { if (!f || f.lines.length) start(line.slice(4).replace(/^a\//, '')); minus = true; continue; }
-    if (line.startsWith('+++ ')) {
-      const p = line.slice(4).replace(/^b\//, '');
-      if (!was && (!f || f.lines.length)) start(p === '/dev/null' ? '' : p);
-      else if (p !== '/dev/null') f.path = p;
-      continue;
-    }
-    if (!f) start('');
-    const kind = line.startsWith('@@') ? 'hunk' : line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : 'ctx';
-    if (kind === 'add') f.add++;
-    if (kind === 'del') f.del++;
-    f.lines.push(`<span class="l ${kind}">${esc(line) || ' '}</span>`);
-  }
-  const total = files.reduce((n, x) => n + x.lines.length, 0);
-  return `<div class="mb-diff">${files.map((x) => `<details class="mb-file"${total <= 12 ? ' open' : ''}><summary>${icon('chevron-right', 'xs')}<span class="mb-path">${esc(x.path || 'diff')}</span><span class="mb-count"><span class="add">+${x.add}</span> <span class="del">−${x.del}</span></span></summary><pre><code>${x.lines.join('')}</code></pre></details>`).join('')}</div>`;
+  const files = parsePatch(text);
+  const total = files.reduce((n, x) => n + x.rows.length, 0);
+  const add = files.reduce((n, x) => n + x.add, 0), del = files.reduce((n, x) => n + x.del, 0);
+  // The marker is the row's first character, in its own span, so copying gives back the patch lines. `--ind` feeds the hanging indent.
+  const row = (r: PatchRow) => `<span class="l ${r.kind}" style="--ind:${r.ind}">${r.kind === 'hunk' ? esc(r.text) : `<span class="m">${esc(r.text.charAt(0) || ' ')}</span>${esc(r.text.slice(1))}`}</span>`;
+  // Every file opens when the whole diff fits the phone's cap (DIFF_OPEN_ROWS); otherwise only the first does.
+  const fold = (x: (typeof files)[number], i: number) => {
+    const slash = x.path.lastIndexOf('/'), dir = x.path.slice(0, slash + 1), name = x.path.slice(slash + 1) || 'diff';
+    return `<details class="mb-file"${total <= DIFF_OPEN_ROWS || i === 0 ? ' open' : ''}><summary>${icon('chevron-right', 'xs')}<span class="mb-path">${dir ? `<span class="mb-dir">${esc(dir)}</span>` : ''}<span class="mb-name">${esc(name)}</span></span><span class="mb-count"><span class="add">+${x.add}</span> <span class="del">−${x.del}</span></span></summary><pre><code>${x.rows.map(row).join('')}</code></pre></details>`;
+  };
+  const n = files.length, label = `${n} file${n === 1 ? '' : 's'}`;
+  // The header is a sibling of the folds, never inside a summary. Its Open slot stays hidden until a viewer can take the patch.
+  return `<div class="mb-diff"><div class="mb-dhead"><span class="mb-dsum">${label} · <span class="add">+${add}</span> <span class="del">−${del}</span></span><span class="mb-dopen" hidden></span></div><div class="mb-dscroll" role="region" tabindex="0" aria-label="Diff, ${label}">${files.map(fold).join('')}</div></div>`;
 }
 
 // --- Checklist --------------------------------------------------------------------

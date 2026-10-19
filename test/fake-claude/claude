@@ -104,6 +104,11 @@ const script = await loadScript();
 const write = (s) => process.stdout.write(s);
 const log = (s) => write(`${s.replace(/\n/g, '\n  ')}\n`);
 let input = '';
+// What the box shows of `input`: the same, but for a newline drawn as a space and a long paste
+// folded into one token, as Claude Code folds one (`folds`, newest last, each with its length).
+let shown = '';
+let folds = [];
+let pastes = 0;
 let busy = false;
 let dialog = null; // { options, resolve, lines }
 
@@ -114,12 +119,43 @@ function drawIdle() {
 
 // The box, then a rule and the footer under it, as Claude Code draws them: always in vim's insert
 // mode, as Claude Code shows it with vim keys (the test machines' setting). The cursor goes back
-// to the end of the box's text by drawing its line again, so wide characters need no column math.
+// to the end of the box's text by drawing its last row again, so wide characters in a one-row box
+// need no column math; a box that wraps counts one column per character.
 const FOOTER = `\r\n${'─'.repeat(40)}\r\n  -- INSERT --`;
-const boxLine = () => `\r\x1b[2K${bash ? '!' : '❯'} ${input}`;
-function drawBox() {
-  write(`${boxLine()}${FOOTER}\x1b[2A${boxLine()}`);
+// A script's top-level `placeholder` (S-2123): faint text in the empty box, drawn dim as Claude
+// Code 2.1.303 draws its placeholder (test/fixtures/claude-ghost/placeholder.ansi), with the
+// cursor left just after the mark. Typing or a paste replaces it.
+const placeholder = String(script.placeholder ?? '');
+const ghost = () => (placeholder && !input && !bash ? `\x1b[2m${placeholder}\x1b[0m\r\x1b[2C` : '');
+const boxText = () => `${bash ? '!' : '❯'} ${shown}`;
+const boxLine = () => `\r\x1b[2K${boxText()}${ghost()}`;
+const cols = () => process.stdout.columns || 80;
+const rowsOf = (len) => Math.max(1, Math.ceil(len / cols()));
+// A script's top-level `boxRows` (S-2123): a box taller than that shows a window of its last rows,
+// the mark on the first, each row padded as Claude Code pads one (2.1.303 shows five at 40x20).
+const boxRows = Number(script.boxRows) || 0;
+// How many rows the box fills on screen now, the cursor on the last.
+let drawnRows = 1;
+// The box drawn again with its footer, from its first row: `prev` is how many columns it filled
+// before (0 at a fresh line), with the cursor at its end. The terminal wraps a long box.
+function drawBox(prev = 0) {
+  const up = prev ? drawnRows - 1 : 0;
+  const chars = [...boxText()];
+  let rows = [boxText()];
+  let last = chars.slice((rowsOf(chars.length) - 1) * cols()).join('');
+  if (boxRows && rowsOf(chars.length) > 1) {
+    const text = [...shown];
+    const w = cols() - 2;
+    rows = [];
+    for (let i = 0; i < text.length; i += w) rows.push(text.slice(i, i + w).join(''));
+    rows = rows.slice(-boxRows).map((r, i) => `${i ? ' ' : bash ? '!' : '❯'} ${r}`);
+    last = rows.at(-1);
+  }
+  write(`${up ? `\x1b[${up}A` : ''}\r\x1b[J${rows.join('\r\n')}${ghost()}${FOOTER}\x1b[2A\r${last}`);
+  drawnRows = rows.length > 1 ? rows.length : rowsOf(chars.length);
+  if (menu) (menu = null), syncMenu();
 }
+const width = () => [...boxText()].length;
 
 function openDialog(title, options) {
   // Claude Code draws a rule above its dialogs.
@@ -166,6 +202,29 @@ function dropBackspace() {
 }
 
 let pasting = false;
+let pasted = '';
+// Claude Code folds a paste of over 800 characters, or of more than two lines, into one token.
+function endPaste() {
+  if (!pasted) return;
+  const prev = width();
+  const lines = pasted.split('\n').length;
+  const fold = pasted.length > 800 || lines > 2;
+  const token = `[Pasted text #${++pastes} +${lines} lines]`;
+  if (fold) folds.push({ token, length: pasted.length });
+  (input += pasted), (shown += fold ? token : pasted.replace(/\n/g, ' ')), (pasted = '');
+  if (!busy) drawBox(prev);
+  menuDismissed = false;
+  syncMenu();
+}
+// A script's top-level `dropPastes` (S-2123): that many bracketed pastes are lost, as a paste into
+// a Claude Code still resuming is.
+let dropPastes = Number(script.dropPastes) || 0;
+let dropping = false;
+// `holdPastes` (S-2123): that many pastes are held back, as a stalled Claude Code holds one, and
+// land just before the next paste does.
+let holdPastes = Number(script.holdPastes) || 0;
+let holding = false;
+let heldPaste = null;
 // A chunk can split a UTF-8 character or an escape sequence (a paste marker, say), so the
 // decoder keeps a partial character, and a trailing partial escape waits for the next chunk.
 const decoder = new StringDecoder('utf8');
@@ -189,14 +248,34 @@ function onKeys(data) {
   const esc = s.lastIndexOf('\x1b');
   if (esc >= 0 && partialEscape.test(s.slice(esc))) (held = s.slice(esc)), (s = s.slice(0, esc));
   while (s) {
-    if (s.startsWith('\x1b[200~')) (pasting = true), (s = s.slice(6));
-    else if (s.startsWith('\x1b[201~')) (pasting = false), (s = s.slice(6));
+    if (s.startsWith('\x1b[200~') && heldPaste !== null) (s = `\x1b[200~${heldPaste}\x1b[201~${s}`), (heldPaste = null);
+    if (s.startsWith('\x1b[200~')) {
+      if (dropPastes > 0) dropPastes--, (dropping = true);
+      else if (holdPastes > 0) holdPastes--, (holding = true), (heldPaste = '');
+      else pasting = true;
+      s = s.slice(6);
+    } else if (s.startsWith('\x1b[201~')) (pasting = dropping = holding = false), (s = s.slice(6)), endPaste();
     else if (s.startsWith('\x1b')) s = s.slice(/^\x1b\[[0-9;]*[A-Za-z~]/.exec(s)?.[0].length ?? 1);
     else {
       const c = s[0];
       s = s.slice(1);
+      if (dropping) continue;
+      if (holding) {
+        heldPaste += c;
+        continue;
+      }
+      if (pasting) {
+        pasted += c === '\r' ? '\n' : c;
+        continue;
+      }
       if (c === '\x03' || c === '\x04') return exit('prompt_input_exit');
-      if (c === '\r' && !pasting) {
+      // While the file a script's `holdEnter` names exists, Enter does nothing (each one is logged
+      // to that path plus `.dropped`), as a Claude Code too busy to take it (S-2123).
+      if (c === '\r' && script.holdEnter && existsSync(script.holdEnter)) {
+        appendFileSync(`${script.holdEnter}.dropped`, `${sessionId}\n`);
+        continue;
+      }
+      if (c === '\r') {
         if (menu) {
           (input = menu), (menu = null);
         }
@@ -206,8 +285,10 @@ function onKeys(data) {
         // A script's `rewrite` ({FROM: TO}) changes what is submitted, as if the harness had.
         let text = raw.trim();
         for (const [from, to] of Object.entries(script.rewrite ?? {})) text = text.split(from).join(to);
-        (input = ''), (bash = false), (menuDismissed = false);
-        if (!busy) write('\r\x1b[J');
+        const up = drawnRows - 1;
+        drawnRows = 1;
+        (input = shown = ''), (folds = []), (bash = false), (menuDismissed = false);
+        if (!busy) write(`${up ? `\x1b[${up}A` : ''}\r\x1b[J`);
         if (text) enqueue(text, 'typed');
         else if (!busy) drawBox();
       } else if ((c === '\x7f' || c === '\b') && dropBackspace()) {
@@ -215,20 +296,31 @@ function onKeys(data) {
       } else if (c === '\x7f' || c === '\b') {
         // One grapheme per backspace, as Claude Code deletes; the box is redrawn.
         if (input) {
-          const last = [...new Intl.Segmenter().segment(input)].pop().segment;
-          input = input.slice(0, input.length - last.length);
-          busy || write(boxLine());
+          const prev = width();
+          const fold = folds.at(-1);
+          if (fold && shown.endsWith(fold.token)) {
+            // A folded paste goes in one backspace, as Claude Code deletes its token.
+            (input = input.slice(0, input.length - fold.length)), (shown = shown.slice(0, shown.length - fold.token.length)), folds.pop();
+          } else {
+            const last = [...new Intl.Segmenter().segment(input)].pop().segment;
+            input = input.slice(0, input.length - last.length);
+            shown = shown.slice(0, shown.length - (last === '\n' ? 1 : last.length));
+          }
+          busy || (prev > cols() ? drawBox(prev) : write(boxLine()));
         }
         else if (bash && !busy) (bash = false), write('\r\x1b[2K❯ ');
         menuDismissed = false;
         syncMenu();
-      } else if (c === '!' && !input && !bash && !busy && !pasting) {
+      } else if (c === '!' && !input && !bash && !busy) {
         bash = true;
         write('\r\x1b[2K! ');
       } else {
-        const ch = c === '\r' || c === '\n' ? '\n' : c;
-        input += ch;
-        if (!busy) write(ch === '\n' ? ' ' : ch);
+        const ch = c === '\n' ? '\n' : c;
+        // The first character replaces a placeholder, and one past the row's end wraps: the box is drawn again.
+        const prev = width();
+        const redraw = (!input && ghost()) || prev >= cols();
+        (input += ch), (shown += ch === '\n' ? ' ' : ch);
+        if (!busy) redraw ? drawBox(prev) : write(ch === '\n' ? ' ' : ch);
         menuDismissed = false;
         syncMenu();
       }
@@ -567,6 +659,9 @@ async function step(raw, turn) {
 
 async function runTurn(prompt, source) {
   vars.prompt = prompt;
+  // While the file a script's `holdPromptHook` names exists, UserPromptSubmit waits, as on a
+  // stalled daemon (S-2123).
+  while (script.holdPromptHook && existsSync(script.holdPromptHook)) await new Promise((r) => setTimeout(r, 100));
   await hook('UserPromptSubmit', { prompt });
   // A bash-mode command is recorded as Claude Code records one.
   record({ type: 'user', message: { role: 'user', content: prompt.startsWith('!') ? `<bash-input>${prompt.slice(1)}</bash-input>` : prompt } });

@@ -41,6 +41,8 @@ export function Rendered({ text, className = '', base, resolve }: { text: string
   useLayoutEffect(() => { linkPrUrls(ref.current!, repos) }, [html, repos])
   // A mail link opens its thread at the mail it names (S-415), as in a thread's own mails.
   const click = (e: MouseEvent) => {
+    // A fold or control in a diff block never reaches the card around it (S-2100).
+    if ((e.target as Element).closest('.mb-diff')) e.stopPropagation()
     if (fileLinkClick(e)) return
     const tl = (e.target as Element).closest<HTMLElement>('[data-thread-link]')
     if (!tl) return

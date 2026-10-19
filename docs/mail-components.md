@@ -12,7 +12,7 @@ The renderer is `web/src/mail/mailblocks.ts` (framework-free; `web/src/mail/Thre
 | Decision | ` ```decision ` block: question lines, then `- Option: why` lines; `(recommended)` marks one | Each option is a button in the thread world. Clicking replies in the thread with `Chose **Option**.` The block then shows the choice. |
 | Callout | GitHub alert: `> [!DONE]`, `[!BLOCKED]`, `[!WARNING]`, `[!NOTE]` | Also `[!INFO]`, `[!TIP]`, `[!IMPORTANT]`, `[!SUCCESS]`, `[!CAUTION]`, `[!ERROR]`, `[!FAILED]`. A hairline note with a coloured label, no tinted fill: tinted callouts are banned. |
 | Details | `<details><summary>Summary</summary>` … `</details>` | Folded evidence. Markdown works inside with blank lines around it. |
-| Diff | ` ```diff ` block, unified diff | One fold per file with `+`/`−` counts; folds when longer than 12 lines. |
+| Diff | ` ```diff ` block, unified diff | A header with the file count and `+`/`−` totals over one scroller (capped at 32 lines, 18 on a phone, and half the screen), one fold per file with its counts and a sticky summary. Rows wrap with a hanging indent. All files open when the diff fits 18 rows; otherwise only the first. |
 | Metrics | ` ```metrics ` block: `Label: value`, optional ` — note`, optional `[success]`, `[warning]`, `[error]` | Three to five numbers side by side, tabular figures. |
 | Agent mention | `@name` | The agent's harness mark and name in link ink; opens its world. Mention chips are banned, so it's ink, not a chip. |
 | Yes or no | ` ```decision ` or ` ```yesno ` block with only a question; `(recommended: yes)` or `(recommended: no)` | Two buttons; same reply as Decision. |

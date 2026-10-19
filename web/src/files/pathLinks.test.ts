@@ -31,9 +31,12 @@ describe('findPaths', () => {
     expect(found('notes/todo.md and web.config.ts:4')).toEqual([['notes/todo.md', 'notes/todo.md', undefined], ['web.config.ts:4', 'web.config.ts', 4]])
   })
   it('finishes on a long pathological line (no quadratic backtracking)', () => {
+    // Quadratic backtracking on 40-60 KB takes minutes; the bound is loose enough for a loaded machine.
+    const t = performance.now()
     expect(found('+a/'.repeat(20_000))).toEqual([])
     expect(found('a/'.repeat(20_000) + '!')).toEqual([])
-  })
+    expect(performance.now() - t).toBeLessThan(3000)
+  }, 10_000)
 })
 
 describe('resolvePath', () => {

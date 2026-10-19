@@ -1,14 +1,15 @@
 // The views tabs show, by key: `agent:ID` (its terminal), `view:ID` (stam's own view of
 // its conversation, OwnView.tsx), `shell:MACHINE:ID` (a plain
 // terminal), `details:ID`, `instructions:ID` (what the agent gets), `inventory:ID` (the same as sized, summarized blocks), `inventory` (that for an agent type), `mail:ID` (an inbox;
-// `mail:human` is the human's), `thread:ID`, `itsa:ID` (an ITSA), `image:ID` (staged images, S-1475), `req:KEY` (a requirement), `compliance` (the requirements' compliance matrix), `board:ID` and `board:all` (a board of ITSAs), `work` (the Work page), `system` (the system view), `process` (a process, read-only), `files` (the Files world) and `file:HOST:PATH[#Lline]` (one file), `diff:REPO#N` (one PR's diff, S-1531), `config` (Settings), and `usage`. Each view
+// `mail:human` is the human's), `thread:ID`, `itsa:ID` (an ITSA), `image:ID` (staged images, S-1475), `req:KEY` (a requirement), `compliance` (the requirements' compliance matrix), `board:ID` and `board:all` (a board of ITSAs), `work` (the Work page), `system` (the system view), `process` (a process, read-only), `files` (the Files world) and `file:HOST:PATH[#Lline]` (one file), `diff:REPO#N` (one PR's diff, S-1531), `patch:HASH` (a patch pasted in mail, S-2103), `config` (Settings), and `usage`. Each view
 // renders once into its own element, which panes adopt; a view not on screen waits, alive,
 // in a hidden store.
 import { lazy, Suspense, useEffect, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { hash } from '../api'
 import { baseName, parseFileKey } from '../files/fileKey'
-import { diffTitle, parseDiffKey } from '../diff/diffKey'
+import { diffTitle, parseDiffKey, parsePatchKey } from '../diff/diffKey'
+import { readPatch } from '../diff/patchStore'
 import { HARNESS, k, money, stateOf, STATE_LABEL } from '../format'
 import { Glyph } from '../Glyph'
 import { Icon } from '../Icon'
@@ -16,7 +17,7 @@ import { stateHelp } from '../legend'
 import { destroyViewElement, leaves, mainWorld, useMadeViews, useShell, viewElement } from '../shell/layout'
 import { byId, getData, useData } from '../store'
 import type { Agent } from '../types'
-import { clock, waitLabel, waitsOf } from '../waits'
+import { clock, restText, waitLabel, waitsOf } from '../waits'
 import { ConfigView } from './ConfigView'
 import { DetailsView } from './DetailsView'
 import { InstructionsView } from './InstructionsView'
@@ -36,6 +37,7 @@ import { RapidView } from './RapidView'
 import { getUi, useUi } from '../ui/state'
 import { WorkView } from '../work/WorkView'
 import { SwipeView } from '../mail/SwipeView'
+import { InboxView } from '../mail/InboxView'
 import { ReqView, reqTitles } from '../req/ReqView'
 import { ComplianceView } from '../req/ComplianceView'
 import { findReq } from '../req/store'
@@ -84,6 +86,7 @@ export function agentTooltip(a: Agent) {
     `${HARNESS[a.harness] ?? a.harness} · ${a.model ?? 'default model'}${a.effort ? ' · ' + a.effort : ''}`,
     `Context ${k(a.context_tokens)} · spent ${money(a.cost_usd ?? 0)}`, `${a.machine}: ${a.cwd}`]
   if (a.role) lines.splice(2, 0, a.role)
+  if (a.resting) lines.push(restText(a.resting))
   if (a.permission_mode === 'bypass') lines.push('Bypass permissions')
   if (a.unread) lines.push(`${a.unread} unread mail`)
   if (a.pending_requests) lines.push(`${a.pending_requests} permission request waiting`)
@@ -92,13 +95,15 @@ export function agentTooltip(a: Agent) {
 }
 
 export function validKey(key: string) {
-  return /^(agent|view|details|instructions|inventory|type|mail|thread|itsa|board|req|image):.+/.test(key) || /^shell:[^:]+:.+/.test(key) || key === 'config' || key === 'inventory' || key === 'usage' || key === 'work' || key === 'system' || key === 'process' || key === 'swipe' || key === 'compliance' || key === 'files' || /^file:[^:/]+:\/.+/.test(key) || parseDiffKey(key) !== null
+  return /^(agent|view|details|instructions|inventory|type|mail|thread|itsa|board|req|image):.+/.test(key) || /^shell:[^:]+:.+/.test(key) || key === 'config' || key === 'inventory' || key === 'usage' || key === 'work' || key === 'system' || key === 'process' || key === 'swipe' || key === 'inbox' || key === 'compliance' || key === 'files' || /^file:[^:/]+:\/.+/.test(key) || parseDiffKey(key) !== null || parsePatchKey(key) !== null
 }
 
 // Whether a saved tab still has something to show after a reload.
 export function keepKey(key: string) {
   const d = getData()
   if (key === 'details' || key === 'approvals') return false
+  // A patch tab lives in this browser's LRU (S-2103): it survives a reload only while its entry does.
+  if (key.startsWith('patch:')) { const h = parsePatchKey(key); return !!h && readPatch(h) !== null }
   if (key.startsWith('agent:') || key.startsWith('view:') || key.startsWith('details:') || key.startsWith('instructions:') || key.startsWith('inventory:')) return !!byId(key.slice(key.indexOf(':') + 1))
   // An image tab's pictures live in the page that opened it; the layout is shared, so a page never closes one.
   if (key.startsWith('mail:')) return key === 'mail:human' || !!byId(key.slice(5))
@@ -154,6 +159,7 @@ export function viewMeta(key: string): Meta {
   if (key === 'work') return { title: 'Work', icon: <Icon name="layout-list" />, tooltip: 'Every open issue, grouped by issue tree' }
   if (key === 'system') return { title: 'System', icon: <Icon name="network" />, tooltip: 'The whole system: every agent in its tree, with its work' }
   if (key === 'swipe') return { title: 'Swipe', icon: <Icon name="layers" />, tooltip: 'Your inbox as cards: left archives, right leaves, up defers' }
+  if (key === 'inbox') return { title: 'Inbox', icon: <Icon name="inbox" />, tooltip: 'Your mail: filter, search, and open a thread beside the list', badge: d.unread || '' }
   if (key === 'files') return { title: 'Files', icon: <Icon name="folder" />, tooltip: 'Files on this machine and its peers' }
   if (key.startsWith('file:')) {
     const f = parseFileKey(key)
@@ -162,6 +168,10 @@ export function viewMeta(key: string): Meta {
   if (key.startsWith('diff:')) {
     const d = parseDiffKey(key)
     return { title: d ? diffTitle(d.pr) : 'Diff', icon: <Icon name="git-pull-request" />, tooltip: d ? `${d.repo} PR #${d.pr}` : undefined }
+  }
+  if (key.startsWith('patch:')) {
+    const h = parsePatchKey(key)
+    return { title: h ? `Patch ${h}` : 'Patch', icon: <Icon name="git-pull-request" />, tooltip: 'A patch pasted in mail, opened in the diff viewer' }
   }
   if (key === 'process') return { title: 'Process', icon: <Icon name="git-branch" />, tooltip: 'A process, drawn read-only: its lanes, nodes, and live counts' }
   if (key === 'inventory') return { title: 'Inventory by type', icon: <Icon name="layers" /> }
@@ -215,8 +225,9 @@ function Content({ viewKey: key }: { viewKey: string }) {
   if (key === 'process') return processView(key)
   if (key === 'files') return <Suspense fallback={null}><FilesView /></Suspense>
   if (key.startsWith('file:')) return <Suspense fallback={null}><FileView viewKey={key} /></Suspense>
-  if (key.startsWith('diff:')) return <Suspense fallback={null}><DiffView viewKey={key} /></Suspense>
+  if (key.startsWith('diff:') || key.startsWith('patch:')) return <Suspense fallback={null}><DiffView viewKey={key} /></Suspense>
   if (key === 'swipe') return <SwipeView />
+  if (key === 'inbox') return <InboxView />
   if (key === 'inventory') return <TypeInventoryView />
   if (key === 'config') return <ConfigView />
   if (key === 'usage') return <UsageHosted />

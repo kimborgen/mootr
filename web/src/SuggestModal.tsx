@@ -16,7 +16,7 @@ import { useData } from './store'
 import { openPreview, openPreviewAt } from './SuggestPreview'
 import { IDLE_MS, SUGGEST_LIMIT, asksNow, goTo, queryOf, routeFor, routeName, sendOn, suggestPath, useRescore, type Route } from './suggest-pick'
 import { useLongPress } from './ui/longpress'
-import { toast } from './ui/menu'
+import { hideMenu, toast } from './ui/menu'
 import { getUi, setUi, useUi } from './ui/state'
 import type { SearchResult } from './types'
 
@@ -180,7 +180,9 @@ function SuggestPanel() {
     return () => cancelAnimationFrame(raf)
   }, [])
   return <>
-    <div id="suggest-scrim" onClick={closeSuggest} />
+    {/* A scrim click closes a suggestion's preview over the prompt as well, even when it lands before the
+      preview's own outside press is listening (S-2020). */}
+    <div id="suggest-scrim" onClick={() => { hideMenu(); closeSuggest() }} />
     <section id="suggest-modal" aria-label="Write and send" onKeyDownCapture={s.onKey}
       // Esc closes the prompt unless the box took it first: it discards a recording.
       onKeyDown={(e) => { if (e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); closeSuggest() } }}>

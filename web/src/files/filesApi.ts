@@ -36,6 +36,8 @@ export const IMAGE_MAX = 50 * 1024 * 1024
 // is refused. Streaming a bigger one needs a token-in-URL or ticket download, a separate auth change.
 export const DOWNLOAD_MAX = 500 * 1024 * 1024
 export const tooBigToDownload = (size: number) => `${baseMb(size)} MB is too large to download in the browser.`
+// A download stopped by the byte count knows only that the file is past the cap, not its size.
+const overCap = () => `Over ${baseMb(DOWNLOAD_MAX)} MB is too large to download in the browser.`
 const baseMb = (size: number) => Math.max(1, Math.round(size / 1024 / 1024))
 
 export interface Body { type: string; size: number; truncated: boolean; text?: string; blob?: Blob }
@@ -61,6 +63,8 @@ export async function readFile(host: string, path: string, all = false, signal?:
 
 // The body as a blob, read in chunks; null (body cancelled) once it passes `max` bytes. `onChunk` gets the bytes so far.
 async function readCapped(r: Response, max: number, type: string, onChunk?: (got: number) => void): Promise<Blob | null> {
+  // No streams: the body can only be read whole, so the cap is checked after the read. downloadBlob has already refused a
+  // size header past the cap, so this is only reached for a body whose size the headers didn't say.
   if (!r.body?.getReader) {
     const b = await r.blob()
     return b.size > max ? null : b
@@ -89,7 +93,7 @@ export async function downloadBlob(host: string, path: string, onProgress?: (don
   if (size > DOWNLOAD_MAX) { void r.body?.cancel(); throw new Error(tooBigToDownload(size)) }
   const type = r.headers.get('content-type') ?? 'application/octet-stream'
   const blob = await readCapped(r, DOWNLOAD_MAX, type, onProgress && size ? (got) => onProgress(Math.min(1, got / size)) : undefined)
-  if (!blob) throw new Error(tooBigToDownload(DOWNLOAD_MAX + 1))
+  if (!blob) throw new Error(overCap())
   return blob
 }
 

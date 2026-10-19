@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { STAM_HOME } from './config.ts';
+import { derivedRepoParent } from './default-repo.ts';
 
 export class FilesError extends Error {
   status: number;
@@ -33,8 +34,12 @@ export function typeByExt(name: string): string {
 // The headers every served file carries: no script can run from it, whatever its type.
 export const SAFE_HEADERS = { 'accept-ranges': 'bytes', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'", 'x-content-type-options': 'nosniff', 'cache-control': 'private' };
 
+// The default roots: the folder holding the checkout stam runs from, the mail attachments (S-2083) and the
+// agents' worktrees (S-2101). A repo registered in itsa.repos adds nothing: more roots come only from an
+// explicit `files.roots`.
 export function defaultRoots(): string[] {
-  return [join(homedir(), 'projects'), join(STAM_HOME, 'attachments')];
+  const parent = derivedRepoParent();
+  return [...(parent ? [parent] : [join(homedir(), 'projects')]), join(STAM_HOME, 'attachments'), join(STAM_HOME, 'worktrees')];
 }
 
 const expand = (p: string) => (p === '~' ? homedir() : p.startsWith('~/') ? join(homedir(), p.slice(2)) : p);
@@ -75,9 +80,10 @@ export function denied(abs: string): boolean {
       if (d === '.claude' ? rel[0]?.startsWith('.claude') : relPath === d || relPath.startsWith(d + '/')) return true;
     }
   }
-  // stam's own home holds the tokens (and every agent's): only the mail attachments in it are open.
+  // stam's own home holds the tokens (and every agent's): only the mail attachments and the agents' worktrees
+  // in it are open. The credential patterns above still hold inside a worktree.
   const stam = resolveSafe(STAM_HOME).toLowerCase();
-  if (inside(low, stam) && !inside(low, join(stam, 'attachments'))) return true;
+  if (inside(low, stam) && !inside(low, join(stam, 'attachments')) && !inside(low, join(stam, 'worktrees'))) return true;
   return false;
 }
 

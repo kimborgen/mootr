@@ -27,7 +27,7 @@ URL="$(sed -n 's/^URL=//p' "$LOG")"
 echo "screenshots: $OUT"
 rc=0
 # In the background, so a signal's trap runs at once rather than after the check ends.
-node "$ROOT/web/check/interactions.mjs" "$URL" "$OUT" ${UI_FLOWS:-tabs rank notes spawn types tools steps archive cos mail maillink search itsa board work term machines rules back layout requirements} &
+node "$ROOT/web/check/interactions.mjs" "$URL" "$OUT" ${UI_FLOWS:-tabs rank notes spawn types tools steps archive cos mail maillink search itsa board work term machines rules back layout requirements permissions} &
 CHECK=$!
 trap 'kill_tree $CHECK; exit 130' INT TERM HUP
 wait $CHECK || rc=$?

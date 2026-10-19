@@ -12,7 +12,7 @@ vi.mock('../files/open', () => ({ openDiff: opened, openFile: vi.fn() }))
 import { resetDiffRepos } from '../diff/diffRepos'
 import type { ItsaLink } from '../types'
 import { LinkChip } from './columns'
-import { clearPress, markPress, PRESS_MS } from './press-flag'
+import { clearPress, markPress, PRESS_MS, refreshPress } from './press-flag'
 
 const gh = (n: number, url: string): ItsaLink => ({ n, system: 'github', external_id: null, url })
 let host: HTMLElement
@@ -64,6 +64,24 @@ describe('the Work PR chip', () => {
       expect(click(a).defaultPrevented).toBe(true)
       expect(opened).toHaveBeenCalledWith('stam2', 14)
     } finally { vi.useRealTimers() }
+  })
+  it('a hold longer than the window still swallows its lift click once the finger lifts (S-1918)', async () => {
+    vi.useFakeTimers()
+    try {
+      const a = await chip(gh(1, 'https://github.com/example/repo/pull/14'))
+      markPress()
+      vi.advanceTimersByTime(PRESS_MS * 3)
+      refreshPress()
+      expect(click(a).defaultPrevented).toBe(true)
+      expect(opened).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+  it('a lift with no long-press behind it marks nothing', async () => {
+    const a = await chip(gh(1, 'https://github.com/example/repo/pull/14'))
+    clearPress()
+    refreshPress()
+    click(a)
+    expect(opened).toHaveBeenCalledWith('stam2', 14)
   })
   it('at scale: 400 rows of chips mark the served ones, and the repos arriving later updates them all at once', async () => {
     resetDiffRepos([], true)

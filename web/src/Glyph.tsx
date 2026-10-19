@@ -1,7 +1,7 @@
 // An agent's mark: the harness icon in its hue inside a state ring. State owns colour, and a
 // pip at the ring's corner gives the states that need telling apart a shape too, so colour is
 // never the only signal: a dot for working, a hollow dot for waiting, ! for blocked, × for
-// errored, bars for paused. Idle and starting have no pip; stopped agents fade to disabled.
+// errored, bars for paused, a dash for resting. Idle and starting have no pip; stopped agents fade to disabled.
 import type { CSSProperties } from 'react'
 import { HARNESS, STATE_COLOR, stateOf } from './format'
 import { Icon } from './Icon'
@@ -16,6 +16,7 @@ const PIP: Record<string, string> = {
   blocked: '<path d="M4 1.5v3.2"/><path d="M4 6.6v.01"/>',
   errored: '<path d="m2 2 4 4"/><path d="m6 2-4 4"/>',
   paused: '<path d="M2.8 2v4"/><path d="M5.2 2v4"/>',
+  resting: '<path d="M2.2 4h3.6"/>',
 }
 const pipSvg = (s: string) => PIP[s] ? `<svg viewBox="0 0 8 8" aria-hidden="true">${PIP[s]}</svg>` : ''
 const pipHtml = (s: string) => s in PIP ? `<span class="pip">${pipSvg(s)}</span>` : ''

@@ -10,7 +10,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, realpathSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir, tempHome } from './tmphome.mjs';
 
@@ -437,20 +437,28 @@ test('pr_open warns only for a stam worktree, and relink refuses the live checko
   }
 });
 
-test('a linked worktree is never the live deploy checkout, even when settings name it as stam2 (S-1863)', () => {
+test('a linked worktree is never the live deploy checkout, even when the release source is that worktree (S-1863)', () => {
   const repo = repoWith(join(work, 'own-repo'), [''], 'own');
   const real = ws.createWorkspace({ kind: 'worktree', repo, branch: 'stam/own' }, 'own');
-  const settingsFile = join(process.env.STAM_HOME, 'settings.json');
+  const saved = process.env.STAM_DEPLOY_REPO;
   try {
-    // A CLI run from a worktree's own copy defaults itsa.repos.stam2 to that worktree.
-    writeFileSync(settingsFile, JSON.stringify({ itsa: { repos: { stam2: real.cwd } } }));
-    assert.equal(ws.liveCheckoutRefusal(real.cwd), null);
-    assert.equal(ws.relinkRefusal(real.cwd), null);
-    // A real checkout named the same way is still the live one, and still refused.
-    writeFileSync(settingsFile, JSON.stringify({ itsa: { repos: { stam2: repo } } }));
+    // A CLI run from a worktree's own copy derives that worktree as the checkout ("a checkout is its own").
+    // Load the workspace module from that copy (its source, in a child process), so deployCheckout() really
+    // resolves to the worktree and the refusal has to come from the linked-worktree guard.
+    for (const d of ['src', 'scripts']) cpSync(join(import.meta.dirname, '..', d), join(real.cwd, d), { recursive: true });
+    symlinkSync(join(import.meta.dirname, '..', 'node_modules'), join(real.cwd, 'node_modules'));
+    const probe = `const w = await import(${JSON.stringify(join(real.cwd, 'src', 'workspace.ts'))}); console.log(JSON.stringify([w.deployCheckout(), w.liveCheckoutRefusal(${JSON.stringify(real.cwd)}), w.relinkRefusal(${JSON.stringify(real.cwd)})]))`;
+    const env = { ...process.env };
+    delete env.STAM_DEPLOY_REPO;
+    const [deploy, live, relink] = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', probe], { env, cwd: real.cwd, encoding: 'utf8' }).trim().split('\n').pop());
+    assert.equal(deploy, realpathSync(real.cwd), 'the copy derives itself as the deploy checkout');
+    assert.equal(live, null);
+    assert.equal(relink, null);
+    // A real checkout named by the deploy watcher is still the live one, and still refused.
+    process.env.STAM_DEPLOY_REPO = repo;
     assert.match(ws.relinkRefusal(repo, true), /live deploy checkout/);
   } finally {
-    rmSync(settingsFile, { force: true });
+    if (saved === undefined) delete process.env.STAM_DEPLOY_REPO; else process.env.STAM_DEPLOY_REPO = saved;
     ws.cleanupWorkspace(real, true);
   }
 });

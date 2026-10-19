@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 // S-1531: the diff view against a mocked API: header, Meat chips and per-file overrides, the states of a file, viewed marks, and the keys.
+import { EditorView } from '@codemirror/view'
 import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DiffView, type DiffViewApi } from './DiffView'
+import type { DiffSource } from './diffSource'
+import { storePatch } from './patchStore'
 import type { DiffFileItem } from './diffModel'
 import type { DeclOptions } from '../decl/declExt'
 
@@ -246,6 +249,52 @@ describe('the diff view', () => {
     expect(main.scrollTop).toBe(0)
   })
 
+  it('a narrow pane folds Wrap and the text size into one control that shows the wrap state (S-1918)', async () => {
+    const was = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 400 })
+    try {
+      const host = await mount()
+      expect(host.querySelector('.codeprefs')).toBeNull()
+      const b = host.querySelector<HTMLElement>('.dv-text')!
+      expect(b.textContent).toBe('Aa · Wrap ○')
+      click(b)
+      const pop = host.querySelector('.dv-text-pop')!
+      expect(byText(pop, 'button', 'Wrap')).toBeTruthy()
+      expect(pop.querySelector('[aria-label="Larger text"]')).toBeTruthy()
+      click(byText(pop, 'button', 'Wrap'))
+      expect(host.querySelector('.dv-text')?.textContent).toBe('Aa · Wrap ●')
+      click(byText(pop, 'button', 'Close'))
+      expect(host.querySelector('.dv-text-pop')).toBeNull()
+    } finally { Object.defineProperty(window, 'innerWidth', { configurable: true, value: was }) }
+  })
+
+  it('with two views open, j/k move only the one last pointed at (S-1918)', async () => {
+    const one = await mount()
+    const rootOne = root!
+    const hostTwo = document.createElement('div')
+    document.body.append(hostTwo)
+    const rootTwo = createRoot(hostTwo)
+    act(() => rootTwo.render(<DiffView viewKey="diff:stam2#7" />))
+    await vi.waitFor(() => expect(hostTwo.querySelector('.dv-file')).not.toBeNull())
+    const mains = [one.querySelector<HTMLElement>('.dv-main')!, hostTwo.querySelector<HTMLElement>('.dv-main')!]
+    const rect = (top: number) => ({ top, bottom: top + 1000, left: 0, right: 0, width: 0, height: 1000, x: 0, y: top, toJSON() {} }) as DOMRect
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const m = mains.find((x) => x === this || x.contains(this))
+      if (!m || m === this) return rect(0)
+      const i = [...m.querySelectorAll('[data-dv-file]')].indexOf(this as Element)
+      return i >= 0 ? rect(i * 1000 - m.scrollTop) : rect(0)
+    })
+    const press = () => act(() => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true })) })
+    act(() => { hostTwo.querySelector('.dv-main')!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })) })
+    press()
+    expect([mains[0].scrollTop, mains[1].scrollTop]).toEqual([0, 1000])
+    act(() => { mains[0].dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })) })
+    press()
+    expect([mains[0].scrollTop, mains[1].scrollTop]).toEqual([1000, 1000])
+    act(() => rootTwo.unmount())
+    act(() => rootOne.unmount())
+  })
+
   it('ignores keys typed into a field', async () => {
     const host = await mount()
     const main = host.querySelector<HTMLElement>('.dv-main')!
@@ -394,6 +443,27 @@ describe('go to declaration', () => {
     await vi.waitFor(() => expect(document.querySelector('.decl-pick [role=alert]')?.textContent).toContain('open the diff again'))
   })
 
+  // S-2103: a source that cannot look a name up (a patch file the checkout could not resolve) says so quietly, with no
+  // request at all. The stub still offers fetched sides, so the file draws and its identifier hooks exist.
+  it('a source with no declaration lookup answers quietly and asks nothing', async () => {
+    const stub: DiffSource = {
+      title: 'Patch deadbeefdeadbeef', provenance: 'patch', scope: 'patch:deadbeefdeadbeef',
+      loadList: async () => ({ files: FILES, shas: { head: HEAD, base: BASE, mergeBase: BASE }, review: null, empty: 'This patch has no files.' }),
+      sideRef: () => ({ repo: 'stam2', pr: 7, head: HEAD, base: BASE }),
+      loadSide: () => Promise.resolve({ kind: 'missing' }),
+      declQuery: () => null,
+      hunks: () => null,
+    }
+    const host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    act(() => root!.render(<DiffView viewKey="patch:deadbeefdeadbeef" source={stub} />))
+    await vi.waitFor(() => expect(host.querySelector('.dv-count')?.textContent).toBe('6 of 9 files'))
+    tap(await hook('src/a.ts'), 'f')
+    await vi.waitFor(() => expect(document.querySelector('.decl-pick[data-state=none]')?.textContent).toContain('No declaration of f found.'))
+    expect(calls.some((u) => u.startsWith('/api/decl?'))).toBe(false)
+  })
+
   // S-1820: .dv-main scrolls, so the draw-ahead observer takes it as its root and its 800 px margin is not clipped.
   it('observes files from the .dv-main scroll container', async () => {
     const opts: IntersectionObserverInit[] = []
@@ -430,12 +500,22 @@ describe('the review verdict chip (S-1917)', () => {
     expect(c.dataset.tone).toBe('bad')
     expect(c.textContent).toContain('changes requested')
   })
-  it('a verdict on an another head is muted and says so, never the success look', async () => {
+  it('a verdict on another head is muted and says so, never the success look', async () => {
     withReview(review({ stale: true, head: 'c3'.repeat(20) }))
     const c = chip(await mount())
     expect(c.dataset.tone).toBe('none')
     expect(c.textContent).toContain('another head')
     expect(c.title).toContain('another head')
+  })
+  it('carries a short label for a narrow pane, with the full text in the title', async () => {
+    withReview(review({ verdict: 'changes', stale: true, head: 'c3'.repeat(20) }))
+    const c = chip(await mount())
+    expect(c.querySelector('.dv-review-long')?.textContent).toBe('changes requested · another head')
+    expect(c.querySelector('.dv-review-short')?.textContent).toBe('changes · other head')
+    expect(c.title).toContain('Changes requested')
+    // Whichever label shows, the accessible name carries the verdict, the reviewer and the stale head.
+    expect(c.getAttribute('aria-label')).toBe(c.title)
+    expect(c.getAttribute('aria-label')).toMatch(/Changes requested by rev-1 on another head/)
   })
   it('no review, or a list without the field: a muted "no review"', async () => {
     withReview(null)
@@ -455,5 +535,66 @@ describe('the review verdict chip (S-1917)', () => {
     expect(pop.querySelector('b')).toBeNull()
     click(byText(pop, 'button', 'Close'))
     expect(host.querySelector('.dv-review-pop')).toBeNull()
+  })
+})
+
+describe('the patch view (S-2103)', () => {
+  // One file's hunks: a context row, a two-for-one change, and no second side anywhere.
+  const PATCH = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,3 @@\n one\n-two\n+TWO\n+three\n'
+
+  it('draws a patch:HASH tab from its own hunks, with no request and no PR chrome', async () => {
+    localStorage.clear()
+    const h = storePatch(PATCH)!
+    const host = await mount(`patch:${h}`)
+    expect(host.querySelector('.dv-title strong')?.textContent).toBe(`Patch ${h}`)
+    expect(host.querySelector('.dv-repo')?.textContent).toBe('patch')
+    expect(host.querySelector('.dv-shas')).toBeNull()
+    expect(host.querySelector('.dv-review')).toBeNull()
+    expect(host.querySelector('.dv-mode')).toBeNull()
+    expect(host.querySelector('.dv-count')?.textContent).toBe('1 of 1 files')
+    await vi.waitFor(() => expect(host.querySelector('[data-dv-file="src/a.ts"] .cm-line')).not.toBeNull())
+    expect(host.querySelectorAll('[data-dv-file="src/a.ts"] .cm-line')).toHaveLength(5)
+    expect(paths(host)).toEqual(['src/a.ts'])
+    expect(calls).toEqual([])
+  })
+
+  it('an entry that is gone says to open it again from its mail', async () => {
+    localStorage.clear()
+    const host = await mount('patch:deadbeefdeadbeef')
+    expect(host.textContent).toContain('Open it again from its mail.')
+    expect(host.querySelector('.dv-count')?.textContent).toBe('0 of 0 files')
+    expect(calls).toEqual([])
+  })
+
+  // A patch is text from a mail: a line that looks like HTML must render as the characters it is, never as markup.
+  it('HTML-looking patch lines render as text', async () => {
+    localStorage.clear()
+    const html = '<img src=x onerror="alert(1)"> & <b>bold</b>'
+    const h = storePatch(`diff --git a/x.html b/x.html\n--- a/x.html\n+++ b/x.html\n@@ -1 +1,2 @@\n-plain\n+${html}\n`)!
+    const host = await mount(`patch:${h}`)
+    await vi.waitFor(() => expect(host.querySelector('[data-dv-file="x.html"] .cm-line')).not.toBeNull())
+    expect(host.querySelector('[data-dv-file="x.html"] img, [data-dv-file="x.html"] b')).toBeNull()
+    expect(host.textContent).toContain(html)
+    expect(calls).toEqual([])
+  })
+
+  // A realistic pasted patch: 20 files and about 2,000 lines, as a review-size fence arrives.
+  it('draws a realistic patch: 20 files, 2,000 lines', async () => {
+    localStorage.clear()
+    const big = Array.from({ length: 20 }, (_, f) => {
+      const path = `src/mod${String(f).padStart(2, '0')}.ts`
+      const rows = Array.from({ length: 100 }, (_, i) => (i === 50 ? `-export const v${f} = ${i}` : i === 51 ? `+export const v${f} = ${i + 1}` : ` // line ${i} of ${path}`))
+      return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,100 +1,100 @@\n${rows.join('\n')}`
+    }).join('\n')
+    const h = storePatch(big)!
+    const host = await mount(`patch:${h}`)
+    expect(host.querySelector('.dv-count')?.textContent).toBe('20 of 20 files')
+    expect(paths(host)).toHaveLength(20)
+    await vi.waitFor(() => expect(host.querySelector('[data-dv-file="src/mod00.ts"] .cm-line')).not.toBeNull())
+    // The painted lines are virtualised, so read the document: the hunk header and its 100 rows.
+    const view = EditorView.findFromDOM(host.querySelector<HTMLElement>('[data-dv-file="src/mod00.ts"] .cm-editor')!)
+    expect(view?.state.doc.lines).toBe(101)
+    expect(view?.state.doc.line(2).text).toBe(' // line 0 of src/mod00.ts')
+    expect(calls).toEqual([])
   })
 })

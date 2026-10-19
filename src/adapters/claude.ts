@@ -10,6 +10,8 @@ import { open } from 'node:fs/promises';
 import { STAM_BIN, agentDir, testTmpBase } from '../config.ts';
 import { allowRules, denyRules } from './claude-permissions.ts';
 import * as db from '../db.ts';
+import { ttlOf, markCold, setTurnReader } from '../cache-cold.ts';
+import type { CacheTtl } from '../cache-cold.ts';
 import { signal as costSignal } from '../rules.ts';
 import { turnSucceeded } from '../cost-probes.ts';
 import type { Agent, Activity, PermissionRequest } from '../db.ts';
@@ -24,6 +26,7 @@ import { promisify } from 'node:util';
 import { hookWaits, replaceHookWaits } from './hook-waits.ts';
 import { dialogDetails, dialogKey, dialogNames, dialogTarget } from './claude-dialog.ts';
 import { inputBox, inputShows, aroundBox, sameAround, menuUnderBox, boxRows } from './claude-input.ts';
+import { promptInBox } from './claude-ghost.ts';
 
 const execFileAsync = promisify(execFile);
 // Tests point this at a scripted fake (test/fake-claude), so no model runs.
@@ -120,14 +123,17 @@ interface TranscriptState {
   rows: Map<string, TokenTotals>;
   totals: TokenTotals;
   bytes: number;
+  recent: { id: string; cacheWrite: number; total: number }[]; // the latest model turns parsed, oldest first, each from one row
+  ttl?: CacheTtl; // the cache window of the latest row that wrote to the cache (S-2236)
 }
+const RECENT_TURNS = 64; // model turns kept per session for the cold-turn measure
 const CHUNK = 1 << 20; // parse a transcript one megabyte at a time
 const CACHE_BYTES = 16 << 20; // cap the parsed state kept for sessions, oldest evicted first
 const transcripts = new Map<string, TranscriptState>();
 let cachedBytes = 0;
 
-// Rough bytes a session's cached state holds: its partial line plus one entry per row.
-const stateBytes = (s: TranscriptState) => s.carry.length + s.rows.size * 48;
+// Rough bytes a session's cached state holds: its partial line plus one entry per row (an id string, a map slot and four numbers, about 160 bytes).
+const stateBytes = (s: TranscriptState) => s.carry.length + s.rows.size * 160;
 
 function processUsageLine(s: TranscriptState, line: string): void {
   let id: string | undefined;
@@ -141,12 +147,17 @@ function processUsageLine(s: TranscriptState, line: string): void {
     return;
   }
   if (!u || !id) return;
+  s.ttl = ttlOf(u.cache_creation) ?? s.ttl;
   const t: TokenTotals = {
     input: u.input_tokens ?? 0,
     output: u.output_tokens ?? 0,
     cacheRead: u.cache_read_input_tokens ?? 0,
     cacheWrite: u.cache_creation_input_tokens ?? 0,
   };
+  const turn = { id, cacheWrite: t.cacheWrite, total: t.input + t.cacheRead + t.cacheWrite };
+  const at = s.recent.findIndex((r) => r.id === id);
+  if (at >= 0) s.recent[at] = turn; // a streaming row for the same message replaces it
+  else if (s.recent.push(turn) > RECENT_TURNS) s.recent.shift();
   const old = s.rows.get(id);
   if (old) {
     s.totals.input -= old.input;
@@ -161,6 +172,31 @@ function processUsageLine(s: TranscriptState, line: string): void {
   s.totals.cacheWrite += t.cacheWrite;
 }
 
+// The cache window the session's transcript shows so far; read after sessionTokens.
+export function sessionTtl(file: string | null | undefined): CacheTtl | undefined {
+  return file ? transcripts.get(file)?.ttl : undefined;
+}
+
+// The id of the latest model turn in the session's transcript, read up to date.
+export function sessionLastId(file: string | null | undefined): string | undefined {
+  if (!file) return undefined;
+  sessionTokens(file);
+  return transcripts.get(file)?.recent.at(-1)?.id;
+}
+setTurnReader((a) => sessionLastId(a.transcript_path), (file, seen) => sessionTurnAfter(file, seen));
+
+// The first model turn after `seen` (a turn id) in the session: its id, cache write and context
+// size, all from one transcript row. With no `seen`, or one this transcript doesn't hold (a new
+// session after a compaction), the oldest turn kept; only the latest 64 turns are kept, so a gap
+// longer than that measures a later turn than the first.
+export function sessionTurnAfter(file: string | null | undefined, seen?: string): { id: string; cacheWrite: number; total: number } | undefined {
+  if (!file) return undefined;
+  sessionTokens(file);
+  const recent = transcripts.get(file)?.recent ?? [];
+  const at = seen ? recent.findIndex((r) => r.id === seen) : -1;
+  return recent[at + 1];
+}
+
 export function sessionTokens(file: string | null | undefined): TokenTotals | undefined {
   if (!file) return undefined;
   let s = transcripts.get(file);
@@ -168,7 +204,7 @@ export function sessionTokens(file: string | null | undefined): TokenTotals | un
     transcripts.delete(file); // move to the end, so eviction drops the least recently used
     transcripts.set(file, s);
   } else {
-    s = { pos: 0, carry: Buffer.alloc(0), rows: new Map(), totals: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, bytes: 0 };
+    s = { pos: 0, carry: Buffer.alloc(0), rows: new Map(), totals: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, bytes: 0, recent: [] };
     transcripts.set(file, s);
   }
   let size: number;
@@ -177,48 +213,62 @@ export function sessionTokens(file: string | null | undefined): TokenTotals | un
   } catch {
     return undefined;
   }
-  if (size < s.pos) {
-    s.pos = 0;
-    s.carry = Buffer.alloc(0);
-    s.rows.clear();
-    s.totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  }
-  if (size > s.pos) {
-    const fd = openSync(file, 'r');
-    try {
-      let pos = s.pos;
-      while (pos < size) {
-        const len = Math.min(CHUNK, size - pos);
-        const buf = Buffer.allocUnsafe(len);
-        const n = readSync(fd, buf, 0, len, pos);
-        if (n <= 0) break;
-        pos += n;
-        const chunk = n === len ? buf : buf.subarray(0, n);
-        const data = s.carry.length ? Buffer.concat([s.carry, chunk]) : chunk;
-        let start = 0;
-        for (;;) {
-          const nl = data.indexOf(0x0a, start);
-          if (nl < 0) break;
-          const line = data.subarray(start, nl);
-          if (line.length && line.indexOf('"usage"') >= 0) processUsageLine(s, line.toString('utf8'));
-          start = nl + 1;
-        }
-        s.carry = Buffer.from(data.subarray(start)); // copy, so the chunk is freed
+  if (size < s.pos) resetState(s);
+  advance(s, file, size, Infinity);
+  note(s);
+  return s.totals;
+}
+
+function resetState(s: TranscriptState): void {
+  s.pos = 0;
+  s.carry = Buffer.alloc(0);
+  s.rows.clear();
+  s.totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  s.ttl = undefined;
+  s.recent = [];
+}
+
+// Reads up to maxBytes of the unread part of file, one CHUNK at a time.
+function advance(s: TranscriptState, file: string, size: number, maxBytes: number): void {
+  if (size <= s.pos) return;
+  const fd = openSync(file, 'r');
+  try {
+    let pos = s.pos;
+    const stop = Math.min(size, pos + maxBytes);
+    while (pos < stop) {
+      const len = Math.min(CHUNK, stop - pos);
+      const buf = Buffer.allocUnsafe(len);
+      const n = readSync(fd, buf, 0, len, pos);
+      if (n <= 0) break;
+      pos += n;
+      const chunk = n === len ? buf : buf.subarray(0, n);
+      const data = s.carry.length ? Buffer.concat([s.carry, chunk]) : chunk;
+      let start = 0;
+      for (;;) {
+        const nl = data.indexOf(0x0a, start);
+        if (nl < 0) break;
+        const line = data.subarray(start, nl);
+        if (line.length && line.indexOf('"usage"') >= 0) processUsageLine(s, line.toString('utf8'));
+        start = nl + 1;
       }
-      s.pos = pos;
-    } finally {
-      closeSync(fd);
+      s.carry = Buffer.from(data.subarray(start)); // copy, so the chunk is freed
     }
+    s.pos = pos;
+  } finally {
+    closeSync(fd);
   }
+}
+
+// Accounts the session's cached size and evicts the least recently used sessions past the cap.
+function note(s: TranscriptState): void {
   cachedBytes += stateBytes(s) - s.bytes;
   s.bytes = stateBytes(s);
-  for (const key of transcripts.keys()) {
+  for (const [key, other] of transcripts) {
     if (cachedBytes <= CACHE_BYTES) break;
-    if (key === file) continue;
-    cachedBytes -= transcripts.get(key)!.bytes;
+    if (other === s) continue;
+    cachedBytes -= other.bytes;
     transcripts.delete(key);
   }
-  return s.totals;
 }
 
 // Waits that Claude Code itself creates (source 'hook'): background work that outlives the
@@ -492,6 +542,8 @@ export const claude: Adapter = {
       case 'PreCompact':
         return set('working', `compacting (${p.trigger})`);
       case 'PostCompact':
+        // The harness's own compaction (stam's marks once, see markCold) leaves its next turn cold.
+        markCold(agent, 'compaction');
         return { activity: 'idle', detail: 'compacted', turnEnded: true };
       default:
         return {};
@@ -730,6 +782,8 @@ export const claude: Adapter = {
       tokensOut: totals?.output,
       tokensCacheRead: totals?.cacheRead,
       tokensCacheWrite: totals?.cacheWrite,
+      // The latest turn's cache write and the detected cache window, for cache-cold.ts.
+      cacheTtl: sessionTtl(session),
       session,
       subscription: p.rate_limits,
     };
@@ -766,9 +820,9 @@ export const claude: Adapter = {
     return false;
   },
 
-  async afterLaunch(agent: Agent, prompt?: string, opts: { admit?: () => boolean } = {}) {
+  async afterLaunch(agent: Agent, prompt?: string, opts: { admit?: () => boolean; current?: () => boolean } = {}) {
     await answerLaunchDialogs(agent);
-    if (prompt) await typeFirstPrompt(agent, prompt, opts.admit);
+    if (prompt) await typeFirstPrompt(agent, prompt, opts.admit, opts.current);
   },
 };
 
@@ -804,21 +858,46 @@ async function answerLaunchDialogs(agent: Agent): Promise<void> {
 // reaches tmux on stdin), then Enter. Typed input is the user's own message, as the
 // argument was, so auto mode trusts it; a channel message it would not. Nobody has
 // attached yet, or the harness has just restarted, so no human draft is in the way.
-// Done when UserPromptSubmit ends 'starting'.
-async function typeFirstPrompt(agent: Agent, text: string, admit?: () => boolean): Promise<void> {
+// A placeholder or prompt suggestion, drawn faint, counts as an empty box: the paste replaces it
+// (S-2123). Enter goes only to a box that holds exactly one copy of the prompt (promptInBox). A
+// paste that never shows and leaves the box empty past a settle was lost (a Claude Code still
+// resuming drops it) and goes in again; a box with anything else in it is left as it is, with
+// nothing pressed, so a late first paste can't make a doubled prompt. Done when UserPromptSubmit
+// ends 'starting': nothing is pasted or pressed after that. A box that empties on Enter took the
+// prompt, so its hook gets a grace period (a stalled daemon handles it late) before a failure.
+// A launch a restart or resume superseded (`current` false) pastes, presses and fails nothing
+// more, and returns quietly (event first-prompt:superseded): the session under this agent's id is
+// the new launch's now.
+async function typeFirstPrompt(agent: Agent, text: string, admit?: () => boolean, current: () => boolean = () => true): Promise<void> {
+  try {
+    await deliverFirstPrompt(agent, text, admit, current);
+  } catch (e) {
+    if (current()) throw e;
+  }
+  if (!current()) db.addEvent(agent.id, 'first-prompt:superseded');
+}
+
+async function deliverFirstPrompt(agent: Agent, text: string, admit: (() => boolean) | undefined, current: () => boolean): Promise<void> {
+  const delivered = () => db.getAgent(agent.id)?.activity !== 'starting';
   const screen = () => {
-    const lines = tmux.capturePane(agent.id).split('\n');
-    const input = [...lines].reverse().find((l) => /^\s*❯/.test(l));
-    return { lines, typed: input === undefined ? undefined : input.replace(/^\s*❯/, '').trim() };
+    const ansi = tmux.capturePaneAnsi(agent.id, 200).split('\n');
+    return { lines: tmux.capturePane(agent.id).split('\n'), box: promptInBox(ansi, text) };
   };
   const alive = () => {
     if (!tmux.hasSession(agent.id) || tmux.isDead(agent.id)) throw new Error('the harness exited');
   };
+  // A failure records the screen it saw, styles and all (S-2123), so its cause can be read later.
+  const failed = (msg: string) => {
+    if (current() && tmux.hasSession(agent.id)) db.addEvent(agent.id, 'first-prompt:screen', { error: msg, screen: tmux.capturePaneAnsi(agent.id, 16).split('\n') });
+    return new Error(msg);
+  };
+  const notOne = () => failed('the input box does not show the prompt exactly once, so nothing was pressed');
   let deadline = Date.now() + 30_000;
   for (;;) {
     alive();
-    const { lines, typed } = screen();
-    if (typed === '' && !lines.some((l) => /Enter to confirm|Esc to cancel/.test(l))) {
+    if (!current()) return;
+    const { lines, box } = screen();
+    if (box === 'empty' && !lines.some((l) => /Enter to confirm|Esc to cancel/.test(l))) {
       // With vim keys, the box must be in insert mode or the text becomes commands.
       if (lines.some((l) => l.includes('-- NORMAL --'))) {
         tmux.sendKeys(agent.id, 'i');
@@ -826,23 +905,46 @@ async function typeFirstPrompt(agent: Agent, text: string, admit?: () => boolean
       }
       break;
     }
-    if (Date.now() > deadline) throw new Error('no empty input box');
+    if (Date.now() > deadline) throw failed('no empty input box');
     await sleep(300);
   }
   if (admit && !admit()) return;
-  tmux.paste(agent.id, text);
-  // A long paste takes a moment to land; an Enter before that is lost.
-  deadline = Date.now() + 10_000;
-  while (Date.now() < deadline && !screen().typed) await sleep(300);
-  await sleep(300);
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const until = async (ms: number, done: () => boolean) => {
+    const end = Date.now() + ms;
+    while (Date.now() < end && !done()) await sleep(300);
+    return done();
+  };
+  for (let paste = 0; ; paste++) {
     alive();
-    tmux.sendKeys(agent.id, 'Enter');
-    for (let i = 0; i < 20; i++) {
-      await sleep(500);
-      if (db.getAgent(agent.id)?.activity !== 'starting') return;
-    }
-    // The Enter was lost and the text is still in the box. Enter on an empty box does nothing.
+    if (delivered() || !current()) return;
+    tmux.paste(agent.id, text);
+    // A long paste takes a moment to land; an Enter before that is lost.
+    if (await until(10_000, () => screen().box !== 'empty')) break;
+    // Still empty after a settle: the paste was lost, so pasting again can't double it.
+    await sleep(2000);
+    if (screen().box !== 'empty') break;
+    if (paste === 2) throw failed('pasted the prompt, but it never showed in the input box');
   }
-  throw new Error('typed the prompt, but Claude Code did not take it');
+  // It lands in parts; then it must stay exactly one copy through a settle.
+  if (!(await until(10_000, () => screen().box === 'one'))) throw notOne();
+  await sleep(500);
+  if (screen().box !== 'one') throw notOne();
+  // The box empties (or goes, as the turn starts) once Claude Code takes the prompt.
+  const took = () => screen().box !== 'one';
+  let taken = false;
+  for (let attempt = 0; attempt < 3 && !taken; attempt++) {
+    alive();
+    if (delivered() || !current()) return;
+    tmux.sendKeys(agent.id, 'Enter');
+    taken = await until(10_000, () => delivered() || !current() || took());
+    if (delivered() || !current()) return;
+    // The Enter was lost and the text is still in the box: Enter again. Anything else is left alone.
+    if (taken && screen().box === 'other') throw notOne();
+  }
+  if (!taken) throw failed('typed the prompt, but Claude Code did not take it');
+  const done = () => delivered() || !current();
+  if (await until(2000, done)) return;
+  db.addEvent(agent.id, 'first-prompt:awaiting-hook');
+  if (await until(120_000, done)) return;
+  throw failed('Claude Code took the prompt, but its UserPromptSubmit hook never came');
 }

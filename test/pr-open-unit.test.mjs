@@ -5,14 +5,16 @@
 // Covers opening a new PR, a new commit on storage pushed to origin and the open PR's body replaced,
 // refused inputs (main, a body without its header, a branch storage lacks) before any gh call, and the
 // ITSA links (github and branch) added once, with an unknown ITSA refused before anything is pushed.
-// It also refuses a Gates line merge-pr would refuse (an unknown token, a `run NAME` test/run.sh doesn't know) before gh runs (S-1292).
+// It also refuses a Gates line merge-pr would refuse (an unknown token, a `run NAME` test/run.sh doesn't know) before gh runs (S-1292),
+// and a branch the merge gate's stories or export-overrides check would fail: a component with no story, a shipped doc edited without its port (S-1942, S-858).
 // Nothing touches GitHub. Run with `node --test test/pr-open-unit.test.mjs`.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tempDir } from './tmphome.mjs';
 
 const base = tempDir('stam-pr-open-test-');
@@ -101,6 +103,7 @@ before(async () => {
   itsa = await import('../src/itsa.ts');
   ({ openPr, openPrHere, prStatusHere } = await import('../src/pr-open.ts'));
   db.open();
+  (await import('../src/settings.ts')).setSetting('itsa', { ...(await import('../src/settings.ts')).settings().itsa, repos: { stam2: work } });
   cfg = { repoName: 'stam2', repo: work, storage: 'storage', origin: 'origin', gh: join(bin, 'gh'), github: 'example/stam', base: 'main' };
 });
 
@@ -150,13 +153,22 @@ test('refuses main, a body without its header, and a branch storage lacks, befor
 test('refuses a Stories: unchanged line the stories gate would reject, before any gh call; accepts the forms it takes (S-914)', async () => {
   clearCalls();
   const withStories = (line) => `${BODY}\n${line}\n`;
-  await assert.rejects(openPr(cfg, { branch: 'feature/x', title: 't', body: withStories('Stories: unchanged') }), /Stories line "Stories: unchanged" needs a reason: write it as Stories: unchanged, REASON/);
-  await assert.rejects(openPr(cfg, { branch: 'feature/x', title: 't', body: withStories('- Stories: unchanged') }), /needs a reason/, 'a bullet counts too');
+  // A bare claim is refused when a component changed (the gate's rule too, S-1942): the stories check names the line.
+  treeBranch('tree/bare', {
+    'web/src/Pane.tsx': 'export const Pane = () => null\n',
+    'web/src/Pane.stories.tsx': "export const stories = [{ code: ['web/src/Pane.tsx#Pane'] }]\n",
+  });
+  await assert.rejects(openPr(cfg, { branch: 'tree/bare', title: 't', body: withStories('Stories: unchanged') }), /pr_open refuses: stories: the Stories line "Stories: unchanged" needs a reason: write it as Stories: unchanged, REASON/);
+  await assert.rejects(openPr(cfg, { branch: 'tree/bare', title: 't', body: withStories('- Stories: unchanged') }), /needs a reason/, 'a bullet counts too');
   assert.equal(existsSync(callsFile), false, 'gh never ran');
+  // A PR that changes no component passes the stories step whatever its line says: it reaches the fetch.
+  await assert.rejects(openPr(cfg, { branch: 'nope', title: 't', body: withStories('Stories: unchanged') }), /git fetch failed/, 'no component changed');
   // The accepted forms pass the check; this run then stops at the missing branch, which is the next check.
   await assert.rejects(openPr(cfg, { branch: 'nope', title: 't', body: withStories('Stories: unchanged for X, Y') }), /git fetch failed/);
   await assert.rejects(openPr(cfg, { branch: 'nope', title: 't', body: withStories('Stories: unchanged: a refactor') }), /git fetch failed/);
   await assert.rejects(openPr(cfg, { branch: 'nope', title: 't', body: withStories('Stories: mostly unchanged') }), /git fetch failed/, 'not an unchanged line, so nothing to refuse');
+  await assert.rejects(openPr(cfg, { branch: 'nope', title: 't', body: withStories('Stories: Pane updated; unchanged for X, because a refactor') }), /git fetch failed/, 'names the updated stories (S-1964)');
+  await assert.rejects(openPr(cfg, { branch: 'tree/bare', title: 't', body: withStories('Stories: Pane updated; unchanged') }), /Stories line "Stories: Pane updated; unchanged" needs a reason/);
 });
 
 test('refuses a Gates line that merge-pr would refuse: an unknown token, before any gh call (S-1292)', async () => {
@@ -269,7 +281,8 @@ test('refuses to open a PR when no GitHub repo is known', async () => {
   await assert.rejects(openPr({ ...cfg, github: '' }, { branch: 'feature/x', title: 't', body: BODY }), /no GitHub repo/);
 });
 
-test('unset storage uses the checkout\'s `storage` remote when it has one', async () => {
+test('unset storage uses the checkout\'s `storage` remote when it has one and a storage peer is configured', async () => {
+  (await import('../src/settings.ts')).setSetting('peers', [{ name: 'storage', url: 'http://storage:7878', token: 't' }]);
   clearCalls();
   const r = await openPr({ ...cfg, storage: '' }, { branch: 'feature/x', title: 't', body: BODY });
   assert.equal(r.head, git(work, ['rev-parse', 'refs/stam/pr-open/feature/x']), 'fetched from storage into the scratch ref');
@@ -899,4 +912,110 @@ test('a merge moves storage main to GitHub main, fast-forward only; a non-fast-f
   await mirrorMain(cfg);
   assert.equal(storageRef('refs/heads/main'), storageOnly, 'a diverged storage main is not overwritten');
   assert.equal(git(originDir, ['rev-parse', 'refs/heads/main']), m3, 'GitHub main is untouched');
+});
+
+// A branch cut from the seed's main (behind origin's main by now, so its merge base is older than main), with the files
+// written and pushed to storage. The stories and export-overrides checks run on it (S-1942).
+function treeBranch(name, files) {
+  git(seed, ['checkout', '-q', '-B', name, 'main']);
+  for (const [p, s] of Object.entries(files)) {
+    mkdirSync(dirname(join(seed, p)), { recursive: true });
+    writeFileSync(join(seed, p), s);
+  }
+  git(seed, ['add', '.']);
+  git(seed, ['commit', '-qm', name]);
+  git(seed, ['push', '-q', '-f', storageDir(), name]);
+  return git(seed, ['rev-parse', 'HEAD']);
+}
+
+test('a PR that adds a component with no story is refused; adding its story makes it pass (S-1942)', async () => {
+  treeBranch('tree/nostory', { 'web/src/Pane.tsx': 'export const Pane = () => null\n' });
+  clearCalls();
+  await assert.rejects(openPr(cfg, { branch: 'tree/nostory', title: 't', body: BODY }), /pr_open refuses: stories: web\/src\/Pane\.tsx: the component Pane has no story/);
+  assert.equal(existsSync(callsFile), false, 'gh never ran');
+  // The branch adds the story that lists Pane: the check passes and the PR opens.
+  writeFileSync(join(seed, 'web/src/Pane.stories.tsx'), "export const stories = [{ code: ['web/src/Pane.tsx#Pane'] }]\n");
+  git(seed, ['add', '.']);
+  git(seed, ['commit', '-qm', 'Pane story']);
+  git(seed, ['push', '-q', '-f', storageDir(), 'tree/nostory']);
+  clearCalls();
+  assert.equal((await openPr(cfg, { branch: 'tree/nostory', title: 't', body: BODY })).created, true);
+  // A branch whose stories pass opens its PR, though it is cut from an older main (S-1818).
+  treeBranch('tree/stories', {
+    'web/src/Pane.tsx': 'export const Pane = () => null\n',
+    'web/src/Pane.stories.tsx': "export const stories = [{ code: ['web/src/Pane.tsx#Pane'] }]\n",
+  });
+  clearCalls();
+  const r = await openPr(cfg, { branch: 'tree/stories', title: 't', body: BODY });
+  assert.equal(r.created, true);
+  assert.equal(r.head, git(seed, ['rev-parse', 'HEAD']));
+  assert.ok(calls().some((c) => c.args[1] === 'create'), 'gh pr create ran');
+});
+
+test('refuses a shipped doc edited without its export/overrides port, naming the file; the ported edit passes (S-858)', async () => {
+  const sha = (s) => createHash('sha256').update(s).digest('hex');
+  const overrides = (docSha) => JSON.stringify({ templates: {}, types: {}, docs: { 'pull-requests.md': docSha } });
+  const fixture = {
+    'export/apply-overrides.mjs': readFileSync(new URL('../export/apply-overrides.mjs', import.meta.url), 'utf8'),
+    'export/override-hashes.mjs': readFileSync(new URL('../export/override-hashes.mjs', import.meta.url), 'utf8'),
+    // A patch targets a file outside docs/, as the real doc-patches.json does (processes/dev-change.yaml): --check reads it (S-1942).
+    'export/overrides/doc-patches.json': JSON.stringify({ 'processes/x.yaml': [['old text', 'new text']] }),
+    'processes/x.yaml': 'old text\n',
+    'export/overrides/manifest.json': overrides(sha('v1 doc\n')),
+    'registry/defaults.json': '{"types":{}}\n',
+    'docs/pull-requests.md': 'v1 doc\n',
+  };
+  // The shipped doc and its manifest sha, but no public version: the branch edits a shipped doc without its port, refused.
+  treeBranch('docs/edit', fixture);
+  clearCalls();
+  await assert.rejects(openPr(cfg, { branch: 'docs/edit', title: 't', body: BODY }), /docs\/pull-requests\.md is shipped and this branch edits it, but not its public version export\/overrides\/docs\/pull-requests\.md/);
+  assert.equal(existsSync(callsFile), false, 'gh never ran');
+  // The same branch with the port added, and the manifest sha of the doc it ships unchanged: passes, and opens the PR.
+  mkdirSync(join(seed, 'export/overrides/docs'), { recursive: true });
+  writeFileSync(join(seed, 'export/overrides/docs/pull-requests.md'), 'v1 public doc\n');
+  git(seed, ['add', '.']);
+  git(seed, ['commit', '-qm', 'port the doc']);
+  git(seed, ['push', '-q', '-f', storageDir(), 'docs/edit']);
+  clearCalls();
+  const r = await openPr(cfg, { branch: 'docs/edit', title: 't', body: BODY });
+  assert.equal(r.head, git(seed, ['rev-parse', 'HEAD']));
+  assert.ok(calls().some((c) => c.args[1] === 'create'), 'gh pr create ran');
+});
+
+test('a branch that changes no component passes the stories step and opens its PR (S-1942)', async () => {
+  git(seed, ['checkout', '-q', '-B', 'tree/plain', 'main']);
+  writeFileSync(join(seed, 'a.txt'), 'plain\n');
+  git(seed, ['commit', '-qam', 'plain']);
+  git(seed, ['push', '-q', '-f', storageDir(), 'tree/plain']);
+  clearCalls();
+  const r = await openPr(cfg, { branch: 'tree/plain', title: 't', body: BODY });
+  assert.equal(r.created, true);
+  assert.equal(r.head, git(seed, ['rev-parse', 'HEAD']));
+  assert.ok(calls().some((c) => c.args[1] === 'create'), 'gh pr create ran');
+});
+
+test('a shipped doc whose manifest sha is stale fails the branch\'s own --check, which pr_open refuses (S-858)', async () => {
+  const sha = (s) => createHash('sha256').update(s).digest('hex');
+  treeBranch('docs/stale', {
+    'export/apply-overrides.mjs': readFileSync(new URL('../export/apply-overrides.mjs', import.meta.url), 'utf8'),
+    'export/override-hashes.mjs': readFileSync(new URL('../export/override-hashes.mjs', import.meta.url), 'utf8'),
+    'export/overrides/doc-patches.json': '{}\n',
+    'export/overrides/manifest.json': JSON.stringify({ templates: {}, types: {}, docs: { 'pull-requests.md': sha('not the doc\n') } }),
+    'export/overrides/docs/pull-requests.md': 'v1 public doc\n',
+    'registry/defaults.json': '{"types":{}}\n',
+    'docs/pull-requests.md': 'v1 doc\n',
+  });
+  clearCalls();
+  await assert.rejects(openPr(cfg, { branch: 'docs/stale', title: 't', body: BODY }), /pr_open refuses: export\/apply-overrides\.mjs --check fails on the branch/);
+  assert.equal(existsSync(callsFile), false, 'gh never ran');
+});
+
+test('a check that runs out of time refuses before gh, and leaves no scratch ref or dir (S-1942)', async () => {
+  const scratch = () => readdirSync(tmpdir()).filter((n) => n.startsWith('stam-pr-open-')).sort();
+  const before = scratch();
+  clearCalls();
+  await assert.rejects(openPr({ ...cfg, checkTimeoutMs: 1 }, { branch: 'tree/plain', title: 't', body: BODY }), /pr_open refuses: the stories and overrides check timed out/);
+  assert.equal(existsSync(callsFile), false, 'gh never ran');
+  assert.equal(git(work, ['for-each-ref', '--format=%(refname)', 'refs/stam/pr-open-base']), '', 'the base ref is gone');
+  assert.deepEqual(scratch(), before, 'the scratch dir is gone');
 });

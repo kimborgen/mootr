@@ -76,6 +76,33 @@ describe('contextmenu in a menu', () => {
   })
 })
 
+// S-1997: Up and Down step a textarea, select or date field in a menu; from a one-line text field they reach the items.
+describe('Up and Down in a menu field', () => {
+  const press = (el: Element, key: string) => {
+    const e = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key })
+    act(() => { el.dispatchEvent(e) })
+    return e.defaultPrevented
+  }
+  it('stay in a textarea, select and date field, and leave a text field for the first item', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    act(() => { root.render(<MenuLayer />) })
+    act(() => { showPopover(0, 0, 'Fields', <><input aria-label="Search" /><textarea aria-label="Note" /><select aria-label="Pick"><option>a</option><option>b</option></select><input type="date" aria-label="Day" /><input type="number" aria-label="N" /><button>Save</button></>) })
+    for (const f of ['textarea', 'select', 'input[type=date]', 'input[type=number]']) {
+      const el = document.querySelector<HTMLElement>('.menu ' + f)!
+      act(() => { el.focus() })
+      expect([f, press(el, 'ArrowDown'), press(el, 'ArrowUp')]).toEqual([f, false, false])
+      expect(document.activeElement).toBe(el)
+    }
+    const search = document.querySelector<HTMLInputElement>('.menu input[aria-label=Search]')!
+    act(() => { search.focus() })
+    expect(press(search, 'ArrowDown')).toBe(true)
+    expect(document.activeElement?.textContent).toBe('Save')
+    act(() => { root.unmount() })
+  })
+})
+
 // S-286: on a phone a menu is a sheet over a scrim that is only a shadow, so the tap that
 // closes it lands on what lies under the scrim. It must only close, not press that too.
 describe('closing a menu by a tap outside', () => {

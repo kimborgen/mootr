@@ -20,7 +20,7 @@ import { useLongPress } from './ui/longpress'
 import { showMenu, type MenuItem } from './ui/menu'
 import { getUi, setUi, useUi } from './ui/state'
 import { agentTooltip } from './views/registry'
-import { WaitMark } from './waits'
+import { RestBadge, WaitMark } from './waits'
 import { isClosed, openItsa, StatusGlyph, statusLabel, toneVar, waitsOnHuman } from './itsa/itsa'
 import { FieldValue } from './work/field-columns'
 import { useWorkExtras } from './work/data'
@@ -110,7 +110,7 @@ export function Tree() {
             title={owns.length === 1 ? `Owns ${shown.key} ${shown.title} · ${statusLabel(shown.status)}${waitsOnHuman(shown) ? ': waits on you' : ''}` : `Owns ${owns.length} ITSAs: ${owns.map((x) => x.key).join(', ')}${owns.some(waitsOnHuman) ? `; ${owns.filter(waitsOnHuman).length} wait on you` : ''}`}>
             <StatusGlyph status={shown.status} />{owns.length === 1 ? shown.key : owns.length}</Stamp> : null}
           {a.pending_requests ? <span className="badge warn" data-ask={a.id} title="Waiting for your approval: open the request"><Icon name="shield-alert" size="xs" /></span> : null}
-          {live(a) ? <WaitMark a={a} /> : null}
+          {a.resting ? <RestBadge a={a} mode="compact" /> : live(a) ? <WaitMark a={a} /> : null}
           {live(a) || a.unread ? <Stamp value={a.unread ?? 0} increaseOnly className={'badge' + (a.unread ? '' : ' empty')} data-inbox={a.id} title={`${a.unread ?? 0} unread mail for ${a.name}: open its inbox`}>{a.unread}</Stamp> : null}
           {a.permission_mode === 'bypass' ? <span style={{ color: 'var(--st-errored)' }} title="Bypass permissions"><Icon name="zap" size="xs" /></span> : null}
           {a.machine !== machine ? <span className="muted" title={`Runs on ${a.machine}`}><Icon name="server" size="xs" /></span> : null}

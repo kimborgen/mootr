@@ -73,6 +73,7 @@ export function scopeSummary<T extends Record<string, any>>(s: T, visible: Set<s
     }
   }
   if (Array.isArray(s.allocations)) out.allocations = s.allocations.filter((x: any) => visible.has(x.root_id));
+  if (s.cache?.ttl_5m_agents) out.cache = { ...s.cache, ttl_5m_agents: s.cache.ttl_5m_agents.filter((x: any) => visible.has(x.agent_id)) };
   if (Array.isArray(s.blocked)) out.blocked = s.blocked.filter((x: any) => visible.has(x.agent_id));
   return out as T;
 }

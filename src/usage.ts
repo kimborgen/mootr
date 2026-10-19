@@ -6,6 +6,7 @@
 // uncached input only; tokens_out includes reasoning tokens; cache read and cache write are
 // their own columns, so the same four numbers can be summed per harness.
 import * as db from './db.ts';
+import * as cacheCold from './cache-cold.ts';
 import { settings, humanMailAllows } from './settings.ts';
 import { accountFor, isOpenRouter, SYSTEM_ACCOUNT } from './accounts.ts';
 import { accountReadings, STALE_MS } from './readings.ts';
@@ -177,6 +178,9 @@ export function pruneSamples(now: number): void {
   d.prepare('DELETE FROM window_readings WHERE at < ?').run(since);
 }
 
+const SUBSCRIPTION_SAME_MS = 10_000;
+const lastSubscription = new Map<string, { text: string; at: number }>();
+
 // Records one statusline refresh. The windows are stored before the cost, so report()
 // classifies the cost against this refresh's windows, not the previous one's. A refresh with
 // neither windows nor counters does nothing.
@@ -192,7 +196,17 @@ export function reportStatusline(
     subscription?: Record<string, { used_percentage?: number; resets_at?: number }>;
   },
 ): void {
-  if (f.subscription) reportSubscription(a.harness, f.subscription);
+  if (f.subscription) {
+    // The same reading as the last one for this harness, inside SUBSCRIPTION_SAME_MS, changes nothing
+    // reportSubscription records, so it skips its queries (S-2126). A change goes through at once.
+    const text = JSON.stringify(f.subscription);
+    const last = lastSubscription.get(a.harness);
+    const now = Date.now();
+    if (!last || last.text !== text || now - last.at >= SUBSCRIPTION_SAME_MS) {
+      lastSubscription.set(a.harness, { text, at: now });
+      reportSubscription(a.harness, f.subscription);
+    }
+  }
   if (f.cost !== undefined || f.tokensIn !== undefined || f.tokensCacheRead !== undefined) report(a, f);
 }
 
@@ -609,6 +623,8 @@ export function summary(days = 14, tree?: string, keep: Set<string> | null = nul
     // Echo of the filter that was applied (sorted types), null when unfiltered; an older daemon omits it, so a page
     // never labels unfiltered numbers as filtered (S-1753).
     filtered_agents: keep ? [...keep].sort() : null,
+    // Cold turns after a wake or a compaction, and agents on the 5-minute cache window (S-2236).
+    cache: cacheCold.summary(since, kept ? ' AND agent_id IN (SELECT value FROM json_each(?))' : '', agentArg),
     // Agents with spend in the period per type, ignoring the filter, for the Agent types bar.
     agent_types: agentTypeCounts(since),
   };

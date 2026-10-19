@@ -70,6 +70,24 @@ export const REGISTRY = {
   },
 }
 
+// What GET /api/permission-modes returns (src/permission-modes.ts): Ask is offered for Claude only.
+const mode = (harness: string, offered: boolean) => [
+  { mode: 'default', label: 'Ask', harness: `${harness} asks`, offered },
+  { mode: 'auto', label: 'Auto', harness: `${harness} auto`, offered: true },
+  { mode: 'bypass', label: 'Bypass', harness: `${harness} bypass`, offered: true },
+]
+export const PERMISSION_MODES = {
+  settings: { harness: { claude: 'auto', codex: 'auto', opencode: 'auto' }, types: {} },
+  harnesses: { claude: mode('--permission-mode', true), codex: mode('codex', false), opencode: mode('opencode', false) },
+  types: ['developer', 'fixture-tester'],
+  stale: [] as unknown[],
+}
+export const STALE_AGENTS = [
+  { id: 'fx-dev', name: 'fixture-dev', harness: 'claude', type: 'developer', mode: 'auto', want: 'bypass', inPlace: true, failed: null },
+  { id: 'fx-oc', name: 'fixture-flash', harness: 'opencode', type: 'fixture-tester', mode: 'auto', want: 'bypass', inPlace: false, failed: null },
+  { id: 'fx-down', name: 'fixture-review', harness: 'codex', type: null, mode: 'auto', want: 'bypass', inPlace: true, failed: 'fixture: the launch failed' },
+]
+
 export const TEMPLATES = [
   { name: 'system-prompt', text: '# {{name}}\n\nYou are an agent in stam. Work in {{cwd}}.', overridden: false },
   { name: 'chief-of-staff', text: 'You coordinate the other agents.', overridden: true },
@@ -97,6 +115,7 @@ export const settingsRoutes = (scope: Scope = { home: 'fixture-machine', local: 
   'GET /api/models?kind=harness&harness=opencode': { models: [{ id: 'openrouter/fixture/flash', name: 'Fixture Flash', in: 0.1, out: 0.4 }] },
   'GET /api/models?kind=openrouter': { models: [{ id: 'fixture/small', name: 'Fixture Small', in: 0.05, out: 0.1 }] },
   'GET /api/itsas/fields': [],
+  'GET /api/permission-modes': PERMISSION_MODES,
   'PATCH /api/config/settings': { text: JSON.stringify(settings) },
 })
 

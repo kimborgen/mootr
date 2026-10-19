@@ -123,6 +123,9 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_agent ON events(agent_id, id);
 CREATE INDEX IF NOT EXISTS events_agent_type ON events(agent_id, type);
+-- usage_info's cold-turn and cache-window reads (S-2236): partial, so other events pay nothing.
+CREATE INDEX IF NOT EXISTS events_cache_cold ON events(ts) WHERE type = 'cache:cold';
+CREATE INDEX IF NOT EXISTS events_cache_ttl ON events(agent_id) WHERE type = 'cache:ttl';
 CREATE TABLE IF NOT EXISTS mail (
   id TEXT PRIMARY KEY,
   from_id TEXT NOT NULL,
@@ -224,6 +227,7 @@ CREATE TABLE IF NOT EXISTS agent_parents (
 );
 CREATE INDEX IF NOT EXISTS agent_parents_parent ON agent_parents (parent_id);
 CREATE INDEX IF NOT EXISTS agents_parent ON agents (parent_id);
+CREATE INDEX IF NOT EXISTS agents_live ON agents (created_at) WHERE lifecycle != 'archived';
 CREATE TABLE IF NOT EXISTS rings (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -709,12 +713,21 @@ export function open(): DatabaseSync {
   if (db) return db;
   mkdirSync(STAM_HOME, { recursive: true });
   db = new DatabaseSync(join(STAM_HOME, 'stam.db'));
+  // The Go daemon shares this file during the migration (S-2194): wait for its write lock rather
+  // than fail with SQLITE_BUSY. First, so the journal_mode switch below waits too.
+  db.exec('PRAGMA busy_timeout = 5000;');
   db.exec('PRAGMA journal_mode = WAL;');
   // Every hook and statusline write is its own commit. With the default FULL, each commit fsyncs
   // the WAL, about 1 ms on an idle disk and far more under load (S-1025), which stalls the event
   // loop. NORMAL fsyncs only at checkpoints: a power loss can drop the last few commits, but the
   // database stays consistent.
   db.exec('PRAGMA synchronous = NORMAL;');
+  // SQLite's default page cache is 2 MB, and stam.db is hundreds of MB: every larger scan (all agents
+  // every few seconds) re-read its pages through 4 KB pread calls, ~37,000 a second and half the
+  // daemon's CPU in the kernel (S-2122). Reads go through a memory map instead, which shares the OS
+  // page cache, and a 64 MB page cache keeps hot pages that the map doesn't cover.
+  db.exec('PRAGMA mmap_size = 536870912;');
+  db.exec('PRAGMA cache_size = -65536;');
   db.exec(SCHEMA);
   // Columns added after the first release; ALTER fails harmlessly when they exist.
   try {
@@ -808,6 +821,8 @@ export function open(): DatabaseSync {
     db.exec('UPDATE mail SET about_itsa = itsa_id WHERE itsa_id IS NOT NULL');
   } catch {}
   db.exec('CREATE INDEX IF NOT EXISTS mail_about_itsa ON mail(about_itsa) WHERE about_itsa IS NOT NULL');
+  // S-2128: pending_action is a migrated column, so its index comes after the migration.
+  db.exec('CREATE INDEX IF NOT EXISTS agents_pending ON agents (created_at) WHERE pending_action IS NOT NULL');
   backfillMailItsas(db);
   // A ring member's PR verdict (S-1824): approve or request_changes, null outside a PR review.
   try {
@@ -916,6 +931,21 @@ export function open(): DatabaseSync {
     fts5Mail = true;
   } catch {
     fts5Mail = false;
+  }
+  // The Go daemon's migration runner starts from this version (S-2194). Set it only when the file
+  // has none yet: a higher value may be a later schema the Go daemon wrote, which must not go back.
+  // The read and the write share one write transaction, so a Go daemon can't commit a later
+  // version between them.
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const { user_version } = db.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (user_version === 0) db.exec('PRAGMA user_version = 1;');
+    db.exec('COMMIT');
+  } catch (e) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {}
+    throw e;
   }
   return db;
 }
@@ -1082,6 +1112,17 @@ export function transaction<T>(fn: () => T): T {
 
 export function listAgents(): Agent[] {
   return open().prepare('SELECT * FROM agents ORDER BY created_at').all() as unknown as Agent[];
+}
+
+// S-2128: the agents the daemon's timers act on, without the ~1300 archived rows listAgents also reads. The
+// WHERE terms match the partial indexes above, so only these rows are visited.
+export function listLiveAgents(): Agent[] {
+  return open().prepare("SELECT * FROM agents WHERE lifecycle != 'archived' ORDER BY created_at").all() as unknown as Agent[];
+}
+
+// The agents with a pending action (a stop, a compaction, a recovery), archived or not.
+export function listPendingAgents(): Agent[] {
+  return open().prepare('SELECT * FROM agents WHERE pending_action IS NOT NULL ORDER BY created_at').all() as unknown as Agent[];
 }
 
 // Every agent's id, spawning parent and activity, without the rest of its row: what org.syncChildrenWaits reads on

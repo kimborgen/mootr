@@ -16,6 +16,14 @@ export interface Wait {
   thread?: string | null
 }
 
+// What a resting agent (S-1969) rests for, as /api/agents reports it: why, what it waits for, and when it is
+// expected to wake (ISO; null with no known time).
+export interface Resting {
+  reason: 'idle' | 'wait'
+  waits: { id: string; kind: string; target: string | null; detail: string | null; since: string; until: string | null }[]
+  expected_wake: string | null
+}
+
 export interface AgentLoad {
   open_itsas: number
   median_lead_s: number | null
@@ -55,11 +63,15 @@ export interface Agent {
   parent_id?: string | null
   chief_of_staff?: number | boolean
   permission_mode?: string | null
+  // 'settings': follows Settings › Permission modes; 'manual': the human's own pick. Null on an agent from before S-1967.
+  permission_source?: string | null
   child_notices?: string | null
   // Set on an optimistic copy (optimistic.ts) while the change is in flight: what the agent is doing, such as 'pausing'.
   pending?: string | null
   unread?: number
   waits?: Wait[]
+  // Set while the agent rests: its harness is stopped and its session kept. It stays live and wakes on mail, a notice or a prompt.
+  resting?: Resting | null
   pending_requests?: number
   // Whether the agent is in at least one open ITSA (step 10); false only when it is in none.
   in_itsa?: boolean

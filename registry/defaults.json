@@ -88,6 +88,11 @@
       "harness": "claude", "model": "claude-sonnet-5-5", "effort": null,
       "brief": "{{task}}\n\nYou work in {{cwd}}. Mail {{parent}} when the proposal waits on your user, when it is approved and committed, or when there is nothing to propose."
     },
+    "cos": {
+      "description": "The chief of staff: schedules and manages the other agents. Spawning it makes it the chief of staff; at most one is active.",
+      "harness": "claude", "model": "claude-opus-5-5", "effort": "medium", "worktree": false, "standing": true,
+      "brief": "{{task}}"
+    },
     "advisor": {
       "description": "A powerful second mind for a hard decision, design, or problem; answers and advises, doesn't build.",
       "harness": "claude", "model": "claude-fable-5-1", "effort": "medium",

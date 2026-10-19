@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, statSync, readFileSync, writeFileSync, renameSync, readdirSync, mkdirSync, createReadStream } from 'node:fs';
 import { resolve, join, basename } from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
-import { homedir, uptime } from 'node:os';
+import { freemem, homedir, loadavg, uptime } from 'node:os';
 import { promisify } from 'node:util';
 import { WebSocketServer } from 'ws';
 import { encodeBody, sendCompressed } from './compress.ts';
@@ -17,6 +17,7 @@ import * as db from './db.ts';
 import { hashToken, mintAgentToken, serverTokenHash } from './agent-token.ts';
 import * as tmux from './tmux.ts';
 import { clientCache } from './tmux-clients.ts';
+import { createStatuslineGate } from './statusline-gate.ts';
 import { adapters } from './adapters/index.ts';
 import * as mail from './mail.ts';
 import { lookingAtNote, tellAnywhere } from './mail.ts';
@@ -32,9 +33,10 @@ import { render, humanMailPrompt, listTemplates, saveTemplate, resetTemplate } f
 import * as lifecycle from './lifecycle.ts';
 import * as permissionModes from './permission-modes.ts';
 import { admit, admitSpawn, accountHeld } from './admission.ts';
-import { developerCapRefusal, isDeveloperSpawn, reserveSlot, releaseSlot, slotHolders, enqueueWaiter, dropWaiter, saveQueueFile, loadQueueFile, grantSlots, queuedWaiters, restoreQueue, URGENT_REASONS, type UrgentReason, type Waiter } from './developer-cap.ts';
+import { developerCapRefusal, isDeveloperSpawn, reserveSlot, releaseSlot, slotHolders, enqueueWaiter, dropWaiter, saveQueueFile, loadQueueFile, grantSlots, queuedWaiters, restoreQueue, roomRefusal, hostReadingFrom, cancelState, mayCancelWaiter, findDuplicate, spawnerKey, URGENT_REASONS, type HostReading, type UrgentReason, type Waiter } from './developer-cap.ts';
 import * as blockers from './blockers.ts';
 import * as context from './context.ts';
+import * as cacheCold from './cache-cold.ts';
 import * as permissions from './permissions.ts';
 import * as webpush from './webpush.ts';
 import * as withdraw from './withdraw.ts';
@@ -80,7 +82,7 @@ import * as usageDrill from './usage-drill.ts';
 import { issueCosts, itsaCost } from './issue-costs.ts';
 import { costDisplay } from './cost-display.ts';
 import { agentRaw, displayCtx, toCost, withOwnCost } from './agent-costs.ts';
-import { activityStats, measuredEffort, type By } from './activity-stats.ts';
+import { activityStatsCached, measuredEffort, type By } from './activity-stats.ts';
 import * as activitySummaryMod from './activity-summary.ts';
 import * as credits from './credits.ts';
 import * as voice from './voice.ts';
@@ -141,6 +143,7 @@ import { searchItsas } from './itsa-search.ts';
 import { whenInstalled } from './embed.ts';
 import WebSocket from 'ws';
 import * as agentView from './agent-view.ts';
+import * as viewPrompt from './view-prompt.ts';
 import { timed, startStallWatch, stalls } from './stall.ts';
 import * as activity from './activity.ts';
 import * as activityClassify from './activity-classify.ts';
@@ -440,15 +443,16 @@ async function reqRoute<T>(fn: () => T | Promise<T>): Promise<T> {
 // The slot queue (S-2053). A developer spawn at the cap waits here and starts when it reaches the head
 // and a slot is free; the reply gives its place and the holders, and the caller gets a notice when it
 // starts or fails. `urgent` (a reason) puts it ahead of the normal spawns.
-function queueSpawn(body: any, name: string): Record<string, unknown> {
+// `by` is the caller the queue keys the spawn by (S-2134): an agent's own id, so an agent can't queue as another; else the `by` the request names.
+function queueSpawn(body: any, name: string, reason: string | null = null, by?: string): Record<string, unknown> {
   let urgent: UrgentReason | undefined;
   if (body.urgent !== undefined && body.urgent !== null && body.urgent !== false) {
     if (!URGENT_REASONS.includes(body.urgent)) throw new HttpError(400, `urgent takes a reason: ${URGENT_REASONS.join(', ')}`);
     urgent = body.urgent;
   }
   if (queuedWaiters().some((w) => w.name === name)) throw new HttpError(409, `name ${name} is taken`);
-  const by = body.by ? String(body.by) : undefined;
-  const waiter = { name, body: { ...body, name }, by, urgent, at: Date.now() };
+  const owner = by ?? (body.by ? String(body.by) : undefined);
+  const waiter = { name, body: { ...body, name, ...(owner ? { by: owner } : {}) }, by: owner, urgent, at: Date.now() };
   const place = enqueueWaiter(waiter);
   try {
     saveSlotQueue();
@@ -458,15 +462,66 @@ function queueSpawn(body: any, name: string): Record<string, unknown> {
   }
   const holders = slotHolders(db.listAgents(), agentTypes(), MACHINE);
   pumpSlotQueue();
-  return { queued: true, name, place, queue_length: queuedWaiters().length, urgent: urgent ?? null, holders, cap: settings().developerCap, machine: MACHINE };
+  return { queued: true, name, place, queue_length: queuedWaiters().length, urgent: urgent ?? null, reason, holders, cap: settings().developerCap, machine: MACHINE };
 }
 
 // The queue is saved after every change and read back at start, so a restart or deploy during a wait
 // loses no accepted request. A granted waiter stays in the file until its spawn ends.
 const SLOT_QUEUE_FILE = join(STAM_HOME, 'slot-queue.json');
 const launching = new Set<Waiter>();
-function saveSlotQueue(): void {
-  saveQueueFile(SLOT_QUEUE_FILE, [...launching, ...queuedWaiters()]);
+function saveSlotQueue(waiting: readonly Waiter[] = queuedWaiters()): void {
+  saveQueueFile(SLOT_QUEUE_FILE, [...launching, ...waiting]);
+}
+
+// Cancels a queued developer spawn by name (S-2134). Its caller, the caller's ancestors, and the boss may cancel it;
+// a spawn already granted a slot is refused, since its agent is starting. The file is saved without it before it
+// leaves memory, so a failed save leaves it queued.
+function cancelQueuedSpawn(name: string, caller: Caller): Record<string, unknown> {
+  const state = cancelState(name, queuedWaiters(), [...launching].map((w) => w.name));
+  if (state === 'unknown') throw new HttpError(404, `no queued spawn named ${name}`);
+  if (state === 'launching') throw new HttpError(409, `${name} already got a developer slot and is starting, so it can't be cancelled`);
+  const w = queuedWaiters().find((x) => x.name === name)!;
+  const owner = w.by ? db.getAgent(w.by) : undefined;
+  const me = caller.kind === 'agent' ? caller.agent : undefined;
+  const boss = caller.kind !== 'agent' && caller.kind !== 'opencode' ? true : caller.boss === true || org.chiefOfStaff()?.id === me || (me !== undefined && isAssistant(me));
+  if (!mayCancelWaiter(owner?.id, me, boss, owner ? org.ancestors(owner) : new Set())) throw new HttpError(403, `${me ? db.getAgent(me)?.name ?? me : 'this caller'} can't cancel ${name}: only its caller, the caller's parents, and the chief of staff may`);
+  removeQueued(w);
+  if (w.by && w.by !== me) tellWaiter(w, `Your queued spawn ${name} was cancelled.`);
+  return { cancelled: true, name, machine: MACHINE };
+}
+
+// Takes a waiter out of the queue: the saved file goes first, so a failed save leaves it queued and refuses the change.
+function removeQueued(w: Waiter): void {
+  try {
+    saveSlotQueue(queuedWaiters().filter((x) => x !== w));
+  } catch (e) {
+    throw new HttpError(503, `can't save the slot queue, so ${w.name} stays queued: ${e instanceof Error ? e.message : e}`);
+  }
+  dropWaiter(w.name);
+}
+
+// A peer's spawn named `name` from `by` started here (S-2134), so this machine's queued spawn of the same name from
+// the same caller would start a duplicate: it is dropped. Only a peer or the human may ask, never an agent.
+function dropQueuedDuplicate(name: string, by: unknown, caller: Caller): Record<string, unknown> {
+  if (caller.kind === 'agent' || caller.kind === 'opencode') throw new HttpError(403, 'only a peer drops a queued duplicate');
+  const w = by ? findDuplicate(queuedWaiters(), name, String(by)) : undefined;
+  if (!w) return { dropped: false };
+  if (cancelState(name, queuedWaiters(), [...launching].map((x) => x.name)) === 'launching') return { dropped: false, launching: true };
+  removeQueued(w);
+  tellWaiter(w, `Your queued spawn ${name} was dropped: ${name} started on another machine from the same caller.`);
+  return { dropped: true };
+}
+
+// After a spawn of `name` from `by` starts here, the peers drop their queued duplicates (S-2134). A daemon-to-daemon
+// call (no caller's via), so the peer sees a peer, not the agent. Fire and forget: a peer that can't be reached keeps
+// its waiter, and the outcome is logged, so the spawn's reply doesn't wait for it.
+function dropQueuedDuplicates(name: string, by: string): void {
+  for (const p of peers())
+    peerCall(p, 'POST', `/api/slot-queue/${encodeURIComponent(name)}/duplicate`, { caller: by }, 8000)
+      .then((r) => {
+        if (r.status === 200 && r.data?.dropped) console.log(`slot queue: ${p.name} dropped its queued duplicate ${name} from ${by}`);
+      })
+      .catch((e) => console.error(`slot queue: ${p.name} duplicate check for ${name}: ${e instanceof Error ? e.message : e}`));
 }
 // A save that fails is logged where nobody has been told yet; enqueue refuses instead.
 const saveSlotQueueLogged = (): void => {
@@ -509,6 +564,7 @@ async function launchWaiter(w: Waiter): Promise<void> {
     if (!waiterAlive(w)) return;
     const a = await spawnAgent(w.body, false, undefined, { granted: true });
     tellWaiter(w, `Your queued spawn ${w.name} got a developer slot and started (${a.id}).`);
+    if (w.by) dropQueuedDuplicates(w.name, w.by);
   } catch (e) {
     tellWaiter(w, `Your queued spawn ${w.name} got a developer slot but failed to start: ${e instanceof Error ? e.message : e}`);
   } finally {
@@ -518,11 +574,17 @@ async function launchWaiter(w: Waiter): Promise<void> {
   }
 }
 
+// The load and free memory the queue's guard reads (S-2120): the sampler's latest sample while it is fresh
+// (STAM_PROC_DIR can seed it for tests), else the os module's.
+function hostReading(): HostReading {
+  return hostReadingFrom(machines.latestSample(), Date.now(), 2 * machines.SAMPLE_MS, () => ({ load1: loadavg()[0], freeBytes: freemem() }));
+}
+
 // Each launch runs on its own, so a slow workspace never holds the next sweep for dead waiters.
 function pumpSlotQueue(): void {
   const before = queuedWaiters().length;
-  const { granted, dropped } = grantSlots(db.listAgents(), agentTypes(), settings().developerCap, MACHINE, waiterAlive);
-  for (const w of dropped) tellWaiter(w, `Your queued spawn ${w.name} was dropped from the developer slot queue after waiting too long; spawn it again when you need it.`);
+  const { granted, dropped } = grantSlots(db.listAgents(), agentTypes(), settings().developerCap, MACHINE, waiterAlive, hostReading());
+  for (const w of dropped) tellWaiter(w, `Your queued spawn ${w.name} was dropped from the developer slot queue because its caller was archived.`);
   // The whole batch is in the saved snapshot before the first launch starts.
   for (const w of granted) launching.add(w);
   if (granted.length || queuedWaiters().length !== before) saveSlotQueueLogged();
@@ -550,16 +612,20 @@ class QueuedSpawn extends Error {
   }
 }
 
-async function spawnAgent(body: any, human = false, onCreated?: (id: string) => void, opts: { queue?: boolean; granted?: boolean } = {}): Promise<db.Agent> {
-  const slot: { name?: string; queue?: boolean; granted?: boolean } = { queue: opts.queue, granted: opts.granted };
+async function spawnAgent(body: any, human = false, onCreated?: (id: string) => void, opts: { queue?: boolean; granted?: boolean; by?: string } = {}): Promise<db.Agent> {
+  const slot: { name?: string; queue?: boolean; granted?: boolean; by?: string; cos?: boolean } = { queue: opts.queue, granted: opts.granted, by: opts.by };
   try {
     return await spawnAgentIn(body, human, onCreated, slot);
   } finally {
     if (slot.name) releaseSlot(slot.name);
+    if (slot.cos) cosSpawning = false;
   }
 }
 
-async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) => void) | undefined, slot: { name?: string; queue?: boolean; granted?: boolean }): Promise<db.Agent> {
+// A cos spawn in flight: held from the check to the end of the spawn, so two at once can't both pass it.
+let cosSpawning = false;
+
+async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) => void) | undefined, slot: { name?: string; queue?: boolean; granted?: boolean; by?: string; cos?: boolean }): Promise<db.Agent> {
   const original = body;
   // An agent type sets the preset, role, visibility, child notices, and brief; anything
   // given explicitly wins. Without a type and with no input at all, the agent gets the
@@ -608,6 +674,16 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
   if (type && (!body.harness || body.harness === type.harness)) body = { ...body, harness: type.harness, model: body.model ?? type.model, effort: body.effort ?? type.effort };
   if (type) body = { ...body, role: body.role || body.type, visibility: body.visibility ?? type.visibility, child_notices: body.child_notices ?? type.child_notices };
   const boss = human || isAssistant(body.by);
+  // The cos type makes its agent the chief of staff, so only the human and the assistant spawn it, and only one runs.
+  const isCos = Boolean(type) && String(body.type) === 'cos';
+  if (isCos) {
+    if (!boss) throw new HttpError(403, 'only the human and the assistant spawn a chief of staff');
+    const current = org.chiefOfStaff();
+    if (current) throw new HttpError(409, `${current.name} is already the chief of staff`);
+    if (cosSpawning) throw new HttpError(409, 'a chief of staff is already starting');
+    cosSpawning = true;
+    slot.cos = true;
+  }
   const harness = String(body.harness ?? 'claude');
   if (!adapters[harness]) throw new HttpError(400, `unknown harness ${harness}`);
   // The parent, here or on another machine (ids are unique across machines). Resolved
@@ -675,9 +751,11 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
   // A spawn behind others in the queue waits too, even with a slot free, so it can't jump them.
   const capRefusal = slot.granted ? null : developerCapRefusal(db.listAgents(), agentTypes(), type, spec.kind === 'worktree', settings().developerCap, MACHINE);
   const behindQueue = !slot.granted && queuedWaiters().length > 0 && isDeveloperSpawn(type, spec.kind === 'worktree') && settings().developerCap > 0;
-  if ((capRefusal || behindQueue) && !human) {
-    if (!slot.queue) throw new HttpError(409, capRefusal ?? `developer spawns are queued on ${MACHINE}; ${queuedWaiters().length} waiting`);
-    throw new QueuedSpawn(queueSpawn(original, name));
+  // A developer spawn also waits on a host without room (S-2120), with free slots or not: the load guard.
+  const roomWait = !slot.granted && isDeveloperSpawn(type, spec.kind === 'worktree') ? roomRefusal(hostReading()) : null;
+  if ((capRefusal || behindQueue || roomWait) && !human) {
+    if (!slot.queue) throw new HttpError(409, capRefusal ?? roomWait ?? `developer spawns are queued on ${MACHINE}; ${queuedWaiters().length} waiting`);
+    throw new QueuedSpawn(queueSpawn(original, name, roomWait, slot.by));
   }
   // Held until the spawn ends, so a second spawn in the same seconds counts this one.
   if (isDeveloperSpawn(type, spec.kind === 'worktree')) {
@@ -743,12 +821,12 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
   const picked = human && permissionModes.isMode(body.permission_mode) && body.permission_mode !== fromSettings ? body.permission_mode : null;
   const permission_mode = picked ?? fromSettings;
   const permission_source = picked ? 'manual' : 'settings';
-  if (boss && body.chief_of_staff) setSetting('chiefOfStaff', name);
+  if (boss && (body.chief_of_staff || isCos)) setSetting('chiefOfStaff', name);
   const visibility = body.visibility && typeof body.visibility === 'object' ? JSON.stringify(body.visibility) : null;
   const kind = human && body.kind === 'assistant' ? 'assistant' : null;
   // How much the new agent hears about its own children; its preference, defaulted.
   const child_notices = ['turn', 'tree-idle', 'none'].includes(body.child_notices) ? String(body.child_notices) : settings().childNotices;
-  db.updateAgent(agent.id, { workspace: JSON.stringify(ws), personal_workspace: personalWorkspace, standing: body.standing === true ? 1 : 0, capabilities: JSON.stringify(capabilitiesFor(harness, agent.model)), permission_mode, permission_source, visibility, child_notices, kind, type: type ? String(body.type) : null, first_prompt: prompt ?? null });
+  db.updateAgent(agent.id, { workspace: JSON.stringify(ws), personal_workspace: personalWorkspace, standing: body.standing === true || (body.standing === undefined && type?.standing === true) ? 1 : 0, capabilities: JSON.stringify(capabilitiesFor(harness, agent.model)), permission_mode, permission_source, visibility, child_notices, kind, type: type ? String(body.type) : null, first_prompt: prompt ?? null });
   // S-759: the first prompt is stored now; the delivery marker (lifecycle.startHarness) says it
   // went in. A daemon restart in between leaves the agent 'starting' with no marker, so the
   // first reconcile pass re-delivers the prompt instead of waiting for the starting timeout.
@@ -950,6 +1028,26 @@ async function startAssistant(prompt?: string): Promise<db.Agent> {
   const cwd = c.cwd ? String(c.cwd).replace(/^~(?=$|\/)/, homedir()) : join(STAM_HOME, 'assistant');
   mkdirSync(cwd, { recursive: true });
   return spawnAgent({ name, harness: c.harness, model: c.model, effort: c.effort, cwd, role: 'Executive assistant', kind: 'assistant', prompt }, true);
+}
+
+// --- The chief of staff, from the cos type -------------------------------------------------
+// Starts one when none is active; spawning type `cos` sets settings.chiefOfStaff.
+let cosStart: Promise<db.Agent> | null = null;
+function startCos(): Promise<db.Agent> {
+  // Concurrent starts share one spawn.
+  cosStart ??= startCosOnce().finally(() => (cosStart = null));
+  return cosStart;
+}
+
+async function startCosOnce(): Promise<db.Agent> {
+  const current = org.chiefOfStaff();
+  if (current) return current;
+  let name = 'cos';
+  for (let i = 2; db.getAgent(name); i++) name = `cos-${i}`;
+  // Its own folder, like the assistant's: it manages stam rather than a project.
+  const cwd = join(STAM_HOME, 'cos');
+  mkdirSync(cwd, { recursive: true });
+  return spawnAgent({ name, type: 'cos', cwd, role: 'Chief of staff' }, true);
 }
 
 // Makes sure the assistant runs, and gives it `prompt` as the human's message.
@@ -1155,6 +1253,7 @@ async function forget(a: db.Agent): Promise<string> {
   }
   tmux.killSession(a.id);
   db.forgetAgent(a.id);
+  lifecycle.restForget(a.id);
   // Its pending permission requests are withdrawn and it is gone from the tree, so a
   // parent's children wait changes and a deferred tree-idle notice above may be owed.
   for (const p of parents) {
@@ -1198,6 +1297,9 @@ function onHook(harness: string, agentId: string, payload: any): { stdout?: stri
   if (r.session_id) fields.session_id = r.session_id;
   if (r.transcript_path) fields.transcript_path = r.transcript_path;
   if (r.last_message) fields.last_message = String(r.last_message).slice(0, 4000);
+  // The rest clock follows which turns act (S-2158); agent still holds the idle_since from before this hook.
+  if (ev === 'UserPromptSubmit' && r.activity === 'working') lifecycle.restTurnStarted(agent.id, agent.idle_since);
+  if (ev === 'PreToolUse' && typeof payload.tool_name === 'string') lifecycle.restToolUsed(agent.id, payload.tool_name);
   timed(`hook ${ev}: update agent`, () => db.updateAgent(agent.id, fields));
   timed(`hook ${ev}: add event`, () => db.addEvent(agent.id, `hook:${ev}`, r.activity ? { activity: r.activity, detail: r.detail } : undefined));
   // A dialog that blocks the agent becomes a permission request; any other activity, or a
@@ -1242,17 +1344,16 @@ const bannerCapturing = new Set<string>();
 let bannerRules = '';
 const canShowBanner = (a: db.Agent) => (a.lifecycle === 'active' || a.lifecycle === 'paused') && (a.activity === 'idle' || a.activity === 'waiting');
 
-function dismissBanners(): void {
+export function dismissBanners(snap: tmux.Snapshot | null): void {
   const banners = settings().banners;
   if (JSON.stringify(banners) !== bannerRules) {
     bannerRules = JSON.stringify(banners);
     bannerLooks.clear();
   }
-  const agents = db.listAgents().filter((a) => canShowBanner(a) && banners.some((b) => b.harness === a.harness));
+  const agents = db.listLiveAgents().filter((a) => canShowBanner(a) && banners.some((b) => b.harness === a.harness));
   const eligible = new Set(agents.map((a) => a.id));
   for (const id of bannerLooks.keys()) if (!eligible.has(id)) bannerLooks.delete(id);
   if (!agents.length) return;
-  const snap = tmux.snapshot();
   if (!snap) return;
   // The panes due a look this tick, oldest look first; at most BANNER_CAPTURES_PER_TICK are captured, so a tick
   // never captures every pane at once (banner-stagger.ts). The rest are due on the next tick.
@@ -1273,16 +1374,28 @@ function dismissBanners(): void {
     bannerCapturing.add(a.id);
     tmux
       .capturePaneAsync(pane)
-      .then((screen) => {
-        const cur = db.getAgent(a.id);
-        if (!cur || !canShowBanner(cur) || cur.harness !== a.harness || JSON.stringify(settings().banners) !== rules) return;
-        bannerLooks.set(a.id, { pane, activity, at: now });
-        for (const b of banners.filter((b) => b.harness === cur.harness)) {
-          if (!new RegExp(b.match).test(screen)) continue;
-          if (tmux.paneOwner(pane) !== owner) return;
-          tmux.sendKeysToPane(pane, ...b.keys);
-          db.addEvent(a.id, 'banner:dismissed', { match: b.match });
-          mail.schedulePush(a.id);
+      .then(async (screen) => {
+        // S-2125: the tmux calls are async; the synchronous parts around them are labelled banners.
+        // The agent as it is now, if it can still show a banner under the same harness and rules.
+        const current = () => {
+          const cur = db.getAgent(a.id);
+          return cur && canShowBanner(cur) && cur.harness === a.harness && JSON.stringify(settings().banners) === rules ? cur : null;
+        };
+        const hits = timed('banners screen', () => {
+          const cur = current();
+          if (!cur) return null;
+          bannerLooks.set(a.id, { pane, activity, at: now });
+          return banners.filter((b) => b.harness === cur.harness && new RegExp(b.match).test(screen));
+        });
+        for (const b of hits ?? []) {
+          if ((await tmux.paneOwnerAsync(pane)) !== owner) return;
+          // The owner lookup took a turn of the event loop: the agent may have started working or changed since.
+          if (!timed('banners recheck', current)) return;
+          await tmux.sendKeysToPaneAsync(pane, ...b.keys);
+          timed('banners dismissed', () => {
+            db.addEvent(a.id, 'banner:dismissed', { match: b.match });
+            mail.schedulePush(a.id);
+          });
         }
       })
       .catch(() => {})
@@ -1293,9 +1406,9 @@ function dismissBanners(): void {
 // A 'working' agent whose harness sits at its prompt and has sent no hook for
 // settings.staleWorkingMinutes missed its end-of-turn hook, e.g. while the daemon restarted
 // (S-188). Mail and notices reach only idle agents, so it ends the turn as Stop would.
-function reconcileStaleWorking(): void {
+export function reconcileStaleWorking(): void {
   const limit = settings().staleWorkingMinutes * 60_000;
-  for (const a of db.listAgents()) {
+  for (const a of db.listLiveAgents()) {
     if (a.lifecycle !== 'active' || a.activity !== 'working') continue;
     const adapter = adapters[a.harness];
     if (!adapter?.atPrompt) continue;
@@ -1312,6 +1425,8 @@ function reconcileStaleWorking(): void {
 // adapters start, since the OpenCode adapter starts a server of its own.
 let tmuxServer: string | null = null;
 let reconciled = false;
+// S-2125: agents whose tmux-server loss reconcile saw but held back, since they changed after the snapshot began.
+const lossDeferred = new Set<string>();
 // S-1393: when the idle shut-down archive sweep last ran. Reconcile ticks every 5 s; the sweep
 // asks git and the home, so it runs every 10 minutes.
 let idleShutdownSweptAt = 0;
@@ -1335,16 +1450,20 @@ function sessionEndedLong(a: db.Agent): boolean {
   return Date.now() - Date.parse(db.lastHookAt(a.id) ?? a.updated_at) >= SESSION_END_MS;
 }
 
-function reconcile(): void {
-  // One tmux call for every agent's session (S-345), rather than a spawn or two per agent.
+export function reconcile(snap: tmux.Snapshot | null = tmux.snapshot()): void {
+  // One tmux call for every agent's session (S-345), rather than a spawn or two per agent; the
+  // loops pass the shared async snapshot (S-2125), and the start-up pass takes its own.
   // A call that failed without saying the server is gone tells nothing, so the tick changes
   // nothing (and the next one counts as the first) rather than taking every agent for lost.
-  const snap = tmux.snapshot();
   if (!snap) {
     console.error('reconcile: tmux list-panes failed; skipped this tick');
     return;
   }
   const { server, dead } = snap;
+  // S-2125: the snapshot is from when its tmux call started, and a shared one may be applied a moment later.
+  // An agent changed since (resumed, relaunched) may have a session the snapshot doesn't show, so it isn't
+  // taken for exited or lost on it; the next tick, with a fresh snapshot, decides. updated_at is in ms.
+  const asOf = tmux.snapshotStartedAt(snap) ?? Infinity;
   const first = !reconciled;
   reconciled = true;
   // No server at daemon start, or a different server (or none) than last time.
@@ -1354,11 +1473,19 @@ function reconcile(): void {
   const reason = first && uptime() < process.uptime() + 300 ? 'this machine restarted' : "stam's tmux server stopped";
   let lost = false;
   const now = Date.now();
-  for (const a of db.listAgents()) {
+  // S-2128: archived agents are skipped below, so only live rows are read.
+  for (const a of db.listLiveAgents()) {
     // Registered agents (no workspace) run outside stam, so there is no terminal to check.
     if (!a.workspace) continue;
     // An archived agent has no terminal left to check, so reconcile makes no tmux call for it.
     if (a.lifecycle === 'archived') continue;
+    // A lost server is seen once, on the tick it changes, so an agent held back here keeps its loss in lossDeferred
+    // until a snapshot from after its change decides it (or shows its session).
+    if (dead.get(a.id) !== false && Date.parse(a.updated_at) >= asOf) {
+      if (serverLost) lossDeferred.add(a.id);
+      continue;
+    }
+    const lostHere = serverLost || lossDeferred.delete(a.id);
     if (a.activity === 'starting') {
       // S-759: a first prompt this restart cut off before delivery is re-delivered now, not
       // waited on; the marker tells it from a launch that already got its prompt in.
@@ -1398,7 +1525,7 @@ function reconcile(): void {
       lost = true;
       continue;
     }
-    if (serverLost && !dead.has(a.id)) {
+    if (lostHere && !dead.has(a.id)) {
       if (a.lifecycle === 'active') {
         lifecycle.markLost(a, reason);
         lost = true;
@@ -1442,6 +1569,16 @@ function reconcile(): void {
   if (first) costSwitch.resumeSwitches();
 }
 
+// The loops' ticks: the shared async snapshot (S-2125), then the synchronous work under its label.
+export async function reconcileTick(): Promise<void> {
+  const snap = await tmux.sharedSnapshot();
+  timed('reconcile', () => reconcile(snap));
+}
+export async function bannersTick(): Promise<void> {
+  const snap = await tmux.sharedSnapshot();
+  timed('banners', () => dismissBanners(snap));
+}
+
 // Addresses to listen on: localhost, plus this machine's Tailscale address so the
 // web UI works from a phone. STAM_BIND (comma-separated) overrides.
 export function bindAddresses(): string[] {
@@ -1465,6 +1602,19 @@ export function bindAddresses(): string[] {
 const viewers = new Map<string, { size: [number, number]; ptys: Set<{ ws: import('ws').WebSocket; pty: import('node-pty').IPty }> }>();
 // A statusline refresh asks whether a tmux client is attached; the answer is cached for a few seconds (tmux-clients.ts, S-1025).
 const tmuxClientsOpen = clientCache(tmux.hasClients, 5_000);
+// Processes one status-line report: the context size, then the usage tables (S-2126: reached through statuslineGate).
+const statuslineGate = createStatuslineGate((slot, body) => {
+  const [harness, id] = slot.split('/') as [string, string];
+  const a = db.getAgent(id);
+  if (!a) return;
+  const f = adapters[harness]?.onStatusLine?.(a, body as Record<string, any>) ?? {};
+  if (f.context_tokens !== undefined || f.context_window !== undefined) db.updateAgent(a.id, { context_tokens: f.context_tokens, context_window: f.context_window });
+  // Stores the windows before the cost, so the paid estimate uses this refresh's windows.
+  usage.reportStatusline(a, f);
+  if (f.context_tokens !== undefined) context.onContext(a.id, f.context_tokens);
+  if (f.session) cacheCold.onCacheTurn(a.id, f.session);
+  if (f.cacheTtl) cacheCold.onCacheTtl(a.id, f.cacheTtl);
+});
 
 function attachTerminal(ws: import('ws').WebSocket, agentId: string, cols: number, rows: number): void {
   let group = viewers.get(agentId);
@@ -2343,7 +2493,7 @@ export async function runDaemon(): Promise<void> {
   timed('reconcile', reconcile);
   // A deploy that changed stam's MCP tools: running agents hear of it and reload (S-178).
   announceToolChanges().catch((e) => console.error(`mcp tools: ${e instanceof Error ? e.message : e}`));
-  setInterval(() => timed('reconcile', reconcile), 5000);
+  setInterval(() => void reconcileTick().catch((e) => console.error(`reconcile: ${e instanceof Error ? e.message : e}`)), 5000);
   // A freed slot goes to the head of the developer slot queue (S-2053).
   restoreSlotQueue();
   setInterval(pumpSlotQueue, 2000);
@@ -2356,11 +2506,7 @@ export async function runDaemon(): Promise<void> {
   activityClassify.startClassifier();
   // The activity summary's digests (S-1009), built in slices after the start-up ingest has begun.
   setTimeout(() => void activitySummaryMod.warmSummary(), 30_000).unref();
-  setInterval(() => {
-    try {
-      timed('banners', dismissBanners);
-    } catch {}
-  }, 3000);
+  setInterval(() => void bannersTick().catch(() => {}), 3000);
   setInterval(() => {
     try {
       timed('stale working', reconcileStaleWorking);
@@ -2370,10 +2516,23 @@ export async function runDaemon(): Promise<void> {
   lifecycle.startRestWaking();
   setInterval(() => timed('standing rest sweep', lifecycle.restSweep), 60_000);
   setInterval(() => timed('standing growth sweep', () => void growthSweep().catch((e) => console.error('standing growth sweep:', e))), 60_000);
-  // On the ITSA home: GitHub PR heads follow storage's branches (S-667).
+  // On the ITSA home: GitHub PR heads follow storage's branches (S-667). A config that
+  // prOpenConfig refuses (a fresh install with no repo) skips the tick, logged once per
+  // message, and never throws out of the timer, which would kill the daemon (S-2140).
+  let prSyncConfigError = '';
   setInterval(() => {
     if ((settings().itsa.home ?? MACHINE) !== MACHINE) return;
-    prSync.syncTick(prOpen.prOpenConfig())?.catch((e) => console.error(`pr-sync: ${e instanceof Error ? e.message : e}`));
+    let cfg: ReturnType<typeof prOpen.prOpenConfig>;
+    try {
+      cfg = prOpen.prOpenConfig();
+      prSyncConfigError = '';
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg !== prSyncConfigError) console.error(`pr-sync: skipped: ${msg}`);
+      prSyncConfigError = msg;
+      return;
+    }
+    prSync.syncTick(cfg)?.catch((e) => console.error(`pr-sync: ${e instanceof Error ? e.message : e}`));
   }, 60_000);
   // Declared-wait timeouts and wake_me timers, fired from `until`. Its first tick also
   // catches up on what came due while the daemon was down (once, not per missed tick).
@@ -2901,6 +3060,7 @@ export async function runDaemon(): Promise<void> {
             chief_of_staff: cos === a.name || cos === a.id,
             blockers: blockersOf.get(a.id) ?? [],
             waits: waitsOf.get(a.id) ?? [],
+            resting: lifecycle.restingOf(a, waitsOf.get(a.id) ?? []),
             in_itsa: !itsaOn || !inItsa ? true : inItsa.has(a.id),
             view: timed('agents: view capabilities', () => agentView.capabilities(a)),
             ...(a.standing && a.lifecycle !== 'archived' ? { load: timed('agents: standing load', () => cachedLoadOf(a)) } : {}),
@@ -3465,7 +3625,7 @@ export async function runDaemon(): Promise<void> {
     [
       'POST',
       /^\/api\/agents\/([\w-]+)\/view\/prompt$/,
-      (m, body, _u, _r, _l, _h, req) => (humanOnly(req, "send to an agent's view"), viewCall(() => agentView.prompt(mustAgent(m[1]), String(body.text ?? ''), body.delivery ?? 'queue')).then(() => ({ sent: true }))),
+      (m, body, _u, _r, _l, _h, req) => (humanOnly(req, "send to an agent's view"), viewCall(() => viewPrompt.prompt(mustAgent(m[1]), String(body.text ?? ''), body.delivery ?? 'queue')).then(() => ({ sent: true }))),
     ],
     [
       'POST',
@@ -3494,14 +3654,32 @@ export async function runDaemon(): Promise<void> {
         if (!body?.by && strictRefuses('spawn with no by', unattributed(human, local, caller))) throw new HttpError(403, 'only the human, or an agent naming itself (by), spawns an agent');
         // A ring reviewer type with no harness, model, or preset is spawned as a ring.
         if (body.type && agentTypes()[String(body.type)]?.review?.ring && !body.preset && !body.harness && !body.model) return spawnRingType(body, human);
-        return spawnAgent(body, human, undefined, { queue: true }).then(
-          (a) => ({ ...a, view: agentView.capabilities(a) }),
+        // An agent's queued spawn is keyed by the agent itself, whatever `by` it names (S-2134).
+        return spawnAgent(body, human, undefined, { queue: true, by: caller.kind === 'agent' ? caller.agent : undefined }).then(
+          (a) => {
+            // The same agent queued on another machine would start a duplicate (S-2134): those queued spawns are dropped.
+            const by = spawnerKey(caller.kind === 'agent' ? caller.agent : undefined, body.by);
+            if (by) dropQueuedDuplicates(a.name, by);
+            return { ...a, view: agentView.capabilities(a) };
+          },
           (e) => {
             if (e instanceof QueuedSpawn) return e.reply;
             throw e;
           },
         );
       },
+    ],
+    // Cancels a queued developer spawn by its name (S-2134): agent_control cancel.
+    [
+      'POST',
+      /^\/api\/slot-queue\/([\w-]+)\/cancel$/,
+      (m, _b, _u, _r, _l, _h, _q, caller) => cancelQueuedSpawn(m[1]!, caller),
+    ],
+    // A peer's spawn of a queued name from the same caller drops this machine's queued one (S-2134).
+    [
+      'POST',
+      /^\/api\/slot-queue\/([\w-]+)\/duplicate$/,
+      (m, body, _u, _r, _l, _h, _q, caller) => dropQueuedDuplicate(decodeURIComponent(m[1]!), body?.caller, caller),
     ],
     [
       'POST',
@@ -3787,7 +3965,7 @@ export async function runDaemon(): Promise<void> {
     [
       'GET',
       /^\/api\/activity$/,
-      (_m, _b, url, _r, local, _h, _q, caller) => {
+      async (_m, _b, url, _r, local, _h, _q, caller) => {
         const by = url.searchParams.get('by') ?? 'agent';
         if (by === 'summary') return activityRoute(url, caller);
         // What a daemon reads of its peers for the summary (S-1079, src/activity-wire.ts): a peer's call only.
@@ -3809,9 +3987,14 @@ export async function runDaemon(): Promise<void> {
         }
         if (!['agent', 'itsa', 'model', 'type'].includes(by)) throw new HttpError(400, `by must be agent, itsa, model, type, or summary, not ${by}`);
         const days = url.searchParams.get('days');
-        const r = activityStats({ by: by as By, days: days == null ? undefined : Number(days), closed: url.searchParams.get('closed') === '1' });
+        if (days != null && !(Number(days) >= 1 && Number(days) <= 3650)) throw new HttpError(400, `days must be 1 to 3650, not ${days}`);
+        // Sliced and kept for 30 s (src/activity-stats.ts, S-2094); each slice is labelled with the mode and the caller.
+        const r = await activityStatsCached({ by: by as By, days: days == null ? undefined : Number(days), closed: url.searchParams.get('closed') === '1' }, (fn) => timed(`GET /api/activity slice by=${by} caller=${caller.kind}`, fn));
         const viewer = usageViewer(caller, url);
-        return viewer === undefined ? r : usageScope.scopeActivity(r as any, viewer, usageScope.visibleAgents(viewer));
+        const scoped = viewer === undefined ? r : usageScope.scopeActivity(r as any, viewer, usageScope.visibleAgents(viewer));
+        // `itsa=S-N`: one ITSA's row, for a page that shows one (the full report stays one memo).
+        const only = url.searchParams.get('itsa');
+        return only && by === 'itsa' ? { ...scoped, rows: (scoped as { rows: { key: string }[] }).rows.filter((x) => x.key === only) } : scoped;
       },
     ],
     // A manager records that it handled a cost notice, by the event id in the notice.
@@ -4072,6 +4255,19 @@ export async function runDaemon(): Promise<void> {
         res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
         res.end(JSON.stringify(body));
         return HANDLED;
+      },
+    ],
+    [
+      'POST',
+      /^\/api\/cos\/(start|stop)$/,
+      // start: runs one from the cos type if none is active. stop: shuts the active one down.
+      async (m, _body, _u, _r, _l, human) => {
+        if (!human) throw new HttpError(403, 'only the human starts or stops the chief of staff this way');
+        if (m[1] === 'start') return startCos();
+        const cos = org.chiefOfStaff();
+        if (!cos) throw new HttpError(404, 'no chief of staff is active');
+        await lifecycle.shutdown(cos, true);
+        return db.getAgent(cos.id)!;
       },
     ],
     ['GET', /^\/api\/assistant$/, () => ({ agent: assistantAgent() ?? null, config: settings().assistant })],
@@ -4991,7 +5187,8 @@ export async function runDaemon(): Promise<void> {
       /^\/api\/agents\/([\w-]+)$/,
       (m) => {
         const a = mustAgent(m[1]);
-        return { ...a, blockers: blockers.blockers(a), waits: waits.webWaits(a.id), view: agentView.capabilities(a) };
+        const ws = waits.webWaits(a.id);
+        return { ...a, blockers: blockers.blockers(a), waits: ws, resting: lifecycle.restingOf(a, ws), view: agentView.capabilities(a) };
       },
     ],
     // The view the human's web UI opens an agent in (S-82): terminal or conversation, or
@@ -5094,7 +5291,9 @@ export async function runDaemon(): Promise<void> {
         const a = mustAgent(m[1]);
         mayManageWaits(a, body?.by, human, peerOwn(local, caller));
         try {
-          return await waits.declare(a.id, body ?? {});
+          const w = await waits.declare(a.id, body ?? {});
+          if (body?.rest === true) lifecycle.requestRest(a.id, w);
+          return w;
         } catch (e) {
           throw new HttpError(400, e instanceof Error ? e.message : String(e));
         }
@@ -5107,7 +5306,9 @@ export async function runDaemon(): Promise<void> {
         const a = mustAgent(m[1]);
         mayManageWaits(a, body?.by, human, peerOwn(local, caller));
         try {
-          return waits.wake(a.id, body ?? {});
+          const w = waits.wake(a.id, body ?? {});
+          if (body?.rest === true) lifecycle.requestRest(a.id, w);
+          return w;
         } catch (e) {
           throw new HttpError(400, e instanceof Error ? e.message : String(e));
         }
@@ -5144,11 +5345,9 @@ export async function runDaemon(): Promise<void> {
       (m, body, _u, _r, _l, _h, _q, caller) => {
         mayActAs(caller, m[2]!, true);
         const a = mustAgent(m[2]);
-        const f = adapters[m[1]]?.onStatusLine?.(a, body) ?? {};
-        if (f.context_tokens !== undefined || f.context_window !== undefined) db.updateAgent(a.id, { context_tokens: f.context_tokens, context_window: f.context_window });
-        // Stores the windows before the cost, so the paid estimate uses this refresh's windows.
-        usage.reportStatusline(a, f);
-        if (f.context_tokens !== undefined) context.onContext(a.id, f.context_tokens);
+        // Unchanged reports are skipped and quick changes coalesced per agent (statusline-gate.ts, S-2126).
+        if (m[1] === 'claude') statuslineGate.submit(`${m[1]}/${a.id}`, body);
+        else statuslineGate.run(`${m[1]}/${a.id}`, body);
         // Whether anyone views the agent: a web terminal, a web view, or a tmux client. The
         // wrapper caches its status line longer while nobody does (statusline-cache.ts, S-274).
         return { viewed: viewers.has(a.id) || agentView.hasViewers(a.id) || tmuxClientsOpen(a.id) };
@@ -5383,7 +5582,7 @@ export async function runDaemon(): Promise<void> {
         const m = path.match(re);
         if (m && req.method === method) {
           // The route's synchronous part is labelled for the stall watch (src/stall.ts).
-          const out = await dedupByClientId(`${caller.kind}:${caller.agent ?? ''}|${path}${req.method === 'POST' && path === '/api/mail' && body && !body.reply_to && !body.new_thread && typeof body.from === 'string' ? `|${mail.readEpoch(body.from)}` : ''}`, req.method === 'POST' ? body?.client_id : undefined, async () => timed(`${req.method} ${path}`, () => handler(m, body, url, res, local, human, req, caller)), { keep: (r) => r !== HANDLED });
+          const out = await dedupByClientId(`${caller.kind}:${caller.agent ?? ''}|${path}${req.method === 'POST' && path === '/api/mail' && body && !body.reply_to && !body.new_thread && typeof body.from === 'string' ? `|${mail.readEpoch(body.from)}` : ''}`, req.method === 'POST' ? body?.client_id : undefined, async () => timed(path === '/api/activity' ? `${req.method} ${path} by=${url.searchParams.get('by') ?? 'agent'} caller=${caller.kind}` : `${req.method} ${path}`, () => handler(m, body, url, res, local, human, req, caller)), { keep: (r) => r !== HANDLED });
           if (out !== HANDLED) timed(`${req.method} ${path} response`, () => send(200, out ?? {}));
           return;
         }

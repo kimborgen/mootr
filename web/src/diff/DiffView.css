@@ -8,8 +8,15 @@
 .dv-review[data-tone='ok'] { color: var(--status-success-fg); border-color: var(--status-success-fg); }
 .dv-review[data-tone='bad'] { color: var(--status-error-fg); border-color: var(--status-error-fg); }
 .dv-review-label { flex: none; white-space: nowrap; }
+/* A narrow pane shows the short label, so the reviewer's name keeps room; the title and the sheet carry the full text. */
+.dv-review-short { display: none; }
+.dv[data-wide='0'] .dv-review-long { display: none; }
+.dv[data-wide='0'] .dv-review-short { display: inline; }
+/* A narrow pane trims the base sha (the title has both) and folds Wrap and the text size into one button. */
+.dv[data-wide='0'] .dv-sha-base { display: none; }
+.dv-text-body { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3); }
 .dv-review-by { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
-.dv-review-pop { position: absolute; left: 0; right: 0; bottom: 0; max-height: 70%; background: var(--surface-raised); border-top: 1px solid var(--border-default); box-shadow: var(--shadow-float); z-index: var(--z-modal); }
+.dv-review-pop, .dv-text-pop { position: absolute; left: 0; right: 0; bottom: 0; max-height: 70%; background: var(--surface-raised); border-top: 1px solid var(--border-default); box-shadow: var(--shadow-float); z-index: var(--z-modal); }
 .dv-review-text { margin: 0; padding: var(--space-3); overflow-wrap: anywhere; }
 .dv-controls { display: flex; align-items: center; gap: var(--space-2); overflow-x: auto; min-width: 0; }
 .dv-spacer { flex: 1; }
@@ -21,7 +28,7 @@
 .dv-chip[aria-pressed='true'] { color: var(--text-muted); border-style: dashed; }
 .dv-mode { flex: none; }
 .dv-body { flex: 1; min-height: 0; display: flex; }
-.dv-side { flex: none; width: 17rem; overflow-y: auto; border-right: 1px solid var(--border-subtle); }
+.dv-side { flex: none; width: var(--size-diff-side); overflow-y: auto; border-right: 1px solid var(--border-subtle); }
 .dv-main { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; }
 .dv-note { padding: var(--space-4); display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-3); }
 .dv-note p { margin: 0; }
@@ -68,6 +75,10 @@
 .dv .dv-code .cm-collapsedLines:hover { color: var(--accent-text); }
 .dv .dv-code .cm-deletedChunk { padding-left: 0; }
 .dv .dv-code .cm-mergeView .cm-editor { min-width: 0; }
+/* A patch file drawn from its own hunks (S-2103): the same tints, on the rows themselves, and muted hunk headers. */
+.dv .dv-code .cm-patchAdd { background-color: var(--status-success-bg); }
+.dv .dv-code .cm-patchDel { background-color: var(--status-error-bg); }
+.dv .dv-code .cm-patchHunk { color: var(--text-muted); background-color: var(--surface-sunken); }
 
 .dv-pager { flex: none; display: flex; gap: var(--space-2); padding: var(--space-1) var(--space-3); border-top: 1px solid var(--border-subtle); background: var(--surface-raised); }
 .dv-pager .dv-btn { flex: 1; }

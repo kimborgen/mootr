@@ -43,8 +43,8 @@ export function treeAgents(agents: Agent[]): Agent[] {
   const dimmed = (a: Agent) => a.lifecycle === 'shut_down' && agents.some((c) => c.lifecycle !== 'archived' && (c.parents ?? []).includes(a.id))
   return agents.filter((a) => live(a) || dimmed(a) || (a.lifecycle !== 'archived' && (a.parents ?? []).some((p) => { const parent = byId.get(p); return !!parent && dimmed(parent) })))
 }
-export const stateOf = (a: Agent) => (a.lifecycle === 'active' ? a.activity ?? 'idle' : a.lifecycle)
-export const STATE_COLOR: Record<string, string> = { working: 'working', starting: 'working', idle: 'idle', waiting: 'idle', blocked: 'blocked', errored: 'errored', paused: 'paused' }
+export const stateOf = (a: Agent) => (a.resting ? 'resting' : a.lifecycle === 'active' ? a.activity ?? 'idle' : a.lifecycle)
+export const STATE_COLOR: Record<string, string> = { working: 'working', starting: 'working', idle: 'idle', waiting: 'idle', blocked: 'blocked', errored: 'errored', paused: 'paused', resting: 'resting' }
 export const STATE_LABEL: Record<string, string> = { shut_down: 'shut down', archived: 'archived' }
 export const stateLabel = (a: Agent) => STATE_LABEL[stateOf(a)] ?? stateOf(a)
 export const HARNESS: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode' }

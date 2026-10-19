@@ -26,3 +26,12 @@ export function parseDiffLink(v: string): DiffRef | null {
 }
 
 export const diffTitle = (pr: number): string => `PR #${pr}`
+
+// The patch view's key (S-2103): `patch:HASH`, a patch pasted in mail and kept in this browser's LRU (patchStore.ts).
+// HASH is the patch text's own 64-bit hash, so the same content is always the same tab.
+export const patchKey = (hash: string): string => `patch:${hash}`
+
+export function parsePatchKey(key: string): string | null {
+  const m = /^patch:([0-9a-f]{16})$/.exec(key)
+  return m ? m[1] : null
+}

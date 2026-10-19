@@ -89,7 +89,7 @@ export function cardBadges(it: Itsa, cols: string[], fields: Field[], anyField =
 }
 
 // The agent states the header counts, in the legend's order, each with how many live agents are in it.
-export const STATES = ['working', 'idle', 'blocked', 'errored', 'paused'] as const
+export const STATES = ['working', 'idle', 'blocked', 'errored', 'paused', 'resting'] as const
 export function stateCounts(agents: Agent[]): { total: number; by: Record<string, number> } {
   const by: Record<string, number> = {}
   let total = 0

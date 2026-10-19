@@ -1,6 +1,6 @@
 // The app's reference resolvers (S-1484), registered once at start (main.tsx): `#494` as a pull request or
 // issue on GitHub, or as the ITSA that carries that PR; and "Settings › Spending" as that Settings section.
-import { currentDiffRepos } from '../diff/diffRepos'
+import { currentDiffRepos, repoNamed } from '../diff/diffRepos'
 import { getData } from '../store'
 import { SECTIONS } from '../views/configSections'
 import { registerRefResolver, type RefTarget } from './refs'
@@ -31,14 +31,21 @@ export function numberTargets(n: string): RefTarget[] {
   const found = itsasForNumber(n)
   if (!found.length) return []
   const repos = new Set<string>()
+  const pulls = new Set<string>()
   for (const i of found) for (const l of i.links ?? []) {
-    const m = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/(?:pull|issues)\/(\d+)$/.exec(l.url ?? '')
-    if (m && m[2] === n) repos.add(m[1])
+    const m = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/(pull|issues)\/(\d+)$/.exec(l.url ?? '')
+    if (m && m[3] === n) { repos.add(m[1]); if (m[2] === 'pull') pulls.add(m[1]) }
   }
   const own = ownRepo()
   if (!repos.size && own) repos.add(own)
+  // A pull request of a repo the diff API serves also opens in the diff view (S-1918).
+  const diffs = [...pulls].flatMap((repo) => {
+    const served = repoNamed(currentDiffRepos(), repo)
+    return served ? [{ label: `View diff ${repo}#${n}`, hint: 'The pull request\'s diff in a pane', action: `diff:${served.name}#${n}` }] : []
+  })
   return [
     ...[...repos].map((repo) => ({ label: `${repo}#${n}`, hint: 'Pull request or issue on GitHub', url: `https://github.com/${repo}/pull/${n}` })),
+    ...diffs,
     ...found.map((i) => ({ label: `${i.key} ${i.title}`, hint: 'The ITSA this pull request delivers', action: 'itsa:' + i.id })),
   ]
 }

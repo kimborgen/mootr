@@ -547,7 +547,7 @@ async function main() {
         a.name,
         a.machine,
         a.harness + (a.model ? `/${a.model}` : ''),
-        a.lifecycle === 'active' ? a.activity : a.lifecycle,
+        a.resting ? 'resting' : a.lifecycle === 'active' ? a.activity : a.lifecycle,
         (a.activity_detail ?? '').slice(0, 40),
         k(a.context_tokens),
         age(a.updated_at),
@@ -574,7 +574,7 @@ async function main() {
       const deadline = Date.now() + Number(values.timeout) * 1000;
       while (Date.now() < deadline) {
         const a = await api('GET', `/api/agents/${positionals[0]}`);
-        const state = a.lifecycle === 'active' ? a.activity : a.lifecycle;
+        const state = a.resting ? 'resting' : a.lifecycle === 'active' ? a.activity : a.lifecycle;
         if (want.includes(state)) return console.log(`${a.name}: ${state} ${a.activity_detail ?? ''}`);
         await new Promise((r) => setTimeout(r, 1000));
       }
@@ -602,6 +602,11 @@ async function main() {
       const a = await api('GET', `/api/agents/${rest[0]}`);
       spawnSync('tmux', tmux.attachArgs(a.id), { stdio: 'inherit' });
       return;
+    }
+    case 'cancel': {
+      // A developer spawn still queued for a slot, by its name (S-2134).
+      const r = await api('POST', `/api/slot-queue/${rest[0]}/cancel`, {});
+      return console.log(`${r.name}: queued spawn cancelled on ${r.machine}`);
     }
     case 'pause':
     case 'unpause':

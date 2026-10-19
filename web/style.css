@@ -218,6 +218,10 @@ button.wait-badge { cursor: pointer; }
 .node.dup .name { color: var(--text-secondary); }
 /* The top wait in a tree row: its kind's glyph, and a timer's time left. */
 .wait-mark { display: inline-flex; align-items: center; gap: 2px; color: var(--text-muted); font-size: var(--type-chrome-xs); font-variant-numeric: tabular-nums; }
+.rest-badge { gap: var(--space-05); color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The whole line wraps inside its parent, with the mark at the top, so a long wait never paints outside the badge. */
+.rest-badge.full { height: auto; min-height: 16px; max-width: 100%; box-sizing: border-box; white-space: normal; text-align: left; align-items: flex-start; padding-block: var(--space-05); overflow-wrap: anywhere; }
+.glyph.resting .ring { border-style: dashed; }
 .asst-tag { color: var(--text-secondary); display: inline-grid; place-items: center; }
 .tree-footer { flex: none; display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border-top: 1px solid var(--border-subtle); }
 .tree-footer .spacer { flex: 1; }
@@ -332,6 +336,7 @@ button.wait-badge { cursor: pointer; }
 .sp-field input, .sp-field textarea { flex: 1; min-width: 0; }
 .sp-prompt { align-items: flex-start; }
 .sp-prompt > svg.i, .sp-prompt .sp-label { margin-top: var(--space-1); }
+.sp-warn { margin: var(--space-1) var(--space-2); color: var(--status-warning-fg); overflow-wrap: anywhere; }
 .sp-error { margin: var(--space-1) var(--space-2); color: var(--status-error-fg); overflow-wrap: anywhere; }
 .spawn-panel footer { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-1); padding: var(--space-2) var(--space-1) var(--space-1) var(--space-2);
   border-top: 1px solid var(--menu-separator); }
@@ -876,18 +881,36 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .mb-metric.warning .mb-mval { color: var(--status-warning-fg); }
 .mb-metric.error .mb-mval { color: var(--status-error-fg); }
 
-.mb-diff { display: flex; flex-direction: column; gap: var(--space-1); }
-.mb-file { border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); overflow: hidden; }
+.mb-diff { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+/* The block's header (S-2100): the counts, and the Open slot at the right. Block actions in mail components show at rest. */
+.mb-dhead { display: flex; align-items: center; gap: var(--space-2); font-size: var(--type-chrome-sm); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.mb-dsum { flex: 1; min-width: 0; }
+.mb-dsum .add { color: var(--status-success-fg); } .mb-dsum .del { color: var(--status-error-fg); }
+/* One vertical scroller per block, capped by lines and by half the screen. A swipe at its end chains to the page: no overscroll containment. */
+.mb-dscroll { --cap: var(--size-diff-cap); display: flex; flex-direction: column; gap: var(--space-1); max-height: min(var(--cap), 50dvh); overflow-y: auto; overflow-x: hidden; min-width: 0; }
+@media (max-width: 760px) { .mb-dscroll { --cap: var(--size-diff-cap-phone); } }
+/* In a list card's clipped preview the block is inert: a tap opens the mail and a swipe swipes the card. */
+.mc-text .mb-diff { pointer-events: none; }
+.mc-text .mb-dscroll { overflow: hidden; }
+.mc-text .mb-dopen { display: none; }
+.mb-file { border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); overflow: clip; flex: none; }
 .mb-file summary, .md details.mb-details > summary { display: flex; align-items: center; gap: var(--space-15); cursor: pointer; list-style: none; }
-.mb-file summary { padding: var(--space-1) var(--space-2); font-size: var(--type-chrome-sm); }
+.mb-file summary { position: sticky; top: 0; z-index: 1; padding: var(--space-1) var(--space-2); font-size: var(--type-chrome-sm); background: var(--mb-surface, var(--surface-page)); }
+.mb-file[open] > summary { border-bottom: 1px solid var(--border-subtle); }
+@media (pointer: coarse) { .mb-file summary { min-height: var(--size-hit-touch); } .mb-dhead { min-height: var(--size-hit-touch); } }
 .mb-file summary:hover { background: var(--control-hover-bg); }
 .mb-file summary::-webkit-details-marker, .md details.mb-details > summary::-webkit-details-marker { display: none; }
 .mb-file[open] > summary > svg, .md details.mb-details[open] > summary > svg { transform: rotate(90deg); }
-.mb-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+.mb-path { flex: 1; min-width: 0; display: flex; white-space: nowrap; font-family: var(--font-mono); }
+.mb-dir { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-muted); }
+.mb-name { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-weight: var(--weight-semibold); }
 .mb-count { flex: none; font-variant-numeric: tabular-nums; }
 .mb-count .add { color: var(--status-success-fg); } .mb-count .del { color: var(--status-error-fg); }
-.md .mb-file pre { margin: 0; padding: var(--space-1) 0; border-top: 1px solid var(--border-subtle); }
-.mb-file .l { display: block; padding: 0 var(--space-3); white-space: pre; }
+.md .mb-file pre { margin: 0; padding: var(--space-1) 0; }
+.mb-file { min-width: 0; }
+/* Rows wrap (S-2099): the marker stays the first character; continuations hang --diff-hang past the code's own indent, capped by --diff-ind-max. */
+.mb-file .l { --hang: calc((1 + min(var(--ind, 0), var(--diff-ind-max)) + var(--diff-hang)) * 1ch); display: block; padding: 0 var(--space-3); padding-inline-start: calc(var(--space-3) + var(--hang)); text-indent: calc(-1 * var(--hang)); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
+.mb-file .l.hunk { --ind: 0; }
 .mb-file .l.add { background: var(--status-success-bg); color: var(--status-success-fg); }
 .mb-file .l.del { background: var(--status-error-bg); color: var(--status-error-fg); }
 .mb-file .l.hunk { color: var(--text-muted); }
@@ -1294,6 +1317,36 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
   /* The reply arrow says follow-up; the card's own words get the room. */
   .rf-target-w { display: none; }
 }
+
+
+/* --- The Inbox page (S-2054): a list of your mail; a thread opens in its own pane to the right. --- */
+.inbox-view { display: flex; flex-direction: column; height: 100%; min-width: 0; background: var(--surface-pane); }
+.inbox-head { flex: none; display: flex; align-items: center; gap: var(--space-3); min-height: var(--size-tab-bar); padding: var(--space-2) var(--space-4) 0; min-width: 0; }
+.inbox-title { margin: 0; font-size: var(--type-chrome-lg); font-weight: var(--weight-semibold); }
+.inbox-count { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: var(--type-chrome-sm); font-variant-numeric: tabular-nums; }
+.inbox-count .asks { color: var(--status-warning-fg); font-weight: var(--weight-medium); }
+.inbox-search { flex: none; width: var(--size-inbox-search); max-width: 50%; }
+.inbox-chips { flex: none; display: flex; align-items: center; column-gap: var(--space-3); min-height: var(--size-row-menu); padding: 0 var(--space-4); border-bottom: 1px solid var(--border-subtle); overflow-x: auto; scrollbar-width: none; }
+.inbox-chip { flex: none; display: inline-flex; align-items: center; height: var(--size-row-menu); color: var(--text-muted); font-weight: var(--weight-medium); white-space: nowrap; }
+.inbox-chip:hover { color: var(--control-hover-fg); }
+.inbox-chip[aria-pressed='true'] { color: var(--accent-text); }
+.inbox-chip .n { margin-left: var(--space-1); font-variant-numeric: tabular-nums; font-weight: var(--weight-regular); }
+.inbox-list { flex: 1; min-height: 0; overflow: auto; padding-bottom: var(--space-2); }
+/* The desktop key hint, under the list; a phone has no keyboard to read it. */
+.inbox-keys { flex: none; padding: var(--space-2) var(--space-4); border-top: 1px solid var(--border-subtle); color: var(--text-muted); font-size: var(--type-chrome-sm); line-height: var(--leading-chrome-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 760px) { .inbox-keys { display: none; } }
+.inbox-group-h { margin: 0; padding: var(--space-3) var(--space-4) var(--space-1); font-size: var(--type-chrome-xs); font-weight: var(--weight-medium); color: var(--text-muted); text-transform: uppercase; letter-spacing: var(--tracking-caps); }
+.inbox-group-h .n { font-variant-numeric: tabular-nums; font-weight: var(--weight-regular); }
+.inbox-state { padding: var(--space-6) var(--space-4); font-size: var(--type-chrome-md); }
+.inbox-state[data-inbox-state='error'] { color: var(--status-error-fg); }
+.mrow.irow { flex-direction: column; align-items: stretch; justify-content: center; gap: 0; height: auto; min-height: var(--size-row-inbox); padding: var(--space-1) var(--space-4); }
+.irow .ir-top { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.irow .ir-top > .s { flex: 1; }
+.irow .ir-kind { flex: none; display: inline-flex; color: var(--text-muted); }
+.irow.ask .ir-kind { color: var(--status-warning-fg); }
+.irow .ir-sum { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-height: var(--leading-chrome-sm); padding-left: calc(var(--icon-xs) + var(--space-2)); color: var(--text-muted); font-size: var(--type-chrome-sm); }
+.irow .ir-top > .glyph, .irow .ir-top > .chip { flex: none; }
+.mrow-act.defer { justify-content: flex-start; }
 
 /* --- The Swipe view (S-1003): the top card follows the pointer; what it would do shows behind it. --- */
 .swipe-view { display: flex; flex-direction: column; height: 100%; background: var(--surface-pane); outline: none; }
@@ -2046,7 +2099,19 @@ span.num .unit { padding: 0 10px 0 6px; color: var(--text-muted); font-size: var
 .set-note .scope-tag { flex: none; }
 .set-note a { color: inherit; text-decoration: underline; }
 .scope-tag { background: var(--status-neutral-bg); color: var(--status-neutral-fg); }
-.set-note.scope-stale { background: var(--status-warning-bg); color: var(--status-warning-fg); --focus-halo-surface: var(--status-warning-bg); }
+.set-note.scope-stale, .set-note.warn { background: var(--status-warning-bg); color: var(--status-warning-fg); --focus-halo-surface: var(--status-warning-bg); }
+/* Settings › Permission modes: the running agents that still run another mode, and what Apply did. */
+.set-label b .hico { margin-right: var(--space-2); vertical-align: middle; }
+.perm-stale ul { list-style: none; margin: 0; padding: 0; }
+.perm-stale li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-4); padding: var(--space-3) 0; border-bottom: 1px solid var(--border-subtle); }
+.perm-who { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; overflow-wrap: anywhere; }
+.perm-flow { margin-left: auto; font-family: var(--font-mono); white-space: nowrap; }
+.perm-note { flex-basis: 100%; font-size: var(--type-chrome-sm); }
+.perm-failed { color: var(--status-error-fg); }
+.perm-stale > p { margin: var(--space-3) 0; }
+.perm-stale .row { padding: var(--space-3) 0; }
+.perm-result { padding: var(--space-3) 0; border-top: 1px solid var(--border-subtle); }
+.perm-result p { margin: 0 0 var(--space-2); }
 fieldset.ro { border: 0; margin: 0; padding: 0; min-width: 0; color: var(--text-disabled); }
 .ctx-bar { position: relative; height: 6px; margin: var(--space-4) 0 var(--space-15); border-radius: var(--radius-xs); background: var(--status-neutral-bg); }
 .ctx-bar b { position: absolute; top: -5px; width: 2px; height: 16px; border-radius: 1px; }

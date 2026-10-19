@@ -190,7 +190,10 @@ test('by_day > the window percent consumed on each of the last 14 days', () => {
   near(s.by_day.reduce((t, d) => t + d.percent, 0), total, 0.05, 'days sum to the change');
 });
 
-test('trees > a DAG counts each agent once and nests children', () => {
+test('trees > a DAG counts each agent once and nests children', (t) => {
+  // summary() reads the clock itself (it takes no now), so pin Date to just after the data (T0 + 10 min, the
+  // subscription's updated_at) to keep the 7-day window and the readings on the data.
+  t.mock.timers.enable({ apis: ['Date'], now: T0 + 10 * MIN });
   const root = agent('root');
   const x = agent('x', root);
   const y = agent('y', root);

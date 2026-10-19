@@ -31,7 +31,7 @@ Allowed `Deploy:` values: `normal`, `alone`, `migration`, `staged`.
   - `migration`: take a DB backup before deploy
   - `staged`: deploy to one machine first and hold
 
-A web PR that changes a component without touching its stories adds one line, anywhere in the body, to say why: `Stories: unchanged, REASON` (the reason is required, for example `a refactor with no visible change`).
+A web PR that changes a component without touching its stories adds one line, anywhere in the body, to say why: `Stories: unchanged, REASON` (the reason is required, for example `a refactor with no visible change`). A Stories line may also name the stories it updated, then the unchanged ones: `Stories: X updated; unchanged for Y, because REASON`.
 
 Below the three lines, write free text: what changed, what was tested and the results, and open questions.
 
@@ -43,7 +43,7 @@ The developer calls the `pr_open` tool, from any machine. It runs on the ITSA ho
 - With `itsa`, it links the PR (system `github`) and the branch (system `branch`) to the ITSA, once each.
 - It returns the PR number and url. The developer then `watch_pr`s the PR.
 
-Refused before any push: the base branch itself, a body that doesn't start with its ITSA, Gates, and Deploy lines, and an ITSA the caller may not change.
+Refused before any push: the base branch itself, a body that doesn't start with its ITSA, Gates, and Deploy lines, and an ITSA the caller may not change. Also refused, before any push, is a branch the merge gate's stories step would fail (checked against the merge base of origin's base branch and the branch, in a few seconds), and one that edits a shipped doc or template without its `export/overrides/` port and manifest sha. The refusal names the file and the story or port it needs.
 
 ## Merging
 

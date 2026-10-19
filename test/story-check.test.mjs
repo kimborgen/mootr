@@ -14,7 +14,7 @@ import { tempDir } from './tmphome.mjs';
 
 const ROOT = resolve(fileURLToPath(import.meta.url), '../..');
 const SCRIPT = join(ROOT, 'scripts/story-check.mjs');
-const { checkRange, checkStories, codeLinks, exportedComponents, isMotionFile, motionExempt, pendingList, storiesUnchanged, storiesUnchangedLine } = await import(SCRIPT);
+const { checkRange, checkRangeAsync, checkStories, codeLinks, exportedComponents, isMotionFile, motionExempt, pendingList, storiesUnchanged, storiesUnchangedLine } = await import(SCRIPT);
 
 const TREE = 'export function Tree() { return null }\n';
 const story = (...codes) => `export const stories = [{ code: [${codes.map((c) => `'${c}'`).join(', ')}] }]\n`;
@@ -84,7 +84,11 @@ test('a changed component whose stories did not change fails; changing the stori
   assert.match(run({ changed })[0], /web\/src\/Tree\.tsx changed but its stories \(web\/src\/Tree\.stories\.tsx\) didn't/);
   assert.deepEqual(run({ changed: [...changed, 'web/src/Tree.stories.tsx'] }), []);
   assert.deepEqual(run({ changed, body: 'ITSA: S-1\nGates: none\nDeploy: normal\n\nStories: unchanged, a refactor with no visible change' }), []);
-  assert.equal(run({ changed, body: 'Stories: unchanged' }).length, 1, 'a reason is required');
+  assert.match(run({ changed, body: 'Stories: unchanged' }).join('\n'), /the Stories line "Stories: unchanged" needs a reason/, 'a reason is required');
+  // With no component changed, the line isn't checked: a PR that changes none passes whatever its Stories line says (S-1942).
+  assert.deepEqual(run({ body: 'Stories: unchanged' }), []);
+  assert.deepEqual(run({ changed: ['web/src/Tree.stories.tsx'], body: 'Stories: unchanged' }), []);
+  assert.deepEqual(run({ body: 'Stories: mostly unchanged' }), [], 'not a claim of unchanged stories');
 });
 
 test('stories, tests and web/src/stories are never components; ALL_CAPS and types do not count', () => {
@@ -147,6 +151,123 @@ test('Stories: unchanged without a reason, or with unchanged not first, is refus
 test('storiesUnchangedLine finds the first Stories: unchanged line, a bullet included', () => {
   assert.equal(storiesUnchangedLine('ITSA: S-1\n- Stories: unchanged for X'), 'Stories: unchanged for X');
   assert.equal(storiesUnchangedLine('ITSA: S-1\nStories: mostly changed'), undefined);
+});
+
+test('a Stories line may name the stories it updated, then the unchanged ones (S-1964)', () => {
+  for (const line of [
+    'Stories: SuggestModal updated; unchanged for actions.stories.tsx, because the menu is untouched',
+    'Stories: MailSide and WaitingList updated; unchanged for X',
+    'Stories: X updated, unchanged: a refactor',
+    '- Stories: X updated; unchanged, a refactor',
+  ]) assert.equal(storiesUnchanged(line), true, line);
+  for (const line of [
+    'Stories: X updated; unchanged',
+    'Stories: X updated; unchanged.',
+    'Stories: X updated; unchanged for',
+    'Stories: X updated; unchanged-ish, reason',
+  ]) assert.equal(storiesUnchanged(line), false, line);
+  // Naming updated stories claims nothing without `unchanged`: the story rule decides, as before.
+  assert.equal(storiesUnchangedLine('Stories: SuggestModal updated.'), undefined);
+  assert.deepEqual(run({ changed: ['web/src/Tree.tsx', 'web/src/Tree.stories.tsx'], body: 'Stories: Tree updated.' }), []);
+  // The exemption covers a changed component whose story didn't change, as the unchanged form does.
+  assert.deepEqual(run({ changed: ['web/src/Tree.tsx'], body: 'Stories: Tree updated; unchanged for Pane, because a refactor' }), []);
+  assert.match(run({ changed: ['web/src/Tree.tsx'], body: 'Stories: Tree updated; unchanged,' }).join('\n'), /needs a reason/, 'a reason is required');
+});
+
+test('a branch behind its base is not blamed for the base\'s story changes (S-1818)', () => {
+  const dir = tempDir('stam-story-behind-');
+  try {
+    const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: dir, encoding: 'utf8' }).trim();
+    const put = (p, s) => { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), s); };
+    git('init', '-q', '-b', 'main');
+    put('web/src/Tree.tsx', TREE);
+    put('web/src/Tree.stories.tsx', story('web/src/Tree.tsx#Tree'));
+    put('web/src/Pane.tsx', 'export const Pane = () => null\n');
+    put('web/src/Pane.stories.tsx', story('web/src/Pane.tsx#Pane'));
+    git('add', '-A'); git('commit', '-qm', 'base');
+    const baseSha = git('rev-parse', 'HEAD');
+    // main edits Pane without its story; the branch, cut from the base, edits Tree with its story.
+    put('web/src/Pane.tsx', 'export const Pane = () => 1\n');
+    git('commit', '-qam', 'main: Pane changed');
+    const main = git('rev-parse', 'HEAD');
+    git('checkout', '-q', '-b', 'feature', baseSha);
+    put('web/src/Tree.tsx', `${TREE}// edit\n`);
+    put('web/src/Tree.stories.tsx', `${story('web/src/Tree.tsx#Tree')}// edit\n`);
+    git('commit', '-qam', 'feature: Tree and its story');
+    const head = git('rev-parse', 'HEAD');
+    assert.deepEqual(checkRange(main, head, { cwd: dir, body: '' }), []);
+    // The branch's own changes are still checked: a component changed without its story fails.
+    put('web/src/Pane.tsx', 'export const Pane = () => 2\n');
+    git('commit', '-qam', 'feature: Pane without its story');
+    assert.match(checkRange(main, git('rev-parse', 'HEAD'), { cwd: dir, body: '' })[0], /web\/src\/Pane\.tsx changed but its stories/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkRangeAsync gives checkRange\'s answer, and a check that runs out of time rejects with timedOut (S-1942)', async () => {
+  const dir = tempDir('stam-story-async-');
+  try {
+    const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: dir, encoding: 'utf8' }).trim();
+    const put = (p, s) => { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), s); };
+    git('init', '-q', '-b', 'main');
+    put('web/src/Tree.tsx', TREE);
+    put('web/src/Tree.stories.tsx', story('web/src/Tree.tsx#Tree'));
+    git('add', '-A'); git('commit', '-qm', 'base');
+    const baseSha = git('rev-parse', 'HEAD');
+    put('web/src/Pane.tsx', 'export const Pane = () => null\n');
+    git('add', '-A'); git('commit', '-qm', 'new component with no story');
+    const head = git('rev-parse', 'HEAD');
+    const sync = checkRange(baseSha, head, { cwd: dir, body: '' });
+    assert.match(sync[0], /the component Pane has no story/);
+    assert.deepEqual(await checkRangeAsync(baseSha, head, { cwd: dir, body: '' }), sync);
+    assert.deepEqual(await checkRangeAsync(baseSha, baseSha, { cwd: dir, body: '' }), []);
+    await assert.rejects(checkRangeAsync(baseSha, head, { cwd: dir, body: '', timeoutMs: 1 }), (e) => e.timedOut === true && /timed out/.test(e.message));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the per-PR run (exempt) does not refuse a branch behind main for a story main has since added (S-1942)', async () => {
+  const dir = tempDir('stam-story-mode-');
+  try {
+    const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: dir, encoding: 'utf8' }).trim();
+    const put = (p, s) => { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), s); };
+    git('init', '-q', '-b', 'main');
+    put('web/src/Tree.tsx', TREE);
+    put('web/src/Tree.stories.tsx', story('web/src/Tree.tsx#Tree'));
+    git('add', '-A'); git('commit', '-qm', 'base');
+    const baseSha = git('rev-parse', 'HEAD');
+    // The branch, cut from the base, adds Pane with no story; main later adds Pane and its story.
+    git('checkout', '-q', '-b', 'feature');
+    put('web/src/Pane.tsx', 'export const Pane = () => null\n');
+    git('add', '-A'); git('commit', '-qm', 'feature: Pane');
+    const head = git('rev-parse', 'HEAD');
+    git('checkout', '-q', 'main');
+    put('web/src/Pane.tsx', 'export const Pane = () => null\n');
+    put('web/src/Pane.stories.tsx', story('web/src/Pane.tsx#Pane'));
+    git('add', '-A'); git('commit', '-qm', 'main: Pane and its story');
+    const main = git('rev-parse', 'HEAD');
+    assert.equal(git('merge-base', main, head), baseSha);
+    assert.match((await checkRangeAsync(main, head, { cwd: dir, body: '' }))[0] ?? '', /web\/src\/Pane\.tsx: the component Pane has no story/, 'the full run refuses it');
+    assert.deepEqual(await checkRangeAsync(main, head, { cwd: dir, body: '', mode: 'exempt' }), [], 'the per-PR run does not');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the branch mode refuses a component the PR adds with no story, and only that one (S-1942)', () => {
+  const pane = 'export const Pane = () => null\n';
+  const files = { ...base().files, 'web/src/Pane.tsx': pane, 'web/src/Old.tsx': 'export const Old = () => null\n' };
+  const changed = ['web/src/Pane.tsx'];
+  assert.match(run({ files, changed, mode: 'branch' })[0], /web\/src\/Pane\.tsx: the component Pane has no story/);
+  // Naming the story in a stories file the PR adds passes.
+  const withStory = { ...files, 'web/src/Pane.stories.tsx': story('web/src/Pane.tsx#Pane') };
+  assert.deepEqual(run({ files: withStory, changed: [...changed, 'web/src/Pane.stories.tsx'], mode: 'branch' }), []);
+  // A component the PR doesn't touch is the base's own problem, not this PR's.
+  assert.deepEqual(run({ files, changed: [], mode: 'branch' }), []);
+  // The per-PR gate mode is unchanged: it asks no story of a component the PR adds.
+  assert.deepEqual(run({ files, changed, mode: 'exempt' }), []);
 });
 
 test('Stories: unchanged also counts as a bullet', () => {

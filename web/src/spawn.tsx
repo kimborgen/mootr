@@ -13,6 +13,7 @@ import { byId, getData, refresh, setData } from './store'
 import { showMenu, swallowNextClick, toast, type MenuItem } from './ui/menu'
 import { getUi, setUi } from './ui/state'
 import type { Agent } from './types'
+import { modeLabel, offeredModes, type PermissionMode, type PermissionModes } from './permission-modes'
 
 interface Preset { harness: string; model?: string | null; effort?: string | null; description?: string }
 interface Registry {
@@ -23,7 +24,7 @@ interface Registry {
 }
 export interface SpawnBody {
   name?: string; type?: string; harness?: string; model?: string; effort?: string; preset?: string; cwd?: string
-  worktree?: boolean; parent?: string; permission_mode?: 'auto' | 'bypass'; prompt?: string
+  worktree?: boolean; parent?: string; permission_mode?: PermissionMode; prompt?: string
   standing?: boolean; workspace?: true | string
 }
 
@@ -32,12 +33,16 @@ export interface SpawnBody {
 // settings.json that doesn't set them.
 let defaults: { preset: string | null; cwd: string | null } = { preset: 'standard', cwd: '~' }
 let reg: Registry | null = null
+// Settings › permission modes: the mode a new agent starts in, and what each harness offers.
+let modes: PermissionModes | null = null
 async function load() {
-  const [r, s] = await Promise.all([
+  const [r, s, pm] = await Promise.all([
     api<Registry>('GET', '/api/registry'),
     api<{ text: string }>('GET', '/api/config/settings').then((x) => JSON.parse(x.text) as { spawnDefaults?: typeof defaults }).catch(() => ({ spawnDefaults: undefined })),
+    api<PermissionModes>('GET', '/api/permission-modes').catch(() => null),
   ])
   reg = r
+  modes = pm
   defaults = { preset: 'standard', cwd: '~', ...s.spawnDefaults }
 }
 // The first menu waits for the registry; later ones show what they have and refresh it.
@@ -46,6 +51,8 @@ async function ready() {
   try { await load() } catch {}
 }
 
+// A picked mode stays when the harness offers it; otherwise the agent follows the settings again.
+const modeFor = (h: string, m: PermissionMode | null) => (m && (modes?.harnesses[h]?.some((x) => x.mode === m && x.offered) ?? m !== 'default') ? m : null)
 const harnesses = () => Object.keys(reg?.harnesses ?? HARNESS)
 const modelsFor = (h: string) => Object.entries(reg?.models ?? {}).filter(([, m]) => m.harnesses?.includes(h)).map(([id]) => id)
 const effortsFor = (h: string, m: string | null) => (m ? reg?.models[m]?.efforts : undefined) ?? reg?.harnesses[h]?.efforts ?? []
@@ -153,13 +160,13 @@ function modelItems(h: string, base: Base, sub: Sub, more: More): MenuItem[] {
 interface Choice {
   type: string | null; harness: string; model: string | null; effort: string | null
   cwd: string | null; cwdTyped: boolean; worktree: boolean; parent: string | null
-  mode: 'auto' | 'bypass'; name: string; prompt: string; standing: boolean; workspace: boolean
+  mode: PermissionMode | null; name: string; prompt: string; standing: boolean; workspace: boolean
 }
 // What the defaults pick, as choices.
 function fresh(base: Base): Choice {
   const dp = defaults.preset ? reg?.presets[defaults.preset] : undefined
   return { type: null, harness: dp?.harness ?? 'claude', model: dp?.model ?? null, effort: dp?.effort ?? null, cwd: null, cwdTyped: false,
-    worktree: false, parent: base.parent ?? null, mode: 'auto', name: '', prompt: '', standing: false, workspace: false }
+    worktree: false, parent: base.parent ?? null, mode: null, name: '', prompt: '', standing: false, workspace: false }
 }
 
 let panel: { choice: Choice; x: number; y: number; n: number; trigger: Element | null } | null = null
@@ -254,17 +261,20 @@ function Panel({ pn }: { pn: NonNullable<typeof panel> }) {
   // Picking a harness keeps the model and effort it supports, or falls back to its default.
   const pickHarness = (h: string) => {
     const m = c.model && modelsFor(h).includes(c.model) ? c.model : null
-    set({ harness: h, model: m, effort: c.effort && effortsFor(h, m).includes(c.effort) ? c.effort : null })
+    set({ harness: h, model: m, effort: c.effort && effortsFor(h, m).includes(c.effort) ? c.effort : null, mode: modeFor(h, c.mode) })
   }
   const pickModel = (m: string | null) => set({ model: m, effort: c.effort && effortsFor(c.harness, m).includes(c.effort) ? c.effort : null })
   // A type brings its harness, model, and effort, which stay changeable after.
   const pickType = (t: string | null) => {
     const ty = t ? reg?.types?.[t] : undefined
-    set(ty ? { type: t, harness: ty.harness, model: ty.model ?? null, effort: ty.effort ?? null } : { type: null })
+    set(ty ? { type: t, harness: ty.harness, model: ty.model ?? null, effort: ty.effort ?? null, mode: modeFor(ty.harness, c.mode) } : { type: null })
   }
   const types = Object.entries(reg?.types ?? {})
   const efforts = effortsFor(c.harness, c.model)
   const parents = d.agents.filter(live)
+  // What Settings give this harness and type, and the modes the harness offers here.
+  const fromSettings = ((c.type && modes?.settings.types[c.type] !== 'inherit' ? modes?.settings.types[c.type] : undefined) ?? modes?.settings.harness[c.harness] ?? 'auto') as PermissionMode
+  const pickable = offeredModes(modes?.harnesses[c.harness] ?? [{ mode: 'auto', label: 'Auto', harness: '', offered: true }, { mode: 'bypass', label: 'Bypass', harness: '', offered: true }])
   const parent = byId(c.parent)
   const opt = (label: string, checked: boolean, action: () => void, extra: Partial<Extract<MenuItem, { label: string }>> = {}): MenuItem => ({ label, checked, action, ...extra })
 
@@ -275,7 +285,8 @@ function Panel({ pn }: { pn: NonNullable<typeof panel> }) {
       await addAgent({
         ...(c.type ? { type: c.type } : {}), harness: c.harness, ...(c.model ? { model: c.model } : {}), ...(c.effort ? { effort: c.effort } : {}),
         ...(c.cwd?.trim() ? { cwd: c.cwd.trim() } : {}), ...(c.worktree ? { worktree: true } : {}), ...(c.parent ? { parent: c.parent } : {}),
-        permission_mode: c.mode, ...(c.name ? { name: c.name } : {}), ...(c.prompt.trim() ? { prompt: c.prompt } : {}),
+        // Left out unless the human picked one: any mode sent is a pick of their own, which the agent keeps over the settings.
+        ...(c.mode ? { permission_mode: c.mode } : {}), ...(c.name ? { name: c.name } : {}), ...(c.prompt.trim() ? { prompt: c.prompt } : {}),
         ...(c.standing ? { standing: true } : {}), ...(c.workspace ? { workspace: true as const } : {}),
       })
       closePanel()
@@ -327,9 +338,10 @@ function Panel({ pn }: { pn: NonNullable<typeof panel> }) {
         <input type="checkbox" checked={c.workspace} onChange={(e) => set({ workspace: e.target.checked })} /></label>
       <Pick icon="network" label="Parent" value={parent ? <><Glyph agent={parent} />{parent.name}</> : 'None'}
         options={() => [opt('None', !c.parent, () => set({ parent: null })), ...parents.map((a) => opt(a.name, a.id === c.parent, () => set({ parent: a.id }), { glyph: <Glyph agent={a} /> }))]} />
-      <Pick icon={c.mode === 'bypass' ? 'zap' : 'shield'} label="Permissions" value={c.mode === 'bypass' ? 'Bypass' : 'Auto mode'}
-        options={() => [opt('Auto mode', c.mode === 'auto', () => set({ mode: 'auto' }), { icon: 'shield', hint: 'asks when unsure' }),
-          opt('Bypass permissions', c.mode === 'bypass', () => set({ mode: 'bypass' }), { icon: 'zap', danger: true, hint: 'never asks' })]} />
+      <Pick icon={c.mode === 'bypass' ? 'zap' : 'shield'} label="Permissions" value={c.mode ? modeLabel(c.mode) : `Settings: ${modeLabel(fromSettings)}`}
+        options={() => [opt(`Follow settings: ${modeLabel(fromSettings)}`, !c.mode, () => set({ mode: null }), { icon: 'settings', hint: 'Settings › Permission modes' }),
+          ...pickable.map((m) => opt(modeLabel(m.mode), c.mode === m.mode, () => set({ mode: m.mode }), m.mode === 'bypass' ? { icon: 'zap', danger: true, hint: 'never asks' } : { icon: 'shield', hint: m.mode === 'default' ? 'asks for each action' : 'asks when unsure' }))]} />
+      {c.mode === 'bypass' ? <p className="sp-warn" role="alert">Bypass runs every action without asking. This agent keeps it until you change it.</p> : null}
       <label className="sp-field"><Icon name="tag" /><span className="sp-label">Name</span>
         <input value={c.name} placeholder="generated" spellCheck={false} autoComplete="off" autoCapitalize="none" maxLength={41}
           onChange={(e) => set({ name: e.target.value.toLowerCase().replace(/[^a-z0-9-]+/g, '-') })} /></label>

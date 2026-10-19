@@ -3,6 +3,7 @@
 // worlds keep their own. `none` is a main pane nothing can be written to: the bottom slot shows the
 // normal input, disabled, with `context` (a plain one-line string) as its placeholder.
 import { baseName, parseFileKey } from './files/fileKey'
+import { parseDiffKey } from './diff/diffKey'
 import { byId, chiefsOfStaff, getData } from './store'
 import { live } from './format'
 import { getUsageState } from './usage/state'
@@ -28,6 +29,8 @@ function contextOf(key: string): string {
   if (key.startsWith('board:')) { const x = getData().itsas.find((i) => i.id === id); return id === 'all' ? 'All issues' : x ? `${x.key} board` : 'Board' }
   if (key.startsWith('type:')) return `${id} · type`
   if (key.startsWith('file:')) { const f = parseFileKey(key); return f ? baseName(f.path) : 'File' }
+  const d = parseDiffKey(key)
+  if (d) return `${d.repo} PR #${d.pr}`
   const named: Record<string, string> = { compliance: 'Compliance', system: 'System', swipe: 'Swipe', files: 'Files', inventory: 'Inventory by type' }
   return named[key] ?? 'Another view'
 }

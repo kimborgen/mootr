@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import { Icon } from '../Icon'
+import { DiffFileHead } from './DiffFileHead'
 import type { DiffEditor, DiffEditorViews, DiffMode } from './mergeEditor'
 import type { DeclHit, DeclSide } from '../decl/declExt'
 import { DiffFail, fetchSide, fetchWhole, type Side, type SideRef } from './diffApi'
@@ -122,7 +123,8 @@ export function FileDiff({ scroller, file, refs, mode, wrap, viewed, onViewed, o
     io.observe(el)
     // A file held when it left tears down once the hold ends.
     const onSel = () => tear()
-    const onOut = (e: FocusEvent) => tear(e.relatedTarget as Node | null)
+    // Alt-tab blurs the editor with a null `relatedTarget`; the caret is still there, so `activeElement` says where focus is.
+    const onOut = (e: FocusEvent) => tear((e.relatedTarget as Node | null) ?? document.activeElement)
     document.addEventListener('selectionchange', onSel)
     el.addEventListener('focusout', onOut)
     return () => { io.disconnect(); document.removeEventListener('selectionchange', onSel); el.removeEventListener('focusout', onOut) }
@@ -165,7 +167,20 @@ export function FileDiff({ scroller, file, refs, mode, wrap, viewed, onViewed, o
     revealed.current = target.n
     const e = ed.current
     cb.current.onTarget?.(target.n)
-    requestAnimationFrame(() => { if (ed.current === e) e.reveal(target.line, target.side) })
+    // CodeMirror scrolls a frame after `reveal`. Once it has, a file in range of the far margin ends its jump hold: no
+    // observer callback comes for a file that never left the range, so the hold would outlast the jump.
+    requestAnimationFrame(() => {
+      if (ed.current !== e) return
+      e.reveal(target.line, target.side)
+      requestAnimationFrame(() => {
+        const el = root.current
+        if (ed.current !== e || !el) return
+        const r = el.getBoundingClientRect()
+        const s = scroller?.current?.getBoundingClientRect()
+        const top = s ? s.top : 0, bottom = s ? s.bottom : window.innerHeight
+        if (r.bottom > top - FAR_MARGIN && r.top < bottom + FAR_MARGIN) jumpHold.current = false
+      })
+    })
   }, [target?.n, drawn])
 
   const download = async () => {
@@ -182,25 +197,11 @@ export function FileDiff({ scroller, file, refs, mode, wrap, viewed, onViewed, o
     } catch (e) { setNote((e as Error).message) }
   }
 
-  const counts = file.denied ? null : <span className="dv-counts"><span className="add">+{file.additions}</span> <span className="del">−{file.deletions}</span></span>
   return (
     <section ref={root} className="dv-file" data-dv-file={file.path} data-status={file.status} aria-label={file.path} style={{ ['--dv-lines' as string]: estimateLines(file), ...(pinned && open && data.s === 'text' ? { minHeight: pinned } : {}) }}>
-      <header className="dv-file-head">
-        <span className="dv-path" title={file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}>
-          {file.oldPath && <><span className="dv-old">{file.oldPath}</span><span className="dv-arrow" aria-hidden> → </span></>}{file.path}
-        </span>
-        <span className="dv-status muted">{file.status === 'modified' ? '' : file.status}</span>
-        {counts}
-        <span className="dv-file-actions">
-          {text && open && <button type="button" className="dv-btn" aria-pressed={whole} onClick={() => setWhole((w) => !w)}>{whole ? 'Collapse' : 'Expand all'}</button>}
-          {!file.denied && <button type="button" className="dv-btn" onClick={onHide}>Hide</button>}
-          {!file.denied && (
-            <label className="dv-viewed">
-              <input type="checkbox" checked={viewed} onChange={(e) => onViewed(e.target.checked)} /> Viewed
-            </label>
-          )}
-        </span>
-      </header>
+      <DiffFileHead file={file} viewed={viewed} onViewed={onViewed} onHide={onHide}>
+        {text && open && <button type="button" className="dv-btn" aria-pressed={whole} onClick={() => setWhole((w) => !w)}>{whole ? 'Collapse' : 'Expand all'}</button>}
+      </DiffFileHead>
       {file.denied && <div className="dv-row muted"><Icon name="lock" /> hidden: protected file</div>}
       {!file.denied && file.status === 'renamed' && noDiff && <div className="dv-row muted">Renamed, no content changes.</div>}
       {open && data.s === 'loading' && <div className="dv-row muted dv-loading">{near ? 'Loading…' : ''}</div>}

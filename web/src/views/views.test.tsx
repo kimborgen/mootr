@@ -534,11 +534,34 @@ describe('DetailsView', () => {
     vi.stubGlobal('confirm', () => false)
     await mount(<DetailsView id="a1" />)
     const sel = host.querySelector('select')!
-    expect(sel.value).toBe('auto')
+    // An auto agent with no recorded source follows the settings.
+    expect(sel.value).toBe('settings')
     await act(async () => { sel.value = 'bypass'; sel.dispatchEvent(new Event('change', { bubbles: true })) })
     await flush()
-    expect(host.querySelector('select')!.value).toBe('auto')
+    expect(host.querySelector('select')!.value).toBe('settings')
     expect(calls.filter((c) => c.method === 'POST')).toEqual([])
+  })
+  it('offers Ask on Claude only, and Follow settings posts mode settings', async () => {
+    vi.stubGlobal('confirm', () => true)
+    // A Claude agent the human pinned to bypass: it shows its own mode, with no settings note.
+    setData({ agents: [agent({ permission_mode: 'bypass', permission_source: 'manual' })], machine: 'alpha' })
+    await mount(<DetailsView id="a1" />)
+    const opts = () => [...host.querySelector('select')!.querySelectorAll('option')].map((o) => o.value)
+    expect(opts()).toEqual(['settings', 'default', 'auto', 'bypass'])
+    const sel = host.querySelector('select')!
+    expect(sel.value).toBe('bypass')
+    expect(host.querySelector('dl.kv')?.textContent).not.toContain('from Settings')
+    await act(async () => { sel.value = 'settings'; sel.dispatchEvent(new Event('change', { bubbles: true })) })
+    await flush()
+    expect(calls.find((c) => c.path === '/api/agents/a1/permission-mode')).toMatchObject({ method: 'POST', body: { mode: 'settings' } })
+  })
+  it('shows the settings as the source of an agent that follows them, and offers no Ask off Claude', async () => {
+    setData({ agents: [agent({ harness: 'codex', permission_mode: 'bypass', permission_source: 'settings' })], machine: 'alpha' })
+    await mount(<DetailsView id="a1" />)
+    const sel = host.querySelector('select')!
+    expect(sel.value).toBe('settings')
+    expect([...sel.querySelectorAll('option')].map((o) => o.value)).toEqual(['settings', 'auto', 'bypass'])
+    expect(host.querySelector('dl.kv')?.textContent).toContain('bypass, from Settings')
   })
   it('runs an action', async () => {
     await mount(<DetailsView id="a1" />)

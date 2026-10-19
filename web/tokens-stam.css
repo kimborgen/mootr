@@ -29,6 +29,7 @@
   --st-blocked: var(--status-warning-fg);
   --st-errored: var(--status-error-fg);
   --st-paused: var(--text-secondary);
+  --st-resting: var(--text-secondary);
   --st-off: var(--text-disabled);
   /* ITSA statuses, on the same vocabulary. The category picks the colour (the glyph's shape
      says the category too): backlog muted, ready secondary, active and review in progress,
@@ -102,10 +103,16 @@
   --size-phone-nav: calc(var(--size-hit-touch) + var(--space-3));
 }
 
+/* An Inbox page row (S-2054): two lines, subject over summary. At least a touch target, so a phone row is tall enough
+   and a desktop row is no shorter than a phone's. The search box's width in the page header. */
+:root { --size-row-inbox: var(--size-hit-touch); --size-inbox-search: 220px; }
+
 /* stam's own view of an agent's conversation (S-79): one reading column, centred in a wide
    pane and full width on a phone. Wide enough for a table or chart in a reply; prose inside
    it keeps the mail measure. */
 :root { --measure-conversation: 48rem; }
+/* The PR diff view's file column (S-1918). */
+:root { --size-diff-side: 17rem; }
 
 /* A mail's 1-3 word title (S-297) sits before its subject in a mail row: it may take up to this
    share of the row, so the subject always keeps the larger part. */
@@ -163,4 +170,17 @@
   --duration-loader-breathe: 1760ms;
   --size-loader: var(--size-control);
   --size-loader-lg: calc(var(--size-control) * 2);
+}
+
+/* Inline diff rows (S-2099): continuation lines hang this far past the code's own indent, and the
+   indent counted is capped so deep code still has width on a 360 px phone. Both are character widths. */
+:root {
+  --diff-hang: 2;
+  --diff-ind-max: 24;
+}
+
+/* The inline diff block's scroller (S-2100): a cap in lines of the chrome row, 32 on a desktop and 18 on a phone. */
+:root {
+  --size-diff-cap: calc(var(--leading-chrome-sm) * 32);
+  --size-diff-cap-phone: calc(var(--leading-chrome-sm) * 18);
 }

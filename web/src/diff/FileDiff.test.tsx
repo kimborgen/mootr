@@ -52,7 +52,7 @@ beforeEach(() => {
   document.body.append(host)
   root = createRoot(host)
 })
-afterEach(() => { act(() => root?.unmount()); root = undefined; document.body.innerHTML = ''; vi.unstubAllGlobals() })
+afterEach(() => { vi.restoreAllMocks(); act(() => root?.unmount()); root = undefined; document.body.innerHTML = ''; vi.unstubAllGlobals() })
 
 const mount = async (extra: Partial<React.ComponentProps<typeof FileDiff>> = {}) => {
   act(() => root!.render(<FileDiff file={f} refs={refs} mode="split" wrap={false} viewed={false} onViewed={() => {}} onHide={() => {}} onEditor={onEditor} {...extra} />))
@@ -113,13 +113,36 @@ describe('far teardown', () => {
     await vi.waitFor(() => expect(destroy).toHaveBeenCalledTimes(1))
   })
 
+  const frames = async (n: number) => { for (let i = 0; i < n; i++) await new Promise((r) => requestAnimationFrame(() => r(null))) }
+  const rectAt = (top: number) => vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top, bottom: top + 400, left: 0, right: 100, width: 100, height: 400, x: 0, y: top, toJSON: () => ({}) })
+
   it('holds a file jumped to from far away until the far observer has seen it in range', async () => {
+    rectAt(FAR_MARGIN * 4)
     await mount({ target: { line: 1, side: 'head', n: 1 }, onTarget: () => {} })
+    await frames(4)
     fire(FAR, false)
     expect(destroy).not.toHaveBeenCalled()
     fire(FAR, true)
     fire(FAR, false)
     await vi.waitFor(() => expect(destroy).toHaveBeenCalledTimes(1))
+  })
+
+  it('ends the jump hold once the jump landed on a file already in range', async () => {
+    rectAt(100)
+    await mount({ target: { line: 1, side: 'head', n: 1 }, onTarget: () => {} })
+    await frames(4)
+    fire(FAR, false)
+    await vi.waitFor(() => expect(destroy).toHaveBeenCalledTimes(1))
+  })
+
+  it('tears down on a blur with no relatedTarget when focus is not in the file (alt-tab keeps it)', async () => {
+    await mount()
+    const ed = host.querySelector<HTMLElement>('.fake-editor')!
+    act(() => ed.focus())
+    fire(FAR, false)
+    // Alt-tab: focusout with a null relatedTarget while the editor stays the active element.
+    act(() => { ed.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null })) })
+    expect(destroy).not.toHaveBeenCalled()
   })
 
   it('drops the pinned height when the torn-down file closes', async () => {

@@ -33,6 +33,8 @@ export interface DeclOptions {
 const TAP_MOVE = 10
 const TAP_MS = 500
 const HOVER_MS = 120
+// How soon after a Ctrl-click's lookup its macOS contextmenu counts as the same click.
+const CTRL_CLICK_MS = 500
 
 const setLink = StateEffect.define<{ from: number; to: number } | null>()
 const linkMark = Decoration.mark({ class: 'cm-decl-link' })
@@ -70,6 +72,8 @@ export function declClicks(o: DeclOptions): Extension {
     o.onDecl({ name: h.id.name, side: h.side, x: ax, y: ay, top: at, local })
   }
   let down: { x: number; y: number; t: number } | null = null
+  // When a Ctrl-click last opened the declaration lookup: on macOS that same click also sends `contextmenu`.
+  let ctrlClickAt = -Infinity
   const hover = ViewPlugin.fromClass(class {
     timer = 0
     at = ''
@@ -106,7 +110,15 @@ export function declClicks(o: DeclOptions): Extension {
         const h = hitAt(view, e.clientX, e.clientY, e.target, o)
         if (!h) return false
         e.preventDefault()
+        ctrlClickAt = e.timeStamp
         report(view, h, e.clientX, e.clientY)
+        return true
+      },
+      // macOS turns a Ctrl-click into a context menu too: the lookup already took the click, so no menu on top of the picker.
+      contextmenu(e) {
+        if (e.timeStamp - ctrlClickAt > CTRL_CLICK_MS) return false
+        ctrlClickAt = -Infinity
+        e.preventDefault()
         return true
       },
       pointerdown(e) { down = e.pointerType === 'touch' ? { x: e.clientX, y: e.clientY, t: e.timeStamp } : null; return false },

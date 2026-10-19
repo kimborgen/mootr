@@ -14,7 +14,7 @@ export const stories: Story[] = [{
   code: ['web/src/SidebarPanes.tsx#SidebarPanes', 'web/src/SidebarPanes.tsx#TABS'],
   rules: [
     'Tabs are `role="tab"` in a `role="tablist"`; the showing tab has `tabindex` 0 and the rest -1. ArrowRight and ArrowLeft move to the next and previous tab, wrapping, and Home and End jump to the first and last; the moved-to tab shows and takes focus.',
-    'Clicking or arrowing to a tab shows it and keeps the choice in settings; clicking the showing tab opens that tab\'s full page when it has one (Issues opens the Work page). Every tab of a pane stays mounted and is hidden when not showing, so a list keeps its scroll.',
+    'Clicking or arrowing to a tab shows it and keeps the choice in settings; clicking the showing tab opens that tab\'s full page when it has one (Issues opens the Work page, Mail the Inbox page, Cost the Usage page). Every tab of a pane stays mounted and is hidden when not showing, so a list keeps its scroll.',
     'The tab strip is `--size-pane-tab-compact`, half of `--size-tab-bar`, by default; the setting `tabBar: "regular"` makes it `--size-tab-bar`. The showing tab takes `--tab-bg-active` and a 2 px `--tab-indicator-focused` line (' + ds('Density') + ').',
     'Panes share the height by weight (3, 2, 1) with a `96px` minimum; each pane scrolls its own list. The lists have no resize separator or fold of their own inside a pane.',
   ],

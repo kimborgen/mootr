@@ -225,6 +225,8 @@ s.cost = {
     'openrouter': { match: { harness: 'opencode', model: 'openrouter/' }, subscription: false, lowCreditsUsd: 2 },
   },
 };
+// The branch link below names the repo `stam2`; the daemon's own default repo is keyed by its checkout's folder name (S-2083).
+s.itsa = { ...(s.itsa ?? {}), repos: { ...(s.itsa?.repos ?? {}), stam2: process.cwd() } };
 await api('POST', '/api/config/settings', { text: JSON.stringify(s, null, 2) });
 console.log('seeded cost accounts');
 // One allocation on the helper tree, so the Usage page shows an allocation against its use.

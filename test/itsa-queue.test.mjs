@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { tempHome, tempDir } from './tmphome.mjs';
 
 const home = tempHome('stam-queue-');
@@ -148,11 +148,11 @@ test('the default repo is the one a release was built from, or this checkout', a
   const release = tempDir('stam-queue-release-');
   try {
     writeFileSync(join(release, '.release.json'), JSON.stringify({ release: 'abc', repo: repo }));
-    assert.deepEqual(settingsMod.defaultRepos(release), { stam2: repo });
+    assert.deepEqual(settingsMod.defaultRepos(release), { [basename(repo)]: repo });
     const plain = tempDir('stam-queue-plain-');
     assert.deepEqual(settingsMod.defaultRepos(plain), {});
     mkdirSync(join(plain, '.git'));
-    assert.deepEqual(settingsMod.defaultRepos(plain), { stam2: plain });
+    assert.deepEqual(settingsMod.defaultRepos(plain), { [basename(plain)]: plain });
     rmSync(plain, { recursive: true, force: true });
   } finally {
     rmSync(release, { recursive: true, force: true });

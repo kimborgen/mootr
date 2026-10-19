@@ -13,11 +13,11 @@ import * as db from './db.ts';
 import { settings, onSettingsChange } from './settings.ts';
 import { apiKey } from './credits.ts';
 import { recordSpend } from './decide.ts';
+import { complete } from './llm/index.ts';
 import { systemHeld } from './budgets.ts';
 import { configHash } from './config-hash.ts';
 import { peerByName, peerCall } from './peers.ts';
 
-const base = () => process.env.STAM_OPENROUTER_URL ?? 'https://openrouter.ai/api/v1';
 const PURPOSE = 'mail-title';
 const HUMAN = 'human';
 const TIMEOUT_MS = 15_000;
@@ -141,36 +141,26 @@ async function title(job: Job, signal: AbortSignal): Promise<void> {
   const cfg = configHash(m, prompt);
   const held = systemHeld();
   if (held) return void db.addEvent('stam', 'mail-title:skipped', { id: job.id, reason: held });
-  let data: any;
+  let data;
   try {
-    const res = await fetch(`${base()}/chat/completions`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: m,
-        messages: [
-          {
-            role: 'system',
-            content: prompt,
-          },
-          { role: 'user', content: `Subject: ${job.subject}\n\n${job.body}` },
-        ],
-        max_tokens: job.summary ? 260 : 16,
-        temperature: 0,
-        usage: { include: true },
-      }),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]),
+    data = await complete({
+      model: m,
+      messages: [
+        { role: 'system', content: prompt },
+        { role: 'user', content: `Subject: ${job.subject}\n\n${job.body}` },
+      ],
+      maxTokens: job.summary ? 260 : 16,
+      temperature: 0,
+      signal,
+      timeoutMs: TIMEOUT_MS,
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    data = await res.json();
   } catch (e) {
     if (!signal.aborted) failed.add(failedAt(job.id, cfg));
     db.addEvent('stam', signal.aborted ? 'mail-title:canceled' : 'mail-title:error', { id: job.id, error: e instanceof Error ? e.message : String(e) });
     return;
   }
-  const usage = data?.usage ?? {};
-  recordSpend(PURPOSE, String(data?.model ?? m), Number(usage.cost) || 0, Number(usage.prompt_tokens) || 0, Number(usage.completion_tokens) || 0);
-  const content = data?.choices?.[0]?.message?.content;
+  recordSpend(PURPOSE, data.model, data.costUsd ?? 0, data.usage.inputTokens, data.usage.outputTokens);
+  const content = data.text;
   const { title: t, summary: s } = job.summary ? parseBoth(content) : { title: cleanTitle(content), summary: null };
   // An answer with neither field is a failure for this config. One with either is current for it: a summary
   // alone isn't asked again, and a title alone isn't either.

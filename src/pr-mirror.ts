@@ -14,7 +14,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { MACHINE } from './config.ts';
-import { settings } from './settings.ts';
+import { settings, storageRemoteFallback } from './settings.ts';
 
 // A job's whole deadline. STAM_MIRROR_TIMEOUT_MS overrides it (tests).
 const budgetMs = (): number => Number(process.env.STAM_MIRROR_TIMEOUT_MS) || 30_000;
@@ -80,9 +80,9 @@ export function checkMirror(number: number, sha: string): void {
 }
 
 // The remote the branch is fetched from and the mirror pushes to: the configured name, else `storage` when the
-// checkout has that remote, else '' (no storage, so no mirror).
+// checkout has that remote and a `storage` peer is configured (settings.ts storageRemoteFallback), else '' (no storage, so no mirror).
 export async function storageRemote(cfg: MirrorConfig, signal?: AbortSignal): Promise<string> {
-  return cfg.storage || ((await git(cfg, ['remote'], signal)).split('\n').includes('storage') ? 'storage' : '');
+  return cfg.storage || storageRemoteFallback((await git(cfg, ['remote'], signal)).split('\n'));
 }
 
 // One mirror request. `sha` is the head the checkout holds (pr_open); without it the head is fetched from origin

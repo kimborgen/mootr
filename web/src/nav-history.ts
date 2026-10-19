@@ -133,8 +133,13 @@ function sync() {
   // back off the stack, while a pick that went somewhere else leaves the entry as the place.
   if (anyOverlay(cur) && !anyOverlay(p)) {
     if (p.current === cur.current && p.mobile === cur.mobile && p.section === cur.section && (p.usage ?? null) === (cur.usage ?? null)) {
+      // A menu opened over this overlay that closes with it (a scrim click with a suggestion's preview open
+      // over the prompt) takes both entries off, or the back would land on the overlay's and reopen it (S-2020).
+      const both = cur.menu && underMenu && anyOverlay(underMenu) && eq(underMenu, { ...cur, menu: false })
       cur = p
-      history.back()
+      underMenu = null
+      if (both) history.go(-2)
+      else history.back()
       return
     }
     cur = p
@@ -176,6 +181,10 @@ function onPop(e: PopStateEvent) {
   // An entry from before the position was kept has no `n`: it moves nothing in the list.
   const known = typeof n === 'number'
   const to = known ? n : pos
+  // A menu over an overlay (S-2020) can't come back, so a back press onto its entry would reopen
+  // the overlay under it, the one a dismiss has just closed. Step past that entry instead: the
+  // browser has already landed on it, so one more step back from there.
+  if (t.menu && to < pos && anyOverlay({ ...t, menu: false })) { history.go(-1); return }
   // Back or forward onto a thing that no longer exists skips to the next live entry that way, when
   // the list holds one; otherwise main shows its gone state. The entry stays in the list, dimmed.
   if (target.current && !anyOverlay(target) && to !== pos && !worldAlive(target.current)) {

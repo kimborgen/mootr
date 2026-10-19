@@ -11,7 +11,7 @@ import type { Agent, Activity } from '../db.ts';
 import type { Adapter, ErrorClass, LaunchSpec } from './types.ts';
 import * as tmux from '../tmux.ts';
 import { schedulePush } from '../mail.ts';
-import { onIdle } from '../lifecycle.ts';
+import { onIdle, dropRestRequest } from '../lifecycle.ts';
 import { onContext, setCompactInstructions } from '../context.ts';
 import { report } from '../usage.ts';
 import { pollCreditsAfterTurn } from '../credits.ts';
@@ -317,6 +317,7 @@ export function onEvent(ev: { type: string; data?: any }): void {
   };
   switch (ev.type) {
     case 'session.execution.started':
+      dropRestRequest(agent.id); // a new turn: the rest its last turn asked for no longer holds (S-2237)
       set('working');
       // A completion notice starts this execution; the work it reports is over.
       return syncJobWaits(agent);

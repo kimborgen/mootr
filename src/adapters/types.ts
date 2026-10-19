@@ -48,8 +48,10 @@ export interface Adapter {
   // Runs once the harness's tmux session exists: answers launch dialogs, then starts the
   // first turn with `prompt` (spawn prompt, or the note of a resume or restart). Right
   // before it delivers the prompt it calls `admit`, the admission gate; on false it
-  // delivers nothing and returns (stam has kept the prompt for later).
-  afterLaunch(agent: Agent, prompt?: string, opts?: { resume?: boolean; admit?: () => boolean }): Promise<void>;
+  // delivers nothing and returns (stam has kept the prompt for later). `current`, with no side
+  // effects, says whether this launch is still the agent's own (S-2123): once it isn't, the adapter
+  // touches the session no more and returns quietly. Without it the launch counts as current.
+  afterLaunch(agent: Agent, prompt?: string, opts?: { resume?: boolean; admit?: () => boolean; current?: () => boolean }): Promise<void>;
   // Starts a turn in an idle agent with this text, without typing into its terminal.
   // Returns false when the agent can't be reached right now.
   pushPrompt(agent: Agent, text: string): Promise<boolean>;
@@ -62,7 +64,7 @@ export interface Adapter {
   onStatusLine?(
     agent: Agent,
     payload: Record<string, any>,
-  ): { context_tokens?: number; context_window?: number; cost?: number; tokensIn?: number; tokensOut?: number; tokensCacheRead?: number; tokensCacheWrite?: number; session?: string; subscription?: Record<string, any> };
+  ): { context_tokens?: number; context_window?: number; cost?: number; tokensIn?: number; tokensOut?: number; tokensCacheRead?: number; tokensCacheWrite?: number; cacheTtl?: '1h' | '5m'; session?: string; subscription?: Record<string, any> };
   // Formats a notice as the after-tool hook output the harness shows the model.
   inTurnNotice?(text: string): string;
   // Types the human's own approval into the agent's input, which some safety checks

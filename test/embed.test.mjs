@@ -5,7 +5,7 @@
 // the local model is never installed in tests). Run with `node --test test/embed.test.mjs`.
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -251,6 +251,46 @@ test('a text edited while it embeds is embedded again, and its stored hash is th
   texts.e1 = 'second version, edited mid-embed';
   for (let i = 0; i < 200 && db.embeddingRow('edited', 'e1')?.hash !== hashOf(texts.e1); i++) await new Promise((r) => setTimeout(r, 20));
   assert.equal(db.embeddingRow('edited', 'e1')?.hash, hashOf(texts.e1), 'the stored hash is the old text\'s');
+});
+
+test('the local provider sends the worker one text per model run (S-2127)', async () => {
+  // onnxruntime's memory arena keeps the largest buffers a run needed, so 16 padded texts per run
+  // held ~1 GB of native memory in the daemon. A fake worker records how many texts each run got.
+  const embedderMod = await import('../src/embed.ts');
+  const dir = join(process.env.STAM_HOME, 'embedder');
+  const pkg = join(dir, 'node_modules', '@huggingface', 'transformers');
+  mkdirSync(pkg, { recursive: true });
+  writeFileSync(join(pkg, 'package.json'), '{}');
+  writeFileSync(join(dir, 'installed.json'), JSON.stringify({ version: embedderMod.LOCAL_VERSION, model: embedderMod.LOCAL_MODEL, revision: embedderMod.LOCAL_REVISION }));
+  const runs = join(process.env.STAM_HOME, 'worker-runs');
+  const fake = join(process.env.STAM_HOME, 'fake-worker.mjs');
+  writeFileSync(
+    fake,
+    `import { parentPort } from 'node:worker_threads';
+import { appendFileSync } from 'node:fs';
+parentPort.on('message', ({ id, texts }) => {
+  appendFileSync(${JSON.stringify(runs)}, texts.length + '\\n');
+  parentPort.postMessage({ id, vecs: texts.map((t) => Float32Array.from([t.length, 0])) });
+});
+`,
+  );
+  const saved = { e: process.env.STAM_EMBEDDER, w: process.env.STAM_EMBED_WORKER };
+  delete process.env.STAM_EMBEDDER;
+  process.env.STAM_EMBED_WORKER = fake;
+  try {
+    assert.equal(installed(), true);
+    const texts = ['a', 'bb', 'ccc', 'dddd', 'eeeee', 'ffffff', 'ggggggg'];
+    const vecs = await embed(texts);
+    assert.deepEqual(vecs.map((v) => v[0]), [1, 2, 3, 4, 5, 6, 7], 'vectors come back in text order');
+    const sizes = readFileSync(runs, 'utf8').trim().split('\n').map(Number);
+    assert.equal(sizes.length, texts.length);
+    assert.ok(sizes.every((n) => n === embedderMod.RUN_BATCH && n === 1), `runs of ${sizes}`);
+  } finally {
+    await embedderMod.unload();
+    saved.e === undefined ? delete process.env.STAM_EMBEDDER : (process.env.STAM_EMBEDDER = saved.e);
+    saved.w === undefined ? delete process.env.STAM_EMBED_WORKER : (process.env.STAM_EMBED_WORKER = saved.w);
+    rmSync(join(dir, 'installed.json'), { force: true });
+  }
 });
 
 test('every src module imports on its own, as the deploy check does', () => {

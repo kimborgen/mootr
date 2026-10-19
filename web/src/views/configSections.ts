@@ -3,6 +3,7 @@ export const SECTIONS = [
   { key: 'assistant', label: 'Executive assistant', icon: 'bot' },
   { key: 'chief', label: 'Chief of staff', icon: 'crown' },
   { key: 'agents', label: 'New agents', icon: 'plus' },
+  { key: 'permissions', label: 'Permission modes', icon: 'shield' },
   { key: 'view', label: 'Agent view', icon: 'message-square' },
   { key: 'types', label: 'Agent types', icon: 'users' },
   { key: 'skills', label: 'Skills', icon: 'file-text' },

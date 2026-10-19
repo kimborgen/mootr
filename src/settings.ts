@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync, renameSync, statSync, chmodSync } from 'node:fs';
 import { MACHINE, ROOT, STAM_HOME } from './config.ts';
+import { derivedRepos } from './default-repo.ts';
 import { validate, noteInvalid, retryNotices } from './accounts.ts';
 import type { McpServer } from './instructions.ts';
 
@@ -96,7 +97,9 @@ export const DEFAULTS = {
   // its expected wake (a wake_me, a wait_for timeout or expect_minutes) is more than afterMinutes away,
   // or after afterMinutes idle with no known time. types: false keeps an agent type up (keyed as
   // agent-class typeOf names it; `cos` is the chief of staff). Both rules apply to standing agents too, a wait with no
-  // time included; only a standing agent with no wait at all keeps standing.idleHours instead.
+  // time included; only a standing agent with no wait at all keeps standing.idleHours instead. Idle counts
+  // from the last turn that acted, not one that only read (S-2158, lifecycle.restClock). `rest: true` on
+  // wait_for or wake_me rests it at its turn end instead (S-2237, lifecycle.requestRest).
   rest: { enabled: true, afterMinutes: 20, graceMinutes: 2, types: { cos: false, assistant: false } as Record<string, boolean> },
   exitRecovery: { percentOfWindow: 85, windowTokens: 350_000, repeatMinutes: 5 },
   // Harness menus that pop up over an idle agent's input and block delivery. When one is
@@ -268,10 +271,10 @@ export const DEFAULTS = {
     // the facts compare against. A link names a repo only by one of these names.
     repos: defaultRepos() as Record<string, string>,
     mainBranch: 'main',
-    // The PR relay (S-514, pr-open.ts): the repo a pr_open names (a name in repos above), the storage
+    // The PR relay (S-514, pr-open.ts): the repo a pr_open names (a name in repos above; '' = the first one, the checkout this daemon runs from), the storage
     // remote its branch is fetched from (a remote name or URL; '' = `storage` if the checkout has that remote, else the local branch is pushed), the origin it pushes to, and the gh binary
     // and GitHub repo it opens the PR with ('' = the repo `origin` points at). Without a `storage` remote in the checkout, the local branch is pushed. Runs on the ITSA home, where gh is.
-    prOpen: { repo: 'stam2', storage: '', origin: 'origin', gh: 'gh', github: '' },
+    prOpen: { repo: '', storage: '', origin: 'origin', gh: 'gh', github: '' },
     // Required (default): every agent belongs to at least one open ITSA. A spawn with no
     // `itsa` joins its parent's most recently updated open ITSA as a participant, and the
     // web tree marks agents that are in none. Off: ITSAs are optional again, no joins, no
@@ -368,13 +371,15 @@ export const DEFAULTS = {
   // only the peer token (STAM_HOME/peer-token) can act as a peer.
   // localHuman (S-613): on one machine without Tailscale, the web page on 127.0.0.1 becomes the human once root
   // vouches for the code it shows (`sudo /usr/bin/install -D -m 644 /dev/null /run/stam-human/UID/CODE`; coreutils
-  // only, never stam's code, as root). Linux only for now. An agent can still wrap sudo via the shell rc or PATH. Off by default; it changes nothing for tailscale serve.
+  // only, never stam's code, as root). Linux only for now. An agent can still wrap sudo via the shell rc or PATH. It changes nothing for tailscale serve.
+  // On for a fresh install (S-2121): ensureSettings writes these defaults into a new settings.json, and pins an
+  // existing file that lacks it to false. A missing value still reads as off, so a lost pin never turns it on.
   // Hosts where agents have passwordless sudo or docker gain no protection from it: there agents are root.
-  auth: { sharedTokenClaims: true, legacyPeerToken: true, humanStrict: false, localHuman: false },
+  auth: { sharedTokenClaims: true, legacyPeerToken: true, humanStrict: false, localHuman: true },
   // An event-loop stall longer than stallMs ms is logged with what was running (src/stall.ts).
   debug: { stallMs: 100 },
-  // The folders the human's Files API may read on this machine (S-1525); null means ~/projects and
-  // the mail attachments. A fixed deny list in src/files.ts holds inside them.
+  // The folders the human's Files API may read on this machine (S-1525); null means the folder holding
+  // the checkout stam runs from (default-repo.ts) and the mail attachments. A fixed deny list in src/files.ts holds inside them.
   files: { roots: null as string[] | null },
   // The PR diff API (S-1530, src/diff.ts). classes: the file patterns per class, hidden by the viewer's
   // "meat" mode. A pattern ending in `/` names a folder anywhere in the path; one with no other `/`
@@ -638,22 +643,27 @@ export function settingsChanged(): void {
 }
 
 // Writes the defaults on first start, and adds top-level keys introduced since, so
-// every setting is visible in the file.
+// every setting is visible in the file. An install from before local login became the default
+// (S-2121) has a file with no auth.localHuman: it gets false written once, so it keeps working as it did.
 export function ensureSettings(): void {
   mkdirSync(STAM_HOME, { recursive: true });
   let user: any = {};
+  let added = false;
   if (existsSync(file())) {
     try {
       user = JSON.parse(readFileSync(file(), 'utf8'));
     } catch {
       return;
     }
+    if (!isObj(user)) return;
+    if (!hasPath(user, ['auth', 'localHuman'])) {
+      user.auth = { ...(isObj(user.auth) ? user.auth : {}), localHuman: false };
+      added = true;
+    }
   }
   const missing = Object.keys(DEFAULTS).filter((k) => !(k in user));
-  if (!missing.length) return;
   // A non-home daemon with a cache gets no shared defaults in its file: the cache holds those.
   const localOnly = !localHomeIsMe(user) && readSharedCache() !== null;
-  let added = false;
   for (const k of missing) {
     if (!localOnly) {
       user[k] = (DEFAULTS as any)[k];
@@ -675,11 +685,19 @@ export function ensureSettings(): void {
 // deployed daemon finds the checkout it came from; a checkout is its own. Nothing else is
 // configured by default. (S-40: branch links name repos by these names only.)
 export function defaultRepos(root = ROOT): Record<string, string> {
-  try {
-    const m = JSON.parse(readFileSync(join(root, '.release.json'), 'utf8'));
-    if (typeof m.repo === 'string' && m.repo) return { stam2: canonicalPath(m.repo) };
-  } catch {}
-  return existsSync(join(root, '.git')) ? { stam2: canonicalPath(root) } : {};
+  return derivedRepos(root);
+}
+// The name in `itsa.repos` that pr_open and the deploy checkout use: prOpen.repo, else the first configured repo
+// (the user's repos come first; the one derived from this checkout is the default when none is set).
+export function primaryRepoName(itsa: { repos: Record<string, string>; prOpen: { repo: string } }): string {
+  return itsa.prOpen.repo || Object.keys(itsa.repos)[0] || '';
+}
+// The remote names a checkout's PR branches live on besides origin: the setting `itsa.prOpen.storage` when it
+// names one; else `storage` when a peer of that name is configured (an install that runs a storage machine).
+export function storageRemoteFallback(remotes: string[]): string {
+  const named = settings().itsa.prOpen.storage;
+  if (named) return named;
+  return remotes.includes('storage') && settings().peers.some((p) => p.name === 'storage') ? 'storage' : '';
 }
 // A configured repo's real path, so a symlink can't point a name elsewhere later.
 function canonicalPath(p: string): string {
@@ -1140,7 +1158,7 @@ function readSettings(): { value: Settings; cacheable: boolean } {
       required: user.itsa?.required === false ? false : true,
       ownerNotices: user.itsa?.ownerNotices === 'off' ? 'off' : 'on',
       keyPrefix: typeof user.itsa?.keyPrefix === 'string' && user.itsa.keyPrefix ? user.itsa.keyPrefix : DEFAULTS.itsa.keyPrefix,
-      repos: Object.fromEntries(Object.entries({ ...DEFAULTS.itsa.repos, ...(user.itsa?.repos ?? {}) }).flatMap(([name, p]) => (typeof p === 'string' && p ? [[name, canonicalPath(p)]] : []))),
+      repos: Object.fromEntries(Object.entries({ ...(user.itsa?.repos ?? {}), ...Object.fromEntries(Object.entries(DEFAULTS.itsa.repos).filter(([n]) => !Object.hasOwn(user.itsa?.repos ?? {}, n))) }).flatMap(([name, p]) => (typeof p === 'string' && p ? [[name, canonicalPath(p)]] : []))),
       mainBranch: typeof user.itsa?.mainBranch === 'string' && user.itsa.mainBranch ? user.itsa.mainBranch : DEFAULTS.itsa.mainBranch,
       prOpen: Object.fromEntries(Object.entries(DEFAULTS.itsa.prOpen).map(([k, d]) => {
         const v = (user.itsa?.prOpen as Record<string, unknown> | undefined)?.[k];

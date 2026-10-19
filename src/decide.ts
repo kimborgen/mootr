@@ -2,7 +2,7 @@
 // piece of state, without a full language-model turn. The first use is the mail check
 // (src/mail-check.ts): does a mail to the human follow the rules for mailing the human?
 //
-// The call is Microsoft's decision model through OpenRouter:
+// The call (src/llm/openrouter.ts) is Microsoft's decision model through OpenRouter:
 //   POST https://openrouter.ai/api/alpha/decisions
 //   {"model": id, "state": <string|object|array>, "questions": {"<name>": <question>}}
 //   -> {"model": id, "answers": {"<name>": <answer>}, "usage": {...}, "id": ..., "provider": ...}
@@ -25,9 +25,9 @@ import { ledgerChanged, systemHeld } from './budgets.ts';
 import { settings, SYSTEM_ACCOUNT } from './settings.ts';
 import { apiKey } from './credits.ts';
 import { addExactPending } from './reconcile.ts';
+import { LlmHttpError, parseModelRef } from './llm/index.ts';
+import { openrouter } from './llm/openrouter.ts';
 
-// The decision endpoint's base; credits.ts overrides its own with the same variable.
-const base = () => process.env.STAM_OPENROUTER_URL ?? 'https://openrouter.ai/api/alpha';
 const TIMEOUT_MS = 20_000;
 
 export type Question =
@@ -58,17 +58,6 @@ export interface DecideFailure {
   error: string;
 }
 
-const RETRY_AFTER_MAX_MS = 300_000;
-
-// The Retry-After header as milliseconds: seconds, or an HTTP date. Undefined when absent or unreadable.
-function retryAfterMs(header: string | null): number | undefined {
-  if (!header) return undefined;
-  const secs = Number(header);
-  const ms = Number.isFinite(secs) ? secs * 1000 : Date.parse(header) - Date.now();
-  if (!Number.isFinite(ms)) return undefined;
-  return Math.min(RETRY_AFTER_MAX_MS, Math.max(0, ms));
-}
-
 // Asks the decision model and says why it failed. Returns the answers and no failure, or null and
 // the failure (no key, a network or HTTP error, a timeout, or a body without answers), with an
 // event either way. `purpose` names what the call is for (e.g. "decide:mail-check"); it is recorded
@@ -82,24 +71,18 @@ export async function decideWithFailure(
   if (!key) return { result: null, failure: { kind: 'other', error: 'no API key' } };
   const held = systemHeld();
   if (held) return { result: null, failure: fail(opts.purpose, { kind: 'other', error: held }) };
-  const model = settings().decisions.model;
-  let res: Response;
+  // The decisions endpoint is OpenRouter-only, so a `provider:` prefix is dropped.
+  const model = parseModelRef(settings().decisions.model).model;
+  let data: any;
   try {
-    res = await fetch(`${base()}/decisions`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model, state, questions }),
-      signal: AbortSignal.timeout(opts.timeoutMs ?? TIMEOUT_MS),
-    });
+    data = await openrouter.decisions!({ model, state, questions }, { timeoutMs: opts.timeoutMs ?? TIMEOUT_MS });
   } catch (e) {
+    if (e instanceof LlmHttpError) {
+      const kind = e.status === 429 ? 'rate-limit' : e.status >= 500 ? 'server' : 'other';
+      return { result: null, failure: fail(opts.purpose, { kind, status: e.status, retryAfterMs: e.retryAfterMs, error: e.message }) };
+    }
     return { result: null, failure: fail(opts.purpose, { kind: 'other', error: e instanceof Error ? e.message : String(e) }) };
   }
-  if (!res.ok) {
-    const kind = res.status === 429 ? 'rate-limit' : res.status >= 500 ? 'server' : 'other';
-    const retry = retryAfterMs(res.headers.get('retry-after'));
-    return { result: null, failure: fail(opts.purpose, { kind, status: res.status, retryAfterMs: retry, error: `HTTP ${res.status}` }) };
-  }
-  const data = (await res.json().catch(() => null)) as any;
   if (!data?.answers || typeof data.answers !== 'object') {
     return { result: null, failure: fail(opts.purpose, { kind: 'other', error: 'no answers in the response' }) };
   }

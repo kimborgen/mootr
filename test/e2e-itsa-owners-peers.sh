@@ -71,12 +71,15 @@ echo "-- an owner shut down on main reaches the parent owner on the home"
 notice home "$LEAD" >/dev/null
 stop main "$WORKER"
 api main POST "/api/agents/$WORKER/shutdown" '{}' >/dev/null
+# The shutdown asks for the final round first (S-1402): the turn end below runs it.
+stop main "$WORKER"
 shut_told() { N=$(notice home "$LEAD"); echo "$N" | grep -q "worker was shut down"; }
 wait_until shut_told || fail "no notice on the home for the shutdown on main (got: $N)"
 [ "$(echo "$N" | grep -c 'worker was shut down')" = 1 ] || fail "the shutdown notice wasn't sent once"
 
 echo "-- archive on main unowns on the home"
 notice home "$LEAD" >/dev/null
+api main POST "/api/agents/$WORKER2/retro-final" "{\"by\":\"$WORKER2\",\"effort\":{\"testing\":100}}" >/dev/null
 api main POST "/api/agents/$WORKER2/archive" '{}' >/dev/null
 # An archive waits for the agent's final round and runs at its next turn end (S-1043): this Stop ends it.
 stop main "$WORKER2"
@@ -114,6 +117,7 @@ pending_is() { [ "$(pending_rows)" = "$1" ]; }
 home_port_closed() { ! curl -s -m 2 -o /dev/null "$HOME_URL/"; }
 on home "$STAM" daemon stop >/dev/null
 wait_until home_port_closed || fail "the home daemon didn't stop"
+api main POST "/api/agents/$WORKER3/retro-final" "{\"by\":\"$WORKER3\",\"effort\":{\"testing\":100}}" >/dev/null
 api main POST "/api/agents/$WORKER3/archive" '{}' >/dev/null || true
 stop main "$WORKER3"
 wait_until pending_is 1 || fail "the failed unown wasn't kept (pending rows: $(pending_rows))"
@@ -121,6 +125,7 @@ curl -s -X POST -H "authorization: Bearer $MAIN_TOKEN" -H 'x-stam-human: 1' "$MA
 api main GET "/api/agents/$WORKER3" >/dev/null || fail "forget removed the agent anyway"
 # A second archived agent is running again (a resume) before the home answers: its pending row
 # is dropped, not retried, and it keeps its ITSA.
+api main POST "/api/agents/$WORKER4/retro-final" "{\"by\":\"$WORKER4\",\"effort\":{\"testing\":100}}" >/dev/null
 api main POST "/api/agents/$WORKER4/archive" '{}' >/dev/null || true
 stop main "$WORKER4"
 wait_until pending_is 2 || fail "the second failed unown wasn't kept (pending rows: $(pending_rows))"

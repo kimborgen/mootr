@@ -4,6 +4,8 @@
 export const PRESS_MS = 1000
 let at = -Infinity
 export const markPress = (): void => { at = Date.now() }
+// The finger lifting restarts the window: a hold longer than PRESS_MS after the menu opened still has its lift click taken.
+export const refreshPress = (): void => { if (at > -Infinity) at = Date.now() }
 export const clearPress = (): void => { at = -Infinity }
 // True once for the click that ends a long-press, if it comes within PRESS_MS.
 export const takePress = (): boolean => { const f = Date.now() - at < PRESS_MS; at = -Infinity; return f }

@@ -18,6 +18,9 @@ export interface WorkExtras { costs: IssueCosts | null; activity: ItsaActivityRe
 }
 
 const REFRESH_MS = 60_000
+// The activity report blocks the daemon for seconds at today's scale (S-2094), so it is read at most every ten minutes, and on a forced refresh.
+const ACTIVITY_MS = 10 * 60_000
+let lastActivity = 0
 let extras: WorkExtras = { costs: null, activity: null, watch: {}, fields: null, fieldsFailed: false, fieldsStart: 0 }
 const listeners = new Set<() => void>()
 const notify = () => { for (const fn of listeners) fn() }
@@ -71,11 +74,15 @@ export async function refreshFields(): Promise<void> {
 // per subject; one that fails is left out.
 export async function refreshWorkExtras(force = false) {
   if (inFlight || (!force && Date.now() - last < REFRESH_MS)) return
+  // A hidden tab reads nothing (S-2094); it catches up when it shows again.
+  if (!force && typeof document !== 'undefined' && document.hidden) return
   inFlight = true
   last = Date.now()
   try {
     const costs = await api<IssueCosts>('GET', '/api/usage/issues?days=7').catch(() => null)
-    const activity = await api<ItsaActivityReport>('GET', '/api/activity?by=itsa').catch(() => null)
+    const due = force || Date.now() - lastActivity >= ACTIVITY_MS
+    if (due) lastActivity = Date.now()
+    const activity = due ? await api<ItsaActivityReport>('GET', '/api/activity?by=itsa').catch(() => extras.activity) : extras.activity
     const subjects = subjectsOf(getData().itsas)
     const pairs = await Promise.all(subjects.map(async (s) => {
       const w = await api<WatchState>('GET', `/api/watch/state?subject=${encodeURIComponent(s)}`).catch(() => null)
@@ -95,6 +102,11 @@ export function useWorkExtras(): WorkExtras {
   const { itsas } = useData()
   const snap = useSyncExternalStore((fn) => { listeners.add(fn); return () => listeners.delete(fn) }, getWorkExtras)
   useEffect(() => { void refreshWorkExtras(); void refreshFields() }, [itsas])
-  useEffect(() => { const t = setInterval(() => { void refreshWorkExtras(); void refreshFields() }, REFRESH_MS); return () => clearInterval(t) }, [])
+  useEffect(() => {
+    const t = setInterval(() => { void refreshWorkExtras(); void refreshFields() }, REFRESH_MS)
+    const shown = () => { if (!document.hidden) void refreshWorkExtras() }
+    document.addEventListener('visibilitychange', shown)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', shown) }
+  }, [])
   return snap
 }

@@ -13,6 +13,7 @@ import { STAM_HOME } from './config.ts';
 import * as db from './db.ts';
 import { isClosedStatus } from './itsa.ts';
 import type { PrOpenConfig } from './pr-open.ts';
+import { storageRemoteFallback } from './settings.ts';
 
 const run = promisify(execFile);
 
@@ -68,7 +69,7 @@ const conflictLogged = new Map<string, string>();
 export async function syncPrs(cfg: PrOpenConfig, log: (line: string) => void = console.log, file = syncStateFile()): Promise<SyncResult> {
   const result: SyncResult = { pushed: [], failed: [], skipped: [] };
   if (!cfg.github) return result;
-  const storage = cfg.storage || ((await git(cfg, ['remote'])).split('\n').includes('storage') ? 'storage' : '');
+  const storage = cfg.storage || storageRemoteFallback((await git(cfg, ['remote'])).split('\n'));
   if (!storage) return result;
   const onStorage = new Map<string, string>();
   for (const line of (await git(cfg, ['ls-remote', '--heads', storage, 'refs/heads/stam/*'])).split('\n')) {

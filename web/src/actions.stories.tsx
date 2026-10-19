@@ -16,6 +16,7 @@ export const stories: Story[] = [{
     'A menu row is `--size-row-menu`; on a phone `--size-hit-touch` (' + ds('Density') + ').',
     'Stop now and Forget use the `danger` tone, and Stop now, Forget and Archive ask with a confirm before acting; Shut down acts at once.',
     'Items that do not apply are left out, not disabled, so the list never shows a dead option.',
+    "The permission item switches the agent between Auto and Bypass as the human's own pick, which then stays over Settings › Permission modes (the other choices, Ask and Follow settings, are in the agent's details). It asks to confirm, and says Bypass runs every action without asking.",
   ],
   states: [
     { name: 'A running agent', height: 460, render: () => <OnMount run={open('fixture-dev')} /> },

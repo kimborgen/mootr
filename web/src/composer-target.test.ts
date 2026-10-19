@@ -56,6 +56,7 @@ describe('bottomTarget: the main world in, the bottom input\'s target out', () =
     expect(ctx('board:i1').context).toBe('S-7 board')
     expect(ctx('type:reviewer').context).toBe('reviewer · type')
     expect(ctx('file:host1:/a/b/c.ts').context).toBe('c.ts')
+    expect(ctx('diff:stam2#7').context).toBe('stam2 PR #7')
     expect(ctx('system').context).toBe('System')
     expect(ctx('swipe').context).toBe('Swipe')
     expect(ctx('files').context).toBe('Files')

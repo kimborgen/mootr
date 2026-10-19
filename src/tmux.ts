@@ -105,8 +105,13 @@ function noServer(stderr: string): boolean {
 // server is gone (a timeout, another error, output it can't read), or listed no panes while
 // the server holds sessions, so nothing is known.
 export type Snapshot = { server: string | null; dead: Map<string, boolean>; activity: Map<string, number>; pane: Map<string, string> };
-export function snapshot(): Snapshot | null {
-  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-panes', '-a', '-F', '#{pid} #{start_time}\t#{session_name}\t#{window_active}\t#{pane_dead}\t#{window_activity}\t#{pane_active}\t#{pane_id}'], { encoding: 'utf8', timeout: 5000 });
+const LIST_PANES = ['-L', TMUX_SOCKET, 'list-panes', '-a', '-F', '#{pid} #{start_time}\t#{session_name}\t#{window_active}\t#{pane_dead}\t#{window_activity}\t#{pane_active}\t#{pane_id}'];
+const SERVER_SESSIONS = ['-L', TMUX_SOCKET, 'display-message', '-p', '#{pid} #{start_time}\t#{server_sessions}'];
+type Out = { status: number | null; stdout: string; stderr: string };
+
+// The snapshot from list-panes' result; `more` is the display-message result the empty case needs, fetched
+// only then. Returns a Snapshot, null, or 'ask' when only `more` can tell.
+function parseSnapshot(r: Out): Snapshot | null | 'ask' {
   const dead = new Map<string, boolean>();
   const activity = new Map<string, number>();
   const pane = new Map<string, string>();
@@ -124,11 +129,68 @@ export function snapshot(): Snapshot | null {
     if (paneActive === '1') pane.set(session, id);
   }
   if (lines.length) return { server: lines[0].split('\t')[0], dead, activity, pane };
-  // No panes names no server either, and is believed only from a server that says it has no sessions.
-  const id = spawnSync('tmux', ['-L', TMUX_SOCKET, 'display-message', '-p', '#{pid} #{start_time}\t#{server_sessions}'], { encoding: 'utf8', timeout: 5000 });
-  if (id.status !== 0) return id.status === 1 && noServer(id.stderr) ? { server: null, dead, activity, pane } : null;
+  return 'ask';
+}
+
+// No panes names no server either, and is believed only from a server that says it has no sessions.
+function parseEmpty(id: Out): Snapshot | null {
+  const empty = { dead: new Map<string, boolean>(), activity: new Map<string, number>(), pane: new Map<string, string>() };
+  if (id.status !== 0) return id.status === 1 && noServer(id.stderr) ? { server: null, ...empty } : null;
   const [server, sessions] = id.stdout.trim().split('\t');
-  return sessions === '0' && /^\d+ \d+$/.test(server) ? { server, dead, activity, pane } : null;
+  return sessions === '0' && /^\d+ \d+$/.test(server) ? { server, ...empty } : null;
+}
+
+export function snapshot(): Snapshot | null {
+  const at = Date.now();
+  const r = spawnSync('tmux', LIST_PANES, { encoding: 'utf8', timeout: 5000 });
+  const p = parseSnapshot(r);
+  const out = p !== 'ask' ? p : parseEmpty(spawnSync('tmux', SERVER_SESSIONS, { encoding: 'utf8', timeout: 5000 }));
+  if (out) startedAt.set(out, at);
+  return out;
+}
+
+function run(args: string[]): Promise<Out> {
+  return new Promise((resolve) =>
+    execFile('tmux', args, { encoding: 'utf8', timeout: 5000 }, (e, stdout, stderr) => {
+      const code = (e as { code?: unknown } | null)?.code;
+      resolve({ status: e ? (typeof code === 'number' ? code : null) : 0, stdout: stdout ?? '', stderr: stderr ?? '' });
+    }),
+  );
+}
+
+// snapshot() without holding the event loop while tmux answers (S-2125).
+export async function snapshotAsync(): Promise<Snapshot | null> {
+  const at = Date.now();
+  const p = parseSnapshot(await run(LIST_PANES));
+  const out = p === 'ask' ? parseEmpty(await run(SERVER_SESSIONS)) : p;
+  if (out) startedAt.set(out, at);
+  return out;
+}
+
+// When the tmux call behind a snapshot started (ms): what the snapshot says is true from then on, so a caller
+// that applies it later can tell the agents that changed since (S-2125).
+const startedAt = new WeakMap<Snapshot, number>();
+export const snapshotStartedAt = (s: Snapshot): number | undefined => startedAt.get(s);
+
+// One snapshotAsync shared by the loops that ask (banners, reconcile): a call while one is in flight joins
+// it (however long it has run, so requests never overlap or finish out of order), and a settled answer is
+// reused for SNAPSHOT_REUSE_MS after it arrived. A failed answer (null) isn't kept.
+const SNAPSHOT_REUSE_MS = 1000;
+let inflight: Promise<Snapshot | null> | null = null;
+let settled: { at: number; value: Snapshot } | null = null;
+export function sharedSnapshot(): Promise<Snapshot | null> {
+  if (inflight) return inflight;
+  if (settled && Date.now() - settled.at < SNAPSHOT_REUSE_MS) return Promise.resolve(settled.value);
+  const p: Promise<Snapshot | null> = snapshotAsync()
+    .then((v) => {
+      settled = v ? { at: Date.now(), value: v } : null;
+      return v;
+    })
+    .finally(() => {
+      if (inflight === p) inflight = null;
+    });
+  inflight = p;
+  return p;
 }
 
 export function isDead(name: string): boolean {
@@ -154,6 +216,17 @@ export function paneOwner(pane: string): string | null {
   const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', pane, '#{pid} #{start_time}\t#{session_name}'], { encoding: 'utf8', timeout: 5000 });
   const [server, session] = r.status === 0 ? r.stdout.trim().split('\t') : [];
   return server && session ? `${server}\t${session}` : null;
+}
+
+export async function paneOwnerAsync(pane: string): Promise<string | null> {
+  const r = await run(['-L', TMUX_SOCKET, 'display-message', '-p', '-t', pane, '#{pid} #{start_time}\t#{session_name}']);
+  const [server, session] = r.status === 0 ? r.stdout.trim().split('\t') : [];
+  return server && session ? `${server}\t${session}` : null;
+}
+
+export async function sendKeysToPaneAsync(pane: string, ...keys: string[]): Promise<void> {
+  const r = await run(['-L', TMUX_SOCKET, 'send-keys', '-t', pane, ...keys]);
+  if (r.status !== 0) throw new Error(`tmux send-keys failed: ${r.stderr.trim()}`);
 }
 
 // Keys to one pane by its %N id, for a caller that has checked whose pane it is (paneOwner).

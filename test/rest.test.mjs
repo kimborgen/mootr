@@ -23,8 +23,10 @@ process.env.STAM_REST_ENABLED = '1'; // test/lib.sh turns it off for every other
 for (const k of ['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT', 'STAM_STANDING_IDLE_HOURS', 'STAM_REST_AFTER_MINUTES', 'STAM_REST_GRACE_MINUTES']) delete process.env[k];
 writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [], chiefOfStaff: 'rest-cos' }));
 
-let db, lifecycle, mail, waits, watch, org;
+let db, lifecycle, mail, waits, watch, org, viewPrompt, agentView;
 const pushed = [];
+const launchPrompts = []; // the prompt each launch delivered
+let afterLaunchHook = null; // a test's own delay or failure inside afterLaunch
 before(async () => {
   db = await import('../src/db.ts');
   lifecycle = await import('../src/lifecycle.ts');
@@ -32,13 +34,17 @@ before(async () => {
   waits = await import('../src/waits.ts');
   watch = await import('../src/watch.ts');
   org = await import('../src/org.ts');
+  viewPrompt = await import('../src/view-prompt.ts');
+  agentView = await import('../src/agent-view.ts');
   lifecycle.startRestWaking();
   org.watchActivity();
   const { adapters } = await import('../src/adapters/index.ts');
   adapters.fake = {
     pushPrompt: async (a, text) => (pushed.push({ id: a.id, text }), true),
     launch: async () => ({ argv: ['sleep', '600'], env: {} }),
-    afterLaunch: async (a) => {
+    afterLaunch: async (a, prompt) => {
+      if (afterLaunchHook) await afterLaunchHook(a, prompt);
+      launchPrompts.push({ id: a.id, prompt });
       db.updateAgent(a.id, { activity: 'idle' });
     },
     turnRunning: async () => false,
@@ -265,6 +271,163 @@ test('a manager with busy children rests only on the no-known-time rule', async 
   await staysUp(a);
   idleFor(a, 21);
   await rests(a, 'wait');
+});
+
+// S-2158: a turn of hooks (the daemon calls these from UserPromptSubmit, PreToolUse and Stop), ending idle for `idle` minutes.
+const turn = (a, tools, idle = 1) => {
+  mail.inTurnNotice(a.id); // the notices the turn reads
+  lifecycle.restTurnStarted(a.id, db.getAgent(a.id).idle_since);
+  for (const t of tools) lifecycle.restToolUsed(a.id, t);
+  lifecycle.restTurnEnded(a.id);
+  idleFor(a, idle);
+};
+// A manager with a child at work, so stam keeps its children wait.
+const busyManager = async (idle) => {
+  const a = agent();
+  const c = agent({ parent: a.id });
+  db.updateAgent(c.id, { activity: 'working' });
+  await settled(() => db.listWaits(a.id).some((w) => w.kind === 'children'));
+  idleFor(a, idle);
+  return a;
+};
+
+test('a turn that only reads keeps the rest clock: the manager rests 20 minutes after its last acting turn', async () => {
+  const early = await busyManager(15);
+  turn(early, ['mcp__stam__read_mail', 'Read', 'Grep']);
+  await staysUp(early); // 15 minutes since its clock
+  const a = await busyManager(21);
+  turn(a, ['mcp__stam__read_mail', 'Read', 'Grep']);
+  turn(a, []); // a notice it answered in text alone
+  assert.ok(Date.parse(lifecycle.restClock(db.getAgent(a.id))) <= Date.now() - 20 * 60_000);
+  await rests(a, 'wait');
+});
+
+test('declaring a wait is no action: read_mail plus wait_for keeps the clock', async () => {
+  const a = await busyManager(25);
+  turn(a, ['mcp__stam__read_mail', 'mcp__stam__wait_for', 'mcp__stam__wake_me', 'mcp__stam__watch_pr', 'mcp__stam__subscribe', 'mcp__stam__wait_done']);
+  await rests(a, 'wait');
+});
+
+test('a turn that acts resets the clock to its own idle_since', async () => {
+  for (const tool of ['mcp__stam__send_mail', 'mcp__stam__spawn_agent', 'Bash', 'Edit']) {
+    const a = await busyManager(25);
+    turn(a, ['mcp__stam__read_mail', tool]);
+    await staysUp(a);
+    assert.equal(lifecycle.restClock(db.getAgent(a.id)), db.getAgent(a.id).idle_since, tool);
+  }
+});
+
+test('an acting turn whose end no hook reported still drops the older clock', async () => {
+  const a = await busyManager(25);
+  turn(a, ['mcp__stam__read_mail']);
+  lifecycle.restTurnStarted(a.id, db.getAgent(a.id).idle_since);
+  lifecycle.restToolUsed(a.id, 'mcp__stam__send_mail'); // and its Stop is lost
+  idleFor(a, 1);
+  await staysUp(a);
+});
+
+test('an archive or forget drops the clock', async () => {
+  const a = await busyManager(25);
+  turn(a, ['mcp__stam__read_mail']);
+  assert.notEqual(lifecycle.restClock(db.getAgent(a.id)), db.getAgent(a.id).idle_since);
+  lifecycle.restForget(a.id);
+  assert.equal(lifecycle.restClock(db.getAgent(a.id)), db.getAgent(a.id).idle_since);
+});
+
+test('a turn whose start no hook reported counts as acting', async () => {
+  const a = await busyManager(25);
+  turn(a, ['mcp__stam__read_mail']);
+  lifecycle.restTurnEnded(a.id); // a Stop with no UserPromptSubmit before it
+  idleFor(a, 1);
+  await staysUp(a);
+});
+
+test('a quiet turn after a wake from rest keeps the clock from before the rest', async () => {
+  const a = await busyManager(25);
+  turn(a, ['mcp__stam__read_mail']);
+  db.updateAgent(a.id, { activity: 'starting' }); // a woken harness: idle_since clears
+  lifecycle.restTurnStarted(a.id, db.getAgent(a.id).idle_since);
+  lifecycle.restToolUsed(a.id, 'mcp__stam__read_thread');
+  lifecycle.restTurnEnded(a.id);
+  db.updateAgent(a.id, { activity: 'idle' });
+  idleFor(a, 1);
+  await rests(a, 'wait');
+});
+
+// S-2237: rest: true on wait_for or wake_me (the daemon's routes call requestRest), honoured from a short
+// delay after the turn end (onIdle calls restTurnEnded; `delay` 0 here).
+const asksRest = async (a, w, delay = 0) => {
+  mail.inTurnNotice(a.id); // the notices its turn read
+  lifecycle.requestRest(a.id, w);
+  idleFor(a, 0);
+  lifecycle.restTurnEnded(a.id, delay);
+};
+
+test('rest: true on a wait rests the agent at its turn end, without the idle minutes', async () => {
+  const a = agent();
+  await asksRest(a, await waits.declare(a.id, { on: 'human', expect_minutes: 90 }));
+  await settled(() => lifecycle.isResting(db.getAgent(a.id))); // the turn end's own timer
+  assert.equal(JSON.parse(events(a.id, 'standing:rest')[0].data).reason, 'wait');
+  const b = await busyManager(0);
+  await asksRest(b, waits.wake(b.id, { note: 'check the team', in_minutes: 5 }));
+  await rests(b, 'wait');
+});
+
+test('a rest request counts only from its delay after the turn end', async () => {
+  const a = agent();
+  const w = await waits.declare(a.id, { on: 'human' });
+  mail.inTurnNotice(a.id);
+  lifecycle.requestRest(a.id, w);
+  idleFor(a, 0);
+  await staysUp(a); // asked, but its turn hasn't ended
+  lifecycle.restTurnEnded(a.id, 60_000);
+  await staysUp(a); // within the delay, the sweep leaves it
+  lifecycle.restTurnEnded(a.id, 0);
+  await rests(a, 'wait');
+});
+
+test('a rest request still meets every guard', async () => {
+  const notice = agent();
+  await asksRest(notice, await waits.declare(notice.id, { on: 'human' }), 60_000);
+  mail.queueNotice(notice.id, 'a child finished');
+  lifecycle.restTurnEnded(notice.id, 0);
+  await staysUp(notice);
+  const churn = agent();
+  for (const min of [50, 30, 10]) inEvents(churn, 'standing:wake', min);
+  await asksRest(churn, await waits.declare(churn.id, { on: 'human' }));
+  await staysUp(churn);
+  const off = agent();
+  await withSettings({ rest: { types: { untyped: false } } }, async () => {
+    await asksRest(off, await waits.declare(off.id, { on: 'human' }));
+    await staysUp(off);
+  });
+});
+
+test("the agent's next turn, its wait clearing, or a repeating wake firing drops the request", async () => {
+  const next = agent();
+  await asksRest(next, await waits.declare(next.id, { on: 'human' }), 60_000);
+  turn(next, ['mcp__stam__send_mail'], 0);
+  await staysUp(next);
+  const dropped = agent();
+  await asksRest(dropped, await waits.declare(dropped.id, { on: 'human' }), 60_000);
+  lifecycle.dropRestRequest(dropped.id); // a Codex or OpenCode turn start
+  lifecycle.restTurnEnded(dropped.id, 0);
+  await staysUp(dropped);
+  const done = agent();
+  const w = await waits.declare(done.id, { on: 'human' });
+  await asksRest(done, w, 60_000);
+  waits.done(done.id, w.id);
+  lifecycle.restTurnEnded(done.id, 0);
+  await staysUp(done);
+  const every = agent();
+  const made = waits.wake(every.id, { note: 'check in', every_minutes: 30 });
+  db.setWaitUntil(made.id, ago(1)); // already due, so the tick fires it now and moves `until` 30 minutes on
+  const timer = db.getWait(made.id);
+  await asksRest(every, timer); // its timer runs after the tick below: neither awaits a macrotask
+  await waits.tick();
+  mail.inTurnNotice(every.id);
+  assert.ok(db.listWaits(every.id).some((x) => x.id === timer.id), 'the repeating wake stays');
+  await staysUp(every);
 });
 
 test('three wakes within an hour stop it resting for an hour', async () => {
@@ -707,4 +870,107 @@ test("clearing a resting child's last wait sends its owed tree-idle notice, whic
   assert.ok(events(p.id, 'notice:queued').some((e) => e.data.includes(`${c.name} finished its turn`)));
   assert.equal(lifecycle.isResting(db.getAgent(c.id)), true, 'the child stays resting');
   assert.equal(db.getAgent(c.id).idle_notified, db.getAgent(c.id).idle_since);
+});
+
+// --- The resting state in the API, and a web-view prompt (S-2034) ---------------------------
+
+const restingNow = (a) => lifecycle.restingOf(db.getAgent(a.id), waits.webWaits(a.id));
+
+test('a resting agent reports resting with its reason, its waits and its expected wake', async () => {
+  const a = agent();
+  waits.wake(a.id, { note: 'check CI', in_minutes: 45 });
+  idleFor(a, 3);
+  await rests(a, 'wait');
+  const r = restingNow(a);
+  assert.equal(r.reason, 'wait');
+  assert.equal(r.waits.length, 1);
+  assert.equal(r.waits[0].kind, 'timer');
+  assert.ok(Math.abs(Date.parse(r.expected_wake) - (Date.now() + 45 * 60_000)) < 60_000);
+  // A wait cleared from outside shows at once: it rests with no wait, and no known wake.
+  waits.done(a.id, r.waits[0].id);
+  assert.deepEqual(restingNow(a), { reason: 'idle', waits: [], expected_wake: null });
+});
+
+test('an agent resting with no wait reports the idle reason and no expected wake', async () => {
+  const a = agent();
+  idleFor(a, 21);
+  await rests(a, 'idle');
+  assert.deepEqual(restingNow(a), { reason: 'idle', waits: [], expected_wake: null });
+});
+
+test('an agent that is up, or paused by a human, reports no resting state', async () => {
+  const up = agent();
+  assert.equal(restingNow(up), null);
+  const paused = agent();
+  idleFor(paused, 21);
+  await rests(paused, 'idle');
+  await lifecycle.pause(db.getAgent(paused.id), 'human'); // a second owner: the rest no longer describes it
+  assert.equal(db.getAgent(paused.id).lifecycle, 'paused');
+  assert.equal(restingNow(paused), null);
+});
+
+test('a prompt typed in the web view wakes a resting agent with that prompt', async () => {
+  const a = agent();
+  waits.wake(a.id, { note: 'check CI', in_minutes: 45 });
+  idleFor(a, 3);
+  await rests(a, 'wait');
+  await viewPrompt.prompt(db.getAgent(a.id), 'please look at the failing test', 'queue');
+  assert.equal(db.getAgent(a.id).lifecycle, 'active');
+  assert.equal(events(a.id, 'standing:wake').length, 1);
+  assert.deepEqual(launchPrompts.filter((l) => l.id === a.id).map((l) => l.prompt), ['please look at the failing test']);
+  assert.equal(events(a.id, 'view-prompt').length, 1);
+});
+
+test('a web-view prompt to a resting agent that a human pause also holds is refused, not lost', async () => {
+  const a = agent();
+  idleFor(a, 21);
+  await rests(a, 'idle');
+  await lifecycle.pause(db.getAgent(a.id), 'human');
+  // Paused by a human as well, it is not resting: the view's own refusal stands.
+  await assert.rejects(viewPrompt.prompt(db.getAgent(a.id), 'hello', 'queue'), (e) => e.status === 409);
+  assert.equal(db.getAgent(a.id).lifecycle, 'paused');
+});
+
+test('an empty web-view prompt to a resting agent is a 400 and wakes nothing', async () => {
+  const a = agent();
+  idleFor(a, 21);
+  await rests(a, 'idle');
+  await assert.rejects(viewPrompt.prompt(db.getAgent(a.id), '  ', 'queue'), (e) => e.status === 400);
+  assert.equal(lifecycle.isResting(db.getAgent(a.id)), true);
+});
+
+test('a web-view prompt whose delayed launch delivery fails is an error, not an ack', async () => {
+  const a = agent();
+  idleFor(a, 21);
+  await rests(a, 'idle');
+  let delivered = false;
+  afterLaunchHook = async () => {
+    await new Promise((r) => setTimeout(r, 150));
+    delivered = true;
+    throw new Error('app-server did not start');
+  };
+  try {
+    await assert.rejects(viewPrompt.prompt(db.getAgent(a.id), 'please look at the failing test', 'queue'), (e) => e.status === 409 && /app-server did not start/.test(e.message));
+  } finally {
+    afterLaunchHook = null;
+  }
+  // The route answered only after the delivery had failed, never before.
+  assert.equal(delivered, true);
+  assert.equal(events(a.id, 'view-prompt').length, 0);
+  assert.equal(events(a.id, 'launch-error').length, 1);
+});
+
+test('a mail wake that beats the web-view prompt leaves the prompt delivered to the awake agent, not a 409', async () => {
+  const a = agent();
+  idleFor(a, 21);
+  await rests(a, 'idle');
+  const stale = db.getAgent(a.id); // what the route saw: still resting
+  await lifecycle.wakeResting(a.id, 'mail or a notice is waiting for you');
+  assert.equal(lifecycle.isResting(db.getAgent(a.id)), false);
+  const typed = [];
+  agentView.register('fake', { capabilities: { can_send: true }, unavailable: () => null, prompt: async (x, text) => void typed.push(text) });
+  await viewPrompt.prompt(stale, 'while you were waking', 'queue');
+  assert.deepEqual(typed, ['while you were waking']);
+  assert.equal(events(a.id, 'view-prompt').length, 1);
+  assert.equal(events(a.id, 'view-prompt')[0].data.includes('"woke":true'), false);
 });

@@ -58,7 +58,7 @@ test("an unknown 'from' parameter is named, not read as the identity; no call", 
 });
 
 test('several unknown parameters are all named', async () => {
-  await assert.rejects(mcp.callTool('wait_for', { self, on: 'human', agent: 'x', from: 'y' }), { message: "wait_for has no parameter 'agent', 'from'; its parameters are on, target (the agent to wait for, an id or name), thread, filter, timeout_minutes, expect_minutes, note" });
+  await assert.rejects(mcp.callTool('wait_for', { self, on: 'human', agent: 'x', from: 'y' }), { message: "wait_for has no parameter 'agent', 'from'; its parameters are on, target (the agent to wait for, an id or name), thread, filter, timeout_minutes, expect_minutes, note, rest" });
 });
 
 test("on 'agent' with target declares the wait; from is never sent to the daemon", async () => {
@@ -74,4 +74,13 @@ test('expect_minutes is passed to the daemon (S-1982)', async () => {
   calls.length = 0;
   await mcp.callTool('wait_for', { self, on: 'human', expect_minutes: 40 });
   assert.deepEqual(calls[0].body, { on: 'human', expect_minutes: 40, by: self });
+});
+
+test('rest is passed to the daemon by wait_for and wake_me (S-2237)', async () => {
+  calls.length = 0;
+  await mcp.callTool('wait_for', { self, on: 'human', expect_minutes: 90, rest: true });
+  assert.deepEqual(calls[0].body, { on: 'human', expect_minutes: 90, rest: true, by: self });
+  await mcp.callTool('wake_me', { self, in_minutes: 60, note: 'check the PR', rest: true });
+  assert.equal(calls[1].path, `/api/agents/${self}/waits/wake`);
+  assert.deepEqual(calls[1].body, { in_minutes: 60, note: 'check the PR', rest: true, by: self });
 });
