@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Unit tests for the lines stam gives an agent when its permission request is answered (S-640):
 // the line typed on approval (src/permissions.ts approvedTyped) names the request, its action (capped
-// at 200 characters), and any note Kim gave; the notice for a deny, or an approval that couldn't be
+// at 200 characters), and any note the user gave; the notice for a deny, or an approval that couldn't be
 // typed (permission-answered), closes with what to do next. Neither says "try again".
 // Run with `node --test test/permission-typed.test.mjs`.
 import { test, before } from 'node:test';
@@ -23,7 +23,7 @@ before(async () => {
 
 test('an approval with no note names the request, says it is approved, and starts with "I authorize"', () => {
   const t = approvedTyped('p1a2b3', 'Run npm test', '');
-  assert.equal(t, "I authorize p1a2b3: Kim approved it (Run npm test). Go ahead with that action now; don't request it again.");
+  assert.equal(t, "I authorize p1a2b3: the user approved it (Run npm test). Go ahead with that action now; don't request it again.");
   assert.ok(t.startsWith('I authorize'));
   assert.ok(!/try again/i.test(t));
 });
@@ -34,9 +34,9 @@ test('the default note "I authorize", in any case, adds nothing', () => {
   assert.equal(approvedTyped('p1a2b3', 'Run npm test', 'i AUTHORIZE.'), plain);
 });
 
-test('a custom note is appended as Kim\'s note, without its trailing punctuation doubled', () => {
+test('a custom note is appended as the user\'s note, without its trailing punctuation doubled', () => {
   const t = approvedTyped('p1a2b3', 'Run npm test', 'only on the staging branch!');
-  assert.equal(t, "I authorize p1a2b3: Kim approved it (Run npm test). Go ahead with that action now; don't request it again. The user's note: only on the staging branch.");
+  assert.equal(t, "I authorize p1a2b3: the user approved it (Run npm test). Go ahead with that action now; don't request it again. The user's note: only on the staging branch.");
   assert.ok(!/try again/i.test(t));
 });
 

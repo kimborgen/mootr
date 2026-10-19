@@ -1,0 +1,13 @@
+Answers: S-1878, S-1921, S-1920, S-1865, S-2029, S-1649, S-2015, S-1780, S-1904, S-789, S-1733, S-1954, S-1935, S-1882, S-1870, S-1998, S-1952, S-2017, S-1846, S-1901, S-1787, S-2009, S-1798, S-1821, S-2000, S-1782, S-1783, S-1804, S-840, S-1923, S-1912, S-1908
+
+One batch on branch `stam/retro-steward-1019b` (derived fixtures, `summary_of` and export manifest change together, so not split by topic). Request changes on any line and I revise it.
+
+- Reviewer checks, new block `20-reviewer-checks.md` for both reviewer types (the 400-token cap left no room in the brief): fixtures reach the changed path and match the production writer (S-1780, S-1904, S-789); `git grep` every changed name and doc claim (S-2015, S-2029, S-1649); lock/cleanup changes traced both ways across the old/new period, a race blocks only if the PR adds or widens it (S-1878, S-1920, S-1921, S-1865, S-1935); read at the reviewed sha, `--stat` check on merge heads (S-1954, S-1733). Effect: fewer #613-style extra rounds.
+- Manager `30-manager-mail-wait.md`: reviewer briefs name PR, branch and full head only (S-1870, S-1998); check-then-act briefs ask for a reservation or one consistent view plus an interleaving test (S-1952, S-2017); fail-closed verdict parsing (S-1846); "docs only" names `test/run.sh export` (S-1901); archive a developer only after its own done mail (S-1787).
+- Developer, new block `40-developer-before-report.md`: grep every changed name and run those tests (S-2009, S-1798, S-1821, S-2000); build-aside for swapped directories (S-1782, S-1783); push nothing after approval unless asked (S-1804); the task wins over the brief (S-840).
+- `templates/ring-turn.md`: residual-race severity rule (S-1935, S-1882); Codex members name checks their sandbox blocked, networked members run them (S-1923, S-1912).
+- `docs/pull-requests.md`: moving a doc into `docs/` ships it (S-1901, S-1908). `docs/testing.md`: synthetic rows and events mirror production (S-789, S-1904).
+
+Net words: reviewer +223 (new block), reviewer-opus +223, manager +85, developer +144 (new block), ring-turn +70, pull-requests +50, testing +60, instruction-sources +23 rows; plus derived fixtures, manifest and export override ports. Tests pass: blocks, template-blocks, blocks-compose, process-briefs, export-overrides, refresh-derived, doc-citations, ring-verdict-line, type-memory. Refused before: none on these topics.
+
+The full diff is in the next comment.

@@ -5,7 +5,7 @@ import { basename, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { MACHINE, STAM_HOME } from './config.ts';
 import { settings } from './settings.ts';
-import { depsCachePath, depsKey, ensureCacheReadOnly, fillDeps, linkDepsFrom, linkDepsFromAsync, retireDamagedCache, touchDepsUsed, warmDeps } from './deploy.ts';
+import { depsCachePath, depsKey, ensureCacheReadOnly, fillDeps, linkDepsOutcome, linkDepsOutcomeAsync, type LinkOutcome, retireDamagedCache, touchDepsUsed, warmDeps } from './deploy.ts';
 import type { AgentType } from './agent-types.ts';
 
 // What linking a worktree's dependencies did (S-1044), for the spawn to log as an agent event.
@@ -61,9 +61,13 @@ function linkDeps(worktree: string, rel: string): DepsEvent | undefined {
   retireDamagedCache(cache);
   if (existsSync(join(cache, '.ready'))) {
     ensureCacheReadOnly(cache);
-    if (!linkDepsFrom(cache, target)) return { dir: rel || '.', key, event: 'deps:failed' };
-    touchDepsUsed(key);
-    return { dir: rel || '.', key, event: 'deps:linked' };
+    const outcome = linkDepsOutcome(cache, target);
+    // gone: a prune removed the entry since the check, so it is a miss and the fill below runs.
+    if (outcome !== 'gone') {
+      if (outcome !== 'linked') return { dir: rel || '.', key, event: 'deps:failed' };
+      touchDepsUsed(key);
+      return { dir: rel || '.', key, event: 'deps:linked' };
+    }
   }
   const promise = warmDeps(dir, true, target)
     .then((r) => r ?? { key, linked: false })
@@ -490,21 +494,28 @@ async function relinkFolder(worktree: string, s: DepsStatus): Promise<RelinkResu
   const dir = rel ? join(worktree, rel) : worktree;
   const nm = join(dir, 'node_modules');
   let key: string | undefined;
-  try {
-    key = await fillDeps(dir, true);
-  } catch (e) {
-    console.log(`deps: relink fill failed for ${dir}: ${e instanceof Error ? e.message : e}`);
-  }
-  if (!key) return { dir: s.dir, event: 'deps:failed' };
   const stamp = `${new Date().toISOString().replace(/\D/g, '').slice(0, 14)}-${process.pid}-${randomBytes(3).toString('hex')}`;
   const fresh = `${nm}.new-${stamp}`;
-  // The cache is filled, so this is a hit: link it like linkDeps does, with an async cp.
-  const cache = depsCachePath(key);
+  // The cache is filled, so this is a hit: link it like linkDeps does, with an async cp. A prune can remove an unused
+  // entry between the fill and the link ('gone'): fill it again.
   let linked = false;
-  try {
-    ensureCacheReadOnly(cache);
-    linked = await linkDepsFromAsync(cache, fresh);
-  } catch {}
+  for (let attempt = 0; attempt < 3 && !linked; attempt++) {
+    key = undefined;
+    try {
+      key = await fillDeps(dir, true);
+    } catch (e) {
+      console.log(`deps: relink fill failed for ${dir}: ${e instanceof Error ? e.message : e}`);
+    }
+    if (!key) return { dir: s.dir, event: 'deps:failed' };
+    const cache = depsCachePath(key);
+    let outcome: LinkOutcome = 'failed';
+    try {
+      ensureCacheReadOnly(cache);
+      outcome = await linkDepsOutcomeAsync(cache, fresh);
+    } catch {}
+    linked = outcome === 'linked';
+    if (outcome !== 'gone') break;
+  }
   if (!linked) {
     rmSync(fresh, { recursive: true, force: true });
     return { dir: s.dir, event: 'deps:failed', key };
@@ -543,7 +554,7 @@ async function relinkFolder(worktree: string, s: DepsStatus): Promise<RelinkResu
     console.log(`deps: relink swap failed for ${nm}: ${e instanceof Error ? e.message : e}`);
     return { dir: s.dir, event: 'deps:failed', key, aside: was === 'dir' && !existsSync(nm) ? aside : undefined };
   }
-  touchDepsUsed(key);
+  touchDepsUsed(key!);
   return { dir: s.dir, event: 'deps:linked', key, aside: was === 'dir' ? aside : undefined };
 }
 

@@ -115,6 +115,127 @@ describe('right-click a table cell', () => {
   })
 })
 
+describe('keyboard path to the cell menu (S-1683)', () => {
+  beforeEach(() => setup(1700))
+  const row = (id: string) => q<HTMLElement>(`.w-row[data-itsa=${id}]`)!
+  const press = async (el: Element, key: string, init: KeyboardEventInit = {}) => {
+    const e = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init })
+    await act(async () => { el.dispatchEvent(e) }); await flush()
+    return e
+  }
+  const colItems = () => [...document.querySelectorAll('.menu [role=menuitem]')].map((b) => [b.querySelector('.ml')?.textContent, b.getAttribute('aria-haspopup')])
+
+  it('the ContextMenu key lists the row\'s columns, and choosing Status opens its cell actions', async () => {
+    row('i2').focus()
+    const e = await press(row('i2'), 'ContextMenu')
+    expect(e.defaultPrevented).toBe(true)
+    expect(colItems().map(([l]) => l)).toContain('Status')
+    expect(colItems().every(([, p]) => p === 'menu')).toBe(true)
+    await choose('Status')
+    expect(menuLabels()).toEqual(['Filter to this value', 'Exclude this value', 'Sort by this column, ascending', 'Sort by this column, descending'])
+    await choose('Filter to this value')
+    expect(rows()).toEqual(['S-2'])
+    expect(opened).not.toHaveBeenCalled()
+  })
+
+  it('Shift+F10 opens it too, F10 alone does not, and the row announces a popup', async () => {
+    expect(row('i1').getAttribute('aria-haspopup')).toBe('menu')
+    const plain = await press(row('i1'), 'F10')
+    expect(plain.defaultPrevented).toBe(false)
+    expect(q('.menu')).toBeNull()
+    await press(row('i1'), 'F10', { shiftKey: true })
+    expect(q('.menu')).toBeTruthy()
+  })
+
+  it('Arrow keys move through the columns and Escape returns focus to the row, from either menu', async () => {
+    row('i3').focus()
+    await press(row('i3'), 'ContextMenu')
+    const first = document.activeElement as HTMLElement
+    expect(first.closest('.menu')).toBeTruthy()
+    await press(first, 'ArrowDown')
+    expect(document.activeElement).not.toBe(first)
+    await press(document.activeElement!, 'Escape')
+    expect(q('.menu')).toBeNull()
+    expect(document.activeElement).toBe(row('i3'))
+    await press(row('i3'), 'ContextMenu')
+    await choose('Status')
+    await press(document.activeElement!, 'Escape')
+    expect(q('.menu')).toBeNull()
+    expect(document.activeElement).toBe(row('i3'))
+  })
+
+  it('the contextmenu event the key also fires is cancelled, and leaves the row menu open', async () => {
+    row('i2').focus()
+    await press(row('i2'), 'ContextMenu')
+    const ctx = new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+    await act(async () => { row('i2').dispatchEvent(ctx) }); await flush()
+    expect(ctx.defaultPrevented).toBe(true)
+    expect(colItems().map(([l]) => l)).toContain('Status')
+    expect(document.querySelectorAll('.menu').length).toBe(1)
+  })
+
+  it('a mouse right-click on the row itself is left to the pane menu', async () => {
+    const ctx = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 })
+    await act(async () => { row('i2').dispatchEvent(ctx) }); await flush()
+    expect(ctx.defaultPrevented).toBe(false)
+    expect(q('.menu')).toBeNull()
+  })
+
+  it('after a choice, focus returns to the row', async () => {
+    row('i2').focus()
+    await press(row('i2'), 'ContextMenu')
+    await choose('Status')
+    await choose('Sort by this column, descending')
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+    expect(q('.menu')).toBeNull()
+    expect(document.activeElement).toBe(row('i2'))
+  })
+
+  it('a contextmenu on the focused menu button (Windows fires it on keyup) is cancelled, so the native menu stays shut', async () => {
+    row('i2').focus()
+    await press(row('i2'), 'ContextMenu')
+    const before = colItems()
+    const ctx = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 0 })
+    await act(async () => { document.activeElement!.dispatchEvent(ctx) }); await flush()
+    expect(ctx.defaultPrevented).toBe(true)
+    expect(document.querySelectorAll('.menu').length).toBe(1)
+    expect(colItems()).toEqual(before)
+  })
+
+  it('a pointer-less contextmenu (button -1) on the row opens the menu with no flag, a Ctrl+click (button 0) does not', async () => {
+    const ctrl = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 0 })
+    await act(async () => { row('i2').dispatchEvent(ctrl) }); await flush()
+    expect(ctrl.defaultPrevented).toBe(false)
+    expect(q('.menu')).toBeNull()
+    const key = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: -1 })
+    await act(async () => { row('i2').dispatchEvent(key) }); await flush()
+    expect(key.defaultPrevented).toBe(true)
+    expect(colItems().map(([l]) => l)).toContain('Status')
+  })
+
+  it('the flag ends on the next keyup, and an unmount clears its timer', async () => {
+    const spy = vi.spyOn(window, 'clearTimeout')
+    await press(row('i2'), 'ContextMenu')
+    const { hideMenu } = await import('../ui/menu')
+    await act(async () => { hideMenu() }); await flush()
+    const up = new KeyboardEvent('keyup', { key: 'ContextMenu', bubbles: true })
+    await act(async () => { row('i2').dispatchEvent(up) }); await flush()
+    const late = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 0 })
+    await act(async () => { row('i2').dispatchEvent(late) }); await flush()
+    expect(late.defaultPrevented).toBe(false)
+    const n = spy.mock.calls.length
+    await act(async () => root.render(<></>))
+    expect(spy.mock.calls.length).toBeGreaterThan(n)
+    spy.mockRestore()
+  })
+
+  it('a key inside the row (the fold chevron) does not open the menu', async () => {
+    const inner = row('i1').querySelector('.w-cell')!
+    await press(inner, 'ContextMenu')
+    expect(q('.menu')).toBeNull()
+  })
+})
+
 describe('long-press a card value on the phone', () => {
   beforeEach(() => setup(400))
   // jsdom has no PointerEvent: a mouse event under the pointer names carries what the page reads.

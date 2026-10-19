@@ -1,1 +1,1 @@
-I authorize {{id}}: Kim approved it ({{action}}). Go ahead with that action now; don't request it again.{{note}}
+I authorize {{id}}: the user approved it ({{action}}). Go ahead with that action now; don't request it again.{{note}}

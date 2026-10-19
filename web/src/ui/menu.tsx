@@ -8,6 +8,8 @@ export type MenuItem =
   | 'sep'
   | { section: string }
   | { label: string; icon?: string; glyph?: ReactNode; hint?: string; title?: string; danger?: boolean; disabled?: boolean; action?: (r: DOMRect) => void
+      // The entry opens another menu: announced as such.
+      popup?: boolean
       // An option among others: true marks the current one, false the rest.
       checked?: boolean
       // A multi-select option (Columns): its ticked state is a checkbox, not a radio.
@@ -23,9 +25,10 @@ const ls = new Set<() => void>()
 const bump = () => { v++; for (const fn of ls) fn() }
 const useUi = () => useSyncExternalStore((fn) => { ls.add(fn); return () => { ls.delete(fn) } }, () => v)
 
-export function showMenu(x: number, y: number, items: MenuItem[], trigger?: Element | null) {
+// `restore` is where focus goes back to on Escape when it isn't the trigger or the focused element.
+export function showMenu(x: number, y: number, items: MenuItem[], trigger?: Element | null, restore?: Element | null) {
   if (menu && trigger && menu.trigger === trigger) return hideMenu()
-  menu = { x, y, items, trigger: trigger ?? null, restore: trigger ?? document.activeElement }
+  menu = { x, y, items, trigger: trigger ?? null, restore: restore ?? trigger ?? document.activeElement }
   bump()
 }
 export function showPopover(x: number, y: number, label: string, body: ReactNode, trigger?: Element | null, above = false) {
@@ -100,14 +103,16 @@ function Menu({ m }: { m: MenuState }) {
     // Esc closes the menu alone: an overlay under it (the Alt+A prompt) stays open.
     if (e.key === 'Escape') { e.stopPropagation(); hideMenu(true) }
   }
-  if (m.body) return <div className="menu popover" role="dialog" aria-label={m.label} tabIndex={-1} ref={ref} onKeyDown={key} style={{ left: m.x, top: m.y }}>{m.body}</div>
+  // The browser's own menu never opens over ours, except in a text field, where it holds paste and spelling (S-2073).
+  const context = (e: React.MouseEvent) => { if (!(e.target as Element).closest('input, textarea')) e.preventDefault() }
+  if (m.body) return <div className="menu popover" role="dialog" aria-label={m.label} tabIndex={-1} ref={ref} onKeyDown={key} onContextMenu={context} style={{ left: m.x, top: m.y }}>{m.body}</div>
   return (
-    <div className="menu" role="menu" ref={ref} onKeyDown={key} style={{ left: m.x, top: m.y }}>
+    <div className="menu" role="menu" ref={ref} onKeyDown={key} onContextMenu={context} style={{ left: m.x, top: m.y }}>
       {m.items.map((it, n) => {
         if (it === 'sep') return <hr key={n} />
         if ('section' in it) return [n > 0 ? <hr key={n + 'h'} /> : null, <div key={n} className="label eyebrow">{it.section}</div>]
         return (
-          <button key={n} role={it.checked === undefined ? 'menuitem' : it.checkbox ? 'menuitemcheckbox' : 'menuitemradio'} aria-checked={it.checked} className={it.danger ? 'danger' : ''} disabled={!!it.disabled} title={it.title}
+          <button key={n} role={it.checked === undefined ? 'menuitem' : it.checkbox ? 'menuitemcheckbox' : 'menuitemradio'} aria-checked={it.checked} aria-haspopup={it.popup ? 'menu' : undefined} className={it.danger ? 'danger' : ''} disabled={!!it.disabled} title={it.title}
             onClick={() => { const r = ref.current!.getBoundingClientRect(); hideMenu(); it.action?.(r) }}>
             {it.glyph ?? (it.icon || it.checked === undefined ? <Icon name={it.icon ?? 'chevron-right'} /> : null)}<span className="ml">{it.label}</span>{it.hint ? <span className="kbd">{it.hint}</span> : null}
             {it.checked === undefined ? null : <span className={'tick' + (it.checked ? '' : ' off')}><Icon name="check" /></span>}

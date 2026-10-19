@@ -926,6 +926,9 @@ export interface PostInput {
   health?: string | null;
   // Recipients on top of the participants (ids or names).
   to?: string[];
+  // The human's reply to decisions names only their askers: with it, the participants aren't added (S-2064). Honoured
+  // from the human alone; `to` still adds whom the human names.
+  only?: string[];
   // Those of `to` the sender didn't name (a reply's fan-out to the thread's people, mail.ts): each
   // is skipped like a gone participant rather than refused (S-603).
   inferred?: string[];
@@ -1005,7 +1008,8 @@ export async function post(ref: string, input: PostInput, opts: { ask?: boolean 
   const quiet = !asStam && !opts.ask && !sys && by !== HUMAN && Boolean(await humanMailBlock(by));
   // A participant that is gone (archived, forgotten, or unknown to every peer) is skipped: the post still lands for the rest (S-281).
   const live = [];
-  for (const p of participants(x.id)) if (await deliverable(p)) live.push(p);
+  const only = by === HUMAN ? input.only : undefined;
+  for (const p of only ? [] : participants(x.id)) if (await deliverable(p)) live.push(p);
   // So is a recipient the sender didn't name, such as the web UI's reply to the thread's senders (S-603).
   for (const r of guessed) {
     const p = (input.to ?? []).includes(r) ? await inferredPerson(r) : null;

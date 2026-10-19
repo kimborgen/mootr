@@ -407,3 +407,53 @@ describe('go to declaration', () => {
     }
   })
 })
+
+describe('the review verdict chip (S-1917)', () => {
+  const review = (extra: object = {}) => ({ verdict: 'approve', by: 'rev-1', summary: 'Looks <b>good</b>', at: '2026-10-19T10:00:00Z', head: HEAD, stale: false, ...extra })
+  const withReview = (r: unknown) => {
+    const base = route
+    route = (u) => (u.startsWith('/api/diff?') ? json(200, { repo: 'stam2', pr: 7, head: HEAD, base: BASE, mergeBase: BASE, files: FILES, ...(r === undefined ? {} : { review: r }) }) : base(u))
+  }
+  const chip = (host: Element) => host.querySelector<HTMLElement>('.dv-review')!
+
+  it('approve on the shown head: success look, reviewer, summary as text in the title', async () => {
+    withReview(review())
+    const c = chip(await mount())
+    expect(c.dataset.tone).toBe('ok')
+    expect(c.textContent).toContain('approved')
+    expect(c.textContent).toContain('rev-1')
+    expect(c.title).toContain('Looks <b>good</b>')
+  })
+  it('changes requested: the error look', async () => {
+    withReview(review({ verdict: 'changes' }))
+    const c = chip(await mount())
+    expect(c.dataset.tone).toBe('bad')
+    expect(c.textContent).toContain('changes requested')
+  })
+  it('a verdict on an another head is muted and says so, never the success look', async () => {
+    withReview(review({ stale: true, head: 'c3'.repeat(20) }))
+    const c = chip(await mount())
+    expect(c.dataset.tone).toBe('none')
+    expect(c.textContent).toContain('another head')
+    expect(c.title).toContain('another head')
+  })
+  it('no review, or a list without the field: a muted "no review"', async () => {
+    withReview(null)
+    expect(chip(await mount()).textContent).toContain('no review')
+    act(() => root?.unmount())
+    withReview(undefined)
+    const c = chip(await mount())
+    expect(c.dataset.tone).toBe('none')
+    expect(c.textContent).toContain('no review')
+  })
+  it('a tap opens the summary as text, and Close shuts it', async () => {
+    withReview(review())
+    const host = await mount()
+    click(chip(host))
+    const pop = host.querySelector('.dv-review-pop')!
+    expect(pop.textContent).toContain('Looks <b>good</b>')
+    expect(pop.querySelector('b')).toBeNull()
+    click(byText(pop, 'button', 'Close'))
+    expect(host.querySelector('.dv-review-pop')).toBeNull()
+  })
+})

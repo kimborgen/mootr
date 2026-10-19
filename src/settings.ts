@@ -198,6 +198,10 @@ export const DEFAULTS = {
   // The most developer-type agents active on this machine at once (S-2008); a spawn over it is
   // refused with the holders named. 0 turns the cap off. Reviewers and other types are never capped.
   developerCap: 6,
+  // The permission mode new agents start in (S-1967): one per harness, and an override per agent
+  // type ('inherit' follows its harness). A running agent whose mode came from here is listed when
+  // these change, and switched on the human's apply. See permission-modes.ts.
+  permissionModes: { harness: { claude: 'auto', codex: 'auto', opencode: 'auto' }, types: {} } as { harness: Record<string, 'default' | 'auto' | 'bypass'>; types: Record<string, 'default' | 'auto' | 'bypass' | 'inherit'> },
   // Which view the human's web UI opens an agent in (S-82): stam's own view of its
   // conversation where its harness has one (the default), or its terminal, which is also
   // what an agent with no view opens in. An agent's own choice wins.
@@ -228,13 +232,14 @@ export const DEFAULTS = {
   search: { embedder: 'local', turnDays: 7 } as { embedder: 'local' | 'off'; turnDays: number },
   // Resource warnings (src/machines.ts): mail the recipients when this machine's load per core,
   // free RAM, or swap use crosses its line, then again each repeatMinutes while it stays across.
-  // The root disk mails once per crossing of 85%, re-armed below 80% (S-736).
+  // The root disk mails once per crossing of diskPct (85%), re-armed 5 points below it (S-736, S-1965).
   // Recipients are agent names or "human"; none means the chief of staff.
   resourceWarn: {
     enabled: true,
     loadPerCore: 2.0,
     ramAvailableGb: 2,
     swapPct: 80,
+    diskPct: 85,
     repeatMinutes: 30,
     recipients: [] as string[],
     // When each kind last mailed (epoch ms, null: never), so a restart doesn't mail it again at once.
@@ -488,6 +493,7 @@ function resourceWarnOf(u: any): Settings['resourceWarn'] {
     loadPerCore: num(u?.loadPerCore, d.loadPerCore),
     ramAvailableGb: num(u?.ramAvailableGb, d.ramAvailableGb),
     swapPct: num(u?.swapPct, d.swapPct),
+    diskPct: num(u?.diskPct, d.diskPct),
     repeatMinutes: num(u?.repeatMinutes, d.repeatMinutes),
     recipients: Array.isArray(u?.recipients) ? u.recipients.filter((r: unknown) => typeof r === 'string' && r) : [],
     lastWarned: { cpu: time(u?.lastWarned?.cpu), ram: time(u?.lastWarned?.ram), swap: time(u?.lastWarned?.swap), disk: time(u?.lastWarned?.disk) },
@@ -936,6 +942,17 @@ const deepFreeze = <T>(v: T): T => {
   return v;
 };
 
+// Only known modes survive: a harness keeps its default for a missing or unknown one, and a type
+// with an unknown one inherits.
+const PERMISSION_MODES = ['default', 'auto', 'bypass'];
+function permissionModesOf(v: any): Settings['permissionModes'] {
+  const harness = { ...DEFAULTS.permissionModes.harness };
+  for (const [k, m] of Object.entries(v?.harness ?? {})) if (PERMISSION_MODES.includes(m as string)) harness[k] = m as 'default' | 'auto' | 'bypass';
+  const types: Settings['permissionModes']['types'] = {};
+  for (const [k, m] of Object.entries(v?.types ?? {})) if (PERMISSION_MODES.includes(m as string)) types[k] = m as 'default' | 'auto' | 'bypass';
+  return { harness, types };
+}
+
 export function settings(): Settings {
   const key = fileKey();
   // A cached read still retries a config notice that is waiting for a sender (accounts.ts).
@@ -1056,6 +1073,7 @@ function readSettings(): { value: Settings; cacheable: boolean } {
     assistant: { ...DEFAULTS.assistant, ...user.assistant },
     assistantDefault: typeof user.assistantDefault === 'string' && user.assistantDefault.trim() ? user.assistantDefault.trim() : DEFAULTS.assistantDefault,
     childNotices: ['turn', 'tree-idle', 'none'].includes(user.childNotices) ? user.childNotices : DEFAULTS.childNotices,
+    permissionModes: permissionModesOf(user.permissionModes),
     agentView: { default: user.agentView?.default === 'terminal' ? 'terminal' : 'conversation' },
     promptDefaultMode: user.promptDefaultMode === 'direct' ? 'direct' : 'mail',
     developerCap: Number.isInteger(user.developerCap) && user.developerCap >= 0 ? user.developerCap : DEFAULTS.developerCap,

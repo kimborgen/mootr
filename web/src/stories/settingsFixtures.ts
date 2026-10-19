@@ -25,7 +25,7 @@ export const SETTINGS = {
     accounts: { 'fixture-claude': {}, 'fixture-codex': {} },
   },
   peers: [{ name: 'fixture-peer', url: 'https://fixture-peer.example.com', token: 'fixture-token' }],
-  resourceWarn: { enabled: true, loadPerCore: 1.5, ramAvailableGb: 2, swapPct: 50, repeatMinutes: 30, recipients: [] },
+  resourceWarn: { enabled: true, loadPerCore: 1.5, ramAvailableGb: 2, swapPct: 50, diskPct: 85, repeatMinutes: 30, recipients: [] },
   requirements: { enabled: false },
   mcpServers: {
     'fixture-docs': { url: 'https://mcp.example.com/mcp', auth: { type: 'oauth' } },

@@ -28,7 +28,7 @@ import { Glance, type GlanceFilter } from './Glance'
 import { totalCell, totalLine, workTotals } from './totals'
 import { foldRows, GROUPS, groupable, groupFor, pruneFolded, STANDALONE, UNOWNED, type Group, type WorkGroup, type WorkRow } from './model'
 import { HeaderMenuBody, optionsFor, publishHeader, type HeaderLive } from './header-menu'
-import { showCellMenu } from './cell-menu'
+import { isMenuKey, showCellMenu, showRowMenu } from './cell-menu'
 import { filterText } from './filter-editors'
 import { ColumnsPanel } from './columns-menu'
 import { clearFilters, defaultLayout, deleteView, fullOrder, isDirty, LOCKED, loadStore, loadWork, moveBy, moveTo, revertView, saveAs, saveStore, saveView, saveWidthsOf, setFilter, setGroup, setQuick, setShown, setSort, setWidth, useView, type ViewStore } from './views'
@@ -148,6 +148,9 @@ export function WorkView({ viewKey }: { viewKey: string }) {
   const [text, setText] = useState('')
   const [now, setNow] = useState(Date.now())
   const root = useRef<HTMLDivElement>(null)
+  // Set while a menu key press is being handled (S-1683): the contextmenu event that key may also fire answers to it.
+  const keyMenu = useRef(0)
+  useEffect(() => () => clearTimeout(keyMenu.current), [])
   const headRef = useRef<HTMLDivElement>(null)
   const extras = useWorkExtras()
   // The columns: the built-ins, then one per ITSA field (S-369), the ids the layout is checked against.
@@ -391,7 +394,27 @@ export function WorkView({ viewKey }: { viewKey: string }) {
   useLayoutEffect(() => { publishHeader(headerLive) })
   // A right-click on a cell opens its filter menu (S-1518). A column with nothing to offer keeps the browser's own menu.
   const cellMenu: CellMenu = (e, c, row) => showCellMenu(e.clientX, e.clientY, headerLive, c.id, row)
-  const open = (e: React.KeyboardEvent, id: string) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openItsa(id) } }
+  const open = (e: React.KeyboardEvent, row: WorkRow) => {
+    if (e.target !== e.currentTarget) return
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openItsa(row.it.id) }
+    // The context-menu key or Shift+F10 on a row: the cell menus by keyboard (S-1683).
+    else if (isMenuKey(e) && rowMenu(e.currentTarget, row)) {
+      e.preventDefault()
+      clearTimeout(keyMenu.current)
+      keyMenu.current = window.setTimeout(() => { keyMenu.current = 0 }, 1000)
+    }
+  }
+  // Under the row's first line. The key also fires a contextmenu event on the row (Chromium on Windows, on keyup),
+  // which would otherwise reach the pane menu: the row answers it with this same menu. A mouse right-click on the row keeps the pane menu.
+  const rowMenu = (el: Element, row: WorkRow) => {
+    const r = el.getBoundingClientRect()
+    return showRowMenu(r.left + 24, r.top + Math.min(r.height, 40), headerLive, cols.map((c) => c.id), row, el)
+  }
+  const rowContext = (e: React.MouseEvent<HTMLElement>, row: WorkRow) => {
+    // A key's event is told by the flag; without it, only a pointer-less one (button -1) counts, so a mouse right-click (2) or a Ctrl+click (0) keeps the pane menu.
+    if (e.target === e.currentTarget && (keyMenu.current || e.button === -1) && rowMenu(e.currentTarget, row)) e.preventDefault()
+  }
+  const rowKeyUp = () => { clearTimeout(keyMenu.current); keyMenu.current = 0 }
   // Fold or unfold these rows (S-1437): only folded ones are kept in the map.
   const setRowFolds = (ids: string[], fold: boolean) => {
     const next = { ...prefs.folded }
@@ -411,7 +434,7 @@ export function WorkView({ viewKey }: { viewKey: string }) {
           toggle: () => setRowFolds([r.it.id], expanded) } : undefined
         return (
           <div key={r.it.id} role="row" tabIndex={0} className={'w-row' + (r.context ? ' context' : '') + (isClosed(r.it) ? ' closed' : '') + (attention.has(r.it.id) ? ' attention' : '')} data-itsa={r.it.id}
-            aria-label={`${r.it.key} ${r.it.title}`} onClick={() => openItsa(r.it.id)} onKeyDown={(e) => open(e, r.it.id)}>
+            aria-label={`${r.it.key} ${r.it.title}`} aria-haspopup="menu" onClick={() => openItsa(r.it.id)} onKeyDown={(e) => open(e, r)} onKeyUp={rowKeyUp} onContextMenu={(e) => rowContext(e, r)}>
             <Cells row={r} cols={cols} cx={cx} onMenu={cellMenu} fold={fold} />
           </div>)
       }))

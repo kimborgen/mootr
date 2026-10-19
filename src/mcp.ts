@@ -503,7 +503,7 @@ export const tools: Tool[] = [
     name: 'spawn_agent',
     group: 'agents',
     description:
-      'Start a new agent as your child: it is registered under you, you get its status and blockers, and you can control it with agent_control. Any model name works, even one stam does not know yet. The executive assistant can also start it under any parent or none, or as chief of staff.',
+      'Start a new agent as your child: it is registered under you, you get its status and blockers, and you can control it with agent_control. Any model name works, even one stam does not know yet. The executive assistant can also start it under any parent or none, or as chief of staff. A developer spawn when the machine already runs developerCap developers (settings, default 6) is not refused but queued: you get "queued, place N" with the holders, the agent starts by itself when a slot frees (first come first served), and you get a notice when it does or fails. Keep working meanwhile; do not spawn it again. Reviewers and other types are never queued.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -531,6 +531,7 @@ export const tools: Tool[] = [
           properties: { reach: { type: 'string', enum: ['all', 'tree', 'parent'] }, siblings: { type: 'boolean' }, registry: { type: 'boolean' } },
         },
         child_notices: { type: 'string', enum: ['turn', 'tree-idle', 'none'], description: "How much this child hears about its own children's finished turns: 'tree-idle' (default), 'turn', or 'none'. Blocked and errored agents always reach their parents." },
+        urgent: { type: 'string', enum: ['red-main', 'deploy-hold', 'approved-pr'], description: 'Only for a developer spawn that has to queue because the slots are full: the reason it should go ahead of normal spawns (first come first served within each class). red-main: a fix for a red main; deploy-hold: a fix that clears a deploy hold; approved-pr: a fix on an approved PR. Not for anything else.' },
         itsa: { type: 'string', description: 'An ITSA id or key: the new agent becomes its owner (a reviewer type joins as a participant instead, and the owner stays), and its first prompt carries the ITSA (key, title, summary, body, parent chain, links). With no prompt, that block is the prompt.' },
         parent: { type: 'string', description: 'Executive assistant only: the parent agent, or "none" for a top-level agent. Defaults to you.' },
         chief_of_staff: { type: 'boolean', description: 'Executive assistant only: make it the chief of staff.' },
@@ -546,6 +547,11 @@ export const tools: Tool[] = [
       if (r.kind === 'ring') {
         const names = (r.members as { name: string; type: string | null }[]).map((m) => `${m.name} (${m.type ?? 'no type'})`).join(', ');
         return text(`Started ring ${r.ring.name} (${r.ring.id}, ${r.ring.format}, up to ${r.ring.max_rounds} rounds). Members: ${names}.${r.moderator ? ` Moderator: ${r.moderator.name} (${r.moderator.type ?? 'no type'}).` : ''} You'll get its result by mail.`);
+      }
+      if (r.queued) {
+        return text(
+          `Queued ${r.name}: place ${r.place} of ${r.queue_length}${r.urgent ? ` (urgent: ${r.urgent})` : ''} for a developer slot on ${r.machine}, all ${r.cap} in use. Holders: ${r.holders.join(', ')}. It starts by itself when a slot frees, and you get a notice then (or if it fails to start). Do not spawn it again.`,
+        );
       }
       return text(`Spawned ${r.name} (${r.id}) in ${r.cwd}.${r.warning ? `\nWarning: ${r.warning}` : ''}`);
     },

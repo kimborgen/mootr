@@ -53,6 +53,29 @@ describe('Home and End in a menu', () => {
   })
 })
 
+// S-2073: a right-click in a menu is cancelled, but a text field in it keeps the browser's paste and spelling menu.
+describe('contextmenu in a menu', () => {
+  const context = (el: Element) => {
+    const e = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 })
+    act(() => { el.dispatchEvent(e) })
+    return e.defaultPrevented
+  }
+  it('is cancelled on an item and on a popover, and left alone in a text field', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    act(() => { root.render(<MenuLayer />) })
+    act(() => { showMenu(0, 0, [{ label: 'Item' }]) })
+    expect(context(document.querySelector('.menu button')!)).toBe(true)
+    act(() => { hideMenu() })
+    act(() => { showPopover(0, 0, 'Save view', <><input aria-label="Name" /><textarea aria-label="Note" /><button>Save</button></>) })
+    expect(context(document.querySelector('.menu input')!)).toBe(false)
+    expect(context(document.querySelector('.menu textarea')!)).toBe(false)
+    expect(context(document.querySelector('.menu.popover button')!)).toBe(true)
+    act(() => { root.unmount() })
+  })
+})
+
 // S-286: on a phone a menu is a sheet over a scrim that is only a shadow, so the tap that
 // closes it lands on what lies under the scrim. It must only close, not press that too.
 describe('closing a menu by a tap outside', () => {

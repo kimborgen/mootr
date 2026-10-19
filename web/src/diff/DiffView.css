@@ -4,6 +4,13 @@
 .dv-title { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1) var(--space-3); min-width: 0; }
 .dv-shas { font-size: var(--type-chrome-sm); }
 .dv-count { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.dv-review { display: inline-flex; align-items: center; gap: var(--space-1); flex: 1 1 0; min-width: 7.5rem; max-width: max-content; min-height: var(--size-control); padding: 0 var(--space-2); font: inherit; font-size: var(--type-chrome-sm); color: var(--text-muted); background: transparent; border: 1px solid var(--border-default); border-radius: var(--radius-sm); cursor: pointer; }
+.dv-review[data-tone='ok'] { color: var(--status-success-fg); border-color: var(--status-success-fg); }
+.dv-review[data-tone='bad'] { color: var(--status-error-fg); border-color: var(--status-error-fg); }
+.dv-review-label { flex: none; white-space: nowrap; }
+.dv-review-by { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.dv-review-pop { position: absolute; left: 0; right: 0; bottom: 0; max-height: 70%; background: var(--surface-raised); border-top: 1px solid var(--border-default); box-shadow: var(--shadow-float); z-index: var(--z-modal); }
+.dv-review-text { margin: 0; padding: var(--space-3); overflow-wrap: anywhere; }
 .dv-controls { display: flex; align-items: center; gap: var(--space-2); overflow-x: auto; min-width: 0; }
 .dv-spacer { flex: 1; }
 
@@ -70,6 +77,7 @@
 .dv-sheet .dv-list { overflow-y: auto; }
 
 @media (pointer: coarse), (max-width: 480px) {
+  .dv-review { min-height: var(--size-hit-touch); }
   .dv-btn, .dv-touch { min-height: var(--size-hit-touch); min-width: var(--size-hit-touch); }
   .dv-li { min-height: var(--size-hit-touch); }
   .dv-viewed { min-height: var(--size-hit-touch); min-width: var(--size-hit-touch); }

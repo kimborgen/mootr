@@ -9,7 +9,7 @@ import type { DeclHit, DeclSide } from '../decl/declExt'
 import { fetchDiffList, fetchSide } from './diffApi'
 import { parseDiffKey } from './diffKey'
 import {
-  chips, currentFile, isShown, readViewed, shownFiles, splitPath, startFilter, stepChange, stepFile, toggleClass, toggleFile, viewedKey, withViewed, writeViewed,
+  chips, currentFile, reviewChip, isShown, readViewed, shownFiles, splitPath, startFilter, stepChange, stepFile, toggleClass, toggleFile, viewedKey, withViewed, writeViewed,
   type DiffFileItem, type DiffList, type Filter,
 } from './diffModel'
 import { FileDiff } from './FileDiff'
@@ -57,6 +57,7 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
   const [pref, setPref] = useState<DiffMode>(readMode)
   const [width, setWidth] = useState(() => (typeof window === 'undefined' ? 0 : window.innerWidth))
   const [sheet, setSheet] = useState(false)
+  const [reviewOpen, setReviewOpen] = useState(false)
   const [active, setActive] = useState(0)
   const root = useRef<HTMLDivElement>(null)
   const main = useRef<HTMLDivElement>(null)
@@ -66,6 +67,7 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
     if (!ref) return
     const ctl = new AbortController()
     setSt({ s: 'loading' })
+    setReviewOpen(false)
     setFlt(startFilter())
     fetchDiffList(ref.repo, ref.pr, ctl.signal).then(
       (list) => setSt({ s: 'ok', list }),
@@ -255,6 +257,13 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
     return () => window.removeEventListener('keydown', on)
   }, [sheet])
 
+  useEffect(() => {
+    if (!reviewOpen) return
+    const on = (e: KeyboardEvent) => { if (e.key === 'Escape') setReviewOpen(false) }
+    window.addEventListener('keydown', on)
+    return () => window.removeEventListener('keydown', on)
+  }, [reviewOpen])
+
   if (!ref) return <div className="dv"><div className="dv-note">Not a diff link.</div></div>
 
   const total = files.length
@@ -285,6 +294,14 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
           <span className="dv-repo muted">{ref.repo}</span>
           {list && <span className="dv-shas mono muted">head {short(list.head)} · base {short(list.base)}</span>}
           {list && <span className="dv-count" aria-live="polite">{shown.length} of {total} files</span>}
+          {list && (() => {
+            const c = reviewChip(list.review)
+            return (
+              <button type="button" className="dv-review" data-tone={c.tone} aria-expanded={reviewOpen} title={c.detail} onClick={() => setReviewOpen((o) => !o)}>
+                <span className="dv-review-label">{c.label}</span>{c.by && <span className="dv-review-by">{c.by}</span>}
+              </button>
+            )
+          })()}
           {list && !wide && <button type="button" className="dv-btn dv-files-btn" aria-expanded={sheet} onClick={() => setSheet((s) => !s)}>Files ({total}) ▾</button>}
         </div>
         {list && (
@@ -338,6 +355,15 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
           onPick={(m) => land(m, decl.side, decl)}
           onOpen={decl.root ? (m) => { const r = decl.root!; closeDecl(); openFile(r.host, `${r.path}/${m.path}`, m.line) } : undefined}
         />
+      )}
+      {reviewOpen && list && (
+        <>
+          <div className="dv-scrim" onClick={() => setReviewOpen(false)} />
+          <div className="dv-review-pop" role="dialog" aria-label="Review verdict">
+            <div className="dv-sheet-head"><strong>Review</strong><button type="button" className="dv-btn dv-touch" onClick={() => setReviewOpen(false)}>Close</button></div>
+            <p className="dv-review-text">{reviewChip(list.review).detail}</p>
+          </div>
+        </>
       )}
       {sheet && !wide && (
         <>

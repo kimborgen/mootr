@@ -6,6 +6,9 @@
 # reconnect, and shutdown (no app-server left behind) and resume.
 # Runs against its own daemon (test/lib.sh). Costs a few cents.
 set -e
+# The permission-mode switch takes only trustedHuman's proof (S-1967): the test key stands in for it.
+STAM_TEST_HUMAN_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')
+export STAM_TEST_HUMAN_KEY
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 isolate
 SOCKET="$STAM_TMUX_SOCKET"
@@ -34,7 +37,7 @@ tmux -L "$SOCKET" send-keys -t "=$ID:" C-u
 # Bypass mode, as the web UI sets it: the agent restarts with no approvals and no sandbox.
 URL="$STAM_URL"
 TOKEN=$(cat "$STAM_HOME/token")
-curl -sf -X POST -H "authorization: Bearer $TOKEN" -H 'x-stam-human: 1' -H 'content-type: application/json' -d '{"mode":"bypass"}' "$URL/api/agents/$ID/permission-mode" >/dev/null
+curl -sf -X POST -H "authorization: Bearer $TOKEN" -H "x-stam-test-human: $STAM_TEST_HUMAN_KEY" -H 'content-type: application/json' -d '{"mode":"bypass"}' "$URL/api/agents/$ID/permission-mode" >/dev/null
 for i in $(seq 1 20); do "$STAM" events "$A" | grep -q 'codex:subscribed.*"approvalPolicy":"never"' && break; sleep 3; done
 "$STAM" events "$A" | grep -q 'codex:subscribed.*"approvalPolicy":"never"' || fail "bypass mode not applied"
 "$STAM" wait "$A" --until idle --timeout 90

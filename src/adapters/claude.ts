@@ -429,7 +429,7 @@ export const claude: Adapter = {
     if (plugin) argv.push('--plugin-dir', plugin);
     if (agent.model) argv.push('--model', agent.model);
     if (agent.effort) argv.push('--effort', agent.effort);
-    argv.push('--permission-mode', agent.permission_mode === 'bypass' ? 'bypassPermissions' : 'auto');
+    argv.push('--permission-mode', agent.permission_mode === 'bypass' ? 'bypassPermissions' : agent.permission_mode === 'default' ? 'default' : 'auto');
     const env: Record<string, string> = {};
     const usl = userStatusLine();
     if (usl) env.STAM_USER_STATUSLINE = usl;

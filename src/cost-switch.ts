@@ -46,6 +46,7 @@ import { preset as presetOf, capabilitiesFor } from './registry.ts';
 import { render } from './templates.ts';
 import { queueNotice, dropNotice, HUMAN } from './mail.ts';
 import { settings } from './settings.ts';
+import { effectiveMode, permissionSource } from './permission-modes.ts';
 import type { Workspace } from './workspace.ts';
 
 const TAKEN_OVER = 'taken-over' as const;
@@ -218,7 +219,9 @@ function move(plan: SwitchPlan, threads: { thread_id: string }[]): { successor: 
       personal_workspace: a.personal_workspace,
       standing: a.standing,
       capabilities: JSON.stringify(capabilitiesFor(plan.harness, plan.model)),
-      permission_mode: a.permission_mode,
+      // A successor that follows the settings takes their mode for its own harness (S-1967).
+      permission_mode: permissionSource(a) === 'settings' ? effectiveMode(plan.harness, plan.toType ?? a.type) : a.permission_mode,
+      permission_source: permissionSource(a),
       visibility: a.visibility,
       child_notices: a.child_notices,
       kind: a.kind,

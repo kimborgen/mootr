@@ -131,7 +131,7 @@ const firstLine = (body: string): string => String(body ?? '').split('\n')[0].tr
 
 // The commit status context scripts/pr-review.mjs posts a verdict under (scripts/merge-pr.mjs,
 // REVIEW_CONTEXT); our gates post `stam/gates`.
-const REVIEW_CONTEXT = 'stam/review';
+export const REVIEW_CONTEXT = 'stam/review';
 
 // The stam agent that posted a review comment or status, from its "Review (AGENT): " text
 // (scripts/pr-review.mjs), or null when the text is not one. Every agent posts as one GitHub
@@ -144,9 +144,14 @@ export function reviewAgentOfComment(text: unknown): string | null {
 // The verdict the newest `stam/review` status on the head carries (S-948): approve for a success,
 // changes for a failure, null for a pending or missing one. It travels in the checks.completed payload.
 export function reviewVerdict(statuses: any[]): 'approve' | 'changes' | null {
-  const reviews = (statuses ?? []).filter((s) => s.context === REVIEW_CONTEXT);
-  const newest = reviews.sort((a, b) => String(b.updated_at ?? b.created_at ?? '').localeCompare(String(a.updated_at ?? a.created_at ?? '')))[0];
+  const newest = newestReview(statuses);
   return newest?.state === 'success' ? 'approve' : newest?.state === 'failure' || newest?.state === 'error' ? 'changes' : null;
+}
+
+// The newest `stam/review` status of a head's statuses, or undefined (shared with the diff header, S-1917).
+export function newestReview(statuses: any[]): any | undefined {
+  const at = (x: any) => String(x.updated_at ?? x.created_at ?? '');
+  return (statuses ?? []).filter((s) => s.context === REVIEW_CONTEXT).sort((a, b) => at(b).localeCompare(at(a)))[0];
 }
 
 // The stam agent whose own `stam/review` status alone made this checks.completed, or null when
@@ -220,8 +225,10 @@ async function pollNumber(s: GithubSubject, prev: any | null, prevEtags: Record<
         if (runs.status === 200) etags[`commits/${head}/check-runs`] = runs.etag ?? '';
         if (status.status === 200) etags[`commits/${head}/status`] = status.etag ?? '';
         // A 304 means that side is unchanged: keep what the snapshot last saw of it, not an empty list.
-        const runsBody = runs.status === 200 ? (runs.body?.check_runs ?? []).map(slimRun) : (state.headRuns ?? []);
-        const stsBody = status.status === 200 ? (status.body?.statuses ?? []).map(slimStatus) : (state.headStatuses ?? []);
+        // On a new head the old lists are the old head's: a failed fetch gives nothing, never a verdict (S-1917) or a pass on a head nobody reviewed.
+        const keep = state.checksHead === head;
+        const runsBody = runs.status === 200 ? (runs.body?.check_runs ?? []).map(slimRun) : keep ? (state.headRuns ?? []) : [];
+        const stsBody = status.status === 200 ? (status.body?.statuses ?? []).map(slimStatus) : keep ? (state.headStatuses ?? []) : [];
         state.headRuns = runsBody;
         state.headStatuses = stsBody;
         const c = checksState(runsBody, stsBody);

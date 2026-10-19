@@ -32,13 +32,14 @@ export function diff(before: Catalog, after: Catalog): { added: string[]; remove
 // Claude Code has no reconnect that keeps the process: reconnect_mcp restarts the session and resumes its conversation
 // (lifecycle.restart), which is too heavy to do to every Claude agent at idle on each deploy. The stdio server's
 // tools/list_changed (mcp.ts) can leave a running session with the old schema of a tool that changed, so the notice
-// names the changed tools and, for a Claude Code agent only, tells it to call reconnect_mcp itself, at a stopping point, if a parameter is missing.
+// names the changed tools and, for a Claude Code agent only, says the listed schema of a changed tool may be stale: the agent can still
+// pass a parameter that the tool's description or the notice names, because the call reaches stam. reconnect_mcp doesn't refresh the schema.
 // Codex and OpenCode agents reload at idle (reconnectMcpWhenIdle), so for them the notice lists the changes alone.
 export function noticeText(d: { added: string[]; removed: string[]; changed?: string[] }, harness?: string): string | undefined {
   const changed = d.changed ?? [];
   const parts = [d.added.length && `new: ${d.added.join(', ')}`, d.removed.length && `removed: ${d.removed.join(', ')}`, changed.length && `changed: ${changed.join(', ')}`].filter(Boolean);
   if (!parts.length) return undefined;
-  const hint = changed.length && harness === 'claude' ? ` If a changed tool lacks a parameter its description names, your session may hold its old schema: call reconnect_mcp when you reach a stopping point (it restarts you and resumes your conversation).` : '';
+  const hint = changed.length && harness === 'claude' ? ` A changed tool's listed schema may be stale: if it lacks a parameter that the tool's description or this notice names, pass that parameter anyway, since the call reaches stam.` : '';
   return `[stam] stam's MCP tools changed in a deploy; ${parts.join('; ')}.${hint}`;
 }
 

@@ -35,6 +35,14 @@ function password(): string {
   return readFileSync(f, 'utf8').trim();
 }
 
+// A new session's permission rules: every tool allowed in bypass, asked in 'default' (S-1967), and
+// OpenCode's own rules in auto. A session keeps them; see permission-modes.ts's switchesInPlace.
+export function sessionPermissions(mode: string): { action: string; resource: string; effect: string }[] | null {
+  if (mode === 'bypass') return [{ action: '*', resource: '*', effect: 'allow' }];
+  if (mode === 'default') return [{ action: '*', resource: '*', effect: 'ask' }];
+  return null;
+}
+
 export async function oc(method: string, path: string, body?: unknown): Promise<any> {
   const res = await fetch(SERVER + path, {
     method,
@@ -433,7 +441,7 @@ export const opencode: Adapter = {
       const [providerID, ...rest] = agent.model.split('/');
       model = { providerID, id: rest.join('/') };
     }
-    const permissions = agent.permission_mode === 'bypass' ? [{ action: '*', resource: '*', effect: 'allow' }] : null;
+    const permissions = sessionPermissions(agent.permission_mode);
     const s = await oc('POST', '/api/session', { title: agent.name, location: { directory: agent.cwd }, model, permissions, metadata: { stam_agent: agent.id } });
     const argv = [BIN, '--server', SERVER, '--session', s.id];
     return { argv, env: { OPENCODE_SERVER_PASSWORD: password() }, fields: { session_id: s.id } };

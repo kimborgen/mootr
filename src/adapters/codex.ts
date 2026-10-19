@@ -144,11 +144,11 @@ function probeHooks(): Promise<{ key: string; command: string; currentHash: stri
 // Codex's workspace-write sandbox, the model may ask to step outside it (on-request), and
 // those requests go to Codex's automatic reviewer instead of waiting for a human. When
 // the reviewer says no, the agent asks through stam's request_permission tool. 'bypass'
-// is Codex's --dangerously-bypass-approvals-and-sandbox: no sandbox, no approvals.
-function permissionConfig(mode: string): Record<string, string> {
-  return mode === 'bypass'
-    ? { approval_policy: 'never', sandbox_mode: 'danger-full-access', approvals_reviewer: 'user' }
-    : { approval_policy: 'on-request', sandbox_mode: 'workspace-write', approvals_reviewer: 'auto_review' };
+// is Codex's --dangerously-bypass-approvals-and-sandbox: no sandbox, no approvals. 'default' is
+// 'auto' with the requests left to the user, in the TUI or the conversation view (S-1967).
+export function permissionConfig(mode: string): Record<string, string> {
+  if (mode === 'bypass') return { approval_policy: 'never', sandbox_mode: 'danger-full-access', approvals_reviewer: 'user' };
+  return { approval_policy: 'on-request', sandbox_mode: 'workspace-write', approvals_reviewer: mode === 'default' ? 'user' : 'auto_review' };
 }
 
 // The same settings as thread parameters, for threads that already exist.

@@ -255,11 +255,11 @@ export function overLines(s: Sample, cfg: Settings['resourceWarn']): Partial<Rec
 
 const WARN_LABEL: Record<WarnKind, string> = { cpu: 'CPU load', ram: 'RAM', swap: 'swap', disk: 'disk' };
 
-// The root disk (S-736) mails once per crossing: when it goes over DISK_WARN_PCT, then not again
-// until it drops below DISK_CLEAR_PCT and crosses DISK_WARN_PCT once more. The armed state lives
-// in lastWarned.disk (null: armed), so a restart keeps it.
+// The root disk (S-736) mails once per crossing: when it goes over the line (settings diskPct,
+// default DISK_WARN_PCT), then not again until it drops DISK_CLEAR_MARGIN below it and crosses once
+// more. The armed state lives in lastWarned.disk (null: armed), so a restart keeps it.
 export const DISK_WARN_PCT = 85;
-export const DISK_CLEAR_PCT = 80;
+export const DISK_CLEAR_MARGIN = 5;
 
 // Calls send for each kind that mails now. Returns the kinds sent, for tests.
 export function warnResources(s: Sample, cfg: Settings['resourceWarn'], send: (subject: string, body: string) => void, now = Date.now()): WarnKind[] {
@@ -278,11 +278,13 @@ export function warnResources(s: Sample, cfg: Settings['resourceWarn'], send: (s
   }
   // No reading (a failed statfs) leaves the armed state as it was.
   if (cfg.enabled && s.diskPct != null) {
-    if (s.diskPct < DISK_CLEAR_PCT) last.disk = null;
-    else if (s.diskPct > DISK_WARN_PCT && last.disk == null) {
+    const line = cfg.diskPct ?? DISK_WARN_PCT;
+    const clear = line - DISK_CLEAR_MARGIN;
+    if (s.diskPct < clear) last.disk = null;
+    else if (s.diskPct > line && last.disk == null) {
       last.disk = now;
       sent.push('disk');
-      send(`Resource warning on ${MACHINE}: disk`, `The root filesystem is ${Math.round(s.diskPct)}% used (line ${DISK_WARN_PCT}%).\n\nStam mails this once, and again only after it drops below ${DISK_CLEAR_PCT}% and crosses ${DISK_WARN_PCT}% once more.`);
+      send(`Resource warning on ${MACHINE}: disk`, `The root filesystem is ${Math.round(s.diskPct)}% used (line ${line}%).\n\nStam mails this once, and again only after it drops below ${clear}% and crosses ${line}% once more.`);
     }
   }
   if (sent.length || last.disk !== settings().resourceWarn.lastWarned.disk) setSetting('resourceWarn', { ...settings().resourceWarn, lastWarned: last });

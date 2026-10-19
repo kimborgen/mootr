@@ -2,7 +2,7 @@ import { warmLessons, cachedLessons } from './retro-lessons.ts';
 import { workspacePrompt } from './workspace-prompt.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { existsSync, statSync, readFileSync, writeFileSync, readdirSync, mkdirSync, createReadStream } from 'node:fs';
+import { existsSync, statSync, readFileSync, writeFileSync, renameSync, readdirSync, mkdirSync, createReadStream } from 'node:fs';
 import { resolve, join, basename } from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { homedir, uptime } from 'node:os';
@@ -19,7 +19,7 @@ import * as tmux from './tmux.ts';
 import { clientCache } from './tmux-clients.ts';
 import { adapters } from './adapters/index.ts';
 import * as mail from './mail.ts';
-import { lookingAtNote } from './mail.ts';
+import { lookingAtNote, tellAnywhere } from './mail.ts';
 import * as usageScope from './usage-scope.ts';
 import { parseAgentFilter } from './agent-class.ts';
 import * as visibility from './mail-visibility.ts';
@@ -30,8 +30,9 @@ import { addStream, hasStream } from './push.ts';
 import * as events from './events.ts';
 import { render, humanMailPrompt, listTemplates, saveTemplate, resetTemplate } from './templates.ts';
 import * as lifecycle from './lifecycle.ts';
+import * as permissionModes from './permission-modes.ts';
 import { admit, admitSpawn, accountHeld } from './admission.ts';
-import { developerCapRefusal, isDeveloperSpawn, reserveSlot, releaseSlot } from './developer-cap.ts';
+import { developerCapRefusal, isDeveloperSpawn, reserveSlot, releaseSlot, slotHolders, enqueueWaiter, dropWaiter, saveQueueFile, loadQueueFile, grantSlots, queuedWaiters, restoreQueue, URGENT_REASONS, type UrgentReason, type Waiter } from './developer-cap.ts';
 import * as blockers from './blockers.ts';
 import * as context from './context.ts';
 import * as permissions from './permissions.ts';
@@ -436,18 +437,121 @@ async function reqRoute<T>(fn: () => T | Promise<T>): Promise<T> {
   }
 }
 
+// The slot queue (S-2053). A developer spawn at the cap waits here and starts when it reaches the head
+// and a slot is free; the reply gives its place and the holders, and the caller gets a notice when it
+// starts or fails. `urgent` (a reason) puts it ahead of the normal spawns.
+function queueSpawn(body: any, name: string): Record<string, unknown> {
+  let urgent: UrgentReason | undefined;
+  if (body.urgent !== undefined && body.urgent !== null && body.urgent !== false) {
+    if (!URGENT_REASONS.includes(body.urgent)) throw new HttpError(400, `urgent takes a reason: ${URGENT_REASONS.join(', ')}`);
+    urgent = body.urgent;
+  }
+  if (queuedWaiters().some((w) => w.name === name)) throw new HttpError(409, `name ${name} is taken`);
+  const by = body.by ? String(body.by) : undefined;
+  const waiter = { name, body: { ...body, name }, by, urgent, at: Date.now() };
+  const place = enqueueWaiter(waiter);
+  try {
+    saveSlotQueue();
+  } catch (e) {
+    dropWaiter(name);
+    throw new HttpError(503, `can't save the slot queue, so the spawn isn't queued: ${e instanceof Error ? e.message : e}`);
+  }
+  const holders = slotHolders(db.listAgents(), agentTypes(), MACHINE);
+  pumpSlotQueue();
+  return { queued: true, name, place, queue_length: queuedWaiters().length, urgent: urgent ?? null, holders, cap: settings().developerCap, machine: MACHINE };
+}
+
+// The queue is saved after every change and read back at start, so a restart or deploy during a wait
+// loses no accepted request. A granted waiter stays in the file until its spawn ends.
+const SLOT_QUEUE_FILE = join(STAM_HOME, 'slot-queue.json');
+const launching = new Set<Waiter>();
+function saveSlotQueue(): void {
+  saveQueueFile(SLOT_QUEUE_FILE, [...launching, ...queuedWaiters()]);
+}
+// A save that fails is logged where nobody has been told yet; enqueue refuses instead.
+const saveSlotQueueLogged = (): void => {
+  try {
+    saveSlotQueue();
+  } catch (e) {
+    console.error(`slot queue: save: ${e instanceof Error ? e.message : e}`);
+  }
+};
+function restoreSlotQueue(): void {
+  try {
+    const { waiting, started } = loadQueueFile(SLOT_QUEUE_FILE, (name) => Boolean(db.getAgent(name)));
+    restoreQueue(waiting);
+    // Its agent row exists: the launch got that far before the restart, so it isn't queued again.
+    for (const w of started) tellWaiter(w, `Your queued spawn ${w.name} got a developer slot and started before a daemon restart; check it with find_agents.`);
+  } catch (e) {
+    // An unreadable file is moved aside, not emptied, and the queue starts empty.
+    console.error(`slot queue: restore: ${e instanceof Error ? e.message : e}; moved to ${SLOT_QUEUE_FILE}.bad`);
+    try {
+      renameSync(SLOT_QUEUE_FILE, `${SLOT_QUEUE_FILE}.bad`);
+    } catch {
+      // Nothing to move.
+    }
+  }
+}
+
+// A waiter whose caller is archived is dead; one whose caller runs elsewhere can't be checked.
+const waiterAlive = (w: Waiter): boolean => {
+  const caller = w.by ? db.getAgent(w.by) : undefined;
+  return !caller || caller.lifecycle !== 'archived';
+};
+// The caller here or on a peer; an archived caller hears nothing.
+const tellWaiter = (w: Waiter, text: string): void => {
+  if (w.by) void tellAnywhere(w.by, text, (a) => a.lifecycle !== 'archived').catch(() => {});
+};
+
+async function launchWaiter(w: Waiter): Promise<void> {
+  try {
+    // The slot is reserved since the grant; a caller archived since then gets no agent.
+    if (!waiterAlive(w)) return;
+    const a = await spawnAgent(w.body, false, undefined, { granted: true });
+    tellWaiter(w, `Your queued spawn ${w.name} got a developer slot and started (${a.id}).`);
+  } catch (e) {
+    tellWaiter(w, `Your queued spawn ${w.name} got a developer slot but failed to start: ${e instanceof Error ? e.message : e}`);
+  } finally {
+    releaseSlot(w.name);
+    launching.delete(w);
+    saveSlotQueueLogged();
+  }
+}
+
+// Each launch runs on its own, so a slow workspace never holds the next sweep for dead waiters.
+function pumpSlotQueue(): void {
+  const before = queuedWaiters().length;
+  const { granted, dropped } = grantSlots(db.listAgents(), agentTypes(), settings().developerCap, MACHINE, waiterAlive);
+  for (const w of dropped) tellWaiter(w, `Your queued spawn ${w.name} was dropped from the developer slot queue after waiting too long; spawn it again when you need it.`);
+  // The whole batch is in the saved snapshot before the first launch starts.
+  for (const w of granted) launching.add(w);
+  if (granted.length || queuedWaiters().length !== before) saveSlotQueueLogged();
+  for (const w of granted) void launchWaiter(w);
+}
+
 const NAMES = 'otter heron lynx wren fox badger hare kestrel marten finch puffin raven seal stoat swift vole crane ibis lark newt orca owl pika robin tern yak'.split(' ');
 
 function freeName(): string {
-  const taken = new Set(db.listAgents().map((a) => a.name));
+  const taken = new Set([...db.listAgents().map((a) => a.name), ...queuedWaiters().map((w) => w.name)]);
   for (const n of NAMES) if (!taken.has(n)) return n;
   for (let i = 2; ; i++) for (const n of NAMES) if (!taken.has(`${n}-${i}`)) return `${n}-${i}`;
 }
 
 // `onCreated` gets the new agent's id as soon as its row exists, so a caller whose spawn then fails
 // knows exactly which agent is its own to clean up.
-async function spawnAgent(body: any, human = false, onCreated?: (id: string) => void): Promise<db.Agent> {
-  const slot: { name?: string } = {};
+// `opts.queue`: a developer spawn at the cap waits in the slot queue (S-2053) and throws QueuedSpawn
+// instead of failing; only the spawn route asks for it. `opts.granted`: the queue already reserved
+// this spawn's slot, so the cap isn't checked again.
+class QueuedSpawn extends Error {
+  reply: Record<string, unknown>;
+  constructor(reply: Record<string, unknown>) {
+    super('queued');
+    this.reply = reply;
+  }
+}
+
+async function spawnAgent(body: any, human = false, onCreated?: (id: string) => void, opts: { queue?: boolean; granted?: boolean } = {}): Promise<db.Agent> {
+  const slot: { name?: string; queue?: boolean; granted?: boolean } = { queue: opts.queue, granted: opts.granted };
   try {
     return await spawnAgentIn(body, human, onCreated, slot);
   } finally {
@@ -455,7 +559,8 @@ async function spawnAgent(body: any, human = false, onCreated?: (id: string) => 
   }
 }
 
-async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) => void) | undefined, slot: { name?: string }): Promise<db.Agent> {
+async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) => void) | undefined, slot: { name?: string; queue?: boolean; granted?: boolean }): Promise<db.Agent> {
+  const original = body;
   // An agent type sets the preset, role, visibility, child notices, and brief; anything
   // given explicitly wins. Without a type and with no input at all, the agent gets the
   // defaults in settings.spawnDefaults and a free name.
@@ -567,8 +672,13 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
   }
   // The developer slot cap (S-2008), checked before any worktree exists so a refusal leaves nothing
   // behind. The check and the reservation run with no await between them.
-  const capRefusal = developerCapRefusal(db.listAgents(), agentTypes(), type, spec.kind === 'worktree', settings().developerCap, MACHINE);
-  if (capRefusal && !human) throw new HttpError(409, capRefusal);
+  // A spawn behind others in the queue waits too, even with a slot free, so it can't jump them.
+  const capRefusal = slot.granted ? null : developerCapRefusal(db.listAgents(), agentTypes(), type, spec.kind === 'worktree', settings().developerCap, MACHINE);
+  const behindQueue = !slot.granted && queuedWaiters().length > 0 && isDeveloperSpawn(type, spec.kind === 'worktree') && settings().developerCap > 0;
+  if ((capRefusal || behindQueue) && !human) {
+    if (!slot.queue) throw new HttpError(409, capRefusal ?? `developer spawns are queued on ${MACHINE}; ${queuedWaiters().length} waiting`);
+    throw new QueuedSpawn(queueSpawn(original, name));
+  }
   // Held until the spawn ends, so a second spawn in the same seconds counts this one.
   if (isDeveloperSpawn(type, spec.kind === 'worktree')) {
     reserveSlot(name);
@@ -627,14 +737,18 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
   onCreated?.(agent.id);
   // Threads the brief cites open to the agent when its spawner may read them whole; a spawn with no spawner and no parent, the human's, opens any (S-1107).
   if (body.prompt) grantCitedThreads(String(body.prompt), body.by ? db.getAgent(String(body.by))?.id ?? String(body.by) : parentId ?? undefined, agent.id);
-  // Only the human picks bypass mode; see `fromHuman`.
-  const permission_mode = human && body.permission_mode === 'bypass' ? 'bypass' : 'auto';
+  // The mode comes from Settings › permission modes (S-1967), for an agent's children too. Only the
+  // human picks another one for an agent (see `fromHuman`), which then stays; an agent's pick is ignored.
+  const fromSettings = permissionModes.effectiveMode(harness, type ? String(body.type) : null);
+  const picked = human && permissionModes.isMode(body.permission_mode) && body.permission_mode !== fromSettings ? body.permission_mode : null;
+  const permission_mode = picked ?? fromSettings;
+  const permission_source = picked ? 'manual' : 'settings';
   if (boss && body.chief_of_staff) setSetting('chiefOfStaff', name);
   const visibility = body.visibility && typeof body.visibility === 'object' ? JSON.stringify(body.visibility) : null;
   const kind = human && body.kind === 'assistant' ? 'assistant' : null;
   // How much the new agent hears about its own children; its preference, defaulted.
   const child_notices = ['turn', 'tree-idle', 'none'].includes(body.child_notices) ? String(body.child_notices) : settings().childNotices;
-  db.updateAgent(agent.id, { workspace: JSON.stringify(ws), personal_workspace: personalWorkspace, standing: body.standing === true ? 1 : 0, capabilities: JSON.stringify(capabilitiesFor(harness, agent.model)), permission_mode, visibility, child_notices, kind, type: type ? String(body.type) : null, first_prompt: prompt ?? null });
+  db.updateAgent(agent.id, { workspace: JSON.stringify(ws), personal_workspace: personalWorkspace, standing: body.standing === true ? 1 : 0, capabilities: JSON.stringify(capabilitiesFor(harness, agent.model)), permission_mode, permission_source, visibility, child_notices, kind, type: type ? String(body.type) : null, first_prompt: prompt ?? null });
   // S-759: the first prompt is stored now; the delivery marker (lifecycle.startHarness) says it
   // went in. A daemon restart in between leaves the agent 'starting' with no marker, so the
   // first reconcile pass re-delivers the prompt instead of waiting for the starting timeout.
@@ -983,11 +1097,49 @@ export async function control(a: db.Agent, action: string, body: any): Promise<s
   throw new HttpError(404, `no action ${action}`);
 }
 
-async function setPermissionMode(a: db.Agent, m: unknown): Promise<string> {
-  const mode = m === 'bypass' ? 'bypass' : 'auto';
-  db.updateAgent(a.id, { permission_mode: mode });
-  db.addEvent(a.id, 'permission-mode', { mode });
-  return a.lifecycle === 'active' || a.lifecycle === 'paused' ? await lifecycle.restart(db.getAgent(a.id)!, `permission mode changed to ${mode}`) : 'set';
+// The human's own pick for one agent stays over the settings; 'settings' makes it follow them
+// again (S-1967). A running agent restarts in place, its session kept, once its step ends. A launch
+// that fails, now or at the step's end, puts the old mode and source back and logs
+// permission-mode:failed (permissionModes.switchFailed), so a settings agent shows on the stale list
+// for a retry; `relaunch` retries by resuming the agent a failed switch left shut down.
+async function setPermissionMode(a: db.Agent, m: unknown, by: string, source: 'manual' | 'settings' = 'manual', relaunch = false): Promise<string> {
+  if (m === 'settings') source = 'settings';
+  const mode = source === 'settings' ? permissionModes.effectiveMode(a.harness, a.type) : permissionModes.isMode(m) ? m : 'auto';
+  const undo: permissionModes.SwitchUndo = { mode, source, by, kept: { permission_mode: a.permission_mode, permission_source: a.permission_source } };
+  db.updateAgent(a.id, { permission_mode: mode, permission_source: source });
+  db.addEvent(a.id, 'permission-mode', { mode, source, by });
+  const reason = `permission mode changed to ${mode}`;
+  if (relaunch && a.lifecycle === 'shut_down') {
+    try {
+      return await lifecycle.resume(db.getAgent(a.id)!, reason);
+    } catch (e) {
+      permissionModes.switchFailed(a.id, undo, e);
+      throw e;
+    }
+  }
+  if (mode === undo.kept.permission_mode || (a.lifecycle !== 'active' && a.lifecycle !== 'paused')) return 'set';
+  return lifecycle.restart(db.getAgent(a.id)!, reason, undo);
+}
+
+// Switches the running agents that follow the settings to the mode the settings now give them
+// (S-1967). An OpenCode agent keeps its session's rules, so it is left for its next session.
+async function applyPermissionModes(by: string): Promise<{ applied: { name: string; mode: string; result: string }[]; skipped: { name: string; reason: string }[] }> {
+  const stale = permissionModes.staleAgents();
+  const skipped = stale.filter((s) => !s.inPlace).map((s) => ({ name: s.name, reason: `${s.harness} keeps a session's permission rules; it starts in ${s.want} at its next new session` }));
+  const results = await Promise.allSettled(
+    stale.filter((s) => s.inPlace).map(async (s) => {
+      const a = db.getAgent(s.id)!;
+      const result = await setPermissionMode(a, s.want, by, 'settings', s.failed !== null);
+      db.addEvent(a.id, 'permission-mode:applied', { from: s.mode, mode: s.want, by });
+      return { name: s.name, mode: s.want, result };
+    }),
+  );
+  const applied: { name: string; mode: string; result: string }[] = [];
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled') applied.push(r.value);
+    else skipped.push({ name: stale.filter((s) => s.inPlace)[i].name, reason: r.reason instanceof Error ? r.reason.message : String(r.reason) });
+  });
+  return { applied, skipped };
 }
 
 async function forget(a: db.Agent): Promise<string> {
@@ -2192,6 +2344,9 @@ export async function runDaemon(): Promise<void> {
   // A deploy that changed stam's MCP tools: running agents hear of it and reload (S-178).
   announceToolChanges().catch((e) => console.error(`mcp tools: ${e instanceof Error ? e.message : e}`));
   setInterval(() => timed('reconcile', reconcile), 5000);
+  // A freed slot goes to the head of the developer slot queue (S-2053).
+  restoreSlotQueue();
+  setInterval(pumpSlotQueue, 2000);
   // Suggested input past its expiry, and held approvals to type (S-422).
   if (ignoredTestOnlyEnv('STAM_TEST_HUMAN_KEY')) console.warn('STAM_TEST_HUMAN_KEY is set outside a test home and is ignored: only tailscale serve proves the human here');
   setInterval(() => void permissions.retryHeldInputs().catch((e) => console.error(`suggested input: ${e instanceof Error ? e.message : e}`)), 5000);
@@ -2488,7 +2643,9 @@ export async function runDaemon(): Promise<void> {
           }
         }
         if (m[1] === 'settings') {
+          const before = settings().permissionModes;
           writeSettingsText(text);
+          permissionModes.noteSettingsChange(before, mail.HUMAN);
           // A raised or removed budget lifts its stop now.
           void budgets.evaluateAll();
         } else {
@@ -2522,11 +2679,13 @@ export async function runDaemon(): Promise<void> {
         // A peer's page changes only shared settings here; the home keeps its own local keys (S-414).
         // MCP servers name commands every machine runs, so they change only on the home's own page.
         if (peerUiRequests.has(req) && 'mcpServers' in body.patch) throw new HttpError(403, `MCP servers change only on ${MACHINE}'s own page`);
+        const before = settings().permissionModes;
         const r = peerUiRequests.has(req) ? patchSharedSettings(body.patch, body.fill === true) : patchSettings(body.patch, body.fill === true);
         if ('problem' in r) {
           if (r.field === 'cost') noteInvalid(r.problem);
           throw new HttpError(400, `${r.field} config rejected: ${r.problem}`);
         }
+        permissionModes.noteSettingsChange(before, mail.HUMAN);
         void budgets.evaluateAll();
         return { text: r.text };
       },
@@ -3335,17 +3494,42 @@ export async function runDaemon(): Promise<void> {
         if (!body?.by && strictRefuses('spawn with no by', unattributed(human, local, caller))) throw new HttpError(403, 'only the human, or an agent naming itself (by), spawns an agent');
         // A ring reviewer type with no harness, model, or preset is spawned as a ring.
         if (body.type && agentTypes()[String(body.type)]?.review?.ring && !body.preset && !body.harness && !body.model) return spawnRingType(body, human);
-        return spawnAgent(body, human).then((a) => ({ ...a, view: agentView.capabilities(a) }));
+        return spawnAgent(body, human, undefined, { queue: true }).then(
+          (a) => ({ ...a, view: agentView.capabilities(a) }),
+          (e) => {
+            if (e instanceof QueuedSpawn) return e.reply;
+            throw e;
+          },
+        );
       },
     ],
     [
       'POST',
       /^\/api\/agents\/([\w-]+)\/permission-mode$/,
-      async (m, body, _u, _r, _l, human) => {
-        if (!human) throw new HttpError(403, 'only the human sets permission modes, from the web UI');
+      async (m, body, _u, _r, _l, _h, req) => {
+        // Bypass is a privilege: only trustedHuman's proof counts, never the x-stam-human claim alone.
+        humanOnly(req, 'set permission modes, from the web UI');
         const a = mustAgent(m[1]);
-        const result = await setPermissionMode(a, body.mode);
+        const result = await setPermissionMode(a, body.mode, mail.HUMAN);
         return { agent: db.getAgent(a.id), result };
+      },
+    ],
+    // Settings › permission modes (S-1967): the settings, each harness's modes in its own words, the
+    // agent types, and the running agents still on another mode than the settings give them.
+    [
+      'GET',
+      /^\/api\/permission-modes$/,
+      () => ({ settings: settings().permissionModes, harnesses: permissionModes.HARNESS_MODES, types: Object.keys(agentTypes()), stale: permissionModes.staleAgents() }),
+    ],
+    // Switches those agents now, each at the end of its step, keeping its session.
+    [
+      'POST',
+      /^\/api\/permission-modes\/apply$/,
+      async (_m, _b, _u, _r, _l, _h, req) => {
+        humanOnly(req, 'apply permission modes, from the web UI');
+        const r = await applyPermissionModes(mail.HUMAN);
+        db.addEvent(mail.HUMAN, 'permission-modes:apply', { by: mail.HUMAN, applied: r.applied.map((x) => x.name), skipped: r.skipped });
+        return { ...r, stale: permissionModes.staleAgents() };
       },
     ],
     // The chief of staff's name (null when none is active), for agents that mail it.

@@ -807,12 +807,13 @@ export function ConfigView() {
       const list = (getPath(s, 'resourceWarn.recipients') as string[] | undefined) ?? []
       return (
         <>
-          <p className="lede">Mail to the recipients when this machine's load, free memory, or swap crosses a line. Each one mails again every repeat interval while it stays across.</p>
+          <p className="lede">Mail to the recipients when this machine's load, free memory, swap, or root disk crosses a line. Load, memory, and swap mail again every repeat interval while they stay across; the disk mails once per crossing.</p>
           <div className="set-card">
             <Row label="Warn" help="Off: no resource mail from this machine.">{toggle('resourceWarn.enabled', 'On')}</Row>
             <Row label="CPU load" help="The one-minute load average per core. Mail above this.">{num('resourceWarn.loadPerCore', { step: 0.1 })}</Row>
             <Row label="Free RAM" help="Mail when available memory is under this.">{num('resourceWarn.ramAvailableGb', { step: 0.5, unit: 'GB' })}</Row>
             <Row label="Swap used" help="Mail when swap used is over this share.">{num('resourceWarn.swapPct', { step: 5, unit: '%' })}</Row>
+            <Row label="Disk used" help="Mail once when the root disk is fuller than this share; again after it drops 5 points below and crosses it once more.">{num('resourceWarn.diskPct', { step: 5, unit: '%' })}</Row>
             <Row label="Repeat" help="While a line stays crossed, mail again after this many minutes.">{num('resourceWarn.repeatMinutes', { unit: 'minutes' })}</Row>
             <Row label="Recipients" help="Agent names, or human, comma-separated. Empty: the chief of staff.">
               <ChangeInput type="text" className="wide" disabled={ro('resourceWarn.recipients')} title={ro('resourceWarn.recipients') ? why : undefined} data-kind="text" defaultValue={list.join(', ')} placeholder="Chief of staff" spellCheck={false}

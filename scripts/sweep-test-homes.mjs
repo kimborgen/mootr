@@ -6,6 +6,8 @@
 //   node scripts/sweep-test-homes.mjs --dry-run        print what it would remove or keep, remove nothing
 //   node scripts/sweep-test-homes.mjs --hours 6        older than 6 hours
 //   node scripts/sweep-test-homes.mjs --review-hours 6 the review folders' age (default 6; see below)
+// It also prunes the deps caches (STAM_HOME/deps, ~/.cache/stam-gate-deps: keep entries a release or worktree
+// hard-links, main's current keys, and the newest 3 unused) and keeps the newest 2 stam.db.bak-* (S-1965).
 //   node scripts/sweep-test-homes.mjs --install        write stam-sweep-test-homes.service and .timer, and enable the timer
 // Review leftovers (S-1235): the folders under ~/.cache/stam-review (clones named after a PR or task, and
 // .tmp-*), the non-standard homes under ~/.cache/stam-test (rev271, pr198, ...), and ~/.cache/review-*
@@ -19,7 +21,9 @@
 // Only directories whose name matches the prefixes the unit tests use (testPrefixes) are considered; a symlink is never followed or removed.
 // STAM_SWEEP_TMP and STAM_SWEEP_CACHE (or --tmp and --cache) name the two folders, for tests.
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { tryExclusive } from './deps-lock.mjs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -232,43 +236,117 @@ function removeFolder(path) {
   rmSync(path, { recursive: true, force: true });
 }
 
-function readText(p) {
+// A read error that makes a process's use unknown: not a process that exited mid-read (ENOENT, ESRCH). Everything
+// else, a permission denial included, counts, so a same-user process made undumpable (PR_SET_DUMPABLE=0, which
+// turns its cwd, fd and environ into EACCES) can't hide a folder it uses.
+const gone = (e) => e?.code === 'ENOENT' || e?.code === 'ESRCH';
+
+// Processes whose state this user can never read, and which hold nothing in a cache folder: their own comm names
+// them (from /proc/PID/stat, which stays readable). systemd --user (cwd /), its (sd-pam) helper, and ssh-agent
+// (a socket) keep a different set of capabilities, so cwd and fd answer EACCES. Trust assumption: the comm is
+// whatever the process set, so a same-user process can rename itself and hide; these exemptions guard against
+// accident (this host's own helpers, which never hold a cache folder), not against a process deliberately hiding.
+const OPAQUE_COMMS = new Set(['systemd', '(sd-pam)', 'ssh-agent']);
+// The comm and state letter from /proc/PID/stat. A zombie (Z) or dead (X) process has released everything, but its
+// cwd, fd and environ answer EACCES, so it is not unknown.
+function statOf(base) {
   try {
-    return readFileSync(p, 'utf8');
+    const stat = readFileSync(join(base, 'stat'), 'utf8');
+    return { comm: stat.slice(stat.indexOf('(') + 1, stat.lastIndexOf(')')), state: stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) };
   } catch {
-    return '';
+    return { comm: null, state: null };
   }
 }
 
 // What every process names, once per run: its cwd, open files, environment values, and arguments.
-export function claimedPaths(procDir = '/proc') {
+// `only`, a list of pid strings, limits the scan to those processes (tests: so the host's other processes can't
+// change the result). A read error on a process this user owns (or on /proc itself) sets `unreadable` on the result, and inUse then
+// answers yes for every path: unknown usage keeps the entry (S-1965). Exempt: a process that exits mid-read, a zombie,
+// one of another user (it can't be read, so for the sweep it is not a user), and one in OPAQUE_COMMS.
+export function claimedPaths(procDir = '/proc', only = null) {
   const out = [];
+  out.unreadable = false;
   let names = [];
   try {
     names = readdirSync(procDir);
-  } catch {}
+  } catch {
+    out.unreadable = true;
+  }
+  const mine = typeof process.getuid === 'function' ? process.getuid() : -1;
   for (const n of names) {
     if (!/^\d+$/.test(n) || Number(n) === process.pid) continue;
+    if (only && !only.includes(n)) continue;
     const base = join(procDir, n);
+    // The process's own uid, from /proc/PID/status (world-readable): the owner of /proc/PID is root for a process
+    // made undumpable (PR_SET_DUMPABLE=0), so it can't tell whose process this is. A process that exited (ENOENT,
+    // ESRCH) is skipped; any other failure to tell is unknown, so the process counts as ours.
+    let owned = true;
     try {
-      out.push(readlinkSync(join(base, 'cwd')));
-    } catch {}
-    try {
-      for (const fd of readdirSync(join(base, 'fd'))) {
+      const m = readFileSync(join(base, 'status'), 'utf8').match(/^Uid:\s+(\d+)/m);
+      if (m) owned = Number(m[1]) === mine;
+    } catch (e) {
+      if (gone(e)) continue;
+    }
+    // A process mid-exec or mid-exit can fail one read; the read is repeated a few times before it counts as unknown.
+    let got = [];
+    let bad = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      got = [];
+      bad = false;
+      let info;
+      const note = (e) => {
+        if (!owned || gone(e)) return;
+        info ??= statOf(base);
+        if (info.state === 'Z' || info.state === 'X') return;
+        if (!OPAQUE_COMMS.has(info.comm) || !['EACCES', 'EPERM'].includes(e?.code)) bad = true;
+      };
+      const read = (p) => {
         try {
-          out.push(readlinkSync(join(base, 'fd', fd)));
-        } catch {}
+          return readFileSync(p, 'utf8');
+        } catch (e) {
+          note(e);
+          return '';
+        }
+      };
+      try {
+        got.push(readlinkSync(join(base, 'cwd')));
+      } catch (e) {
+        note(e);
       }
-    } catch {}
-    for (const kv of readText(join(base, 'environ')).split('\0')) out.push(kv.slice(kv.indexOf('=') + 1));
-    out.push(...readText(join(base, 'cmdline')).split('\0'));
+      try {
+        for (const fd of readdirSync(join(base, 'fd'))) {
+          try {
+            got.push(readlinkSync(join(base, 'fd', fd)));
+          } catch (e) {
+            note(e);
+          }
+        }
+      } catch (e) {
+        note(e);
+      }
+      for (const kv of read(join(base, 'environ')).split('\0')) got.push(kv.slice(kv.indexOf('=') + 1));
+      got.push(...read(join(base, 'cmdline')).split('\0'));
+      if (!bad) break;
+      try {
+        lstatSync(base);
+      } catch {
+        bad = false;
+        break;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+    out.push(...got);
+    if (bad) out.unreadable = true;
   }
-  return out.filter((p) => p.includes('/'));
+  const paths = out.filter((p) => p.includes('/'));
+  paths.unreadable = out.unreadable;
+  return paths;
 }
 
 // Whether any claimed path is `dir` or inside it, or a longer string that holds `dir/` (a shell
 // command line, or a list of paths).
 export function inUse(dir, claims) {
+  if (claims.unreadable) return true;
   return claims.some((c) => c === dir || c.startsWith(dir + sep) || c.includes(dir + sep) || c.includes(`${dir} `));
 }
 
@@ -291,9 +369,22 @@ export function newest(dir, deep = false) {
   return t;
 }
 
+// STAM_SWEEP_PROC and STAM_SWEEP_PIDS (a comma list) name the proc root and the only pids to scan, for tests.
+// Only a full comma list of positive integers up to PID_MAX counts; anything else (empty, whitespace, a stray comma, garbage) is
+// treated as unset, with a warning, so a malformed filter scans every process instead of none.
+const PID_MAX = 4194304;
+export function pidsOf(env) {
+  const v = env.STAM_SWEEP_PIDS;
+  if (v === undefined) return null;
+  // Each pid is at most Linux's pid_max ceiling, 2^22: a larger number names no process and would filter every one out.
+  if (/^[1-9]\d*(,[1-9]\d*)*$/.test(v) && v.split(',').every((p) => Number(p) <= PID_MAX)) return v.split(',');
+  console.error(`STAM_SWEEP_PIDS=${JSON.stringify(v)} is not a comma list of pids; scanning every process`);
+  return null;
+}
+
 // Returns [{ path, action: 'remove' | 'keep', why }]; removes unless `dryRun`.
 export function sweep({ hours = 2, reviewHours = 6, dryRun = false, now = Date.now(), env = process.env, claims, agents } = {}) {
-  const held = claims ?? claimedPaths();
+  const held = claims ?? claimedPaths(env.STAM_SWEEP_PROC || '/proc', pidsOf(env));
   const results = [];
   const texts = agents === undefined ? liveAgentTexts(env) : agents;
   const seen = new Set();
@@ -340,6 +431,179 @@ export function sweep({ hours = 2, reviewHours = 6, dryRun = false, now = Date.n
   return results;
 }
 
+// Caches that fill the disk (S-1965): the deps caches and the database backups. Never uv or bai2: only
+// these folders. A deps entry is KEY, 16 hex digits; deploy's own prune handles .tmp- and .damaged- ones.
+export const KEEP_UNUSED_DEPS = 3;
+export const KEEP_BACKUPS = 2;
+const DEPS_KEY = /^[0-9a-f]{16}$/;
+
+// The keys main's lockfiles name now (S-1044 depsKey for STAM_HOME/deps, gate.mjs for the gate cache),
+// for the dev and non-dev installs, so the entry a next link needs is never pruned.
+export function currentKeys(mainDir) {
+  const keys = new Set();
+  for (const dir of ['', 'web']) {
+    const abs = join(mainDir, dir);
+    const pkg = join(abs, 'package.json');
+    const lock = join(abs, 'package-lock.json');
+    if (!existsSync(pkg)) continue;
+    const tail = `${process.version} ${process.platform} ${process.arch}`;
+    const h = (lockText, extra) => createHash('sha256').update(readFileSync(pkg)).update(lockText).update(extra).digest('hex').slice(0, 16);
+    if (existsSync(lock)) for (const dev of [true, false]) keys.add(h(readFileSync(lock), `${dev} ${tail}`));
+    keys.add(h(existsSync(lock) ? readFileSync(lock) : '', tail));
+  }
+  return keys;
+}
+
+// A cache entry is in use when its node_modules was hard-linked into a release or worktree (`cp -al`):
+// its .package-lock.json then has more than one link. (Same test as find -samefile, without the walk.)
+function linkedElsewhere(entry) {
+  // No node_modules: nothing to link, so nothing uses it. Any other failure to look is unknown, which keeps the entry.
+  try {
+    lstatSync(join(entry, 'node_modules'));
+  } catch (e) {
+    return e?.code !== 'ENOENT';
+  }
+  try {
+    return lstatSync(join(entry, 'node_modules', '.package-lock.json')).nlink > 1;
+  } catch {
+    return true;
+  }
+}
+
+function entryTime(entry) {
+  let t = lstatSync(entry).mtimeMs;
+  for (const m of ['.used', '.ready']) {
+    try {
+      t = Math.max(t, lstatSync(join(entry, m)).mtimeMs);
+    } catch {}
+  }
+  return t;
+}
+
+// Bytes available to the user on the filesystem of `path`: df's number, which counts hard links once.
+export function freeBytes(path) {
+  const st = statfsSync(path);
+  return st.bavail * st.bsize;
+}
+
+// Prunes one deps cache: keeps entries in use, entries a process names, `keys` (main's current ones), and the
+// newest `keep` of the rest. Returns [{ path, action, why }].
+// Selection and the rename of each victim to a hidden .pruned- name happen under the root's exclusive lock
+// (scripts/deps-lock.mjs), which every consumer holds shared while it checks and links; busy, or no flock(1),
+// prunes nothing. The renamed victims are deleted after the lock is released.
+export function pruneDepsCache(root, { keys = new Set(), keep = KEEP_UNUSED_DEPS, claims, dryRun = false } = {}) {
+  try {
+    if (!lstatSync(root).isDirectory()) return [];
+  } catch {
+    return [];
+  }
+  const lock = dryRun ? null : tryExclusive(root);
+  if (!dryRun && !lock) return [{ path: root, action: 'keep', why: 'the cache lock is busy or flock is missing' }];
+  const out = [];
+  const doomed = [];
+  try {
+    let names = [];
+    try {
+      names = readdirSync(root).filter((n) => DEPS_KEY.test(n));
+    } catch {
+      return out;
+    }
+    const spare = [];
+    for (const name of names.sort()) {
+      const path = join(root, name);
+      let st;
+      try {
+        st = lstatSync(path);
+      } catch {
+        continue;
+      }
+      if (!st.isDirectory()) continue;
+      if (keys.has(name)) out.push({ path, action: 'keep', why: "matches main's lockfiles" });
+      else if (linkedElsewhere(path)) out.push({ path, action: 'keep', why: 'linked by a release or worktree, or unreadable' });
+      else if (inUse(path, claims)) out.push({ path, action: 'keep', why: 'a process uses it' });
+      else spare.push({ path, t: entryTime(path) });
+    }
+    spare.sort((a, b) => b.t - a.t || a.path.localeCompare(b.path));
+    spare.forEach(({ path }, i) => {
+      if (i < keep) return out.push({ path, action: 'keep', why: `one of the newest ${keep} unused` });
+      let why = `unused and older than the newest ${keep}`;
+      if (!dryRun) {
+        const hidden = join(root, `.pruned-${path.slice(root.length + 1)}-${process.pid}`);
+        try {
+          renameSync(path, hidden);
+          doomed.push(hidden);
+        } catch {
+          return out.push({ path, action: 'keep', why: 'could not be set aside' });
+        }
+      }
+      out.push({ path, action: 'remove', why });
+    });
+  } finally {
+    lock?.release();
+  }
+  // Victims set aside by this run, and any an interrupted run left.
+  if (!dryRun) {
+    try {
+      for (const n of readdirSync(root)) if (/^\.pruned-/.test(n)) doomed.push(join(root, n));
+    } catch {}
+  }
+  for (const d of new Set(doomed)) rmSync(d, { recursive: true, force: true });
+  return out;
+}
+
+// Keeps the newest `keep` stam.db.bak-* files in `home` (deploy's pre-deploy copies).
+export function pruneBackups(home, { keep = KEEP_BACKUPS, claims, dryRun = false } = {}) {
+  const out = [];
+  let names = [];
+  try {
+    names = readdirSync(home).filter((n) => n.startsWith('stam.db.bak-'));
+  } catch {
+    return out;
+  }
+  const files = [];
+  for (const n of names) {
+    const path = join(home, n);
+    try {
+      const st = lstatSync(path);
+      if (st.isFile()) files.push({ path, t: st.mtimeMs });
+    } catch {}
+  }
+  files.sort((a, b) => b.t - a.t || b.path.localeCompare(a.path));
+  files.forEach(({ path }, i) => {
+    if (i < keep) out.push({ path, action: 'keep', why: `one of the newest ${keep} backups` });
+    else if (inUse(path, claims)) out.push({ path, action: 'keep', why: 'a process uses it' });
+    else {
+      if (!dryRun) rmSync(path, { force: true });
+      out.push({ path, action: 'remove', why: `older than the newest ${keep} backups` });
+    }
+  });
+  return out;
+}
+
+// The roots come from env (STAM_HOME, STAM_GATE_DEPS, STAM_SWEEP_MAIN), so a test names its own. The disk
+// gain is the df difference on the stam home, since hard links make du overcount.
+export function pruneCaches({ dryRun = false, env = process.env, claims } = {}) {
+  const held = claims ?? claimedPaths(env.STAM_SWEEP_PROC || '/proc', pidsOf(env));
+  const home = env.STAM_HOME || join(homedir(), '.local/share/stam');
+  const gate = env.STAM_GATE_DEPS || join(env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'stam-gate-deps');
+  const main = env.STAM_SWEEP_MAIN || join(homedir(), 'projects/stam2');
+  const keys = currentKeys(main);
+  let before = null;
+  try {
+    before = freeBytes(existsSync(home) ? home : homedir());
+  } catch {}
+  const results = [
+    ...pruneDepsCache(join(home, 'deps'), { keys, claims: held, dryRun }),
+    ...pruneDepsCache(gate, { keys, claims: held, dryRun }),
+    ...pruneBackups(home, { claims: held, dryRun }),
+  ];
+  let freed = null;
+  try {
+    if (before != null && !dryRun) freed = freeBytes(existsSync(home) ? home : homedir()) - before;
+  } catch {}
+  return { results, freed };
+}
+
 export function install(env = process.env) {
   const dir = env.STAM_SWEEP_UNIT_DIR || join(homedir(), '.config/systemd/user');
   mkdirSync(dir, { recursive: true });
@@ -379,7 +643,11 @@ function main(args) {
     console.error('--hours needs a number');
     process.exit(2);
   }
-  for (const r of sweep({ hours, reviewHours, dryRun, env })) console.log(`${r.action === 'remove' && dryRun ? 'would remove' : r.action === 'remove' ? 'removed' : 'kept'} ${r.path} (${r.why})`);
+  const show = (r) => console.log(`${r.action === 'remove' && dryRun ? 'would remove' : r.action === 'remove' ? 'removed' : 'kept'} ${r.path} (${r.why})`);
+  for (const r of sweep({ hours, reviewHours, dryRun, env })) show(r);
+  const { results, freed } = pruneCaches({ dryRun, env });
+  for (const r of results) show(r);
+  if (freed != null && results.some((r) => r.action === 'remove')) console.log(`freed ${(freed / 2 ** 20).toFixed(0)} MiB on the stam disk (df)`);
 }
 
 // import.meta.url is the real path; argv[1] is as typed, so a symlinked checkout would run nothing.

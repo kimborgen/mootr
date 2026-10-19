@@ -17,6 +17,7 @@ import { settings, REDACTED, patchedSettingsText, patchTouchedText, writeSetting
 import { noteInvalid } from './accounts.ts';
 import { STAM_HOME } from './config.ts';
 import { sharedFilesChanged } from './settings-sync.ts';
+import { noteSettingsChange } from './permission-modes.ts';
 import * as budgets from './budgets.ts';
 import { unifiedDiff } from './textdiff.ts';
 import { adapters } from './adapters/index.ts';
@@ -507,7 +508,9 @@ function answerSettings(r: db.PermissionRequest, a: db.Agent, approve: boolean, 
       patchLocalKeys(split.local);
       applied = true;
     } else {
+      const before = settings().permissionModes;
       writeSettingsText(next.text);
+      noteSettingsChange(before, `${a.name}, approved by ${by}`);
       void budgets.evaluateAll();
       applied = true;
     }

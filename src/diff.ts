@@ -9,6 +9,8 @@ import { basename, join } from 'node:path';
 import type { ServerResponse } from 'node:http';
 import { STAM_HOME } from './config.ts';
 import { settings } from './settings.ts';
+import * as db from './db.ts';
+import { newestReview, reviewAgentOfComment, reviewVerdict } from './sources/github.ts';
 import { SAFE_HEADERS, TEXT_CAP, denied, typeByExt } from './files.ts';
 
 export class DiffError extends Error {
@@ -368,6 +370,39 @@ export async function repos(): Promise<{ repos: { name: string; github: string |
   return { repos: out };
 }
 
+// The stam reviewer's verdict the diff header shows (S-1917), from the poller's snapshot of the watched PR, never a GitHub call.
+// `head` is the commit the `stam/review` status sits on (the snapshot's `checksHead`), and `stale` says it isn't the head the
+// list shows. The snapshot keeps the statuses of one head only, so once the poller sees a new head a verdict on the old one is
+// gone and `review` is null; `stale` is only true in the window where the list's head and the poller's differ.
+export type ReviewVerdict = { verdict: 'approve' | 'changes'; by: string | null; summary: string | null; at: string | null; head: string; stale: boolean };
+
+// Pure: the verdict in a watch snapshot (`state`, already parsed; null for none) against the head the list shows.
+// null when there is no `stam/review` status, or it is pending. The summary is text from the status description
+// ("Review (AGENT): approve. SUMMARY"), cut to GitHub's description length, and is never markup.
+export function reviewOf(state: any, shownHead: string): ReviewVerdict | null {
+  if (!state || typeof state.checksHead !== 'string') return null;
+  const sts = Array.isArray(state.headStatuses) ? state.headStatuses : [];
+  const newest = newestReview(sts);
+  const verdict = reviewVerdict(sts);
+  const at = (x: any) => String(x.updated_at ?? x.created_at ?? '');
+  if (!verdict) return null;
+  const desc = typeof newest.description === 'string' ? newest.description : '';
+  const summary = desc.replace(/^Review \([^)]*\):\s*(?:approve|request_changes)\.?\s*/, '').trim().slice(0, 200);
+  return { verdict, by: reviewAgentOfComment(desc), summary: summary || null, at: at(newest) || null, head: state.checksHead, stale: state.checksHead !== shownHead };
+}
+
+// The review of a repo's PR: its watch snapshot is kept after a merge or a close (nothing deletes watch_state), so a merged
+// PR still shows its last verdict. null when the repo has no GitHub origin, the PR isn't watched, or nothing is posted.
+export async function reviewFor(repo: string, pr: number, shownHead: string): Promise<ReviewVerdict | null> {
+  try {
+    const slug = githubSlug((await run(['config', '--get', 'remote.origin.url'], { cwd: checkoutOf(repo) })).stdout);
+    const row = slug ? db.getWatchState(`github:${slug}#${pr}`) : undefined;
+    return row ? reviewOf(JSON.parse(row.state), shownHead) : null;
+  } catch {
+    return null;
+  }
+}
+
 // What the two routes share: the human check, the parameters, and the answer. A list returns its JSON; a file
 // is written to `res` and the result is undefined.
 export async function request(kind: 'list' | 'file' | 'repos', human: boolean, q: URLSearchParams, res: ServerResponse): Promise<object | undefined> {
@@ -377,7 +412,10 @@ export async function request(kind: 'list' | 'file' | 'repos', human: boolean, q
   const pr = q.get('pr') ?? '';
   if (!repo) throw new DiffError(400, 'repo is required');
   if (!/^[1-9]\d{0,8}$/.test(pr)) throw new DiffError(400, 'pr must be a PR number');
-  if (kind === 'list') return list(repo, Number(pr));
+  if (kind === 'list') {
+    const out = await list(repo, Number(pr));
+    return { ...out, review: await reviewFor(repo, Number(pr), out.head) };
+  }
   const side = q.get('side') ?? 'head';
   if (side !== 'base' && side !== 'head') throw new DiffError(400, 'side must be base or head');
   const want: { head?: string; base?: string } = {};

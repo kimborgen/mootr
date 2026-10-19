@@ -31,6 +31,7 @@ export const stories: Story[] = [{
   code: ['web/src/ui/menu.tsx#showMenu', 'web/src/ui/menu.tsx#MenuItem', 'web/src/ui/menu.tsx#MenuLayer', 'web/src/ui/menu.tsx#hideMenu'],
   rules: [
     'A popover can open upward from its trigger (`showPopover`\'s `above`), capped to the room above it, as the prompt input\'s recipient menu does; it never runs off the viewport.',
+    'A row that opens another menu sets `popup`, which announces it (`aria-haspopup`); `showMenu`\'s `restore` names where Escape returns focus when it isn\'t the trigger, as the Work row menu does for its row (S-1683). A contextmenu event inside a menu is cancelled, so the browser\'s own menu never opens over it, except in a text field, which keeps paste and spelling (S-2073).',
     'Rows are `--size-row-menu` (28 px) on `--menu-bg` with `--radius-md` and `--shadow-float`, at `--z-popover` (' + ds('Modals and menus') + ').',
     'It enters at `--duration-base` with `--ease-out` and exits at 0 ms: a fading menu blocks what the user already chose to act on (' + ds('Never animated') + ').',
     'On a phone a row is at least `--size-hit-touch` (44 px), and the tap on the scrim that closes the sheet presses nothing under it.',

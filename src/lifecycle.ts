@@ -23,6 +23,7 @@ import { isReviewerType } from './agent-types.ts';
 import { admit, heldBy, type TurnKind } from './admission.ts';
 import { schedulePush, queueNotice, tellAnywhere, queuedNoticeCount, onRestWake, tellStopped } from './mail.ts';
 import { failLaunch } from './test-hooks.ts';
+import { switchFailed, type SwitchUndo } from './permission-modes.ts';
 import { registry } from './registry.ts';
 import { settings } from './settings.ts';
 import { chiefOfStaff, syncChildrenWaits } from './org.ts';
@@ -38,7 +39,8 @@ type Pending =
   // uncommitted worktree changes. `at` (epoch ms) is the deadline for the final round: past it,
   // the sweep archives regardless of the agent's turn. `tries` counts deadline retries.
   | { type: 'archive'; force?: boolean; discard?: boolean; at?: number; tries?: number; midTurn?: boolean; waited?: boolean }
-  | { type: 'restart'; reason: string }
+  // `permission`: a mode switch's undo, applied if the relaunch fails (S-1967).
+  | { type: 'restart'; reason: string; permission?: SwitchUndo }
   | { type: 'compact'; instructions?: string; prompt?: string; reason: string }
   // Set on a shut-down agent whose terminal went down with the tmux server; see recoverLost.
   // `interrupted`: the operation id of a compaction a daemon restart cut short (S-358), not a context exit.
@@ -406,7 +408,12 @@ async function runPending(a: db.Agent, p: Pending): Promise<string | void> {
   if (p.type === 'recover') return;
   if (p.type === 'restart') {
     quitHarness(a, `restarting: ${p.reason}`);
-    await startHarness(db.getAgent(a.id)!, render('restarted', { reason: p.reason }), true, 'restart');
+    try {
+      await startHarness(db.getAgent(a.id)!, render('restarted', { reason: p.reason }), true, 'restart');
+    } catch (e) {
+      if (p.permission) switchFailed(a.id, p.permission, e);
+      throw e;
+    }
   }
 }
 
@@ -1515,8 +1522,8 @@ export async function upgradeHarness(name: string, command?: string): Promise<{ 
   return { from, to, output, agents };
 }
 
-export function restart(a: db.Agent, reason: string): Promise<string> {
-  return whenIdle(a, { type: 'restart', reason }, render('restart-prepare', { reason }));
+export function restart(a: db.Agent, reason: string, permission?: SwitchUndo): Promise<string> {
+  return whenIdle(a, { type: 'restart', reason, ...(permission ? { permission } : {}) }, render('restart-prepare', { reason }));
 }
 
 // --- Coming back after the tmux server went down (a reboot, or the server crashing) ---

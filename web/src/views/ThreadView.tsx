@@ -38,7 +38,9 @@ export function composeReply(all: Staged[], suggested: SuggestedPick[], t: strin
   const answering = all.some((x) => !isAct(x)) && !all.some((x) => x.kind === 'perm')
   const answers = [...all.filter((x) => !isAct(x)).map((x) => answerOf(x as Answered)), ...(answering ? suggested : []).map((p) => answerOf({ mailId: p.mailId, q: p.q, body: mb.pickText(p.labels, true) }))]
   const acts = all.filter((x): x is Extract<Staged, { kind: 'itsa' }> => x.kind === 'itsa')
-  return { body: [...answers, acts.length ? '' : t].filter(Boolean).join('\n\n'), perms: all.filter((x): x is Extract<Staged, { kind: 'perm' }> => x.kind === 'perm'), acts }
+  // The mails the answers are on: their askers are the reply's recipients (replyRecipients).
+  const answered = [...all.filter((x) => !isAct(x)).map((x) => x.mailId), ...(answering ? suggested : []).map((p) => p.mailId)]
+  return { body: [...answers, acts.length ? '' : t].filter(Boolean).join('\n\n'), perms: all.filter((x): x is Extract<Staged, { kind: 'perm' }> => x.kind === 'perm'), acts, answered }
 }
 const answerOf = (s: Answered) => [s.q ? `> ${s.q}` : '', s.body, s.note ? mb.noteText(s.note) : ''].filter(Boolean).join('\n\n')
 
@@ -73,6 +75,18 @@ const agent = (id: string) => id !== 'human' && !id.startsWith('system:')
 export function recipients(mails: Mail[]) {
   const senders = [...new Set(mails.map((m) => m.from_id))].filter(agent)
   return senders.length ? senders : [...new Set(mails.flatMap((m) => m.recipients.map((r) => r.id)))].filter(agent)
+}
+
+// The agents who asked the decisions a reply answers (S-1366): a later relay in the thread never gets an
+// answer meant for its asker. Empty when the reply answers no decision of an agent's.
+export function askersOf(mails: Mail[], answered: string[]) {
+  return [...new Set(answered.map((id) => mails.find((m) => m.id === id)?.from_id))].filter((id): id is string => !!id && agent(id))
+}
+
+// Whom a reply goes to: its askers, else the agents who wrote in the thread.
+export function replyRecipients(mails: Mail[], answered: string[]) {
+  const asked = askersOf(mails, answered)
+  return asked.length ? asked : recipients(mails)
 }
 
 export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
@@ -147,7 +161,6 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
     box()?.restore(d, 'thread:' + tid)
   }, [tid])
 
-  const to = recipients(mails)
   const shown = useMemo(() => (pending.length ? [...mails, ...pending] : mails), [mails, pending])
 
   // The latest mail asking the human to act on an ITSA, and what that ITSA offers now.
@@ -267,6 +280,8 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
   // What the reply sends: the staged answers in the order clicked, the pick blocks nobody touched with their
   // recommended options (S-1516), then the typed text.
   const compose = (t: string) => composeReply([...staged.values()], sugg.filter((p) => !staged.has(p.key)), t)
+  // Who the reply goes to: the askers of the decisions it answers (S-1366), else the thread's writers.
+  const to = replyRecipients(mails, compose('').answered)
 
   // Once the daemon accepts a send (its row is `client_id`), the thread archives and the next mail
   // opens, unless anything else waits in this thread's strip: a draft, a failed row, or another
@@ -285,6 +300,8 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
     [...mails.map((m) => m.permission), ...getData().perms].find((x): x is Permission => !!x && x.id === id && x.kind === 'input')
   async function send({ text: t, files, client_id, cc, itsa }: SendPayload) {
     const { body, perms, acts } = compose(t)
+    // A reply to decisions reaches their askers only (S-2064): the server adds no ITSA participant to it.
+    const only = askersOf(mails, compose(t).answered)
     const answersOnly = !compose('').body
     setSkipped([])
     const before = staged
@@ -338,7 +355,7 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
     try {
       // The human names no one: the recipients come from the thread, so one nobody can mail any more is skipped, not refused (S-603).
       // A cc picked in the box (S-1464) joins the thread's own recipients, and an ITSA pick files the reply on it.
-      await api('POST', '/api/mail', { from: 'human', to: [...new Set([...to, ...(cc ?? [])])], inferred: to, reply_to: replyTo, body: reply, attachments: files.map((f) => ({ name: f.name, content_b64: f.content_b64 })), ...(itsa ? { itsa } : {}), client_id })
+      await api('POST', '/api/mail', { from: 'human', to: [...new Set([...to, ...(cc ?? [])])], inferred: to, ...(only.length ? { only } : {}), reply_to: replyTo, body: reply, attachments: files.map((f) => ({ name: f.name, content_b64: f.content_b64 })), ...(itsa ? { itsa } : {}), client_id })
     } catch (e) {
       // The reply leaves the thread again; the prompt input's strip keeps the text, to put back in
       // the box, and onSubmit's undo brings back the staged answers that weren't sent.

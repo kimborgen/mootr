@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
-  chips, currentFile, estimateLines, hiddenSummary, isShown, readViewed, shownFiles, splitPath, startFilter, stepChange, stepFile, toggleClass, toggleFile, viewedKey, withViewed, writeViewed,
+  chips, currentFile, reviewChip, estimateLines, hiddenSummary, isShown, readViewed, shownFiles, splitPath, startFilter, stepChange, stepFile, toggleClass, toggleFile, viewedKey, withViewed, writeViewed,
   type DiffFileItem,
 } from './diffModel'
 
@@ -135,5 +135,21 @@ describe('small helpers', () => {
     expect(estimateLines(f('x', null, { binary: true }))).toBe(2)
     expect(estimateLines(f('x', null, { additions: 5000 }))).toBe(400)
     expect(estimateLines(f('x', null, { additions: 2, deletions: 0 }))).toBe(10)
+  })
+})
+
+describe('reviewChip (S-1917)', () => {
+  const r = (x: object = {}) => ({ verdict: 'approve' as const, by: 'rev-1', summary: 'ok', at: null, head: 'a'.repeat(40), stale: false, ...x })
+  it('maps each state', () => {
+    expect(reviewChip(r()).tone).toBe('ok')
+    expect(reviewChip(r({ verdict: 'changes' })).tone).toBe('bad')
+    const old = reviewChip(r({ stale: true }))
+    expect(old.tone).toBe('none')
+    expect(old.label).toContain('another head')
+    expect(reviewChip(null)).toMatchObject({ tone: 'none', label: 'no review' })
+    expect(reviewChip(undefined).label).toBe('no review')
+  })
+  it('names the reviewer only when known', () => {
+    expect(reviewChip(r({ by: null })).detail).not.toContain(' by ')
   })
 })

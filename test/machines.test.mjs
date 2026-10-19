@@ -220,6 +220,20 @@ test('warnResources mails the root disk once per crossing: re-armed only below 8
   assert.equal(mails.length, 2);
 });
 
+test('warnResources: the disk line is settings diskPct, re-armed 5 points below it', () => {
+  const mails = [];
+  const send = (subject) => mails.push(subject);
+  const cfg = { ...CFG, diskPct: 70 };
+  const t0 = 90_000_000;
+  // An earlier test left the warning disarmed: a low reading arms it.
+  assert.deepEqual(m.warnResources(sample({ diskPct: 10 }), cfg, send, t0 - MIN), []);
+  assert.deepEqual(m.warnResources(sample({ diskPct: 69 }), cfg, send, t0), []);
+  assert.deepEqual(m.warnResources(sample({ diskPct: 72 }), cfg, send, t0 + MIN), ['disk']);
+  assert.deepEqual(m.warnResources(sample({ diskPct: 66 }), cfg, send, t0 + 2 * MIN), []);
+  assert.deepEqual(m.warnResources(sample({ diskPct: 64 }), cfg, send, t0 + 3 * MIN), []);
+  assert.deepEqual(m.warnResources(sample({ diskPct: 71 }), cfg, send, t0 + 4 * MIN), ['disk']);
+});
+
 test('warnResources: a failed statfs read neither mails nor re-arms the disk warning', () => {
   const mails = [];
   const send = (subject) => mails.push(subject);

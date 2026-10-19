@@ -33,9 +33,9 @@ const item = (f: FixtureFile): DiffFileItem => {
 }
 
 // The routes of a PR: its list and each file's sides, keyed as the stories stub wants them (the exact request).
-export function diffRoutes(files: FixtureFile[]): Record<string, unknown> {
+export function diffRoutes(files: FixtureFile[], review?: unknown): Record<string, unknown> {
   const routes: Record<string, unknown> = {}
-  routes[`GET ${diffListUrl(REPO, PR)}`] = { repo: REPO, pr: PR, head: HEAD, base: BASE, mergeBase: BASE, files: files.map(item) }
+  routes[`GET ${diffListUrl(REPO, PR)}`] = { repo: REPO, pr: PR, head: HEAD, base: BASE, mergeBase: BASE, files: files.map(item), ...(review === undefined ? {} : { review }) }
   for (const f of files) {
     const it = item(f)
     if (it.denied) continue

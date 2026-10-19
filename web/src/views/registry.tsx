@@ -24,6 +24,7 @@ import { ImageTabView } from './ImageTabView'
 import { imageSet } from '../image-tab'
 import { InventoryView, TypeInventoryView } from './InventoryView'
 import { TypeView } from './TypeView'
+import { ViewBoundary } from './ViewBoundary'
 import { ItsaView, itsaTitles } from './ItsaView'
 import { Board } from '../itsa/Board'
 import { StatusGlyph } from '../itsa/itsa'
@@ -181,9 +182,15 @@ function UsageHosted() {
   return <UsageView shown={shown} />
 }
 
+// Owns a view's element for as long as its portal lives, outside the boundary: a view that
+// throws unmounts below it, and its error must stay in the element it showed in.
+export function ViewHost({ viewKey: key, children }: { viewKey: string; children: ReactNode }) {
+  useEffect(() => () => destroyViewElement(key), [key])
+  return <ViewBoundary viewKey={key}>{children}</ViewBoundary>
+}
+
 function Content({ viewKey: key }: { viewKey: string }) {
   useData()
-  useEffect(() => () => destroyViewElement(key), [key])
   const id = key.slice(key.indexOf(':') + 1)
   if (key.startsWith('agent:')) return <TerminalView viewKey={key} id={id} />
   if (key.startsWith('shell:')) {
@@ -218,6 +225,6 @@ function Content({ viewKey: key }: { viewKey: string }) {
 
 export function ViewPortals() {
   const keys = useMadeViews()
-  return <>{keys.map((key) => createPortal(<Content viewKey={key} />, viewElement(key), key))}</>
+  return <>{keys.map((key) => createPortal(<ViewHost viewKey={key}><Content viewKey={key} /></ViewHost>, viewElement(key), key))}</>
 }
 

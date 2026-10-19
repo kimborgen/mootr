@@ -96,6 +96,9 @@ export interface SendInput {
   // The mail gate (S-983): an agent's mail to the human is checked by the decision model before it
   // is stored, and a fail refuses it. This reason sends it anyway; it is stored on the mail and shown to the human.
   override?: string;
+  // A human reply that answers decisions (S-1366, S-2064): the askers, and nobody else. In an ITSA's thread the
+  // participants aren't added, so a relay that joined the thread gets nothing; `to` still carries any recipient the human adds.
+  only?: string[];
   // The human sent this without picking a recipient, so it went to the default top-level agent (S-1462):
   // the stored mail carries the routing-uncertain note for the recipient. Ignored from anyone but the human.
   routing_uncertain?: boolean;
@@ -309,7 +312,7 @@ export async function sendMail(input: SendInput): Promise<SentMail> {
     // An answer to the user's own mail reaches the user only when it names them, like any comment: mail between
     // agents in a thread the user started stays in the thread, out of the user's inbox (S-542; S-308 added the user always).
     // An agent's reply posts only where the agent may post (S-480); stam's own mail stands in as an agent and isn't checked.
-    return postRouted(parent.itsa_id, { by: from!, to: input.to, inferred: input.inferred, subject: input.subject, body: input.body, attachments: input.attachments, reply_to: parent.id, override: input.override, from_stam: input.from_stam }, input.from_stam ? undefined : via);
+    return postRouted(parent.itsa_id, { by: from!, to: input.to, inferred: input.inferred, only: input.only, subject: input.subject, body: input.body, attachments: input.attachments, reply_to: parent.id, override: input.override, from_stam: input.from_stam }, input.from_stam ? undefined : via);
   };
   // The mail replied to may live only on a peer (its recipient's machine, S-359). A peer's
   // forwarded copy already carries its thread, so it doesn't ask again. An agent's reply asks

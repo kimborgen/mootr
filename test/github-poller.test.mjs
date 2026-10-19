@@ -389,3 +389,26 @@ test('a first poll of a closed PR or an issue does not mirror', async () => {
   assert.equal(github.mirrorsHead(null, closed), false, 'a closed PR is not mirrored on first sight');
   assert.equal(github.mirrorsHead(null, { events: [], state: { type: 'issue', state: 'open' } }), false, 'an issue has no head to mirror');
 });
+
+test('a new head whose status fetch fails keeps nothing of the old head: no copied verdict (S-1917)', async () => {
+  seedOpenPr('sha1');
+  const rev = { context: 'stam/review', state: 'success', description: 'Review (rev-1): approve. fine', updated_at: '2026-10-19T10:00:00Z', created_at: '2026-10-19T10:00:00Z' };
+  fake.update({ statuses: { 'o/r@sha1': { state: 'success', statuses: [rev] } } });
+  let held = (await poll('github:o/r#1', { state: null, etags: {} })).held;
+  assert.equal(held.state.checksHead, 'sha1');
+  assert.equal(github.reviewVerdict(held.state.headStatuses), 'approve');
+  // A push, and the new head's check calls fail: the snapshot moves to sha2 with nothing, not sha1's approve.
+  seedOpenPr('sha2');
+  fake.update({ failChecks: { 'o/r@sha2': true } });
+  let r = await poll('github:o/r#1', held);
+  assert.equal(r.state.checksHead, 'sha2');
+  assert.deepEqual(r.state.headStatuses, []);
+  assert.equal(github.reviewVerdict(r.state.headStatuses), null);
+  // Same head, a later failed fetch still keeps what the snapshot saw of it.
+  fake.update({ failChecks: { 'o/r@sha2': false }, statuses: { 'o/r@sha2': { state: 'success', statuses: [{ ...rev, updated_at: '2026-10-19T11:00:00Z' }] } } });
+  held = (await poll('github:o/r#1', r.held)).held;
+  assert.equal(github.reviewVerdict(held.state.headStatuses), 'approve');
+  fake.update({ failChecks: { 'o/r@sha2': true } });
+  r = await poll('github:o/r#1', held);
+  assert.equal(github.reviewVerdict(r.state.headStatuses), 'approve');
+});

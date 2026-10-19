@@ -17,7 +17,21 @@ export interface DiffFileItem {
   headBlob?: string
   baseBlob?: string
 }
-export interface DiffList { repo: string; pr: number; head: string; base: string; mergeBase: string; files: DiffFileItem[] }
+// The stam reviewer's verdict on the PR (S-1917, `review` of the list): absent or null when none is known.
+export interface DiffReview { verdict: 'approve' | 'changes'; by: string | null; summary: string | null; at: string | null; head: string; stale: boolean }
+export interface DiffList { repo: string; pr: number; head: string; base: string; mergeBase: string; files: DiffFileItem[]; review?: DiffReview | null }
+
+// What the header's verdict chip says: its text, its look (`ok`, `bad`, or `none` for muted, which a verdict on another head
+// always is: the list's head can lag or lead the poller's) and the longer line for its title and sheet. The wording never claims more than the `stam/review` status backs.
+export interface ReviewChip { tone: 'ok' | 'bad' | 'none'; label: string; by: string | null; detail: string }
+export function reviewChip(r: DiffReview | null | undefined): ReviewChip {
+  if (!r) return { tone: 'none', label: 'no review', by: null, detail: 'No stam review has been posted on this PR.' }
+  const word = r.verdict === 'approve' ? 'approved' : 'changes requested'
+  const who = r.by ? ` by ${r.by}` : ''
+  const head = r.stale ? ` on another head (${r.head.slice(0, 7)}), not the one shown` : ` on the head shown (${r.head.slice(0, 7)})`
+  const detail = `${word[0].toUpperCase()}${word.slice(1)}${who}${head}.${r.summary ? ` ${r.summary}` : ''}`
+  return { tone: r.stale ? 'none' : r.verdict === 'approve' ? 'ok' : 'bad', label: r.stale ? `${word} · another head` : word, by: r.by, detail }
+}
 
 export const CLASSES: FileClass[] = ['tests', 'lockfiles', 'generated', 'docs']
 export const CLASS_LABEL: Record<FileClass, string> = { tests: 'Tests', lockfiles: 'Lockfiles', generated: 'Generated', docs: 'Docs' }

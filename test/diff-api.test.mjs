@@ -335,3 +335,54 @@ test('the checkout is never written to', async () => {
   assert.equal(git(checkout, 'for-each-ref').split('\n').filter((l) => /stam-diff|pull/.test(l)).length, 0);
   assert.ok(existsSync(join(stamHome, 'cache', 'diff', 'app.git', 'HEAD')));
 });
+
+const st = (state, description, at = '2026-10-19T10:00:00Z', context = 'stam/review') => ({ context, state, description, updated_at: at, created_at: at });
+
+test('the review verdict (S-1917): reviewOf maps the newest stam/review status, and stale compares against the head the list shows', () => {
+  const snap = (statuses, checksHead = 'aaa') => ({ checksHead, headStatuses: statuses });
+  const ok = d.reviewOf(snap([st('success', 'Review (rev-1): approve. Looks <b>good</b> to me')]), 'aaa');
+  assert.deepEqual(ok, { verdict: 'approve', by: 'rev-1', summary: 'Looks <b>good</b> to me', at: '2026-10-19T10:00:00Z', head: 'aaa', stale: false });
+  const old = d.reviewOf(snap([st('failure', 'Review (rev-1): request_changes. Missing a test')]), 'bbb');
+  assert.equal(old.verdict, 'changes');
+  assert.equal(old.stale, true, 'compared against the head the list shows, not the poller head');
+  assert.equal(old.head, 'aaa');
+  // The newest of several wins; other contexts and pending ones count for nothing.
+  const newest = d.reviewOf(snap([st('failure', 'Review (a): request_changes. no', '2026-10-19T09:00:00Z'), st('success', 'Review (b): approve. ok', '2026-10-19T11:00:00Z'), st('failure', 'x', '2026-10-19T12:00:00Z', 'stam/gates')]), 'aaa');
+  assert.equal(newest.by, 'b');
+  assert.equal(d.reviewOf(snap([st('pending', 'Review (a): approve. wait')]), 'aaa'), null);
+  assert.equal(d.reviewOf(snap([st('success', 'ok', undefined, 'stam/gates')]), 'aaa'), null);
+  assert.equal(d.reviewOf(snap([]), 'aaa'), null);
+  assert.equal(d.reviewOf(null, 'aaa'), null);
+  assert.equal(d.reviewOf({ headStatuses: [st('success', 'x')] }, 'aaa'), null, 'no checks head, no verdict');
+  // A description that is not the reviewer's own format still shows, without an author.
+  const plain = d.reviewOf(snap([st('success', 'approved by hand')]), 'aaa');
+  assert.equal(plain.by, null);
+  assert.equal(plain.summary, 'approved by hand');
+});
+
+test('reviewFor reads the watch snapshot of the repo\'s GitHub PR; an unwatched PR or a non-GitHub origin has none', async () => {
+  const gh = join(root, 'gh-checkout');
+  git(root, 'init', '-q', '-b', 'main', gh);
+  git(gh, 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git');
+  setSettings({ itsa: { repos: { app: checkout, gh } } });
+  const db = await import('../src/db.ts');
+  assert.equal(await d.reviewFor('gh', 5, 'aaa'), null, 'unwatched');
+  db.setWatchState('github:acme/widgets#5', { checksHead: 'aaa', headStatuses: [st('success', 'Review (rev-1): approve. fine')] }, {});
+  const r = await d.reviewFor('gh', 5, 'aaa');
+  assert.equal(r.verdict, 'approve');
+  assert.equal(r.stale, false);
+  assert.equal(await d.reviewFor('gh', 6, 'aaa'), null, 'another PR');
+  assert.equal(await d.reviewFor('app', 5, 'aaa'), null, 'origin is not on GitHub');
+  assert.equal(await d.reviewFor('nope', 5, 'aaa'), null, 'unknown repo');
+  setSettings();
+});
+
+test('a status description GitHub cut at 140 characters ("...") still yields the reviewer and a summary (S-1917)', async () => {
+  const text = `Review (rev-1): request_changes. ${'x'.repeat(200)}`;
+  const desc = `${text.slice(0, 137)}...`;
+  assert.equal(desc.length, 140);
+  const r = d.reviewOf({ checksHead: 'aaa', headStatuses: [st('failure', desc)] }, 'aaa');
+  assert.equal(r.by, 'rev-1');
+  assert.equal(r.verdict, 'changes');
+  assert.ok(r.summary.endsWith('...') && r.summary.startsWith('xxx'), r.summary);
+});

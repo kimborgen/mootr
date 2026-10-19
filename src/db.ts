@@ -58,8 +58,12 @@ export interface Agent {
   tokens_after_compaction: number | null;
   // JSON from registry.capabilitiesFor at spawn.
   capabilities: string | null;
-  // 'auto' (default) or 'bypass'; only the human sets it, from the web UI.
+  // 'default', 'auto' (the default), or 'bypass'. See permission-modes.ts.
   permission_mode: string;
+  // Where permission_mode came from: 'settings' (Settings › permission modes, followed when
+  // they change) or 'manual' (the human picked it for this agent, and it stays). Null for an
+  // agent from before S-1967: see permissionSource.
+  permission_source: string | null;
   // JSON: who a child may reach, set by its parent. See org.ts.
   visibility: string | null;
   // How much this agent hears about its children's finished turns: 'turn', 'tree-idle',
@@ -728,7 +732,7 @@ export function open(): DatabaseSync {
   try {
     db.exec('ALTER TABLE peer_agents ADD COLUMN busy_at TEXT');
   } catch {}
-  for (const col of ['workspace TEXT', 'personal_workspace TEXT', 'standing INTEGER NOT NULL DEFAULT 0', 'pending_action TEXT', 'idle_since TEXT', 'context_level INTEGER NOT NULL DEFAULT 0', 'tokens_after_compaction INTEGER', 'capabilities TEXT', "permission_mode TEXT NOT NULL DEFAULT 'auto'", 'visibility TEXT', 'child_notices TEXT', 'last_message TEXT', 'usage_last TEXT', 'kind TEXT', 'first_prompt TEXT', 'type TEXT', 'forwarded_to TEXT', 'token_hash TEXT']) {
+  for (const col of ['workspace TEXT', 'personal_workspace TEXT', 'standing INTEGER NOT NULL DEFAULT 0', 'pending_action TEXT', 'idle_since TEXT', 'context_level INTEGER NOT NULL DEFAULT 0', 'tokens_after_compaction INTEGER', 'capabilities TEXT', "permission_mode TEXT NOT NULL DEFAULT 'auto'", 'visibility TEXT', 'child_notices TEXT', 'last_message TEXT', 'usage_last TEXT', 'kind TEXT', 'first_prompt TEXT', 'type TEXT', 'forwarded_to TEXT', 'token_hash TEXT', 'permission_source TEXT']) {
     try {
       db.exec(`ALTER TABLE agents ADD COLUMN ${col}`);
     } catch {}

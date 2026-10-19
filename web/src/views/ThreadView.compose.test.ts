@@ -22,6 +22,10 @@ describe('composeReply', () => {
     expect(r.body).toBe('')
     expect(r.perms).toHaveLength(1)
   })
+  it('names the mails its answers are on, so the reply goes to their askers (S-1366)', () => {
+    expect(composeReply([choice] as never, [pick], 'thanks').answered).toEqual(['m2', 'm1'])
+    expect(composeReply([{ kind: 'itsa', mailId: 'm4', itsa: 'i1', action: 'approve', label: 'Approve' }] as never, [pick], '').answered).toEqual([])
+  })
   it('adds nothing to an ITSA action, which takes the typed text as its comment', () => {
     const act = [{ kind: 'itsa', mailId: 'm4', itsa: 'i1', action: 'approve', label: 'Approve' }] as never
     expect(composeReply(act, [pick], 'ok').body).toBe('')

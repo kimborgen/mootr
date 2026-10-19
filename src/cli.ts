@@ -24,7 +24,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const JANITOR_TIMEOUT_MS = Number(process.env.STAM_JANITOR_TIMEOUT_MS) || 2 * 60_000;
 
 // The spawn lines of USAGE, printed alone when spawn gets no NAME or --help.
-const SPAWN_USAGE = named(`  stam spawn NAME [--type T] [--var KEY=VALUE]... [--role TEXT] [--preset P | --harness claude|opencode|codex --model M --effort E] [--cwd DIR] [--parent AGENT] [--itsa ID|KEY] [--machine M]
+const SPAWN_USAGE = named(`  stam spawn NAME [--type T] [--var KEY=VALUE]... [--role TEXT] [--preset P | --harness claude|opencode|codex --model M --effort E] [--cwd DIR] [--parent AGENT] [--itsa ID|KEY] [--machine M] [--urgent red-main|deploy-hold|approved-pr]
              [--worktree [--branch B] [--base REF] | --workspace-script CMD | --workspace-instructions TEXT] [--standing] [--workspace[=NAME]  (the name only with "=", never a separate word)] [PROMPT]
 `);
 
@@ -499,6 +499,7 @@ async function main() {
           var: { type: 'string', multiple: true },
           itsa: { type: 'string' },
           machine: { type: 'string' },
+          urgent: { type: 'string' },
           'chief-of-staff': { type: 'boolean' },
           worktree: { type: 'boolean' },
           branch: { type: 'string' },
@@ -536,6 +537,7 @@ async function main() {
         const who = (x: { name: string }) => x.name;
         return console.log(`started ring ${a.ring.name} (${a.ring.id}); members ${a.members.map(who).join(', ')}${a.moderator ? `; moderator ${a.moderator.name}` : ''}; result by mail; see: stam ring ${a.ring.name}`);
       }
+      if (a.queued) return console.log(`queued ${a.name}: place ${a.place} of ${a.queue_length} for a developer slot on ${a.machine} (${a.cap} in use: ${a.holders.join(', ')}); it starts when a slot frees`);
       return console.log(`spawned ${a.name} (${a.id}); attach with: stam attach ${a.name}`);
     }
     case 'ls': {

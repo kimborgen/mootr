@@ -111,6 +111,7 @@ peer-busy
 peer-remember
 peer-ui-writes-unit
 permission-dialog-mail
+permission-modes-unit
 permission-requests-index
 permission-typed
 pr-open-scope
@@ -290,6 +291,8 @@ decision-mail-peers
 deferred
 delegate-ask
 permission-asks
+permission-modes
+permission-modes-unit
 delegate-peer-parent
 files-unit
 diff-api
@@ -388,6 +391,7 @@ mail-read-cited
 mail-search
 mail-threading
 mail-tools-unit
+mail-reply-only-unit
 threads-with
 mail-title
 mail-title-peers
@@ -649,6 +653,7 @@ cmd() {
   case "$1" in
     mail-threading) echo "node --test test/mail-threading.test.mjs" ;;
     mail-tools-unit) echo "node --test test/mail-tools.test.mjs" ;;
+    mail-reply-only-unit) echo "node --test test/mail-reply-only.test.mjs" ;;
     threads-with) echo "node --test test/threads-with.test.mjs" ;;
     client-dedup-unit) echo "node --test test/client-dedup.test.mjs" ;;
     write-timeout-unit) echo "node --test test/write-timeout.test.mjs" ;;
@@ -712,6 +717,7 @@ cmd() {
     auto-archive-repair) echo "node --test test/auto-archive-repair.test.mjs" ;;
     permission-dialog-mail) echo "node --test test/permission-dialog-mail.test.mjs" ;;
     permission-typed) echo "node --test test/permission-typed.test.mjs" ;;
+    permission-modes-unit) echo "node --test test/permission-modes.test.mjs" ;;
     withdraw) echo "node --test test/withdraw.test.mjs" ;;
     db-backup-lock) echo "node --test test/db-backup-lock.test.mjs" ;;
     withdraw-peers-unit) echo "node --test test/withdraw-peers.test.mjs" ;;

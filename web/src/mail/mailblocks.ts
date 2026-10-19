@@ -109,12 +109,21 @@ function diff(text: string): string {
   const files: DiffFile[] = [];
   let f!: DiffFile;
   const start = (path: string) => { f = { path, lines: [], add: 0, del: 0 }; files.push(f); };
+  // A `+++` header names the file its `---` opened; one without a `---` before it opens its own (S-2084: a hand-written diff of new text).
+  let minus = false;
   for (const line of text.replace(/\n$/, '').split('\n')) {
+    const was = minus;
+    minus = false;
     const g = line.match(/^diff --git a\/(.*?) b\/(.*)$/);
     if (g) { start(g[2]); continue; }
     if (/^(index |new file mode|deleted file mode|similarity index|rename (from|to) )/.test(line) && f) continue;
-    if (line.startsWith('--- ')) { if (!f || f.lines.length) start(line.slice(4).replace(/^a\//, '')); continue; }
-    if (line.startsWith('+++ ')) { const p = line.slice(4).replace(/^b\//, ''); if (p !== '/dev/null') f.path = p; continue; }
+    if (line.startsWith('--- ')) { if (!f || f.lines.length) start(line.slice(4).replace(/^a\//, '')); minus = true; continue; }
+    if (line.startsWith('+++ ')) {
+      const p = line.slice(4).replace(/^b\//, '');
+      if (!was && (!f || f.lines.length)) start(p === '/dev/null' ? '' : p);
+      else if (p !== '/dev/null') f.path = p;
+      continue;
+    }
     if (!f) start('');
     const kind = line.startsWith('@@') ? 'hunk' : line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : 'ctx';
     if (kind === 'add') f.add++;
@@ -1016,33 +1025,37 @@ function parser(): Marked {
   marker.use(MATH_EXT);
   marker.use({
     renderer: {
-      code({ text, lang }: Tokens.Code) {
-        const name = String(lang ?? '').trim().toLowerCase();
-        if (name === 'decision') return decision(text, decisions++);
-        if (name === 'metrics') return metrics(text);
-        if (name === 'diff' || name === 'patch') return diff(text);
-        if (name === 'yesno' || name === 'question') return decision(text, decisions++);
-        if (name === 'checklist' || name === 'status') return checklist(text);
-        if (name === 'tests' || name === 'test') return tests(text);
-        if (name === 'spend' || name === 'cost') return spend(text);
-        if (name === 'error') return error(text);
-        if (['terminal', 'console', 'shell-session', 'log', 'ansi'].includes(name)) return terminal(text);
-        if (name === 'progress') return progress(text);
-        if (name === 'pick' || name === 'multi' || name === 'choose') return decision(text, decisions++, true);
-        if (name === 'compare' || name === 'before-after') return compare(text);
-        if (name === 'pane' || name === 'terminal-link') return pane(text);
-        if (name === 'mermaid' || name === 'diagram') return diagram(text);
-        if (name === 'table' || name === 'csv' || name === 'tsv') return table(text);
-        if (name === 'chart' || name === 'graph' || name === 'plot') return chart(text);
-        if (name === 'rank') return rank(text, decisions++);
-        if (name === 'timeline') return timeline(text);
-        if (name === 'math' || name === 'latex' || name === 'tex') return mathBlock(text);
-        if (['embed', 'video', 'audio', 'image', 'file'].includes(name)) return embed(text);
-        return false;
+      code(token: Tokens.Code) {
+        // One component that throws on odd content shows as plain code instead of taking its mail, view, or the app down (S-2084).
+        try { return component(token); } catch (e) { console.error('mail component', token.lang, e); return false; }
       },
     },
   });
   return marker;
+}
+function component({ text, lang }: Tokens.Code): string | false {
+  const name = String(lang ?? '').trim().toLowerCase();
+  if (name === 'decision') return decision(text, decisions++);
+  if (name === 'metrics') return metrics(text);
+  if (name === 'diff' || name === 'patch') return diff(text);
+  if (name === 'yesno' || name === 'question') return decision(text, decisions++);
+  if (name === 'checklist' || name === 'status') return checklist(text);
+  if (name === 'tests' || name === 'test') return tests(text);
+  if (name === 'spend' || name === 'cost') return spend(text);
+  if (name === 'error') return error(text);
+  if (['terminal', 'console', 'shell-session', 'log', 'ansi'].includes(name)) return terminal(text);
+  if (name === 'progress') return progress(text);
+  if (name === 'pick' || name === 'multi' || name === 'choose') return decision(text, decisions++, true);
+  if (name === 'compare' || name === 'before-after') return compare(text);
+  if (name === 'pane' || name === 'terminal-link') return pane(text);
+  if (name === 'mermaid' || name === 'diagram') return diagram(text);
+  if (name === 'table' || name === 'csv' || name === 'tsv') return table(text);
+  if (name === 'chart' || name === 'graph' || name === 'plot') return chart(text);
+  if (name === 'rank') return rank(text, decisions++);
+  if (name === 'timeline') return timeline(text);
+  if (name === 'math' || name === 'latex' || name === 'tex') return mathBlock(text);
+  if (['embed', 'video', 'audio', 'image', 'file'].includes(name)) return embed(text);
+  return false;
 }
 const inner = (text: string): string => parser().parse(text) as string;
 const inline = (text: string): string => parser().parseInline(text) as string;

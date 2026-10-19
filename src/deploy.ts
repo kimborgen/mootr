@@ -8,10 +8,11 @@ import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, writeFileSync, closeSync } from 'node:fs';
 import { createServer } from 'node:net';
 import os, { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { RELEASES, ROOT, STAM_HOME } from './config.ts';
 import { lockHolder, tryLock } from './release-lock.ts';
 import { api } from './client.ts';
+import { GONE, NODEPS, linkLocked, linkLockedAsync, tryExclusive } from '../scripts/deps-lock.mjs';
 
 export const SERVICE = process.env.STAM_SERVICE ?? 'stamd';
 export const UNIT = join(homedir(), '.config', 'systemd', 'user', `${SERVICE}.service`);
@@ -212,44 +213,37 @@ function removeBuildOutputs(nodeModules: string): void {
   for (const d of BUILD_OUTPUT_DIRS) rmSync(join(nodeModules, d), { recursive: true, force: true });
 }
 
-// Hard-links a filled cache's node_modules into target (S-1044). Falls back to a copy across
-// filesystems. Returns false when the cache has no node_modules or the link fails.
-export function linkDepsFrom(cache: string, target: string): boolean {
-  const src = join(cache, 'node_modules');
-  if (!existsSync(src)) return false;
-  if (spawnSync('cp', ['-al', src, target]).status === 0) {
+// What a link of a cache entry's node_modules came to (S-1965): linked (hard-linked, or copied across filesystems),
+// nodeps (a filled entry with no node_modules: a package with no dependencies), gone (the entry vanished, as a
+// prune can remove an unused one: fill it again), or failed. The classification, the link and the copy fallback run
+// as one operation under the deps root's shared lock (scripts/deps-lock.mjs), so a prune can't land between them.
+export type LinkOutcome = 'linked' | 'nodeps' | 'gone' | 'failed';
+
+function outcomeOf(status: number, target: string): LinkOutcome {
+  if (status === 0) {
     // Hard links: removing them here leaves the cache's copies alone.
     removeBuildOutputs(target);
-    return true;
+    return 'linked';
   }
   rmSync(target, { recursive: true, force: true });
-  try {
-    cpSync(src, target, { recursive: true, verbatimSymlinks: true });
-    removeBuildOutputs(target);
-    return true;
-  } catch {
-    return false;
-  }
+  if (status === NODEPS) return 'nodeps';
+  return status === GONE ? 'gone' : 'failed';
 }
 
-// linkDepsFrom with the `cp -al` run async, so a link done on a daemon request (pr_open's relink,
-// S-1706) doesn't stall the event loop for the seconds a big tree takes. Falls back to the sync
-// version, whose copy path covers a cross-filesystem cache.
-export async function linkDepsFromAsync(cache: string, target: string): Promise<boolean> {
-  const src = join(cache, 'node_modules');
-  if (!existsSync(src)) return false;
-  const ok = await new Promise<boolean>((resolve) => {
-    const child = spawn('cp', ['-al', src, target], { stdio: 'ignore' });
-    child.on('error', () => resolve(false));
-    child.on('close', (code) => resolve(code === 0));
-  });
-  if (ok) {
-    removeBuildOutputs(target);
-    return true;
-  }
-  rmSync(target, { recursive: true, force: true });
-  return linkDepsFrom(cache, target);
+export function linkDepsOutcome(cache: string, target: string): LinkOutcome {
+  return outcomeOf(linkLocked(dirname(cache), cache, target), target);
 }
+
+// linkDepsOutcome with the `cp -al` run async, so a link done on a daemon request (pr_open's relink, S-1706)
+// doesn't stall the event loop for the seconds a big tree takes.
+export async function linkDepsOutcomeAsync(cache: string, target: string): Promise<LinkOutcome> {
+  return outcomeOf(await linkLockedAsync(dirname(cache), cache, target), target);
+}
+
+// Hard-links a filled cache's node_modules into target (S-1044). Returns false when the cache has no
+// node_modules or the link fails.
+export const linkDepsFrom = (cache: string, target: string): boolean => linkDepsOutcome(cache, target) === 'linked';
+export const linkDepsFromAsync = async (cache: string, target: string): Promise<boolean> => (await linkDepsOutcomeAsync(cache, target)) === 'linked';
 
 // A cache with `.ro` but no `.ro2` was converged by the first read-only code, which chmod'd every
 // file to 0444 and so stripped the exec bits (`tsc: Permission denied`). The files share inodes
@@ -353,13 +347,24 @@ export async function fillDeps(dir: string, dev: boolean, label?: string): Promi
 // node_modules, so the spawn can log `deps:linked` when the warm finishes (not only
 // `deps:warming`). Used by createWorkspace fire-and-forget: the spawn doesn't wait.
 export async function warmDeps(dir: string, dev: boolean, target?: string): Promise<{ key: string; linked: boolean } | undefined> {
-  const key = await fillDeps(dir, dev);
-  if (!key) return undefined;
-  const cache = depsCachePath(key);
-  ensureCacheReadOnly(cache);
-  touchDepsUsed(key);
-  const linked = target ? existsSync(target) || linkDepsFrom(cache, target) : false;
-  return { key, linked };
+  let key: string | undefined;
+  let linked = false;
+  // A prune can remove an unused entry between the fill and the link: fill it again.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    key = await fillDeps(dir, dev);
+    if (!key) return undefined;
+    const cache = depsCachePath(key);
+    ensureCacheReadOnly(cache);
+    touchDepsUsed(key);
+    if (!target || existsSync(target)) {
+      linked = Boolean(target);
+      break;
+    }
+    const outcome = linkDepsOutcome(cache, target);
+    linked = outcome === 'linked';
+    if (outcome !== 'gone') break;
+  }
+  return key ? { key, linked } : undefined;
 }
 
 // node_modules for a package folder in a release. Installs once per package-lock (and Node
@@ -373,19 +378,18 @@ async function installDeps(dir: string, dev: boolean): Promise<string | undefine
     run('npm', ['install', '--no-audit', '--no-fund', ...(dev ? [] : ['--omit=dev'])], { cwd: dir });
     return undefined;
   }
-  const key = await fillDeps(dir, dev);
-  if (!key) return undefined;
-  const cache = depsCachePath(key);
-  ensureCacheReadOnly(cache);
-  touchDepsUsed(key);
-  // A package with no dependencies installs no node_modules.
-  if (!existsSync(join(cache, 'node_modules'))) return key;
-  if (!linkDepsFrom(cache, join(dir, 'node_modules'))) {
-    rmSync(join(dir, 'node_modules'), { recursive: true, force: true });
-    cpSync(join(cache, 'node_modules'), join(dir, 'node_modules'), { recursive: true, verbatimSymlinks: true });
-    removeBuildOutputs(join(dir, 'node_modules'));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const key = await fillDeps(dir, dev);
+    if (!key) return undefined;
+    const cache = depsCachePath(key);
+    ensureCacheReadOnly(cache);
+    touchDepsUsed(key);
+    // A package with no dependencies installs no node_modules ('nodeps'); an entry a prune removed since the fill is filled again.
+    const outcome = linkDepsOutcome(cache, join(dir, 'node_modules'));
+    if (outcome === 'linked' || outcome === 'nodeps') return key;
+    if (outcome === 'failed') throw new Error(`can't link the deps cache ${key} into ${dir}`);
   }
-  return key;
+  throw new Error(`the deps cache for ${dir} kept disappearing`);
 }
 
 function freePort(): Promise<number> {
@@ -629,35 +633,44 @@ function prune(): string[] {
   const deps = new Set(releases().flatMap((n) => meta(n)!.deps));
   const depsCutoff = Date.now() - DEPS_KEEP_MS;
   const depsTmpCutoff = Date.now() - CACHE_MAX_AGE;
-  if (existsSync(DEPS)) for (const d of readdirSync(DEPS)) {
-    const p = join(DEPS, d);
-    // A cache moved aside as damaged (retireDamagedCache) goes at any age: releases and worktrees
-    // keep their own hard links to the files.
-    if (/\.damaged-/.test(d)) {
-      rmSync(p, { recursive: true, force: true });
-      continue;
-    }
-    // A fill in progress (a `.tmp-` folder) is left alone; one a stopped fill left behind goes
-    // after a day (S-1044).
-    if (/\.tmp-/.test(d)) {
-      try {
-        if (statSync(p).mtimeMs >= depsTmpCutoff) continue;
-      } catch {
+  // Under the deps root's exclusive lock, so no link starts from an entry being removed (S-1965); busy: left for the next prune.
+  const depsLock = existsSync(DEPS) ? tryExclusive(DEPS) : null;
+  if (depsLock) try {
+    for (const d of readdirSync(DEPS)) {
+      const p = join(DEPS, d);
+      // Only the shapes the cache makes are removed: a key, its .tmp- and .damaged- folders, and a victim a sweep set
+      // aside (.pruned-*). The lock file `.prune.lock` (its inode must outlive every prune) and anything unknown stay.
+      if (!/^[0-9a-f]{16}(\.(tmp|damaged)-.+)?$/.test(d) && !/^\.pruned-/.test(d)) continue;
+      // A cache moved aside as damaged (retireDamagedCache) goes at any age: releases and worktrees
+      // keep their own hard links to the files.
+      if (/\.damaged-/.test(d)) {
+        rmSync(p, { recursive: true, force: true });
         continue;
       }
+      // A fill in progress (a `.tmp-` folder) is left alone; one a stopped fill left behind goes
+      // after a day (S-1044).
+      if (/\.tmp-/.test(d)) {
+        try {
+          if (statSync(p).mtimeMs >= depsTmpCutoff) continue;
+        } catch {
+          continue;
+        }
+        rmSync(p, { recursive: true, force: true });
+        continue;
+      }
+      // A key a release names, or one a worktree linked within the window, stays (S-1044). A
+      // warmed dev key isn't in any release, so `.used` is what keeps it for a worktree on a branch
+      // no deploy covers yet.
+      if (deps.has(d)) continue;
+      let used = 0;
+      try {
+        used = statSync(join(DEPS, d, '.used')).mtimeMs;
+      } catch {}
+      if (used >= depsCutoff) continue;
       rmSync(p, { recursive: true, force: true });
-      continue;
     }
-    // A key a release names, or one a worktree linked within the window, stays (S-1044). A
-    // warmed dev key isn't in any release, so `.used` is what keeps it for a worktree on a branch
-    // no deploy covers yet.
-    if (deps.has(d)) continue;
-    let used = 0;
-    try {
-      used = statSync(join(DEPS, d, '.used')).mtimeMs;
-    } catch {}
-    if (used >= depsCutoff) continue;
-    rmSync(p, { recursive: true, force: true });
+  } finally {
+    depsLock.release();
   }
   sweepCompileCache();
   // An agent's shim pins the release it started from until the agent exits, so a long-lived fleet

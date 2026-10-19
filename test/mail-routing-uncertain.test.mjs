@@ -26,7 +26,7 @@ after(() => rmSync(home, { recursive: true, force: true }));
 
 test('the human\'s routing_uncertain mail carries the note, shown to the recipient and not in the body', async () => {
   const note = templates.render('routing-uncertain', {});
-  assert.match(note, /^Routing was uncertain: Kim typed this without picking a recipient/);
+  assert.match(note, /^Routing was uncertain: the user typed this without picking a recipient/);
   const m = await mail.sendMail({ from: 'human', to: ['alice'], subject: 'Q', body: 'what is up?', routing_uncertain: true });
   const stored = db.getMail(m.id);
   assert.equal(stored.note, note);

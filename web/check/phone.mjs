@@ -2078,6 +2078,9 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     check(tag, 'diff: the header names the PR', (await p.locator('.dv-title strong').innerText()) === 'PR #7');
     check(tag, 'diff: the header shows the short head and base shas', /^head [0-9a-f]{7} · base [0-9a-f]{7}$/.test(await p.locator('.dv-shas').innerText()));
     check(tag, 'diff: Meat hides the test and the lockfile ("7 of 9 files")', (await p.locator('.dv-count').innerText()) === '7 of 9 files');
+    // S-1917: the fixture PR isn't watched, so the chip says "no review"; it stays one line inside the viewport.
+    const rv = await p.locator('.dv-review').boundingBox();
+    check(tag, 'diff: the review chip says "no review" and fits the phone width on one line', (await p.locator('.dv-review').innerText()) === 'no review' && !!rv && rv.x >= 0 && rv.x + rv.width <= 360 && rv.height < 48, JSON.stringify(rv));
     check(tag, 'diff: the chips count the classes, tests and lockfiles hidden', (await p.locator('.dv-chip').allInnerTexts()).join('|') === 'Tests 1 hidden|Lockfiles 1 hidden|Docs 1', (await p.locator('.dv-chip').allInnerTexts()).join('|'));
     check(tag, 'diff: no file column and no Split/Unified toggle on the phone', await p.locator('.dv-side').count() === 0 && await p.locator('.dv-mode').count() === 0);
     // The editor mounts lazily, when its row intersects, and the first merge bundle fetch is slow under load: bring the row
