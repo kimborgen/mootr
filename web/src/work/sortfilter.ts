@@ -6,7 +6,9 @@ import type { CellContext } from './columns'
 import type { WorkRow } from './model'
 
 export type ColFilter =
-  | { kind: 'values'; values: string[] }
+  // `values` keeps the listed ones; `not` is a standing rule that hides them, so a value that
+  // appears later still shows. One or the other (a stored pair collapses to `values`).
+  | { kind: 'values'; values?: string[]; not?: string[] }
   | { kind: 'text'; q: string }
   | { kind: 'range'; min?: number; max?: number }
   | { kind: 'date'; preset?: DatePreset; from?: string; to?: string }
@@ -93,7 +95,9 @@ export function matchFilter(f: ColFilter, v: FilterCell, now = Date.now()): bool
   switch (f.kind) {
     case 'values': {
       const list = Array.isArray(v) ? v : [isBlank(v) ? BLANK : String(v)]
-      return (list.length ? list : [BLANK]).some((x) => f.values.includes(x))
+      const vals = list.length ? list : [BLANK]
+      // An include list keeps a row with any listed value; a `not` rule hides a row with any listed value.
+      return (!f.values || vals.some((x) => f.values!.includes(x))) && !vals.some((x) => f.not?.includes(x))
     }
     case 'text': {
       const q = f.q.trim().toLowerCase()
@@ -172,7 +176,14 @@ export function cleanFilter(raw: unknown): ColFilter | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
   switch (r.kind) {
-    case 'values': return Array.isArray(r.values) && r.values.every((v) => typeof v === 'string') ? { kind: 'values', values: [...new Set(r.values as string[])] } : null
+    case 'values': {
+      const list = (x: unknown) => (Array.isArray(x) && x.every((v) => typeof v === 'string') ? [...new Set(x as string[])] : null)
+      const [values, not] = [r.values === undefined ? undefined : list(r.values), r.not === undefined ? undefined : list(r.not)]
+      if (values === null || not === null || (values === undefined && !not?.length)) return null
+      // An include list already leaves out what `not` hides, so the two collapse to the list.
+      if (values) return { kind: 'values', values: not?.length ? values.filter((v) => !not.includes(v)) : values }
+      return { kind: 'values', not: not! }
+    }
     case 'text': return typeof r.q === 'string' ? { kind: 'text', q: r.q } : null
     case 'range': {
       const [min, max] = [num(r.min), num(r.max)]

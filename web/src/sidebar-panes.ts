@@ -18,13 +18,14 @@ export const MAX_PANES = 4
 // the cost showing.
 export const DEFAULT_PANES: PaneLayout[] = [
   { tabs: ['agents', 'issues'], active: 'agents' },
-  { tabs: ['mail'], active: 'mail' },
+  { tabs: ['mail', 'history'], active: 'mail' },
   { tabs: ['cost', 'machines'], active: 'cost' },
 ]
 // The layout version. 2 added the `cost` tab: a saved layout older than that gets it once, in the
 // pane that holds `machines` (else the last pane), without becoming the showing tab. Every save
-// carries the current version, so a human who removes the tab afterwards keeps it removed.
-export const LAYOUT_V = 2
+// carries the current version, so a human who removes the tab afterwards keeps it removed. 3 added
+// `history` the same way, in the pane that holds `mail` (else the last pane).
+export const LAYOUT_V = 3
 
 const clone = (p: PaneLayout[]): PaneLayout[] => p.map((x) => ({ tabs: [...x.tabs], active: x.active }))
 
@@ -48,9 +49,13 @@ export function sanitizePanes(x: unknown, known: readonly string[]): PaneLayout[
   }
   if (!out.length) return clone(DEFAULT_PANES)
   const v = (x as { v?: unknown }).v
-  if ((typeof v === 'number' ? v : 1) < LAYOUT_V && known.includes('cost') && !seen.has('cost')) {
+  if ((typeof v === 'number' ? v : 1) < 2 && known.includes('cost') && !seen.has('cost')) {
     const at = out.findIndex((p) => p.tabs.includes('machines'))
     out[at < 0 ? out.length - 1 : at].tabs.push('cost')
+  }
+  if ((typeof v === 'number' ? v : 1) < 3 && known.includes('history') && !seen.has('history')) {
+    const at = out.findIndex((p) => p.tabs.includes('mail'))
+    out[at < 0 ? out.length - 1 : at].tabs.push('history')
   }
   return out
 }

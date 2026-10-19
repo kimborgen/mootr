@@ -1,6 +1,6 @@
 // The motion gate (S-696): decides whether one kind of animation may run right now. A kind may
 // animate when the master and its own toggle are on (Settings › Motion, kept in the human's
-// settings so it follows Kim across devices), the browser doesn't ask for reduced motion, the
+// settings so it follows the user across devices), the browser doesn't ask for reduced motion, the
 // element is on screen, and its scroll container isn't scrolling (or stopped under SCROLL_QUIET_MS
 // ago). The system view is exempt: it doesn't call the gate. Later sidebar changes add a kind to
 // MOTION_KINDS and call canAnimate (plain code) or useMotion (React); the settings page lists the

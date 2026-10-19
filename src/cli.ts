@@ -10,6 +10,13 @@ import { statuslineTtl, throttled } from './statusline-cache.ts';
 import * as tmux from './tmux.ts';
 import { SERVICE, UNIT, systemctl, waitHealthy } from './deploy.ts';
 
+// The name the user invoked (bin/mootr or bin/stam sets it); help and usage text print it.
+const CLI = process.env.STAM_CLI_NAME === 'stam' ? 'stam' : 'mootr';
+// Not passed on: the daemon, its tmux server and every agent pane would inherit it (the CLI they run says its own name).
+delete process.env.STAM_CLI_NAME;
+// Rewrites the `stam` command name in usage text to the invoked name.
+const named = (text: string) => text.replace(/^( *)stam /gm, `$1${CLI} `).replace(/(\| |usage: |see: |with: |run |: )stam (?=[a-z])/g, `$1${CLI} `);
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // `stam janitor` waits this long for the daemon's sweep: a sweep walks every test folder on the
@@ -17,11 +24,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const JANITOR_TIMEOUT_MS = Number(process.env.STAM_JANITOR_TIMEOUT_MS) || 2 * 60_000;
 
 // The spawn lines of USAGE, printed alone when spawn gets no NAME or --help.
-const SPAWN_USAGE = `  stam spawn NAME [--type T] [--var KEY=VALUE]... [--role TEXT] [--preset P | --harness claude|opencode|codex --model M --effort E] [--cwd DIR] [--parent AGENT] [--itsa ID|KEY] [--machine M]
+const SPAWN_USAGE = named(`  stam spawn NAME [--type T] [--var KEY=VALUE]... [--role TEXT] [--preset P | --harness claude|opencode|codex --model M --effort E] [--cwd DIR] [--parent AGENT] [--itsa ID|KEY] [--machine M]
              [--worktree [--branch B] [--base REF] | --workspace-script CMD | --workspace-instructions TEXT] [--standing] [--workspace[=NAME]  (the name only with "=", never a separate word)] [PROMPT]
-`;
+`);
 
-const USAGE = `stam: run and coordinate coding agents
+const USAGE = named(`${CLI}: run and coordinate coding agents
 
   stam daemon [run|start|stop|restart|status|install]
   stam deploy [REF] [--repo DIR]    build a committed ref (default HEAD) into a release, check it, and switch to it
@@ -104,7 +111,9 @@ ${SPAWN_USAGE}  stam ls
   stam mail inbox AGENT|human
   stam mail read [AGENT|human] [MAIL_ID...]
   stam mcp login|logout|status NAME   manage a remote MCP server's shared OAuth login
-  stam mcp                            the MCP server agents talk to (stdio)`;
+  stam mcp                            the MCP server agents talk to (stdio)
+
+The command is called mootr; its old name, stam, is still accepted as an alias.`);
 
 // Commands that harnesses or services call with their own argv, so `--help` keeps their meaning (S-1236).
 const NO_HELP_CMDS = new Set(['hook', 'statusline', 'mcp', 'mcp-proxy', 'daemon']);
@@ -117,13 +126,13 @@ function wantsHelp(args: string[]): boolean {
   return flags.includes('--help') || flags.includes('-h');
 }
 
-// The USAGE lines for one subcommand: its `stam NAME` line and the indented lines under it.
+// The USAGE lines for one subcommand: its `mootr NAME` line and the indented lines under it.
 // Empty when none match, so the caller prints all of USAGE.
 function usageFor(cmd: string): string {
   const out: string[] = [];
   let on = false;
   for (const line of USAGE.split('\n')) {
-    const m = /^  stam ([^ ]+)/.exec(line);
+    const m = new RegExp(`^  ${CLI} ([^ ]+)`).exec(line);
     if (m) on = m[1].split('|').includes(cmd);
     else if (!/^\s{3,}\S/.test(line)) on = false;
     if (on) out.push(line);
@@ -872,7 +881,7 @@ async function main() {
           console.log(i.type === 'event' ? `${i.ts}  -- ${i.text}` : `${i.ts}  ${i.mail.from_name}${i.mail.kind === 'update' ? ` [update ${i.mail.health}]` : ''}: ${i.mail.body.split('\n')[0]}`);
         return;
       }
-      // The mails of an ITSA's own thread (not the caller's part of it), as this daemon holds it (no peer fan-out), as JSON: scripts/merge-pr.mjs reads Kim's mailed yes (S-1490). Fails when the thread can't be read.
+      // The mails of an ITSA's own thread (not the caller's part of it), as this daemon holds it (no peer fan-out), as JSON: scripts/merge-pr.mjs reads the user's mailed yes (S-1490). Fails when the thread can't be read.
       if (sub === 'mails') {
         if (!positionals[0]) throw new Error('usage: stam itsa mails REF');
         const t = await api<any>('GET', `/api/itsas/${positionals[0]}/thread?local=1`);
@@ -1202,6 +1211,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(`stam: ${e.message}`);
+  console.error(`${CLI}: ${named(String(e.message))}`);
   process.exit(1);
 });

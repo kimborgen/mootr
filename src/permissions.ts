@@ -232,7 +232,7 @@ function reviewer(id: string, by: string, peer?: { boss: boolean }) {
 export function approvedTyped(id: string, action: string, note: string): string {
   const kept = note.trim().replace(/[\s.!]+$/, '');
   const short = action.length > 200 ? `${action.slice(0, 200)}…` : action;
-  return render('permission-typed', { id, action: short, note: kept && kept.toLowerCase() !== 'i authorize' ? ` Kim's note: ${kept}.` : '' });
+  return render('permission-typed', { id, action: short, note: kept && kept.toLowerCase() !== 'i authorize' ? ` The user's note: ${kept}.` : '' });
 }
 
 // The closing line of the notice an agent gets when its request is answered (S-640): approved says go

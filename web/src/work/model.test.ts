@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import type { Itsa } from '../types'
 import type { CellContext } from './columns'
 import type { SortFilterCol } from './sortfilter'
-import { agentIdsOf, FLAT, groupByAgent, groupFlat, groupFor, groupWork, pruneFolded, since, STANDALONE, UNOWNED, type AgentNode, type GroupOptions } from './model'
+import { agentIdsOf, FLAT, foldRows, groupByAgent, groupFlat, groupFor, groupWork, pruneFolded, since, STANDALONE, UNOWNED, type AgentNode, type GroupOptions } from './model'
 
 let n = 0
 const mk = (key: string, parent: string | null, status = 'todo', more: Partial<Itsa> = {}): Itsa => ({
@@ -268,5 +268,20 @@ describe('pruneFolded', () => {
   it('returns the same object when nothing is gone', () => {
     const f = { 'column:agents:a1': true }
     expect(pruneFolded(f, new Set(['a1']))).toBe(f)
+  })
+})
+
+describe('foldRows', () => {
+  const row = (id: string, depth: number) => ({ it: { id } as never, depth, context: false })
+  const rows = [row('a', 0), row('a1', 1), row('a1x', 2), row('a2', 1), row('b', 0), row('c', 0), row('c1', 1)]
+  it('counts the deeper rows after each row, and shows everything when nothing is folded', () => {
+    const f = foldRows(rows, () => false)
+    expect(f.rows.map((r) => r.it.id)).toEqual(['a', 'a1', 'a1x', 'a2', 'b', 'c', 'c1'])
+    expect([...f.kids]).toEqual([['a', 3], ['a1', 1], ['c', 1]])
+  })
+  it('hides the subrows of a folded row up to the next row at its depth, and nested folds hide with it', () => {
+    expect(foldRows(rows, (r) => r.it.id === 'a1').rows.map((r) => r.it.id)).toEqual(['a', 'a1', 'a2', 'b', 'c', 'c1'])
+    expect(foldRows(rows, (r) => r.it.id === 'a' || r.it.id === 'a1').rows.map((r) => r.it.id)).toEqual(['a', 'b', 'c', 'c1'])
+    expect(foldRows(rows, (r) => r.it.id === 'b').rows).toHaveLength(7)
   })
 })

@@ -19,7 +19,7 @@ export const PROCESSES = {
       watcher: { type: 'script', label: 'Deploy watcher' },
     },
     nodes: {
-      request: { kind: 'start', lane: 'human', label: 'Mail from Kim', triggers: [{ source: 'mail', actors: ['human'], label: 'Mail from Kim' }, { source: 'github', types: ['issues.opened'] }, { source: 'timer', cron: '0 9 * * 1' }, { source: 'slack', types: ['message.channels'] }, { source: 'linear', types: ['issue.created'] }, { source: 'webhook', label: 'a long webhook trigger name that overflows' }] },
+      request: { kind: 'start', lane: 'human', label: 'Mail from the user', triggers: [{ source: 'mail', actors: ['human'], label: 'Mail from the user' }, { source: 'github', types: ['issues.opened'] }, { source: 'timer', cron: '0 9 * * 1' }, { source: 'slack', types: ['message.channels'] }, { source: 'linear', types: ['issue.created'] }, { source: 'webhook', label: 'a long webhook trigger name that overflows' }] },
       code: { kind: 'agent', lane: 'developer', label: 'Implement, test, pr_open', statuses: ['in_progress'], doneWhen: 'pr_opened', boundary: [{ on: 'cost', action: 'pause' }] },
       review: { kind: 'agent', lane: 'reviewer', statuses: ['in_review'] },
       verdict: { kind: 'exclusive', lane: 'reviewer', label: 'Approved?' },
@@ -59,7 +59,7 @@ export const PROCESSES = {
     description: 'Cut a release from main and watch it deploy.',
     lanes: { human: { type: 'human' }, manager: { type: 'manager' }, watcher: { type: 'script', label: 'Deploy watcher' } },
     nodes: {
-      ask: { kind: 'start', lane: 'human', label: 'Kim says tag it', triggers: [{ source: 'mail', actors: ['human'] }] },
+      ask: { kind: 'start', lane: 'human', label: 'The user says tag it', triggers: [{ source: 'mail', actors: ['human'] }] },
       tag: { kind: 'script', lane: 'manager', label: 'Tag and push', run: 'scripts/release.mjs', statuses: ['ready_to_merge'] },
       live: { kind: 'end', lane: 'watcher', status: 'done', label: 'Live' },
     },

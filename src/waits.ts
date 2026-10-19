@@ -25,6 +25,9 @@ export async function declare(agentId: string, body: any): Promise<db.Wait> {
   if (on !== 'agent' && on !== 'human' && on !== 'event') throw new Error("on must be 'agent', 'human', or 'event'");
   const timeout = body?.timeout_minutes == null ? null : Number(body.timeout_minutes);
   if (timeout != null && !(timeout > 0)) throw new Error('timeout_minutes must be positive');
+  // When the agent expects the answer (S-1982): no timeout, only the rest sweep's estimate of its wake.
+  const expect = body?.expect_minutes == null ? null : Number(body.expect_minutes);
+  if (expect != null && !(expect > 0)) throw new Error('expect_minutes must be positive');
   const note = String(body?.note ?? '').trim();
   const until = timeout == null ? null : minutesFromNow(timeout);
 
@@ -33,6 +36,7 @@ export async function declare(agentId: string, body: any): Promise<db.Wait> {
     const detail = note || `an external event (${describeFilter(filter)})`;
     const data: Record<string, unknown> = { on, filter };
     if (timeout != null) data.timeout_minutes = timeout;
+    if (expect != null) data.expect_at = minutesFromNow(expect);
     const w = db.addWait({ agent_id: agentId, kind: 'event', source: 'declared', detail, until, data: JSON.stringify(data) });
     db.addEvent(agentId, 'wait:declared', { id: w.id, kind: 'event', filter, timeout_minutes: timeout });
     return w;
@@ -65,6 +69,7 @@ export async function declare(agentId: string, body: any): Promise<db.Wait> {
   if (target) data.target = target;
   if (thread) data.thread = thread;
   if (timeout != null) data.timeout_minutes = timeout;
+  if (expect != null) data.expect_at = minutesFromNow(expect);
   const w = db.addWait({ agent_id: agentId, kind: on, source: 'declared', target, detail, until, data: JSON.stringify(data) });
   // The agent awaited gets one notice naming the thread to answer in.
   if (on === 'agent' && target) {

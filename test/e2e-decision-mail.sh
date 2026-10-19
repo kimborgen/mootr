@@ -4,6 +4,7 @@
 # are registered, not spawned. Checks:
 #   - an agent's mail with a decision block is listed; a mail with no block is not
 #   - a stam mail (its subject starts with `[stam]`) with a block is not listed
+#   - a from_stam mail, sent with the peer token as a peer's own daemon sends it, with a block is not listed
 #   - an ITSA's ask mail is never listed, while the ITSA is open or after it closes
 #   - a plain decision mail about an ITSA in a human status is left out, and listed once it leaves
 #   - the human's reply in the mail's thread clears it
@@ -32,9 +33,14 @@ M1=$(api POST /api/mail "$PICK" | jget "d['id']")
 has "$M1" || fail "the decision mail isn't listed"
 has "$PLAIN" && fail "a mail with no decision block is listed"
 
-echo "-- a stam mail with a block is not listed"
-S=$(api POST /api/mail "{\"from\":\"alice\",\"to\":[\"human\"],\"subject\":\"[stam] Pick\",\"body\":\"${FENCE}yesno\nok?\n${FENCE}\",\"from_stam\":true}" | jget "d['id']")
+echo "-- a stam-subject mail with a block is not listed (from_stam is set only by stam, so it can't be sent over HTTP)"
+S=$(api POST /api/mail "{\"from\":\"alice\",\"to\":[\"human\"],\"subject\":\"[stam] Pick\",\"body\":\"${FENCE}yesno\nok?\n${FENCE}\"}" | jget "d['id']")
 has "$S" && fail "a stam mail is listed"
+
+echo "-- a from_stam mail (sent as a peer's own daemon does, S-2033) with a block is not listed"
+PEER_TOKEN=$(cat "$STAM_HOME/peer-token")
+F=$(curl -sf -X POST -H "authorization: Bearer $PEER_TOKEN" -H 'x-stam-local: 1' -H 'content-type: application/json' -d "{\"from\":\"alice\",\"to\":[\"human\"],\"subject\":\"Pick\",\"body\":\"${FENCE}yesno\nok?\n${FENCE}\",\"from_stam\":true}" "$STAM_URL/api/mail" | jget "d['id']")
+has "$F" && fail "a from_stam mail is listed"
 
 echo "-- an ITSA's ask is never listed: the ITSA row covers it, and it is over once the ITSA closes"
 KEY=$("$STAM" itsa new "Decision mail e2e" --owner alice --status in_progress | awk '{print $1}')

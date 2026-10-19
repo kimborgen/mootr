@@ -141,6 +141,12 @@ function chat(res, raw) {
     const name = text.match(/^Tool: (\S+)/m)?.[1] ?? 'tool';
     return answer(res, seeded ? decodeURIComponent(seeded) : JSON.stringify({ tool: `stub ${name}`.slice(0, 40), doing: `doing the stub work of ${name}` }));
   }
+  // A tool name (S-1933) answers the URL-decoded TOOLNAME=... marker as it is, else {"label": "Stub NAME"}.
+  if (text.includes('You name one tool')) {
+    const seeded = text.match(/TOOLNAME=([\w%.!~*'()-]+)/)?.[1];
+    const name = text.match(/^Tool: (\S+)/m)?.[1] ?? 'tool';
+    return answer(res, seeded ? decodeURIComponent(seeded) : JSON.stringify({ label: `Stub ${name}`.slice(0, 30) }));
+  }
   const marked = text.match(/TITLE=([\w-]+)/)?.[1];
   const subject = (text.match(/^Subject: (.*)$/m)?.[1] ?? 'Stub mail title words').replace(/^Check:\s*/, '');
   let content = marked ? marked.replace(/_/g, ' ') : `**Title: ${subject.split(/\s+/).slice(0, 4).join(' ')}.**`;

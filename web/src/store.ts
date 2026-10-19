@@ -6,6 +6,7 @@ import { useSyncExternalStore } from 'react'
 import { api, setKnownOrigins } from './api'
 import { rearmMailTitles } from './mail/mail-titles'
 import { rearmToolSummaries } from './mail/tool-summaries'
+import { rearmToolNames } from './mail/tool-names'
 import { live } from './format'
 import { onLiveEvent } from './live'
 import type { Agent, DecisionMail, Itsa, ItsaAttention, ItsaQueueRow, ItsaStatus, Machine, Permission, PlainShell, Ring, Thread, Thresholds } from './types'
@@ -383,6 +384,7 @@ async function fetchItsas() {
 export async function loadThresholds() {
   // Called after a settings save: a tool-summary step turned back on is asked again (S-1843).
   rearmToolSummaries()
+  rearmToolNames()
   rearmMailTitles()
   try {
     const s = JSON.parse((await api<{ text: string }>('GET', '/api/config/settings')).text)

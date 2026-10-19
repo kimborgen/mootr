@@ -260,12 +260,24 @@ test('a participant on a peer that is down is kept, so its post is queued for it
   assert.equal(db.outboxRows().some((r) => r.peer === 'far' && r.body.includes('far-s281')), true, 'the post for the down peer waits in its outbox');
 });
 
-// S-542 (it was S-308): in a thread Kim started, mail reaches Kim only when it is addressed to them.
+// S-542 (it was S-308): in a thread the user started, mail reaches the user only when it is addressed to them.
 test('an agent’s reply to the human’s mail in the ITSA thread reaches the human only when addressed to them', async () => {
-  const q = await itsa.post(x.key, { by: 'human', body: 'Kim asks something' });
+  const q = await itsa.post(x.key, { by: 'human', body: 'Dana asks something' });
   await mail.sendMail({ from: 'bob', to: ['alice'], body: 'bob to alice', reply_to: q.id });
-  await mail.sendMail({ from: 'bob', to: ['human'], body: 'answer for Kim', reply_to: q.id });
+  await mail.sendMail({ from: 'bob', to: ['human'], body: 'answer for Dana', reply_to: q.id });
   const sent = (body) => db.threadMail(q.thread_id).findLast((m) => m.body === body);
   assert.ok(!sent('bob to alice').recipients.some((r) => r.id === 'human'), 'mail between agents stays out of the human\'s inbox');
-  assert.ok(sent('answer for Kim').recipients.some((r) => r.id === 'human'), 'an answer addressed to the human reaches them');
+  assert.ok(sent('answer for Dana').recipients.some((r) => r.id === 'human'), 'an answer addressed to the human reaches them');
+});
+
+test('a from_stam reply into an ITSA thread stays a notice, so it does not undefer the thread for bob (S-2033)', async () => {
+  const y = await itsa.create({ title: 'Stam reply', by: 'human', owner: 'alice', participants: ['bob', 'carol'] });
+  const m = await itsa.post(y.key, { by: 'bob', body: 'first' });
+  const parent = db.threadMail(m.thread_id).at(-1);
+  db.deferThread('a2', m.thread_id, [parent.id]);
+  const sent = await mail.sendMail({ from: 'a1', from_stam: true, to: ['bob'], body: 'stam notice', reply_to: parent.id });
+  assert.equal(sent.thread_id, m.thread_id);
+  assert.equal(sent.itsa_id, y.id);
+  assert.ok(db.getMail(sent.id).notice, 'the reply keeps its notice flag through the ITSA comment path');
+  assert.equal(db.deferredCount('a2'), 1, 'a notice leaves the deferred thread deferred');
 });

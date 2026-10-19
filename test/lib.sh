@@ -47,6 +47,9 @@ export STAM_TEST_COST_HOOKS=1
 # No test daemon runs the one-time full auto-archive pass (S-637) unless its test sets the delay,
 # as e2e-auto-archive-full does. 2^31-1 ms is setTimeout's largest delay; a larger one fires at once.
 export STAM_AUTO_ARCHIVE_FULL_DELAY_MS="${STAM_AUTO_ARCHIVE_FULL_DELAY_MS:-2147483647}"
+# No test daemon rests an agent for a long wait or idle (S-1982) unless its test opts in, as
+# test/rest.test.mjs does; standing agents keep their own rest rule (STAM_STANDING_IDLE_HOURS).
+export STAM_REST_ENABLED="${STAM_REST_ENABLED:-0}"
 # Claude Code agents run the fake (test/fake-claude) unless this run is a smoke test: run.sh sets
 # STAM_TEST_SMOKE for those. It's set here, not per test, so a daemon started before fake_claude
 # still spawns the fake, never the real claude (S-176).

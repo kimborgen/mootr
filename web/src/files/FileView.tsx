@@ -13,7 +13,7 @@ import { DeclPicker, isPhone, type DeclPickState } from '../decl/DeclPicker'
 import { DeclFail, hasDecl, lookupDecl, type DeclMatch } from '../decl/declApi'
 import type { DeclHit } from '../decl/declExt'
 import { baseName, crumbs, kindOf, parentOf, parseFileKey, pushRecent, type Kind } from './fileKey'
-import { downloadBlob, FilesFail, readFile, startMachine, type Body } from './filesApi'
+import { DOWNLOAD_MAX, downloadBlob, FilesFail, tooBigToDownload, readFile, startMachine, type Body } from './filesApi'
 
 // Above this, Load all would freeze the tab: the file is offered as a download.
 export const LOAD_ALL_MAX = 50 * 1024 * 1024
@@ -118,6 +118,8 @@ export function FileView({ viewKey }: { viewKey: string }) {
   const [all, setAll] = useState(false)
   const [source, setSource] = useState(false)
   const [dl, setDl] = useState('')
+  const [busy, setBusy] = useState(false)
+  const dlCtl = useRef<AbortController | null>(null)
   const host = ref?.host ?? ''
   const path = ref?.path ?? ''
   const decl = useFileDecl(viewKey, host, path)
@@ -126,6 +128,9 @@ export function FileView({ viewKey }: { viewKey: string }) {
     const ctl = new AbortController()
     let src: string | undefined
     setSt({ s: 'loading' })
+    dlCtl.current?.abort()
+    setBusy(false)
+    setDl('')
     readFile(host, path, all, ctl.signal).then(
       (body) => {
         const kind = kindOf(baseName(path), body.type)
@@ -136,18 +141,25 @@ export function FileView({ viewKey }: { viewKey: string }) {
       (err) => { if (!ctl.signal.aborted) setSt({ s: 'error', err }) })
     return () => { ctl.abort(); if (src) URL.revokeObjectURL(src) }
   }, [host, path, all, tries])
+  useEffect(() => () => dlCtl.current?.abort(), [])
   if (!ref) return <div className="fv"><div className="fv-note">Not a file link.</div></div>
   const download = async () => {
+    if (busy) return
+    const known = st.s === 'ok' ? st.body.size : 0
+    if (known > DOWNLOAD_MAX) { setDl(tooBigToDownload(known)); return }
     setDl('Preparing…')
+    setBusy(true)
+    const ctl = new AbortController()
+    dlCtl.current = ctl
     try {
       const a = document.createElement('a')
-      const u = URL.createObjectURL(await downloadBlob(host, path))
+      const u = URL.createObjectURL(await downloadBlob(host, path, (f) => setDl(`Preparing… ${Math.round(f * 100)}%`), ctl.signal))
       a.href = u
       a.download = baseName(path)
       a.click()
       setTimeout(() => URL.revokeObjectURL(u), 10_000)
       setDl('')
-    } catch (e) { setDl((e as Error).message) }
+    } catch (e) { if (!ctl.signal.aborted) setDl((e as Error).message) } finally { if (!ctl.signal.aborted) setBusy(false) }
   }
   return (
     <div className="fv">
@@ -166,6 +178,13 @@ export function FileView({ viewKey }: { viewKey: string }) {
         {st.s === 'ok' && st.kind === 'image' && st.src && (
           <div className="fv-image"><img src={st.src} alt={baseName(path)} onClick={() => openImage(st.src!, baseName(path))} /></div>
         )}
+        {st.s === 'ok' && st.kind === 'image' && !st.src && (
+          <div className="fv-note" data-testid="image-too-big">
+            <p>{baseName(path)} is {Math.max(1, Math.round(st.body.size / 1024 / 1024))} MB, too large to show here.</p>
+            <button className="btn primary fv-touch" onClick={download} disabled={busy}><Icon name="download" /> Download</button>
+            {dl && <p className="muted">{dl}</p>}
+          </div>
+        )}
         {st.s === 'ok' && st.kind === 'pdf' && <PdfView src={st.src} name={baseName(path)} size={st.body.size} onDownload={download} downloadNote={dl} />}
         {st.s === 'ok' && st.kind === 'markdown' && !source && <div className="fv-md"><Rendered text={st.body.text ?? ''} base={{ host, cwd: parentOf(path) }} /></div>}
         {st.s === 'ok' && (st.kind === 'text' || (st.kind === 'markdown' && source)) && (
@@ -173,7 +192,7 @@ export function FileView({ viewKey }: { viewKey: string }) {
             {st.body.truncated && (
               <div className="fv-trunc" role="status">
                 Showing the first part of a {Math.round(st.body.size / 1024 / 1024)} MB file.{' '}
-                {st.body.size > LOAD_ALL_MAX ? <button className="btn text fv-touch" onClick={download}>Download it instead</button> : <button className="btn text fv-touch" onClick={() => setAll(true)}>Load all</button>}
+                {st.body.size > LOAD_ALL_MAX ? <button className="btn text fv-touch" onClick={download} disabled={busy}>Download it instead</button> : <button className="btn text fv-touch" onClick={() => setAll(true)}>Load all</button>}
                 {dl && <span className="muted"> {dl}</span>}
               </div>
             )}
@@ -184,7 +203,7 @@ export function FileView({ viewKey }: { viewKey: string }) {
         {st.s === 'ok' && st.kind === 'download' && (
           <div className="fv-note">
             <p>{baseName(path)} <span className="muted">({st.body.type}{st.body.size ? `, ${Math.max(1, Math.round(st.body.size / 1024))} KB` : ''})</span> has no viewer yet.</p>
-            <button className="btn primary fv-touch" onClick={download}><Icon name="download" /> Download</button>
+            <button className="btn primary fv-touch" onClick={download} disabled={busy}><Icon name="download" /> Download</button>
             {dl && <p className="muted">{dl}</p>}
           </div>
         )}

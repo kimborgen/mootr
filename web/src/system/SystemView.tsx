@@ -79,7 +79,7 @@ const PACK_AT = 0.55
 const UNPACK_AT = 0.72
 const PACK_MAX_K = 0.9
 // The two-column option at Fit (S-784), off by default: two columns of full cards fit a 360 px
-// phone only with names under 14 px, so it is an experiment (`#view=system&cardsCols=2`) Kim can
+// phone only with names under 14 px, so it is an experiment (`#view=system&cardsCols=2`) the user can
 // compare against the one column, never a setting.
 const cardsColsOf = () => (new URLSearchParams(location.hash.slice(1)).get('cardsCols') === '2' ? 2 : 0)
 // A press that moves less than this is a click, not a drag.

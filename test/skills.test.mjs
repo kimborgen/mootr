@@ -23,7 +23,7 @@ const skill = (dir, name, fm, body = 'Do the thing.\n') => {
 };
 
 before(async () => {
-  skill(join(user, '.claude', 'skills'), 'kim-style', 'description: How to write to Kim.');
+  skill(join(user, '.claude', 'skills'), 'user-style', 'description: How to write to the user.');
   skill(join(home, 'skills'), 'own', 'description: >\n  Folded line one\n  and two.');
   skill(join(home, 'skills'), 'fetched', 'description: "Quoted: yes"');
   writeFileSync(join(home, 'skills', 'fetched', 'origin.json'), '{}');
@@ -41,11 +41,11 @@ test('parseSkill reads plain, quoted and folded descriptions and strips the fron
 
 test('skillInfos gives source, size and reach per harness', () => {
   const by = Object.fromEntries(ins.skillInfos().map((s) => [s.name, s]));
-  assert.equal(by['kim-style'].source, 'user');
+  assert.equal(by['user-style'].source, 'user');
   assert.equal(by.own.source, 'stam');
   assert.equal(by.own.description, 'Folded line one and two.');
   assert.equal(by.fetched.source, 'imported');
-  assert.ok(by['kim-style'].tokens > 0);
+  assert.ok(by['user-style'].tokens > 0);
   assert.ok(by.fetched.extraTokens >= 100, 'origin.json and extra.md count apart from SKILL.md');
   assert.equal(by.own.extraTokens, 0);
   assert.deepEqual(by.own.reaches, { claude: 'native', opencode: 'unreachable', codex: 'unreachable' });
@@ -61,17 +61,17 @@ test('linkSkills into ~/.agents/skills makes Codex reach every skill and keeps w
   symlinkSync(foreign, join(dir, 'foreign'));
   symlinkSync(join(home, 'skills', 'gone'), join(dir, 'gone'));
   // The user's own links into the Claude folder: an alias name, and a non-skill file.
-  symlinkSync(join(user, '.claude', 'skills', 'kim-style'), join(dir, 'alias'));
+  symlinkSync(join(user, '.claude', 'skills', 'user-style'), join(dir, 'alias'));
   writeFileSync(join(user, '.claude', 'notes.md'), 'x');
-  symlinkSync(join(user, '.claude', 'skills', 'kim-style', 'SKILL.md'), join(dir, 'file'));
+  symlinkSync(join(user, '.claude', 'skills', 'user-style', 'SKILL.md'), join(dir, 'file'));
   ins.linkSkills(dir);
   assert.ok(!lstatSync(join(dir, 'own')).isSymbolicLink(), 'a real folder stays');
   assert.equal(readlinkSync(join(dir, 'foreign')), foreign, 'a foreign link stays');
   assert.ok(lstatSync(join(dir, 'alias')).isSymbolicLink() && lstatSync(join(dir, 'file')).isSymbolicLink(), 'the user\'s own links into the Claude folder stay');
   assert.ok(!existsSync(join(dir, 'gone')) && (() => { try { lstatSync(join(dir, 'gone')); return false; } catch { return true; } })(), 'a stale stam link is removed');
-  assert.equal(readlinkSync(join(dir, 'kim-style')), join(user, '.claude', 'skills', 'kim-style'));
+  assert.equal(readlinkSync(join(dir, 'user-style')), join(user, '.claude', 'skills', 'user-style'));
   const by = Object.fromEntries(ins.skillInfos().map((s) => [s.name, s]));
-  assert.equal(by['kim-style'].reaches.codex, 'native');
+  assert.equal(by['user-style'].reaches.codex, 'native');
   assert.equal(by.own.reaches.codex, 'unreachable', 'the user\'s folder of the same name is a different skill');
   assert.equal(by.fetched.reaches.codex, 'native');
   ins.linkSkills(dir); // idempotent

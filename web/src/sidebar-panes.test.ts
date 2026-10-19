@@ -56,6 +56,20 @@ describe('the cost tab migration', () => {
   })
 })
 
+describe('the history tab migration', () => {
+  const v2 = { v: 2, panes: [{ tabs: ['agents', 'issues'], active: 'agents' }, { tabs: ['mail'], active: 'mail' }, { tabs: ['cost', 'machines'], active: 'cost' }] }
+  const KNOWN_H = ['agents', 'issues', 'mail', 'history', 'cost', 'machines']
+  it('defaults to the mail pane', () => {
+    expect(DEFAULT_PANES[1]).toEqual({ tabs: ['mail', 'history'], active: 'mail' })
+  })
+  it('adds history once to the pane holding mail, keeping its showing tab', () => {
+    expect(sanitizePanes(v2, KNOWN_H)[1]).toEqual({ tabs: ['mail', 'history'], active: 'mail' })
+  })
+  it('leaves a layout saved at the current version alone', () => {
+    expect(sanitizePanes({ ...v2, v: LAYOUT_V }, KNOWN_H)).toEqual(v2.panes)
+  })
+})
+
 describe('activating a tab', () => {
   it('changes only that pane, and only to one of its tabs', () => {
     const next = activate(DEFAULT_PANES, 0, 'issues')

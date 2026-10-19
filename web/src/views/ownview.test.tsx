@@ -119,7 +119,7 @@ describe('the view state model', () => {
     const mail = (id: string, at: number, out = false): ViewMessage => ({ id, role: 'user', kind: 'mail', at, parts: [{ type: 'mail', id, from_id: 'x', from: 'x', subject: id, body: id, thread: id, read_at: null, ...(out ? { to: [{ id: 'cos', name: 'cos', read_at: null }] } : {}) }] })
     const notice = (id: string, at: number): ViewMessage => msg(id, at, { role: 'system', kind: 'notice', parts: [{ type: 'text', text: '[stam] You have 1 unread mail.' }] })
     const shape = (ms: ViewMessage[]) => turns(ms).map((t) => `${t.id}:${t.input?.id ?? '-'}>${t.items.map((m) => m.id).join(',')}`)
-    // Before the first input, a turn with no input; Kim's message and a mail in each open one
+    // Before the first input, a turn with no input; the user's message and a mail in each open one
     // (the mail notice after it joins the mail's turn); mail the agent sent, reasoning and tools, and other system rows are items.
     expect(shape([
       msg('a0', 1), msg('u', 2, { role: 'user' }), msg('a1', 3), mail('out', 4, true), msg('c', 5, { role: 'system', kind: 'compaction' }),

@@ -74,7 +74,7 @@ export const openWorld = (name: 'config' | 'inventory' | 'usage' | 'work' | 'sys
 export const openType = (name: string) => { doneFocus(); shell.showAgentWorld('w:type:' + name) }
 // An issue's own world, `w:itsa:ID`, as Settings and Usage are worlds of their own.
 export const selectIssue = (id: string) => { doneFocus(); shell.showAgentWorld('w:itsa:' + id) }
-// The mail Kim has open, and the one before it: after an archive, "next" follows the way Kim is
+// The mail the user has open, and the one before it: after an archive, "next" follows the way the user is
 // moving through the list (working bottom up, the one above).
 let shownMail: string | null = null
 let priorMail: string | null = null
@@ -149,7 +149,7 @@ export function markMailRead(ids: string[]): Promise<boolean> {
 export function mailOrder(d = getData()) {
   return [...d.humanThreads.filter(hasPendingPermission), ...d.humanThreads.filter((t) => !hasPendingPermission(t))]
 }
-// The mail to open after `tid` leaves the list: the one above when Kim came to it from below,
+// The mail to open after `tid` leaves the list: the one above when the user came to it from below,
 // else the one below; at either end, the other neighbour; null when none is left.
 export function nextMail(list: { thread_id: string }[], tid: string, prior: string | null): string | null {
   const i = list.findIndex((t) => t.thread_id === tid)

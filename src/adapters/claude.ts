@@ -379,7 +379,7 @@ export const claude: Adapter = {
         PreToolUse: [{ hooks: [hook] }, { matcher: 'Bash', hooks: [guard] }],
       },
       statusLine: { type: 'command', command: `${STAM_BIN} statusline claude`, padding: 0 },
-      // stam's own tools are pre-approved (Kim's decision, 2026-10-11): mail stays inside
+      // stam's own tools are pre-approved (a project decision, 2026-10-11): mail stays inside
       // the user's own system, and auto mode's check blocked agents mailing what they were asked to.
       // The test base folder holds every test's daemon home and logs; outside it, reading them
       // stops the agent on a dialog even in auto mode (S-276).
@@ -508,6 +508,9 @@ export const claude: Adapter = {
     const args = ['-p', '--resume', agent.session_id!, '--output-format', 'json'];
     if (agent.model) args.push('--model', agent.model);
     const run = execFileAsync(BIN, args, { cwd: agent.cwd, timeout: 600_000, env: { ...process.env, STAM_AGENT_ID: '', STAM_COMPACTOR: `${agent.id}:${opts?.op ?? ''}` } });
+    // A compactor that exits before reading stdin fails this write with EPIPE. Unhandled, that
+    // took the daemon down (S-2040); the run's own rejection reports the failure.
+    run.child.stdin!.on('error', () => {});
     run.child.stdin!.end(`/compact ${instructions ?? ''}`.trim());
     await run;
     return { relaunch: true };

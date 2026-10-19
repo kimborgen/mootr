@@ -1,12 +1,12 @@
 #!/bin/sh
-# Kim's reply to a mail a peer stores (S-359), free (no models). Two isolated daemons, "main"
+# Dana's reply to a mail a peer stores (S-359), free (no models). Two isolated daemons, "main"
 # (the human's web UI) and "twin", peered. far, an agent on twin, mails the human, so the mail
-# is stored on twin only. Kim replies on main naming it:
+# is stored on twin only. Dana replies on main naming it:
 #   - the reply resolves the mail through twin and is delivered to far on twin
 #   - the reply joins the mail's thread on both daemons
 #   - the mail record is shown to far, which sent it, and not to nosy, another agent on twin
 #   - so is the mail's thread and subject (S-388), on twin and through main for kid, an agent
-#     there, while Kim's web UI on main still resolves it
+#     there, while the web UI on main still resolves it
 #   - nor to oc, an OpenCode agent on main, or the shared token naming kid's box: main asks twin
 #     for the box it read as, so twin doesn't answer as for a daemon (S-467); nor are the threads
 #     of an agent on twin that shares oc's name, when oc lists its own threads (S-476)
@@ -52,7 +52,7 @@ api() {
   _url=$MAIN_URL; _tok=$MAIN_TOKEN; [ "$1" = twin ] && { _url=$TWIN_URL; _tok=$TWIN_TOKEN; }
   curl -s -X "$2" -H "authorization: Bearer $_tok" -H 'content-type: application/json' ${4:+-d "$4"} "$_url$3"
 }
-# Kim's web UI sends as the human: the daemon takes the x-stam-human header for that.
+# The web UI sends as the human: the daemon takes the x-stam-human header for that.
 kim() {
   curl -s -X "$1" -H "authorization: Bearer $MAIN_TOKEN" -H 'x-stam-human: 1' -H 'content-type: application/json' -d "$3" "$MAIN_URL$2"
 }
@@ -92,9 +92,9 @@ echo "-- the mail record: far sent it, nosy didn't"
 api twin GET "/api/mail/$M1?box=$FAR" | jget "len(d)" | grep -qx 1 || fail "far's box doesn't show its own mail record"
 curl -s -H "authorization: Bearer $NOSY_TOKEN" "$TWIN_URL/api/mail/$M1" | jget "len(d)" | grep -qx 0 || fail "nosy reads far's mail record"
 
-echo "-- the mail's thread and subject (S-388): far and Kim see them, nosy and kid don't"
+echo "-- the mail's thread and subject (S-388): far and Dana see them, nosy and kid don't"
 api twin GET "/api/mail/$M1/thread?box=$FAR" | jget "d[0]['subject']" | grep -qx "Pick a cache" || fail "far's box doesn't see its own mail's thread"
-api main GET "/api/mail/$M1/thread" | jget "d[0]['thread_id']" | grep -qx "$M1" || fail "Kim's web UI on main doesn't resolve the peer mail's thread"
+api main GET "/api/mail/$M1/thread" | jget "d[0]['thread_id']" | grep -qx "$M1" || fail "the web UI on main doesn't resolve the peer mail's thread"
 curl -s -H "authorization: Bearer $NOSY_TOKEN" "$TWIN_URL/api/mail/$M1/thread" | jget "len(d)" | grep -qx 0 || fail "nosy reads far's mail thread on twin"
 curl -s -H "authorization: Bearer $KID_TOKEN" "$MAIN_URL/api/mail/$M1/thread" | jget "len(d)" | grep -qx 0 || fail "kid reads far's mail thread through main"
 echo "-- through main, the OpenCode server and the shared token are checked on twin as the box they name (S-467)"
@@ -112,7 +112,7 @@ OC_THREADS=$(curl -s -H "authorization: Bearer $OC_TOKEN" "$MAIN_URL/api/agents/
 printf "%s" "$OC_THREADS" | jget "isinstance(d, list)" | grep -qx True || fail "oc can't list its own threads through main (got: $OC_THREADS)"
 printf "%s" "$OC_THREADS" | jget "any(m['subject']=='Twin oc only' for t in d for m in t['mails'])" | grep -qx False || fail "oc reads the threads of twin's agent named oc through main"
 
-echo "-- Kim replies on main to the mail stored on twin"
+echo "-- Dana replies on main to the mail stored on twin"
 R=$(kim POST /api/mail "{\"from\":\"human\",\"to\":[\"far\"],\"reply_to\":\"$M1\",\"body\":\"Redis.\"}")
 M2=$(printf "%s" "$R" | jget "d['id']") || fail "the reply to a peer-stored mail failed (got: $R)"
 

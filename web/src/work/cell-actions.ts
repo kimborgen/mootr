@@ -28,10 +28,11 @@ function valuesOf(raw: unknown): string[] | null {
 }
 
 // The entries for one cell. `options` are the column's checklist values (with the other filters
-// applied), which an Exclude starts from when the column has no values filter yet. How an entry
+// applied), which gives each entry its label. How an entry
 // meets a filter already on the column:
 // - Filter to this value replaces any filter on the column.
-// - Exclude this value takes the value off an existing values filter, else lists every other value.
+// - Exclude this value takes the value off an include list, else adds it to the column's standing
+//   `not` rule (made if there is none), so a value that appears later still shows.
 // - At least / At most set one bound and keep the other when it still fits (a date drops its preset).
 // - Has and Has not replace the filter.
 export function cellActions(col: SortFilterCol & { label?: string }, row: WorkRow, cx: CellContext, layout: Layout, options: FilterValue[]): CellEntry[] {
@@ -50,8 +51,9 @@ export function cellActions(col: SortFilterCol & { label?: string }, row: WorkRo
           { label: 'Filter to this value', hint: label(v), apply: (l) => setFilter(l, id, { kind: 'values', values: [v] }) },
           { label: 'Exclude this value', hint: label(v), apply: (l) => {
             const f = l.filters?.[id]
-            const base = f?.kind === 'values' ? f.values : options.map((o) => o.value)
-            return setFilter(l, id, { kind: 'values', values: base.filter((x) => x !== v) })
+            if (f?.kind !== 'values') return setFilter(l, id, { kind: 'values', not: [v] })
+            if (f.values) return setFilter(l, id, { kind: 'values', values: f.values.filter((x) => x !== v && !f.not?.includes(x)) })
+            return setFilter(l, id, { kind: 'values', not: [...new Set([...(f.not ?? []), v])] })
           } },
         ]))
         break

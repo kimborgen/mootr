@@ -45,6 +45,7 @@ agent-class
 agent-ips
 agent-load
 agent-rates
+agent-routes-unit
 agent-view-default
 agent-views-unit
 allocations
@@ -64,10 +65,11 @@ cost-display
 cost-notices
 db-synchronous
 decision-fence
+decl-index
 default-read-stale
 delegate-peer-parent
+developer-cap-unit
 diff-api
-decl-index
 doc-citations
 embed-unit
 events-unit
@@ -97,7 +99,6 @@ mail-full-suite-sender
 mail-gate-strict-unit
 mail-recipients-index
 mail-routing-uncertain
-thread-defer
 mail-threading
 mail-visibility-creator
 manager-merge-line
@@ -158,6 +159,7 @@ sw-group
 swallowed-wait
 template-blocks
 test-hooks
+thread-defer
 thread-resolved
 threads-with
 ticket-unit
@@ -174,7 +176,6 @@ usage
 usage-agents-filter
 usage-drill
 usage-history
-agent-routes-unit
 waits-unit
 watch-unit
 window-summary-calls
@@ -431,6 +432,8 @@ peers-down
 personal-workspace
 personal-workspace-unit
 standing-rest-unit
+rest-unit
+compact-epipe-unit
 standing-growth
 pr-open-scope
 pr-open-scope-peers
@@ -511,7 +514,10 @@ settings-writes
 tiny-models
 tool-summaries
 tool-summaries-route
+tool-names
 spawn-usage
+developer-cap-unit
+developer-cap
 spawn-worktree-unit
 stale-working
 stall
@@ -577,6 +583,7 @@ window-summary-calls
 withdraw
 withdraw-ask
 supersede
+mail-from-stam-http
 withdraw-ask-http
 withdraw-ask-peers
 withdraw-peers
@@ -688,6 +695,7 @@ cmd() {
     settings-file-mode) echo "node --test test/settings-file-mode.test.mjs" ;;
     tiny-models) echo "node --test test/tiny-models.test.mjs" ;;
     tool-summaries) echo "node --test test/tool-summaries.test.mjs" ;;
+    tool-names) echo "node --test test/tool-names.test.mjs" ;;
     settings-memo) echo "node --test test/settings-memo.test.mjs" ;;
     settings-notice) echo "node --test test/settings-notice.test.mjs" ;;
     peer-remember) echo "node --test test/peer-remember.test.mjs" ;;
@@ -829,9 +837,12 @@ cmd() {
     agent-view-unit) echo "node --test test/agent-view.test.mjs" ;;
     agent-view-default) echo "node --test test/agent-view-default.test.mjs" ;;
     swallowed-wait) echo "node --test test/swallowed-wait.test.mjs" ;;
+    developer-cap-unit) echo "node --test test/developer-cap-unit.test.mjs" ;;
     spawn-worktree-unit) echo "node --test test/spawn-worktree-unit.test.mjs" ;;
     personal-workspace-unit) echo "node --test test/personal-workspace.test.mjs" ;;
     standing-rest-unit) echo "node --test test/standing-rest.test.mjs" ;;
+    rest-unit) echo "node --test test/rest.test.mjs" ;;
+    compact-epipe-unit) echo "node --test test/compact-epipe.test.mjs" ;;
     standing-growth) echo "node --test test/standing-growth.test.mjs" ;;
     review-dir-cleanup) echo "node --test test/review-dir-cleanup.test.mjs" ;;
     reviewer-types) echo "node --test test/reviewer-types.test.mjs" ;;

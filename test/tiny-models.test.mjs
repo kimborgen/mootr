@@ -20,7 +20,7 @@ const t = await import('../src/tiny-models.ts');
 const byId = (id) => t.tinyModels().find((m) => m.id === id);
 
 test('the registry lists every tiny step, in order', () => {
-  assert.deepEqual(t.tinyModels().map((m) => m.id), ['decisions', 'mailTitles', 'blockSummaries', 'activityClassify', 'toolSummary']);
+  assert.deepEqual(t.tinyModels().map((m) => m.id), ['decisions', 'mailTitles', 'blockSummaries', 'activityClassify', 'toolSummary', 'toolNames']);
 });
 
 test('decisions names what shares its model and the others name nothing', () => {
@@ -73,6 +73,18 @@ test('the tool summary reads its own settings, and empty instructions mean the d
   assert.equal(c.model, 'google/gemma-3-4b-it');
   assert.equal(c.instructions, t.TOOL_SUMMARY_DEFAULT_INSTRUCTIONS);
   assert.equal(settings().tiny.toolSummary.instructions, '  ');
+});
+
+test('the tool names are on by default with the cheap model and a fixed prompt', () => {
+  write({});
+  assert.deepEqual(t.toolNameConfig(), { enabled: true, model: 'google/gemma-3-4b-it' });
+  assert.equal(byId('toolNames').toggle, 'tiny.toolNames.enabled');
+  assert.equal(byId('toolNames').instructions.editable, false);
+  assert.match(byId('toolNames').instructions.text, /"label"/);
+  write({ tiny: { toolNames: { enabled: false, model: ' foo/bar ' } } });
+  assert.deepEqual(t.toolNameConfig(), { enabled: false, model: 'foo/bar' });
+  write({ tiny: { toolNames: { enabled: 'no', model: '' } } });
+  assert.deepEqual(t.toolNameConfig(), { enabled: true, model: 'google/gemma-3-4b-it' });
 });
 
 test('every page setting path exists in the settings', () => {

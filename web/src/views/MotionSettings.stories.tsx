@@ -4,7 +4,7 @@ import { MotionSettings } from './MotionSettings'
 export const stories: Story[] = [{
   name: 'Motion settings',
   group: 'Settings',
-  what: 'Settings › Motion: a master toggle for all animation and one toggle for each kind of motion in the sidebar, saved in the human\'s settings so they follow Kim across devices.',
+  what: 'Settings › Motion: a master toggle for all animation and one toggle for each kind of motion in the sidebar, saved in the human\'s settings so they follow the user across devices.',
   when: 'Settings, in the Motion section.',
   code: ['web/src/views/MotionSettings.tsx#MotionSettings', 'web/src/motion-gate.ts#MOTION_KINDS'],
   rules: [

@@ -1,10 +1,10 @@
 ← stam: [stam] You have 1 unread mail. Read it with the stam `read_…
   Called stam (ctrl+o to expand)
   Called stam 2 times (ctrl+o to expand)
-● Deploys stay stopped overnight unless Kim acts on the current suggestion before it expires at 22:41 Oslo. @cos thinks Kim is away for the night, so I won't send the suggestion again on a timer. I
+● Deploys stay stopped overnight unless Dana acts on the current suggestion before it expires at 22:41 Oslo. @cos thinks Dana is away for the night, so I won't send the suggestion again on a timer. I
   cleared my 22:41 recheck and told @cos.
-  - If Kim approves before then: the stop file goes, and the watcher deploys the waiting merges: #35, #34, #36 (S-438), #37 (S-495) and #38 (S-497).
-  - If it expires: I wait for @cos to say Kim is back, then send it once more.
+  - If Dana approves before then: the stop file goes, and the watcher deploys the waiting merges: #35, #34, #36 (S-438), #37 (S-495) and #38 (S-497).
+  - If it expires: I wait for @cos to say Dana is back, then send it once more.
   - Meanwhile: live stays 9166c8e, and #30, #27 and #28 stay unmerged.
 ✻ Brewed for 9s · done 10:11 PM
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

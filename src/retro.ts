@@ -188,18 +188,24 @@ const firstDetail = (body: string | null | undefined): string =>
     .map((l) => l.trim())
     .find(Boolean) ?? '';
 
-// The meaning search's page size, and how many candidates the search looks at before it gives up
-// (S-729 review): enough to page past items whose +1 count the daemon refuses. The route caps a
-// request at 30, so a page is 30.
-const SEARCH_PAGE = 30;
+// How many candidates the meaning search returns, in one route call (S-1925): one embedding of the
+// query and one scan of the vectors per search. The route allows up to 200 per request.
 const MAX_CANDIDATES = 150;
 
-// One page of the meaning search, or null when the embedder isn't ready (the route answered by
+// Words that carry no meaning in a query, left out of the word coverage.
+const STOPWORDS = new Set('a an the is are was were be been it its this that these those of to in on at by for from with and or but not no nor so as if then than use used using do does did can could should would will we you i my our your there here'.split(' '));
+// How much the squared word coverage (0 to 1) counts against a cosine (about 0.15 to 0.7). Squared,
+// so a lone shared word adds little but a paraphrase sharing half the query's rare words outranks an
+// unrelated item with a higher cosine, and a pure paraphrase with no shared words isn't crowded out
+// by items that share one (S-721).
+const COVERAGE_WEIGHT = 4;
+
+// The meaning search, one call, or null when the embedder isn't ready (the route answered by
 // keyword) or the route failed: the caller then uses word overlap. Empty when the page is past the
 // end. The route ranks by meaning, restricted to the kinds and to open items, best first.
-async function meaningPage(api: Api, words: string, offset: number): Promise<any[] | null> {
+async function meaningHits(api: Api, words: string): Promise<any[] | null> {
   try {
-    const hits = await api('GET', `/api/itsas/search?${new URLSearchParams({ q: words, limit: String(SEARCH_PAGE), offset: String(offset), kind: `${RETRO_KIND},${REPORT_KIND}`, open: '1' })}`);
+    const hits = await api('GET', `/api/itsas/search?${new URLSearchParams({ q: words, limit: String(MAX_CANDIDATES), kind: `${RETRO_KIND},${REPORT_KIND}`, open: '1' })}`);
     if (!Array.isArray(hits)) return null;
     return hits.length && hits[0].by !== 'meaning' ? null : hits;
   } catch {
@@ -225,59 +231,47 @@ const hitLine = (x: any, n: number): string => {
   return `${x.key} "${x.title}" [${x.status}] · Kind: ${kindOf(x.body)} · ${n} +1${n === 1 ? '' : 's'}${detail ? ` · ${detail}` : ''}`;
 };
 
-// Open retro items and feedback reports nearest the query, by meaning when the embedder is ready
-// and by shared words otherwise, up to three, each with its Kind line, its +1 count and the first
-// line of its details. A match whose +1 count the daemon refuses is skipped, not an error: the
-// search pages on past it, up to MAX_CANDIDATES, and falls back to word overlap when nothing
-// countable is near.
+// Open retro items and feedback reports nearest the query, up to three, each with its Kind line,
+// its +1 count and the first line of its details. An item scores its cosine from the meaning
+// search (when the embedder is ready) plus how much of the query's words it covers, each word
+// weighted by how rare it is among the open items and counted fully in the title or summary, half in
+// the details (S-1925). So a paraphrase that shares the rare words still ranks first when the
+// vector is missing, stale, or outscored by a longer item. A match whose +1 count the daemon
+// refuses is skipped, not an error: the search goes on to the next.
 export async function searchRetros(api: Api, words: string): Promise<string> {
-  const want = [...wordsOf(words)];
-  if (!want.length) throw new Error('search needs at least one word');
+  const all = [...wordsOf(words)];
+  if (!all.length) throw new Error('search needs at least one word');
+  const want = all.filter((w) => !STOPWORDS.has(w));
+  if (!want.length) want.push(...all);
   const rows = (await Promise.all([RETRO_KIND, REPORT_KIND].map((k) => api('GET', `/api/itsas?kind=${k}`))))
     .flat()
     .filter((x: any) => !x.closed_at);
-  const byId = new Map(rows.map((x: any) => [x.id, x]));
+  // The meaning search's cosines, from one route call; none when the embedder isn't ready. A text-only
+  // match carries cosine 0 and counts as none.
+  const cosine = new Map<string, number>();
+  for (const h of (await meaningHits(api, words)) ?? []) cosine.set(h.id, Number(h.cosine ?? h.score) || 0);
+  const head = rows.map((x: any) => wordsOf(`${x.title} ${x.summary ?? ''}`));
+  const rest = rows.map((x: any) => wordsOf(headerFields(x.body).details));
+  const idf = new Map(want.map((w) => [w, Math.log(1 + rows.length / (1 + head.filter((h, i) => h.has(w) || rest[i].has(w)).length))]));
+  const total = [...idf.values()].reduce((a, b) => a + b, 0) || 1;
+  const ranked = rows
+    .map((x: any, i: number) => {
+      const covered = want.reduce((sum, w) => sum + idf.get(w)! * (head[i].has(w) ? 1 : rest[i].has(w) ? 0.5 : 0), 0) / total;
+      return { x, cos: cosine.get(x.id), score: (cosine.get(x.id) ?? 0) + COVERAGE_WEIGHT * covered * covered, covered };
+    })
+    .filter((h) => (h.cos ?? 0) > 0 || h.covered > 0)
+    .sort((a, b) => b.score - a.score || a.x.key.localeCompare(b.x.key));
   const lines: string[] = [];
-  const seen = new Set<string>();
   let byMeaning = false;
-  for (let offset = 0; offset < MAX_CANDIDATES; ) {
-    const hits = await meaningPage(api, words, offset);
-    if (hits === null) break;
-    offset += hits.length;
-    byMeaning = true;
-    for (const h of hits) {
-      if (lines.length >= MAX_HITS) break;
-      if (seen.has(h.id)) continue;
-      seen.add(h.id);
-      const x = byId.get(h.id);
-      if (!x) continue;
-      const n = await plusOnesOrNull(api, x.id);
-      if (n === null) continue;
-      lines.push(hitLine(x, n));
-    }
-    if (lines.length >= MAX_HITS || hits.length < SEARCH_PAGE) break;
-  }
-  if (!lines.length) {
-    // The word overlap search: the same rows, most matching words first.
-    const ranked = rows
-      .map((x: any) => {
-        const have = wordsOf(`${x.title} ${x.summary ?? ''} ${x.body ?? ''}`);
-        return { x, score: want.filter((w) => have.has(w)).length };
-      })
-      .filter((h) => h.score > 0)
-      .sort((a, b) => b.score - a.score);
-    for (const { x } of ranked) {
-      if (lines.length >= MAX_HITS) break;
-      if (seen.has(x.id)) continue;
-      seen.add(x.id);
-      const n = await plusOnesOrNull(api, x.id);
-      if (n === null) continue;
-      lines.push(hitLine(x, n));
-    }
-    byMeaning = false;
+  for (const { x, cos } of ranked) {
+    if (lines.length >= MAX_HITS) break;
+    const n = await plusOnesOrNull(api, x.id);
+    if (n === null) continue;
+    if ((cos ?? 0) > 0) byMeaning = true;
+    lines.push(hitLine(x, n));
   }
   if (!lines.length) return `No open retro items or feedback reports match "${words}". File yours with kind, title, summary and details.`;
-  return `Ranked by ${byMeaning ? 'meaning' : 'keyword'}.\n${lines.join('\n')}`;
+  return `Ranked by ${byMeaning ? 'meaning and words' : 'keyword'}.\n${lines.join('\n')}`;
 }
 
 // A +1 on a retro item or feedback report: a comment with the reporter's scenario, which also

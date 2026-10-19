@@ -16,7 +16,8 @@ import * as tmux from './tmux.ts';
 import { adapters } from './adapters/index.ts';
 import { render, renderWithRetro, withRetroReminder } from './templates.ts';
 import { cleanupWorkspace, type Workspace } from './workspace.ts';
-import { markCompacted } from './context.ts';
+import { markCompacted, idleCompactIfDue } from './context.ts';
+import { typeOf } from './agent-class.ts';
 import { compactorProcesses, dirProcesses, removeAgentScratchDirs, removeClaudeScratch, removeReviewDir, removeReviewTmpDir, reviewDirOf, reviewTmpForSpawn, stopAndConfirm } from './proctree.ts';
 import { isReviewerType } from './agent-types.ts';
 import { admit, heldBy, type TurnKind } from './admission.ts';
@@ -181,10 +182,17 @@ export function assertNotTakenOver(a: db.Agent): void {
   throw new Error(`${cur.name} was taken over by ${s.name}: switch back with \`cost_switch ${s.name} ${p}\`, or archive ${s.name} first`);
 }
 
+// The rest ends with the harness: a resting agent shut down or archived keeps its other pause owners, never the rest's,
+// so a later resume doesn't come back paused and taken for resting.
+function withoutRest(a: db.Agent): string | null {
+  const owners = pauseOwners(db.getAgent(a.id) ?? a).filter((o) => o !== REST_OWNER);
+  return owners.length ? JSON.stringify(owners) : null;
+}
+
 function quitHarness(a: db.Agent, detail: string): void {
   invalidateLaunch(a.id);
   tmux.killSession(a.id);
-  db.updateAgent(a.id, { lifecycle: 'shut_down', activity: 'unknown', activity_detail: detail, pending_action: null });
+  db.updateAgent(a.id, { lifecycle: 'shut_down', activity: 'unknown', activity_detail: detail, pending_action: null, paused_by: withoutRest(a) });
   db.addEvent(a.id, 'shutdown', { detail });
   stopTurn(a);
 }
@@ -351,7 +359,10 @@ async function compactAndResume(a: db.Agent, instructions?: string): Promise<str
 // skips the gate, only for the pause notice itself, which tells a held agent to stop.
 async function prompt(a: db.Agent, text: string, kind: TurnKind | null = 'prompt'): Promise<boolean> {
   if (kind && !admit(a, kind).ok) return false;
-  return (await adapterFor(a).pushPrompt(a, text).catch(() => false)) ?? false;
+  const ok = (await adapterFor(a).pushPrompt(a, text).catch(() => false)) ?? false;
+  // A turn is on its way before any hook says so: the rest sweep waits for it (pushedTurnPending).
+  if (ok) db.addEvent(a.id, 'prompt:sent', { kind });
+  return ok;
 }
 
 // Asks a working agent to wrap up, or runs the action now if it's idle.
@@ -405,7 +416,8 @@ function mcpSharers(a: db.Agent): db.Agent[] {
   const scope = adapters[a.harness]?.mcpScope;
   if (!scope) return [db.getAgent(a.id) ?? a];
   const key = scope(a);
-  return db.listAgents().filter((b) => b.harness === a.harness && (b.lifecycle === 'active' || b.lifecycle === 'paused') && scope(b) === key);
+  // A resting agent has no harness on the client; its next launch loads the servers afresh.
+  return db.listAgents().filter((b) => b.harness === a.harness && (b.lifecycle === 'active' || b.lifecycle === 'paused') && !db.restOwned(b) && scope(b) === key);
 }
 
 const reconnectPending = (a: db.Agent) => !!a.pending_action && JSON.parse(a.pending_action).type === 'reconnect-mcp';
@@ -581,45 +593,141 @@ async function resumeNowLocked(id: string, text: string): Promise<string> {
   return 'active';
 }
 
-// --- Resting standing agents (S-897) --------------------------------------------------------
-// A standing agent idle past standing.idleHours rests: paused with the owner REST_OWNER and its
-// harness stopped, as a shutdown does, so no turn is spent telling it. The conversation and the
-// workspace stay; resumeNowLocked starts the harness again on a resume. Only REST_OWNER holds it:
-// a human or agent pause, or a cost blocker, also keeps it down, and a wake never lifts those.
-export const REST_OWNER = 'standing-idle';
+// --- Resting (S-897, S-1982) ----------------------------------------------------------------
+// An idle agent whose next wake is far off rests: paused with the owner REST_OWNER and its harness
+// stopped, as a shutdown does, so no turn is spent telling it. The conversation and the workspace
+// stay; resumeNowLocked starts the harness again on a resume. Only REST_OWNER holds it: a human or
+// agent pause, or a cost blocker, also keeps it down, and a wake never lifts those.
+// The owner keeps its S-897 name, so agents resting across the upgrade still wake.
+export const REST_OWNER = 'standing-idle'; // db.REST_PAUSED_BY is its paused_by
 
 export function isResting(a: db.Agent): boolean {
   const owners = pauseOwners(a);
-  return a.standing === 1 && a.lifecycle === 'paused' && owners.length === 1 && owners[0] === REST_OWNER;
+  return a.lifecycle === 'paused' && owners.length === 1 && owners[0] === REST_OWNER;
 }
 
 // STAM_STANDING_IDLE_HOURS overrides the setting (tests use a fraction).
-function restAfterMs(): number {
+function standingIdleMs(): number {
   const env = Number(process.env.STAM_STANDING_IDLE_HOURS);
   return (env > 0 ? env : settings().standing.idleHours) * 3_600_000;
 }
 
-function restable(a: db.Agent): boolean {
-  if (!a.standing || a.lifecycle !== 'active' || (a.activity !== 'idle' && a.activity !== 'waiting') || !a.idle_since || !a.workspace || !a.session_id) return false;
-  if (Date.now() - Date.parse(a.idle_since) < restAfterMs()) return false;
-  if (a.pending_action || a.forwarded_to || transitions.has(a.id) || compactionRunning(a.id)) return false;
-  // An open wake_me or wait_for keeps the activity 'waiting': its firing or answer is a notice or mail that wakes it. A wait the harness holds (a hook's) would die with the harness.
-  if (db.listWaits(a.id).some((w) => w.source !== 'declared' && w.source !== 'stam')) return false;
-  // Mail or a notice that hasn't reached it yet means it has work.
-  return !db.hasPendingPermission(a.id) && db.unpushedCount(a.id) === 0 && queuedNoticeCount(a.id) === 0 && heldBy(a) === null;
+// STAM_REST_AFTER_MINUTES and STAM_REST_GRACE_MINUTES override the settings (tests use fractions).
+function restMs(): { after: number; grace: number } {
+  const r = settings().rest;
+  const env = (k: string, v: number) => (Number(process.env[k]) > 0 ? Number(process.env[k]) : v) * 60_000;
+  return { after: env('STAM_REST_AFTER_MINUTES', r.afterMinutes), grace: env('STAM_REST_GRACE_MINUTES', r.graceMinutes) };
 }
 
-// Rests every standing agent that has been idle long enough. Called every minute.
-export function restSweep(): void {
-  for (const a of db.listAgents()) if (restable(a)) rest(a.id).catch((e) => db.addEvent(a.id, 'standing:rest-error', String(e)));
+// STAM_REST_ENABLED (1 or 0) overrides rest.enabled: test daemons turn it off (test/lib.sh), so an agent
+// in an e2e test never rests mid-test; the standing rule is separate.
+function restEnabled(): boolean {
+  const env = process.env.STAM_REST_ENABLED;
+  return env === '1' ? true : env === '0' ? false : settings().rest.enabled;
 }
+
+// A prompt, mail or web-view push since it went idle starts a turn the hooks haven't reported yet: the push returns
+// before the harness's turn-start hook, and the push consumed the mail or notices, so a rest now would lose
+// them. Its turn moves idle_since past the push. A push that never starts a turn keeps the agent up until
+// its next turn: up costs memory, a rest would cost the work.
+function pushedTurnPending(a: db.Agent): boolean {
+  const at = db.lastEventAt(a.id, ['pushed', 'prompt:sent', 'view-prompt']);
+  return at != null && at >= a.idle_since!;
+}
+
+// An agent woken this many times within an hour stays up for an hour after that (churn guard).
+const CHURN_WAKES = 3;
+const HOUR = 3_600_000;
+
+function churning(id: string, now: number): boolean {
+  const wakes = db.eventTimes(id, 'standing:wake', new Date(now - 2 * HOUR).toISOString()).map(Date.parse);
+  // The third wake within an hour of the first, that last one less than an hour ago.
+  for (let i = CHURN_WAKES - 1; i < wakes.length; i++) if (now - wakes[i] < HOUR && wakes[i] - wakes[i - CHURN_WAKES + 1] < HOUR) return true;
+  return false;
+}
+
+// The soonest future time a stam-held wait is expected to wake the agent: a wake_me's fire time, a
+// wait_for timeout, or its expect_minutes. Null with no known time.
+function expectedWake(a: db.Agent, now: number): number | null {
+  let soonest: number | null = null;
+  for (const w of db.listWaits(a.id)) {
+    let data: { expect_at?: string } = {};
+    try {
+      data = w.data ? JSON.parse(w.data) : {};
+    } catch {}
+    for (const t of [w.until, data.expect_at]) {
+      const ms = t ? Date.parse(t) : NaN;
+      if (ms > now && (soonest == null || ms < soonest)) soonest = ms;
+    }
+  }
+  return soonest;
+}
+
+const restTypeKey = (a: db.Agent): string => {
+  const t = typeOf(a, settings().chiefOfStaff);
+  return t === 'chief-of-staff' ? 'cos' : t;
+};
+
+export type RestPlan = { reason: 'idle' | 'wait'; wake: number | null };
+
+// Whether the agent may rest now, and why. Null keeps it up.
+function restPlan(a: db.Agent, now = Date.now()): RestPlan | null {
+  if (a.lifecycle !== 'active' || (a.activity !== 'idle' && a.activity !== 'waiting') || !a.idle_since || !a.workspace || !a.session_id) return null;
+  if (a.pending_action || a.forwarded_to || transitions.has(a.id) || compactionRunning(a.id)) return null;
+  const waits = db.listWaits(a.id);
+  // An open wake_me or wait_for keeps the activity 'waiting': its firing or answer is a notice or mail that wakes it. A wait the harness holds (a hook's) would die with the harness.
+  if (waits.some((w) => w.source !== 'declared' && w.source !== 'stam')) return null;
+  // Mail or a notice that hasn't reached it yet means it has work.
+  if (db.hasPendingPermission(a.id) || db.unpushedCount(a.id) > 0 || queuedNoticeCount(a.id) > 0 || heldBy(a) !== null) return null;
+  if (pushedTurnPending(a)) return null;
+  if (settings().rest.types[restTypeKey(a)] === false) return null;
+  const plan = restRule(a, waits, now);
+  // Someone at its terminal (`stam attach`, a web terminal) is using it.
+  return plan && !tmux.hasClients(a.id) ? plan : null;
+}
+
+// The timing rules, for an agent nothing else keeps up.
+function restRule(a: db.Agent, waits: db.Wait[], now: number): RestPlan | null {
+  const idle = now - Date.parse(a.idle_since!);
+  const reason = waits.length ? 'wait' : 'idle';
+  const wake = expectedWake(a, now);
+  // Woken this often lately: chatty notices would restart it again and again. Standing agents too.
+  if (churning(a.id, now)) return null;
+  // S-897: a standing agent idle this long rests whatever it waits for.
+  if (a.standing && idle >= standingIdleMs()) return { reason, wake };
+  if (!restEnabled()) return null;
+  const { after, grace } = restMs();
+  // A manager with children at work (stam's 'children' wait) hears from them at any time, so its wake times say little.
+  const busyChildren = waits.some((w) => w.kind === 'children' && w.source === 'stam');
+  if (wake != null && !busyChildren) {
+    if (wake - now <= after) return null; // it wakes soon anyway
+    return idle >= grace ? { reason, wake } : null;
+  }
+  if (a.standing && reason === 'idle') return null; // only its standing rule above
+  return idle >= after ? { reason, wake } : null;
+}
+
+// Rests every agent that may rest now. Called every minute.
+export function restSweep(): void {
+  const now = Date.now();
+  for (const a of db.listAgents()) if (restPlan(a, now)) rest(a.id).catch((e) => db.addEvent(a.id, 'standing:rest-error', String(e)));
+}
+
+const clock = (ms: number) => new Date(ms).toISOString().slice(11, 16);
 
 export function rest(id: string): Promise<string> {
   return serial(id, async () => {
     const a = db.getAgent(id);
-    if (!a || !restable(a)) return 'not resting';
-    db.updateAgent(id, { lifecycle: 'paused', paused_by: JSON.stringify([REST_OWNER]), activity: 'unknown', activity_detail: 'resting: standing agent idle; unpause to resume', pending_action: null });
-    db.addEvent(id, 'standing:rest', { idleSince: a.idle_since });
+    const plan = a && restPlan(a);
+    if (!a || !plan) return 'not resting';
+    // A rest predicted to outlast the prompt cache compacts first, if the idle compaction would; the
+    // agent rests on a later sweep, once idle again. The cache ages from its last call, when it went idle.
+    const long = plan.wake == null || plan.wake - Date.parse(a.idle_since!) > settings().idleCompaction.idleMinutes * 60_000;
+    if (long && idleCompactIfDue(a, 'before a long rest')) return 'compacting first';
+    const detail = plan.reason === 'idle' ? 'resting: idle; mail or a notice wakes it' : `resting: waiting${plan.wake ? `, expected wake ${clock(plan.wake)} UTC` : ''}; mail or a notice wakes it`;
+    // idle_since stays: the tree-idle notice its parents may still be owed is keyed by it (org.needsTreeIdleNotice).
+    db.updateAgent(id, { lifecycle: 'paused', paused_by: JSON.stringify([REST_OWNER]), activity: 'unknown', activity_detail: detail, pending_action: null, idle_since: a.idle_since });
+    db.addEvent(id, 'standing:rest', { idleSince: a.idle_since, reason: plan.reason, expectedWake: plan.wake ? new Date(plan.wake).toISOString() : null });
     invalidateLaunch(id);
     harnessExited(id);
     tmux.killSession(id);
@@ -1012,7 +1120,8 @@ export async function cascadeChildren(parentId: string, fallback: string[], rep:
       rep.kept.push(`${c.name} (also reports to ${rest.map((p) => db.getAgent(p)?.name ?? p).join(', ')})`);
       continue;
     }
-    const idle = c.lifecycle === 'shut_down' || ((c.lifecycle === 'active' || c.lifecycle === 'paused') && c.activity === 'idle');
+    // A resting child with no wait is as idle as an idle one (S-1982).
+    const idle = c.lifecycle === 'shut_down' || ((c.lifecycle === 'active' || c.lifecycle === 'paused') && c.activity === 'idle') || (db.restOwned(c) && !db.isBusy(c));
     if (!idle) {
       keep(c, `${c.name} (${c.activity})`, rest);
       continue;
@@ -1280,7 +1389,7 @@ async function archiveLocked(a: db.Agent, opts: { force?: boolean; discard?: boo
   const d = db.open();
   d.exec('BEGIN');
   try {
-    db.updateAgent(a.id, { lifecycle: 'archived', activity: 'unknown', activity_detail: result, pending_action: null });
+    db.updateAgent(a.id, { lifecycle: 'archived', activity: 'unknown', activity_detail: result, pending_action: null, paused_by: withoutRest(a) });
     forgetLessons(a.id);
     // An archived grantee loses the workspaces shared with it; an archived owner's grants stay (S-896).
     db.open().prepare('DELETE FROM workspace_grants WHERE grantee_id = ?').run(a.id);

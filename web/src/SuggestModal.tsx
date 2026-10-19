@@ -13,7 +13,9 @@ import { recentIds } from './nav-history'
 import { closeSearch } from './Search'
 import * as shell from './shell/layout'
 import { useData } from './store'
+import { openPreview, openPreviewAt } from './SuggestPreview'
 import { IDLE_MS, SUGGEST_LIMIT, asksNow, goTo, queryOf, routeFor, routeName, sendOn, suggestPath, useRescore, type Route } from './suggest-pick'
+import { useLongPress } from './ui/longpress'
 import { toast } from './ui/menu'
 import { getUi, setUi, useUi } from './ui/state'
 import type { SearchResult } from './types'
@@ -131,10 +133,18 @@ export function useSuggest(composer: React.RefObject<ComposerHandle | null>, opt
     after?.()
   }
 
+  // Preview (S-1910): a hold or right click on a card, the Preview button, or Alt+P on the highlighted
+  // card (the best one with none) shows what it is, with a Pick that does what a tap does.
+  const hold = useLongPress((at) => {
+    const hit = cards.find((c) => at.el.dataset.suggest === c.kind + ':' + c.id)
+    if (hit) openPreview(hit, at.x, at.y, choose)
+  }, '.sg-card')
+
   // Up from the box walks the cards from the best (nearest the box) away; down walks back.
   // Enter in the box on a card picks it instead of sending; on a button (Go to) it presses the button.
   const onKey = (e: React.KeyboardEvent) => {
     if (!cards.length) return
+    if (e.altKey && e.code === 'KeyP' && !e.ctrlKey && !e.metaKey && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); openPreviewAt(cards[Math.max(sel, 0)], choose); return }
     const ta = e.target as HTMLTextAreaElement
     const firstLine = ta.tagName !== 'TEXTAREA' || !ta.value.slice(0, ta.selectionStart).includes('\n')
     if (e.key === 'ArrowUp' && (sel >= 0 || firstLine)) { e.preventDefault(); setSel((n) => Math.min(n + 1, cards.length - 1)) }
@@ -151,9 +161,9 @@ export function useSuggest(composer: React.RefObject<ComposerHandle | null>, opt
     : <span className="muted sg-default">{text.trim() ? `No pick: goes to ${name}` : `Goes to ${name} unless you pick`}</span>
 
   const list = <>
-    <div className="sg-list" role="listbox" aria-label="Suggested recipients" hidden={!!pick || !cards.length}>
+    <div className="sg-list" role="listbox" aria-label="Suggested recipients" hidden={!!pick || !cards.length} {...hold}>
       {cards.map((r, i) => <SuggestCard key={r.kind + ':' + r.id} r={r} sel={i === sel} onPick={choose} onHover={() => setSel(i)}
-        actions={(c) => <button type="button" className="sg-go" data-go onMouseDown={(e) => e.preventDefault()} onClick={() => goto(c)} title={`Go to ${c.title}, with what you wrote as a draft`}>Go to<Icon name="chevron-right" size="xs" /></button>} />)}
+        actions={(c) => <><button type="button" className="sg-prev" data-preview-btn aria-label={`Preview ${c.title}`} onMouseDown={(e) => e.preventDefault()} onClick={() => openPreviewAt(c, choose)} title="Preview (Alt+P, or hold on a phone)"><Icon name="eye" size="xs" /></button><button type="button" className="sg-go" data-go onMouseDown={(e) => e.preventDefault()} onClick={() => goto(c)} title={`Go to ${c.title}, with what you wrote as a draft`}>Go to<Icon name="chevron-right" size="xs" /></button></>} />)}
     </div>
     {typeof route === 'string' ? <p className="sg-why" role="status">{route}</p> : null}
   </>

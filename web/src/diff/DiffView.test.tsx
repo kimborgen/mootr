@@ -393,4 +393,17 @@ describe('go to declaration', () => {
     tap(await hook('src/a.ts'), 'f')
     await vi.waitFor(() => expect(document.querySelector('.decl-pick [role=alert]')?.textContent).toContain('open the diff again'))
   })
+
+  // S-1820: .dv-main scrolls, so the draw-ahead observer takes it as its root and its 800 px margin is not clipped.
+  it('observes files from the .dv-main scroll container', async () => {
+    const opts: IntersectionObserverInit[] = []
+    vi.stubGlobal('IntersectionObserver', class { constructor(_cb: unknown, o: IntersectionObserverInit) { opts.push(o) } observe() {} unobserve() {} disconnect() {} takeRecords() { return [] } })
+    const host = await mount()
+    const main = host.querySelector<HTMLElement>('.dv-main')!
+    expect(opts.length).toBeGreaterThan(0)
+    for (const o of opts) {
+      expect(o.root).toBe(main)
+      expect(o.rootMargin).toBe('800px 0px')
+    }
+  })
 })

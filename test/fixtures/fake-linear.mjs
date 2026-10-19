@@ -2,7 +2,7 @@
 // streamable-HTTP MCP methods src/sources/mcp-client.ts uses (initialize, notifications, and
 // tools/call for `get_issue` and `list_comments`), requires the bearer `good` (any other gets
 // a 401, so a test can prove the refresh path), and serves the issues and comments it is
-// given. The real Linear tool names and result shapes are unverified until Kim logs in; these
+// given. The real Linear tool names and result shapes are unverified until the user logs in; these
 // are the shapes the poller parses defensively. `startFakeLinear({ port })` returns the server,
 // its url, `update(patch)`, and `close()`. Run as a script, it prints `URL=...` and takes the
 // same patches over `POST /_control`. See test/linear-poller.test.mjs and

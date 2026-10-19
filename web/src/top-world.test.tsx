@@ -13,7 +13,7 @@ import type { Agent } from './types'
 
 const agent = (over: Partial<Agent> & { id: string; name: string }) => ({ role: '', lifecycle: 'paused', state: 'idle', created_at: '2026-10-01T00:00:00Z', kind: null, parents: [], ...over }) as unknown as Agent
 const cos = agent({ id: 'cos1', name: 'cos', chief_of_staff: true })
-const intake = agent({ id: 'aa5sp', name: 'intake', role: "cos's intake assistant: triages Kim's ideas", parents: ['cos1'] })
+const intake = agent({ id: 'aa5sp', name: 'intake', role: "cos's intake assistant: triages Dana's ideas", parents: ['cos1'] })
 
 let root: Root
 let host: HTMLElement

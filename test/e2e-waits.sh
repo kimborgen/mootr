@@ -36,8 +36,8 @@ finish "$C" "waiting on a timer"
 [ "$(turns "$P")" = 0 ] || fail "the parent was told while the child waited"
 
 echo "-- the detail names the top wait (human over timer) and counts the rest"
-wait_add "$C" '{"kind":"human","target":"m123","detail":"Kim to pick a token lifetime","source":"declared"}' >/dev/null
-[ "$(detail "$C")" = "waiting for Kim to pick a token lifetime (+1 more)" ] || fail "detail: $(detail "$C")"
+wait_add "$C" '{"kind":"human","target":"m123","detail":"Dana to pick a token lifetime","source":"declared"}' >/dev/null
+[ "$(detail "$C")" = "waiting for Dana to pick a token lifetime (+1 more)" ] || fail "detail: $(detail "$C")"
 api GET /api/agents | python3 -c "import json,sys; a=[x for x in json.load(sys.stdin) if x['id']=='$C'][0]; assert [w['kind'] for w in a['waits']]==['human','timer'], a['waits']" || fail "the agent list doesn't carry its waits, top first"
 
 echo "-- clearing by kind and target leaves the other wait"

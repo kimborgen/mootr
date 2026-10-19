@@ -109,7 +109,7 @@ test('approved: only an Approve after the latest needs_approval counts', () => {
   assert.equal(loop.approved([st('needs_approval'), act('changes'), st('needs_approval'), act('approve')]), true);
 });
 
-test('approved: Kim\'s latest action since the request counts, from any status; creation in needs_approval asks; a kind change needs a new approval', () => {
+test('approved: the user\'s latest action since the request counts, from any status; creation in needs_approval asks; a kind change needs a new approval', () => {
   const st = (to) => ({ type: 'status', actor: 'a1', data: JSON.stringify({ from: 'x', to }) });
   const act = (id, from) => ({ type: 'action', actor: 'human', data: JSON.stringify({ id, from }) });
   // Approved, then sent to review and sent back: the latest action is Request changes.
@@ -311,7 +311,7 @@ test('a steward spawns once per digest: not while a proposal is open, nor while 
   const open = await itsa.create({ title: 'open', kind: 'proposal', by: 'human' });
   assert.match((await loop.afterDigest('2026-10-13', '# digest', spawn)).reason, /still open/);
   await itsa.set(open.key, { status: 'canceled' }, 'human');
-  // A process change waiting for Kim (S-1084) doesn't hold the steward back.
+  // A process change waiting for the user (S-1084) doesn't hold the steward back.
   const procChange = await itsa.create({ title: 'demo process change', kind: 'proposal', body: 'Process proposal: demo\nPR: #7\n\nx', status: 'needs_approval', by: 'human' });
   const r2 = await loop.afterDigest('2026-10-13', '# digest', spawn);
   assert.equal(r2.spawned, 'retro-steward-2');

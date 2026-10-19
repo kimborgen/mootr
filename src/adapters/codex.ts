@@ -134,6 +134,8 @@ function probeHooks(): Promise<{ key: string; command: string; currentHash: stri
       }
     });
     p.on('error', reject);
+    // A Codex that exits at once fails these writes with EPIPE; the timeout reports it.
+    p.stdin.on('error', () => {});
     p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'stam', version: '2' }, capabilities: null } }) + '\n');
   });
 }

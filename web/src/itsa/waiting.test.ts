@@ -84,7 +84,7 @@ describe('waitingRows', () => {
     expect(rows.map((r) => r.key)).toEqual(['d:m1'])
   })
 
-  // S-609: Kim answered p30282c and p47654e, and the agent's own waits about them still counted.
+  // S-609: the human answered p30282c and p47654e, and the agent's own waits about them still counted.
   it("shows a request once: stam's wait for it and the agent's wait_for tied to it are one row", () => {
     const stamWait = { ...wait('w1', 'p000001'), detail: 'your approval', source: 'stam' }
     const own = { ...wait('w2', 'p000001'), detail: 'merge authorization for PR #129 (p000001)', source: 'declared' }

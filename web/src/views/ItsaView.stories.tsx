@@ -25,7 +25,7 @@ const THREAD: ItsaThreadItem[] = [
 const WIDE = '| Segment | Size (MB) | Records | Written at | Merged into | Checksum | Notes |\n|---|---|---|---|---|---|---|\n| seg-0001 | 61 | 1,204,331 | 2026-10-16 09:12 | seg-0007 | 9f3a2c71b0e4 | Oldest, compacted |\n| seg-0002 | 58 | 1,190,004 | 2026-10-16 09:40 | seg-0007 | 51ce08a2d9f3 | Compacted |\n| seg-0003 | 12 | 233,918 | 2026-10-17 07:05 | none | c04b77e1aa52 | Live |'
 const THREAD_WIDE: ItsaThreadItem[] = [
   ...THREAD,
-  { type: 'mail', ts: ago(20), mail: mail('fm-i5', 'fx-t-i911', 'fx-cos', ['fx-dev'], 'S-911 Build the new index', 'Can you attach the checksum list for seg-0003 before I ask Kim to review?', { min: 20, kind: 'comment' }) },
+  { type: 'mail', ts: ago(20), mail: mail('fm-i5', 'fx-t-i911', 'fx-cos', ['fx-dev'], 'S-911 Build the new index', 'Can you attach the checksum list for seg-0003 before I ask Dana to review?', { min: 20, kind: 'comment' }) },
   { type: 'mail', ts: ago(12), mail: mail('fm-i4', 'fx-t-i911', 'fx-dev', ['human'], 'S-911 Build the new index', 'The segment report after the merge:\n\n' + WIDE, { min: 12, kind: 'update' }) },
   { type: 'mail', ts: ago(5), mail: mail('fm-i6', 'fx-t-i911', 'fx-dev', ['human'], 'S-911 Build the new index', 'Checksums are in the table above. Ready for review.', { min: 5, kind: 'comment' }) },
 ]

@@ -91,14 +91,26 @@ export function idleSweep(): void {
   const avg = avgAfterCompaction();
   for (const a of db.listAgents()) {
     if ((a.lifecycle !== 'active' && a.lifecycle !== 'paused') || !a.idle_since || a.context_tokens == null) continue;
+    // A resting agent has no harness to compact; its rest compacted first when it would outlast the cache (lifecycle.rest).
+    if (db.restOwned(a)) continue;
     if (Date.now() - Date.parse(a.idle_since) < s.idleMinutes * 60_000) continue;
-    if (idleCompacted.get(a.id) === a.idle_since) continue;
-    // A stored 0 dates from before onContext ignored it: no measurement.
-    const base = a.tokens_after_compaction || avg;
-    const threshold = base != null ? base + s.growthTokens : s.minTokens;
-    if (a.context_tokens <= threshold) continue;
-    idleCompacted.set(a.id, a.idle_since);
-    db.addEvent(a.id, 'context:idle-compaction', { tokens: a.context_tokens, threshold });
-    requestCompaction(a, { reason: 'idle past the cache lifetime' }).catch((e) => db.addEvent(a.id, 'compaction-error', String(e)));
+    idleCompactIfDue(a, 'idle past the cache lifetime', avg);
   }
+}
+
+// The idle compaction's rule for one agent: compacts it, once per idle period, when its context
+// has grown past the threshold. True when it asked for one. The rest sweep (lifecycle.ts) calls it
+// before a rest predicted to outlast the cache, so the agent doesn't wake to a full re-read.
+export function idleCompactIfDue(a: db.Agent, reason: string, avg = avgAfterCompaction()): boolean {
+  const s = settings().idleCompaction;
+  if (!s.enabled || !a.idle_since || a.context_tokens == null) return false;
+  if (idleCompacted.get(a.id) === a.idle_since) return false;
+  // A stored 0 dates from before onContext ignored it: no measurement.
+  const base = a.tokens_after_compaction || avg;
+  const threshold = base != null ? base + s.growthTokens : s.minTokens;
+  if (a.context_tokens <= threshold) return false;
+  idleCompacted.set(a.id, a.idle_since);
+  db.addEvent(a.id, 'context:idle-compaction', { tokens: a.context_tokens, threshold, reason });
+  requestCompaction(a, { reason }).catch((e) => db.addEvent(a.id, 'compaction-error', String(e)));
+  return true;
 }

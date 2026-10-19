@@ -18,6 +18,15 @@ describe('matchFilter', () => {
     expect(matchFilter({ kind: 'values', values: [] }, 'a')).toBe(false)
   })
 
+  it('values not: hides the listed ones, shows the rest including values never seen', () => {
+    const f: ColFilter = { kind: 'values', not: ['blocked', BLANK] }
+    expect([matchFilter(f, 'blocked'), matchFilter(f, 'brand_new'), matchFilter(f, null), matchFilter(f, [])]).toEqual([false, true, false, false])
+    // A row listing several values is hidden when any one is excluded; an include list keeps it when any is listed.
+    expect(matchFilter(f, ['blocked', 'a'])).toBe(false)
+    expect(matchFilter(f, ['a', 'c'])).toBe(true)
+    expect(matchFilter({ kind: 'values', values: ['a'] }, ['a', 'c'])).toBe(true)
+  })
+
   it('text: contains, case aside; no text keeps all', () => {
     expect([matchFilter({ kind: 'text', q: 'FOO' }, 'a foo b'), matchFilter({ kind: 'text', q: 'x' }, 'a foo'), matchFilter({ kind: 'text', q: 'x' }, null), matchFilter({ kind: 'text', q: ' ' }, null)]).toEqual([true, false, false, true])
   })
@@ -124,6 +133,15 @@ describe('stored sort and filters', () => {
     expect(cleanSort(raw)).toEqual([{ col: 'a', dir: 'asc' }, { col: 'gone', dir: 'asc' }, { col: 'c', dir: 'desc' }])
     expect(cleanSort(raw, ['a', 'c'])).toEqual([{ col: 'a', dir: 'asc' }, { col: 'c', dir: 'desc' }])
     expect([cleanSort('x'), cleanSort(undefined), cleanSort({})]).toEqual([[], [], []])
+  })
+
+  it('keeps a not rule, drops an empty or malformed one', () => {
+    expect(cleanFilter({ kind: 'values', not: ['a', 'a'] })).toEqual({ kind: 'values', not: ['a'] })
+    expect(cleanFilter({ kind: 'values', values: ['b'], not: [] })).toEqual({ kind: 'values', values: ['b'] })
+    // Both together collapse to the include list less what the rule hides.
+    expect(cleanFilter({ kind: 'values', values: ['a', 'b'], not: ['b', 'x'] })).toEqual({ kind: 'values', values: ['a'] })
+    expect(cleanFilter({ kind: 'values', values: ['a'], not: ['a'] })).toEqual({ kind: 'values', values: [] })
+    for (const bad of [{ kind: 'values', not: [] }, { kind: 'values', not: [1] }, { kind: 'values', not: 'a' }]) expect(cleanFilter(bad)).toBeNull()
   })
 
   it('keeps each filter kind when well-formed and drops a malformed one', () => {

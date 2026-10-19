@@ -5,7 +5,7 @@
 // run must send none. Run with `node --test test/cli-help.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { readFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,7 @@ import { tempDir } from './tmphome.mjs';
 
 const CLI = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 const NO_HELP = new Set(['hook', 'statusline', 'mcp', 'mcp-proxy', 'daemon']);
-const HEADER = 'stam: run and coordinate coding agents';
+const HEADER = 'mootr: run and coordinate coding agents';
 
 // Every `case 'NAME':` directly under main()'s switch (four spaces in; the nested switches sit deeper).
 const commands = [...readFileSync(CLI, 'utf8').matchAll(/^    case '([^']+)':/gm)].map((m) => m[1]);
@@ -59,8 +59,8 @@ test('every subcommand: --help and -h print usage, exit 0, and send no request',
     const r = await run([cmd, flag]);
     assert.equal(r.code, 0, `${cmd} ${flag}: ${r.err}`);
     assert.equal(r.err, '', `${cmd} ${flag} wrote to stderr`);
-    // An alias line (`stam pause|unpause AGENT`) names the command inside its `|` list.
-    assert.ok(new RegExp(`stam (\\S+\\|)?${cmd}\\b`).test(r.out) || r.out.includes(HEADER), `${cmd} ${flag} printed no usage: ${r.out}`);
+    // An alias line (`mootr pause|unpause AGENT`) names the command inside its `|` list.
+    assert.ok(new RegExp(`mootr (\\S+\\|)?${cmd}\\b`).test(r.out) || r.out.includes(HEADER), `${cmd} ${flag} printed no usage: ${r.out}`);
     assert.deepEqual(r.seen, [], `${cmd} ${flag} made a request`);
   });
 });
@@ -77,7 +77,7 @@ test('-h after a --flag is help, and nothing runs', async () => {
   for (const args of [['itsa', 'set', 'S-1', '--summary', '-h'], ['prune', '--dry-run', '-h']]) {
     const r = await run(args);
     assert.equal(r.code, 0, `${args.join(' ')}: ${r.err}`);
-    assert.ok(new RegExp(`stam (\\S+\\|)?${args[0]}\\b`).test(r.out), r.out);
+    assert.ok(new RegExp(`mootr (\\S+\\|)?${args[0]}\\b`).test(r.out), r.out);
     assert.deepEqual(r.seen, [], `${args.join(' ')} made a request`);
   }
 });
@@ -88,3 +88,24 @@ test('args after -- are never help', async () => {
   assert.ok(r.seen.length > 0, 'no request reached the stub daemon');
   assert.ok(!r.out.includes(HEADER), r.out);
 });
+
+// The name the user invoked prints in usage (R3 of S-1958): bin/mootr says mootr, bin/stam still works and says stam.
+const BIN = (name) => fileURLToPath(new URL(`../bin/${name}`, import.meta.url));
+for (const [name, other] of [['mootr', 'stam'], ['stam', 'mootr']]) {
+  test(`bin/${name} --help prints ${name} usage`, () => {
+    const r = spawnSync(BIN(name), ['--help'], { encoding: 'utf8', env: { ...process.env, STAM_CLI_NAME: '' } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.startsWith(`${name}: run and coordinate coding agents`), r.stdout);
+    assert.ok(r.stdout.includes(`  ${name} daemon`) && !r.stdout.includes(`  ${other} daemon`), r.stdout);
+    assert.ok(r.stdout.includes('stam'), 'the alias is mentioned');
+  });
+  test(`bin/${name} prints its own name in a usage error`, () => {
+    const r = spawnSync(BIN(name), ['itsa', 'show'], { encoding: 'utf8', env: { ...process.env, STAM_CLI_NAME: '' } });
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.trim(), `${name}: usage: ${name} itsa show REF`);
+  });
+  test(`bin/${name} ignores an inherited STAM_CLI_NAME`, () => {
+    const r = spawnSync(BIN(name), ['itsa', 'show'], { encoding: 'utf8', env: { ...process.env, STAM_CLI_NAME: other } });
+    assert.equal(r.stderr.trim(), `${name}: usage: ${name} itsa show REF`);
+  });
+}

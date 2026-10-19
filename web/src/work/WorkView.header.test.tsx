@@ -153,7 +153,8 @@ describe('Work header menu', () => {
     await click(rowOf('testing'))
     expect(titles()).toEqual(['Gamma', 'Beta'])
     expect(menu()).not.toBeNull()
-    expect(host.querySelector('.w-ftoken')?.textContent).toBe('Status: in progress, in review')
+    // Unticking with no filter starts a standing rule, so a status that appears later still shows (S-1890).
+    expect(host.querySelector('.w-ftoken')?.textContent).toBe('Status ≠ testing')
     expect(host.querySelector('.work-bar .count')?.textContent).toBe('2 of 3')
     expect(head('status').querySelector('.w-hfilter')).not.toBeNull()
     await click(host.querySelector('.w-fclear')!)

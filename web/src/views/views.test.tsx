@@ -1259,7 +1259,7 @@ describe('ConfigView Decision steps section', () => {
   const button = (text: string) => [...host.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes(text))!
 
   it('names a step after the question\'s first words', () => {
-    expect(nameFrom('Does this mail ask Kim for money?')).toBe('Does this mail ask Kim for money')
+    expect(nameFrom('Does this mail ask Dana for money?')).toBe('Does this mail ask Dana for money')
     expect(nameFrom('  Is the agent about to delete files outside its worktree or push to main? ')).toBe('Is the agent about to delete files')
   })
   it('lists the steps in plain words and saves on/off at once', async () => {

@@ -2,8 +2,8 @@
 // The Work header menu's filter editors (S-1513): each reports the next filter, or null when nothing is left filtered.
 import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { describeFilter, FilterEditor } from './filter-editors'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { describeFilter, filterText, FilterEditor } from './filter-editors'
 import type { ColFilter, FilterKind, FilterValue } from './sortfilter'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -34,13 +34,41 @@ describe('values editor', () => {
     expect(rows().every((r) => r.getAttribute('aria-checked') === 'true')).toBe(true)
   })
 
-  it('unticking one filters to the rest; ticking the last back drops the filter', async () => {
+  it('unticking from no filter starts an exclude rule; inside an include list it stays an include list', async () => {
     await show('values')
     await click(rows()[1])
-    expect(seen.at(-1)).toEqual({ kind: 'values', values: ['a', ''] })
+    expect(seen.at(-1)).toEqual({ kind: 'values', not: ['b'] })
+    await show('values', { kind: 'values', values: ['a', 'b'] })
+    await click(rows()[1])
+    expect(seen.at(-1)).toEqual({ kind: 'values', values: ['a'] })
     await show('values', { kind: 'values', values: ['a', ''] })
     await click(rows()[1])
     expect(seen.at(-1)).toBeNull()
+  })
+
+  it('a not rule shows the hidden values unticked; ticking one removes it, unticking adds it', async () => {
+    await show('values', { kind: 'values', not: ['b'] })
+    expect(rows().map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'false', 'true'])
+    await click(rows()[0])
+    expect(seen.at(-1)).toEqual({ kind: 'values', not: ['a', 'b'] })
+    await click(rows()[1])
+    expect(seen.at(-1)).toBeNull()
+  })
+
+  it('None on every value is an empty include list, so ticking one then picks it alone', async () => {
+    await show('values')
+    await click([...host.querySelectorAll('.fm-bulk button')].find((b) => b.textContent === 'None'))
+    expect(seen.at(-1)).toEqual({ kind: 'values', values: [] })
+    await show('values', { kind: 'values', values: [] })
+    await click(rows()[0])
+    expect(seen.at(-1)).toEqual({ kind: 'values', values: ['a'] })
+  })
+
+  it('a rule value the options no longer list stays in the rule', async () => {
+    await show('values', { kind: 'values', not: ['gone'] })
+    expect(rows().map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'true', 'true'])
+    await click(rows()[0])
+    expect(seen.at(-1)).toEqual({ kind: 'values', not: ['gone', 'a'] })
   })
 
   it('searches the labels, and None and All act on what the search shows', async () => {
@@ -48,23 +76,9 @@ describe('values editor', () => {
     await type(host.querySelector('input[type=search]')!, 'ta')
     expect(names()).toEqual(['Beta'])
     await click([...host.querySelectorAll('.fm-bulk button')].find((b) => b.textContent === 'None'))
-    expect(seen.at(-1)).toEqual({ kind: 'values', values: ['a', ''] })
+    expect(seen.at(-1)).toEqual({ kind: 'values', not: ['b'] })
     await type(host.querySelector('input[type=search]')!, 'zzz')
     expect(host.querySelector('.rm-none')?.textContent).toBe('No value matches')
-  })
-})
-
-describe('values search keys', () => {
-  it('Home and End stay in the search box instead of reaching the menu', async () => {
-    const outer = vi.fn()
-    document.body.addEventListener('keydown', outer)
-    await show('values')
-    const input = host.querySelector('input[type=search]')!
-    for (const k of ['Home', 'End']) await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: k })) })
-    expect(outer).not.toHaveBeenCalled()
-    await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'a' })) })
-    expect(outer).toHaveBeenCalledTimes(1)
-    document.body.removeEventListener('keydown', outer)
   })
 })
 
@@ -139,6 +153,9 @@ describe('describeFilter', () => {
   it('says each kind in words', () => {
     expect(describeFilter({ kind: 'values', values: ['a', ''] }, OPTS)).toBe('Alpha, (Blank)')
     expect(describeFilter({ kind: 'values', values: [] })).toBe('none')
+    expect(describeFilter({ kind: 'values', not: ['a', ''] }, OPTS)).toBe('≠ Alpha, (Blank)')
+    expect(filterText('Status', { kind: 'values', not: ['a'] }, OPTS)).toBe('Status ≠ Alpha')
+    expect(filterText('Status', { kind: 'values', values: ['a'] }, OPTS)).toBe('Status: Alpha')
     expect(describeFilter({ kind: 'text', q: ' x ' })).toBe('contains “x”')
     expect(describeFilter({ kind: 'range', min: 1, max: 5 })).toBe('1 to 5')
     expect(describeFilter({ kind: 'range', max: 5 })).toBe('at most 5')

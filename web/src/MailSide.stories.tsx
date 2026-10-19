@@ -29,6 +29,7 @@ export const stories: Story[] = [{
     'The Swipe switch opens the inbox as a stack of cards in main (`w:swipe`, the Swipe view story); it is pressed while that view shows.',
     'Counts follow one definition (`useWaiting`; To answer adds the deferred asks via `useToAnswerCount`), so the tabs and the lists agree; the inbox header counts only the rows it lists. A wait on a thread the list doesn\'t hold opens the agent, not an empty thread. Closing a thread from the Deferred list opens the next deferred one. The Awaiting, Archived, Deferred and To answer switches sit on their own row under the title: they wrap on a desktop and scroll sideways on a phone.',
     'Until the threads first load, the loading mark (`Loading`) stands under any rows already waiting on you, never an empty-state line (' + ds('Empty, loading, and error') + ').',
+    'On a phone a History switch ends the row; it swaps the list for the history of what main showed (the History story). On a desktop History is a tab of the sidebar pane instead.',
     'No toast: a blocked archive says why in the button title and in the one transient notice bar the design allows (' + ds('Persona rules') + ').',
   ],
   states: [
@@ -41,6 +42,7 @@ export const stories: Story[] = [{
     { name: 'To answer', data: sidebar([T_PLAIN], { ...WAITING, agents: AGENTS_STOPPED, perms: [T_PERM.mails[0].permission!], humanArchived: [T_ARCH] }), render: () => <OnMount run={press('To answer')}>{side()}</OnMount> },
     { name: 'Archived', data: sidebar([T_PLAIN], { humanArchived: [T_ARCH] }), render: () => <OnMount run={press('Archived')}>{side()}</OnMount> },
     { name: 'With the parent or chief of staff', data: sidebar([T_PLAIN], { delegateDialogs: [DIALOG] }), render: () => <OnMount run={(el) => el.querySelector<HTMLDetailsElement>('.mail-delegated')?.setAttribute('open', '')}>{side()}</OnMount> },
+    { name: 'History on a phone', data: sidebar([T_PLAIN]), render: () => <OnMount run={press('History')}>{side()}</OnMount> },
     { name: 'Deferred threads', data: sidebar([T_PLAIN], { humanDeferred: [T_ARCH] }), render: () => <OnMount run={press('Deferred')}>{side()}</OnMount> },
     { name: 'Deferred asks', data: sidebar([T_RICH, T_PLAIN], { decisions: [{ ...DECISION, deferred: true }] }), render: side },
     { name: 'Many threads, long subjects', data: sidebar(MANY, { unread: 4 }), render: side },

@@ -14,6 +14,8 @@ import { closeSpawnPanel, onSpawnPanelChange, spawnPanelOpen } from './spawn'
 import { hideMenu, menuOpen, onMenuChange } from './ui/menu'
 import { onWorkSheetChange, setWorkSheet, workSheetOpen } from './work/sheet-state'
 import { getUi, onUiChange, setUi } from './ui/state'
+import { drop, emptyHistory, settle, skipDead, visit, type HistoryState } from './history-model'
+import { worldAlive } from './history-alive'
 import { encodeUsage, getUsageState, onUsageChange, restoreUsage, usageHash } from './usage/state'
 
 type Mobile = shell.Mobile
@@ -34,10 +36,28 @@ export interface Place {
   usage?: string | null
 }
 
+// The sidebar history (S-1456): the places seen by thing, on the browser's own history. `pos` is the
+// shown entry's position in that history, saved in each entry's state as `n`.
+let hist: HistoryState = emptyHistory()
+let pos = 0
+const histSubs = new Set<() => void>()
+const setHist = (h: HistoryState) => { if (h !== hist) { hist = h; histSubs.forEach((f) => f()) } }
+export const historyState = () => hist
+export const onHistoryChange = (f: () => void) => { histSubs.add(f); return () => { histSubs.delete(f) } }
+// Moves to entry `i` as pressing back or forward that many times would; the list stays.
+export function jumpToEntry(i: number) {
+  const e = hist.entries[i]
+  if (e && e.pos !== pos) history.go(e.pos - pos)
+}
+// What the history records of a place: the thing in main, and never while an overlay is open.
+const record = (p: Place) => { if (p.current && !anyOverlay(p)) setHist(visit(hist, p.current, pos)) }
+
 const SECTION_KEY = 'stam/settings-section'
 let reported: string | null = null
 let cur: Place | null = null
 let applying = false
+// The place a menu opened over, to tell its close from an overlay opening over the menu.
+let underMenu: Place | null = null
 let scheduled = false
 // The agents, threads and ITSAs visited lately, newest first: the Alt+A prompt sends them to
 // /api/suggest, which ranks them higher.
@@ -96,7 +116,8 @@ function apply(t: Place) {
   if (t.mobile !== shell.phoneShows()) shell.phoneShow(t.mobile)
   setUi({ searchOpen: t.search, suggestOpen: !!t.suggest, topOpen: t.top, viewer: t.viewer ? { src: t.viewer, alt: '' } : null })
   if (t.current === 'w:usage' && t.usage) restoreUsage(t.usage)
-  hideMenu()
+  // Focus returns to where it was before the menu opened, as Esc and Close do.
+  hideMenu(true)
   closeSpawnPanel()
   setWorkSheet(false)
   // A Settings section already on screen changes through the same event the palette uses.
@@ -117,11 +138,26 @@ function sync() {
       return
     }
     cur = p
-    history.replaceState({ stam: p }, '', urlOf(p))
+    history.replaceState({ stam: p, n: pos }, '', urlOf(p))
+    record(p)
     return
   }
+  // A menu or sheet over an overlay (a suggestion's preview over the Alt+A prompt) that closes onto
+  // the place it opened over takes its entry back off, so one back press still closes the overlay.
+  // Any other close (the menu was opened first and an overlay opened over it) pushes as usual.
+  if (cur.menu && !p.menu && underMenu && eq(p, underMenu)) {
+    cur = p
+    underMenu = null
+    history.back()
+    return
+  }
+  if (!cur.menu && p.menu) underMenu = cur
+  else if (!p.menu) underMenu = null
   cur = p
-  history.pushState({ stam: p }, '', urlOf(p))
+  pos++
+  history.pushState({ stam: p, n: pos }, '', urlOf(p))
+  setHist(drop(hist, pos))
+  record(p)
 }
 
 // Shell, UI, menu, and panel changes settle in one microtask, so a close that is also a move
@@ -136,20 +172,37 @@ function onPop(e: PopStateEvent) {
   const t = (e.state as { stam?: unknown } | null)?.stam
   if (!isPlace(t)) return
   const target: Place = { ...t, menu: false }
+  const n = (e.state as { n?: unknown }).n
+  // An entry from before the position was kept has no `n`: it moves nothing in the list.
+  const known = typeof n === 'number'
+  const to = known ? n : pos
+  // Back or forward onto a thing that no longer exists skips to the next live entry that way, when
+  // the list holds one; otherwise main shows its gone state. The entry stays in the list, dimmed.
+  if (target.current && !anyOverlay(target) && to !== pos && !worldAlive(target.current)) {
+    const d = skipDead(hist, target.current, to, pos, worldAlive)
+    if (d !== null) { history.go(d); return }
+  }
+  pos = to
   if (target.current !== cur?.current) noteVisit(target.current)
   cur = target
+  underMenu = null
   applying = true
   apply(target)
   applying = false
+  if (known && target.current && !anyOverlay(target)) setHist(settle(hist, target.current, pos))
 }
 
 export function init() {
   const saved = (history.state as { stam?: unknown } | null)?.stam
   cur = isPlace(saved) ? saved : place()
+  const n = (history.state as { n?: unknown } | null)?.n
+  pos = typeof n === 'number' ? n : 0
+  hist = emptyHistory()
+  record(cur)
   noteVisit(cur.current)
   // A reload on Usage restores the tab, period, measure and scope the entry recorded.
   if (cur.current === 'w:usage' && cur.usage) restoreUsage(cur.usage)
-  history.replaceState({ stam: cur }, '', urlOf(cur))
+  history.replaceState({ stam: cur, n: pos }, '', urlOf(cur))
   shell.onChange(schedule)
   onUiChange(schedule)
   onMenuChange(schedule)

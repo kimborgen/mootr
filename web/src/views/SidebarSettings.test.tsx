@@ -37,11 +37,15 @@ describe('Settings › Sidebar', () => {
     expect(q<HTMLInputElement>('[aria-label="Issues is the default tab of pane 1"]').checked).toBe(true)
   })
   it('removes a tab to unused and adds it back as a new pane', async () => {
+    // Mail shares its pane with history, so removing Mail alone keeps the pane
     await click('[aria-label="Remove Mail from the sidebar"]')
+    expect(panes()).toBe(3)
+    await click('[aria-label="Remove History from the sidebar"]')
     expect(panes()).toBe(2)
     expect(host.querySelector('[data-unused="mail"]')).not.toBeNull()
     await choose('[aria-label="Add Mail to"]', 'new')
     expect(panes()).toBe(3)
+    expect(host.querySelector('[data-unused="history"]')).not.toBeNull()
   })
   it('sets the tab bar height and resets everything', async () => {
     await click('[role=radio][aria-checked=false]')

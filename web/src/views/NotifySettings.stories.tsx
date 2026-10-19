@@ -12,11 +12,11 @@ const info = (devices = DEVICES) => ({ 'GET /api/push': { publicKey: 'fixture-ke
 export const stories: Story[] = [{
   name: 'Notifications settings',
   group: 'Settings',
-  what: 'Phone and desktop pushes for each mail to you and each permission request, with stam closed. It installs stam as an app, turns pushes on for this device, sends a test, and lists every device that gets them, with the last push, which kinds each takes, a test, and a remove. A tap on a push opens the thread; on Android a request has Approve and Deny on the notification.',
-  when: 'Settings, Notifications (`notify`). Devices live on the daemon serving this page; a mail stored on another machine reaches them through it. The daemon accepts these requests only through stam\'s Tailscale address, never with a `stam web` token link, so there the page explains how to set it up instead.',
+  what: 'Phone and desktop pushes for each mail to you and each permission request, with mootr closed. It installs mootr as an app, turns pushes on for this device, sends a test, and lists every device that gets them, with the last push, which kinds each takes, a test, and a remove. A tap on a push opens the thread; on Android a request has Approve and Deny on the notification.',
+  when: 'Settings, Notifications (`notify`). Devices live on the daemon serving this page; a mail stored on another machine reaches them through it. The daemon accepts these requests only through mootr\'s Tailscale address, never with a `stam web` token link, so there the page explains how to set it up instead.',
   code: ['web/src/views/NotifySettings.tsx#NotifySettings'],
   rules: [
-    'The This device card depends on the browser: Install stam (primary button) where the browser offers an install, an Add to Home Screen note on iOS, "This browser doesn\'t support push notifications." where there is no push, "Notifications are blocked for this site" when the permission is denied, and Turn on for this device otherwise. The frames below show whichever the story page\'s own browser gives.',
+    'The This device card depends on the browser: Install mootr (primary button) where the browser offers an install, an Add to Home Screen note on iOS, "This browser doesn\'t support push notifications." where there is no push, "Notifications are blocked for this site" when the permission is denied, and Turn on for this device otherwise. The frames below show whichever the story page\'s own browser gives.',
     'A device row\'s kinds are a segmented control, each segment a pressed-state button (`aria-pressed`); on a phone segments are `--size-hit-touch` tall (' + ds('Buttons') + ').',
     'A device that failed shows "Last push failed: REASON"; one that never pushed shows when it was added; otherwise when the last push went through.',
     'On a peer without the home\'s page the section is read-only like the other shared settings: its controls are disabled with the reason on hover.',

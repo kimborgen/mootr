@@ -320,7 +320,7 @@ export function DiffView({ viewKey, onEditor, apiRef }: DiffViewProps) {
           {list && total > 0 && shown.length === 0 && <div className="dv-note muted">All {total} files are hidden. Turn Meat off or show a class above.</div>}
           {list && refs && shown.map((f) => (
             <FileDiff
-              key={f.path} file={f} refs={refs} mode={mode} wrap={prefs.wrap} viewed={isViewed(f)} onViewed={(on) => mark(f, on)} onHide={() => setFlt((x) => toggleFile(f, x))} onEditor={onEditor}
+              key={f.path} scroller={main} file={f} refs={refs} mode={mode} wrap={prefs.wrap} viewed={isViewed(f)} onViewed={(on) => mark(f, on)} onHide={() => setFlt((x) => toggleFile(f, x))} onEditor={onEditor}
               onDecl={(hit) => onDecl(f, hit)} hasDecl={hasName} forceOpen={forced.has(f.path)} target={target?.path === f.path ? target : undefined} onTarget={(n) => { landed.current = n; pin.current?.() }}
             />
           ))}

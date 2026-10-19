@@ -26,10 +26,10 @@ import { attentionItsaIds, needsRows, type NeedsRow } from './needs'
 import { openNeeds } from './openNeeds'
 import { Glance, type GlanceFilter } from './Glance'
 import { totalCell, totalLine, workTotals } from './totals'
-import { GROUPS, groupable, groupFor, pruneFolded, STANDALONE, UNOWNED, type Group, type WorkGroup, type WorkRow } from './model'
+import { foldRows, GROUPS, groupable, groupFor, pruneFolded, STANDALONE, UNOWNED, type Group, type WorkGroup, type WorkRow } from './model'
 import { HeaderMenuBody, optionsFor, publishHeader, type HeaderLive } from './header-menu'
 import { showCellMenu } from './cell-menu'
-import { describeFilter } from './filter-editors'
+import { filterText } from './filter-editors'
 import { ColumnsPanel } from './columns-menu'
 import { clearFilters, defaultLayout, deleteView, fullOrder, isDirty, LOCKED, loadStore, loadWork, moveBy, moveTo, revertView, saveAs, saveStore, saveView, saveWidthsOf, setFilter, setGroup, setQuick, setShown, setSort, setWidth, useView, type ViewStore } from './views'
 import { QuickBar } from './quick-bar'
@@ -51,6 +51,12 @@ const PLAIN_GROUPS = GROUPS.filter((g) => g !== 'column')
 // A group's fold key: the issue grouping keeps its bare ids (folds saved before the other
 // modes), and the others prefix theirs, so no two modes share one.
 const foldKey = (mode: Group, id: string) => mode === 'issues' ? id : `${mode}:${id}`
+// A row's fold key (S-1437): one fold model, in the same `folded` map as the groups'; the `row:` prefix keeps it apart.
+const rowKey = (mode: Group, id: string) => `row:${mode}:${id}`
+// The fold on a row of the Work cell: its disclosure chevron (when it has subrows) and how many rows it hides.
+interface RowFold { kids: number; open: boolean; hidden: number; label: string; toggle: () => void }
+// A row that has nothing to fold, in a table that folds: it only keeps the chevron's slot.
+const NO_FOLD: RowFold = { kids: 0, open: true, hidden: 0, label: '', toggle: () => {} }
 
 // Which groups are folded: this device's, since a fold is how this screen is laid out here.
 // The views (columns, grouping, the open/all filter) are in settings (views.ts).
@@ -81,11 +87,22 @@ function SaveView({ onSave, onCancel }: { onSave: (name: string) => void; onCanc
 
 // `onMenu` is a right-click on a cell (S-1518): it opens the cell's filter menu and returns whether it did.
 type CellMenu = (e: React.MouseEvent, col: WorkColumn, row: WorkRow) => boolean
-function Cells({ row, cols, cx, onMenu }: { row: WorkRow; cols: WorkColumn[]; cx: CellContext; onMenu?: CellMenu }) {
+// `fold` is set in the issue tree: a row with subrows gets a chevron before its title, one without a spacer of the
+// same width, so the keys line up. The chevron's click and keys stay its own (they never open the row).
+function Cells({ row, cols, cx, onMenu, fold }: { row: WorkRow; cols: WorkColumn[]; cx: CellContext; onMenu?: CellMenu; fold?: RowFold }) {
   return <>{cols.map((c) => (
     <div key={c.id} role="cell" className={`w-cell wc-${c.id}` + (c.align === 'end' ? ' end' : '')} data-cell={c.id}
       onContextMenu={onMenu ? (e) => { if (onMenu(e, c, row)) e.preventDefault() } : undefined}
-      style={c.id === 'work' ? { '--depth': row.depth } as CSSProperties : undefined}>{c.render(row, cx)}</div>))}</>
+      style={c.id === 'work' ? { '--depth': row.depth } as CSSProperties : undefined}>
+      {c.id === 'work' && fold ? <div className="w-fold">
+        {fold.kids ? <button type="button" className="w-rowtoggle" data-fold={fold.open ? 'open' : 'folded'} aria-expanded={fold.open} aria-label={fold.label}
+          onClick={(e) => { e.stopPropagation(); fold.toggle() }}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation() }}>
+          <span className={'chev' + (fold.open ? ' open' : '')}><Icon name="chevron-right" size="xs" /></span></button>
+          : <span className="w-rowtoggle spacer" aria-hidden="true" />}
+        <div className="w-foldbody">{c.render(row, cx)}</div>
+        {fold.hidden ? <span className="count w-hidden" data-hidden title={`${fold.hidden} hidden`} aria-label={`${fold.hidden} hidden`}>{fold.hidden}</span> : null}
+      </div> : c.render(row, cx)}</div>))}</>
 }
 
 // The pinned group: its head carries a warning mark and, when it has rows, the count; its rows
@@ -93,7 +110,7 @@ function Cells({ row, cols, cx, onMenu }: { row: WorkRow; cols: WorkColumn[]; cx
 // can't be collapsed away. Empty, it is one muted line; until your mail and the agents have loaded, the loading mark
 // instead (and until the agents, whose waits feed it), so it never says "Nothing needs you" too early.
 const needsWork = (n: NeedsRow): WorkRow => ({ it: n.it, depth: 0, context: false })
-function NeedsGroup({ rows, cols, cx, loading = false }: { rows: NeedsRow[]; cols: WorkColumn[]; cx: CellContext; loading?: boolean }) {
+function NeedsGroup({ rows, cols, cx, loading = false, spacer }: { rows: NeedsRow[]; cols: WorkColumn[]; cx: CellContext; loading?: boolean; spacer?: RowFold }) {
   return <div role="rowgroup" className={'w-group w-needs' + (rows.length ? '' : ' empty')} data-group="needs">
     <div role="row" className="w-ghead w-needs-head">
       <span className="w-needs-mark" aria-hidden="true"><Icon name="shield-alert" size="xs" /></span>
@@ -104,7 +121,7 @@ function NeedsGroup({ rows, cols, cx, loading = false }: { rows: NeedsRow[]; col
         aria-label={`${n.it.key ? n.it.key + ' ' : ''}${n.it.title}`}
         onClick={() => openNeeds(n)}
         onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openNeeds(n) } }}>
-        <Cells row={needsWork(n)} cols={cols} cx={cx} />
+        <Cells row={needsWork(n)} cols={cols} cx={cx} fold={spacer} />
       </div>))}
   </div>
 }
@@ -125,9 +142,9 @@ export function WorkView({ viewKey }: { viewKey: string }) {
   // Folds kept for agents that are gone are dropped, once the agents have loaded.
   useEffect(() => {
     if (!storeLoaded.agents) return
-    const next = pruneFolded(prefs.folded, new Set(agents.map((a) => a.id)))
+    const next = pruneFolded(prefs.folded, new Set(agents.map((a) => a.id)), storeLoaded.itsas && !itsaError ? new Set(itsas.map((x) => x.id)) : undefined)
     if (next !== prefs.folded) setPrefs({ folded: next })
-  }, [storeLoaded.agents, agents, prefs.folded]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [storeLoaded.agents, storeLoaded.itsas, itsas, itsaError, agents, prefs.folded]) // eslint-disable-line react-hooks/exhaustive-deps
   const [text, setText] = useState('')
   const [now, setNow] = useState(Date.now())
   const root = useRef<HTMLDivElement>(null)
@@ -196,6 +213,8 @@ export function WorkView({ viewKey }: { viewKey: string }) {
   // A column grouping whose column is gone, or can't group, shows the issue tree (model.ts groupFor).
   const groupCol = layout.group === 'column' ? COL_BY_ID.get(layout.groupBy ?? '') : undefined
   const mode: Group = layout.group === 'column' && !groupable(groupCol) ? 'issues' : layout.group
+  // Only the issue tree folds its rows (S-1437): in the agent tree the rows under an ITSA aren't its own.
+  const tree = mode === 'issues'
   // A header press that is mid-drag: the column, the drop slot (before the k-th table column),
   // and where the indicator sits.
   // A press that moved (a reorder or a resize) is not a click: the click that follows it doesn't sort.
@@ -228,7 +247,8 @@ export function WorkView({ viewKey }: { viewKey: string }) {
   const cx: CellContext = { now, extras }
   // A resized column takes its px as the user set it; the rest keep their registry track.
   // This is the one place a px value reaches the grid: it is the user's width, not a design value.
-  const track = (c: WorkColumn) => layout.widths[c.id] !== undefined ? `minmax(${layout.widths[c.id]}px, ${layout.widths[c.id]}px)` : c.width
+  // A track never grows the table past its pane: it can shrink to --size-work-col-min and its cell truncates (S-1437).
+  const track = (c: WorkColumn) => layout.widths[c.id] !== undefined ? `minmax(var(--size-work-col-min), ${layout.widths[c.id]}px)` : c.width.startsWith('minmax(') ? c.width : `minmax(var(--size-work-col-min), ${c.width})`
 
   const apply = (id: string) => {
     edit((s, ids) => ({ ...useView(s, id, ids), show: s.views.find((x) => x.id === id)?.show ?? 'open' }))
@@ -372,14 +392,29 @@ export function WorkView({ viewKey }: { viewKey: string }) {
   // A right-click on a cell opens its filter menu (S-1518). A column with nothing to offer keeps the browser's own menu.
   const cellMenu: CellMenu = (e, c, row) => showCellMenu(e.clientX, e.clientY, headerLive, c.id, row)
   const open = (e: React.KeyboardEvent, id: string) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openItsa(id) } }
+  // Fold or unfold these rows (S-1437): only folded ones are kept in the map.
+  const setRowFolds = (ids: string[], fold: boolean) => {
+    const next = { ...prefs.folded }
+    for (const id of ids) { if (fold) next[rowKey(mode, id)] = true; else delete next[rowKey(mode, id)] }
+    setPrefs({ folded: next })
+  }
+  // Every row that has subrows, in the issue tree (the agent tree folds by its group heads): what Expand all and Collapse all work on.
+  const foldable = tree ? [...new Set(groups.flatMap((g) => [...foldRows(g.rows, () => false).kids.keys()]))] : []
   const group = (g: WorkGroup) => {
     const n = g.rows.filter((r) => !r.context).length
+    const { rows: shownRows, kids } = foldRows(g.rows, (r) => tree && !!prefs.folded[rowKey(mode, r.it.id)])
     const rows = (
-      g.rows.map((r) => (
+      shownRows.map((r) => {
+        const k = kids.get(r.it.id) ?? 0
+        const expanded = !prefs.folded[rowKey(mode, r.it.id)]
+        const fold: RowFold | undefined = tree ? { kids: k, open: expanded, hidden: expanded ? 0 : k, label: `${expanded ? 'Collapse' : 'Expand'} ${r.it.key}`,
+          toggle: () => setRowFolds([r.it.id], expanded) } : undefined
+        return (
           <div key={r.it.id} role="row" tabIndex={0} className={'w-row' + (r.context ? ' context' : '') + (isClosed(r.it) ? ' closed' : '') + (attention.has(r.it.id) ? ' attention' : '')} data-itsa={r.it.id}
             aria-label={`${r.it.key} ${r.it.title}`} onClick={() => openItsa(r.it.id)} onKeyDown={(e) => open(e, r.it.id)}>
-            <Cells row={r} cols={cols} cx={cx} onMenu={cellMenu} />
-          </div>)))
+            <Cells row={r} cols={cols} cx={cx} onMenu={cellMenu} fold={fold} />
+          </div>)
+      }))
     // The flat list has no header, so nothing folds it.
     if (mode === 'flat') return <div key={g.id} role="rowgroup" className="w-group" data-group="flat">{rows}</div>
     const key = foldKey(mode, g.id)
@@ -447,7 +482,7 @@ export function WorkView({ viewKey }: { viewKey: string }) {
             onDoubleClick={(e) => { e.stopPropagation(); editWidths((s) => ({ ...s, layout: setWidth(s.layout, c.id, null) })) }} />
         </div>
       })}{drop ? <span className="w-drop" aria-hidden="true" style={{ left: drop.left }} /> : null}</div></div>
-      <NeedsGroup rows={needs} cols={cols} cx={cx} loading={!storeLoaded.mail || !storeLoaded.agents} />
+      <NeedsGroup rows={needs} cols={cols} cx={cx} loading={!storeLoaded.mail || !storeLoaded.agents} spacer={tree ? NO_FOLD : undefined} />
       {groups.length ? groups.map(group) : <div className="w-innerstack">{empty}</div>}
       {groups.length ? <TotalsRow cols={cols} totals={totalsOf(groups)} /> : null}
     </div>)
@@ -479,6 +514,10 @@ export function WorkView({ viewKey }: { viewKey: string }) {
           <input type="search" value={text} placeholder="Search all columns" aria-label="Search all columns" autoComplete="off" spellCheck={false}
             onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape' && text) { e.preventDefault(); setText('') } }} />
         </label>
+        {foldable.length ? <div className="w-pair w-foldall">
+          <button type="button" className="btn text" data-fold-all="expand" disabled={!foldable.some((id) => prefs.folded[rowKey(mode, id)])} onClick={() => setRowFolds(foldable, false)}>Expand all</button>
+            <button type="button" className="btn text" data-fold-all="collapse" disabled={foldable.every((id) => prefs.folded[rowKey(mode, id)])} onClick={() => setRowFolds(foldable, true)}>Collapse all</button>
+        </div> : null}
         <div className="w-tools">
           <button type="button" className="btn" aria-haspopup="menu" onClick={viewMenu}>View</button>
           <button type="button" className="btn" aria-haspopup="menu" onClick={columnsMenu}>Columns</button>
@@ -494,7 +533,7 @@ export function WorkView({ viewKey }: { viewKey: string }) {
       {glanced || !colFiltered ? null : <div className="w-filters" role="group" aria-label="Active filters">
         {Object.entries(layout.filters ?? {}).map(([id, f]) => {
           const label = COL_BY_ID.get(id)?.label ?? id
-          const text = `${label}: ${describeFilter(f, f.kind === 'values' ? optionsFor({ layout, col: (x) => COL_BY_ID.get(x), rows: rowsFor, cx, edit: () => {} }, id) : [])}`
+          const text = filterText(label, f, f.kind === 'values' ? optionsFor({ layout, col: (x) => COL_BY_ID.get(x), rows: rowsFor, cx, edit: () => {} }, id) : [])
           return <span key={id} className="w-ftoken" data-col={id}>
             <button type="button" className="w-ftext" title={text} aria-haspopup="dialog" onClick={(e) => headerMenu(id, e.currentTarget)}>{text}</button>
             <button type="button" className="w-fx" aria-label={`Clear the ${label} filter`} onClick={() => edit((s) => ({ ...s, layout: setFilter(s.layout, id, null) }))}><Icon name="x" size="xs" /></button>

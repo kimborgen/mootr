@@ -12,7 +12,7 @@ import { settings, type Settings } from './settings.ts';
 import { TITLE_PROMPT, SUMMARY_PROMPT as MAIL_SUMMARY_PROMPT } from './mail-title.ts';
 import { SUMMARY_PROMPT as BLOCK_SUMMARY_PROMPT } from './block-summaries.ts';
 
-export type TinyId = 'decisions' | 'mailTitles' | 'blockSummaries' | 'activityClassify' | 'toolSummary';
+export type TinyId = 'decisions' | 'mailTitles' | 'blockSummaries' | 'activityClassify' | 'toolSummary' | 'toolNames';
 
 // What a tool summary asks for: one tool call in two fields. S-1481 builds the feature that uses it.
 export const TOOL_SUMMARY_FIELDS = { tool: 'the tool in plain English, 1-3 words', doing: 'what the agent is doing, one short sentence of at most 12 words' } as const;
@@ -24,6 +24,16 @@ export const TOOL_SUMMARY_DEFAULT_INSTRUCTIONS = [
   '"tool" is the tool in plain English, one to three words, for example "send mail", "edit file", "run command".',
   `"doing" is what the agent is doing, one short sentence of at most ${TOOL_SUMMARY_MAX_WORDS} words, for example "instructing agent cost-budget-mgr that its tree is not working".`,
   'Name agents, files and ITSA keys as they appear. No Markdown, no preamble, no quotation marks inside the values.',
+].join('\n');
+
+// What a tool name asks for (S-1933): one tool's name in plain English, in one field.
+export const TOOL_NAME_MAX_WORDS = 3;
+export const TOOL_NAME_INSTRUCTIONS = [
+  'You name one tool an AI coding agent can call. You get the tool name, as a harness gave it.',
+  'Answer with JSON of exactly one string field and nothing else:',
+  '{"label": "..."}',
+  `"label" is the tool in plain English, one to ${TOOL_NAME_MAX_WORDS} words, starting with a capital letter, for example "Send mail", "Edit file", "Run command".`,
+  'No Markdown, no preamble, no server name, no quotation marks inside the value.',
 ].join('\n');
 
 export interface Instr { text: string; default: string; editable: boolean; path: string | null; note?: string }
@@ -129,7 +139,26 @@ export function tinyModels(s: Settings = settings()): TinyModel[] {
       instructions: { text: ts.instructions || TOOL_SUMMARY_DEFAULT_INSTRUCTIONS, default: TOOL_SUMMARY_DEFAULT_INSTRUCTIONS, editable: true, path: 'tiny.toolSummary.instructions' },
       extras: [],
     },
+    {
+      id: 'toolNames',
+      label: 'Tool names',
+      purpose: 'Names each tool once in plain English, for the conversation view (the built-in tools are named in code). Stored and reused for ever.',
+      enabled: s.tiny.toolNames.enabled,
+      toggle: 'tiny.toolNames.enabled',
+      model: s.tiny.toolNames.model,
+      modelPath: 'tiny.toolNames.model',
+      modelKind: 'openrouter',
+      usedBy: null,
+      instructions: { text: TOOL_NAME_INSTRUCTIONS, default: TOOL_NAME_INSTRUCTIONS, editable: false, path: null },
+      extras: [],
+    },
   ];
+}
+
+// What the tool name map (S-1933) reads: whether to run, and which model.
+export interface ToolNameConfig { enabled: boolean; model: string }
+export function toolNameConfig(s: Settings = settings()): ToolNameConfig {
+  return { enabled: s.tiny.toolNames.enabled, model: s.tiny.toolNames.model };
 }
 
 // What the tool-summary feature (S-1481) reads: whether to run, which model, and the system prompt.

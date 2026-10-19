@@ -29,7 +29,7 @@ const BODY_CHARS = 2000;
 const BODY_CHARS_HUMAN = 3000;
 const MAX_WORDS = 3;
 const MAX_CHARS = 40;
-// A summary is a condensed version of the mail itself (Kim, S-1111), shaped by the mail's type
+// A summary is a condensed version of the mail itself (S-1111), shaped by the mail's type
 // (S-1311): a decision is its question and up to four option lines, so five lines in all; a
 // blocker or a done mail is a few labelled lines. The cap is on stored characters and lines.
 const SUMMARY_CHARS = 400;

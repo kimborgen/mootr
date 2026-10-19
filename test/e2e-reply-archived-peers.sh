@@ -45,7 +45,7 @@ api() {
   _url=$MAIN_URL; _tok=$MAIN_TOKEN; [ "$1" = twin ] && { _url=$TWIN_URL; _tok=$TWIN_TOKEN; }
   curl -s -X "$2" -H "authorization: Bearer $_tok" -H 'content-type: application/json' ${4:+-d "$4"} "$_url$3"
 }
-# Kim's web UI sends as the human: the daemon takes the x-stam-human header for that.
+# The web UI sends as the human: the daemon takes the x-stam-human header for that.
 kim() {
   curl -s -X "$1" -H "authorization: Bearer $MAIN_TOKEN" -H 'x-stam-human: 1' -H 'content-type: application/json' -d "$3" "$MAIN_URL$2"
 }

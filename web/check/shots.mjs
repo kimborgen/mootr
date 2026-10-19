@@ -390,6 +390,12 @@ for (const size of SIZES) for (const theme of THEMES) {
     await p.locator('.fl-row', { hasText: 'sample.pdf' }).first().click();
     await p.waitForSelector('[data-testid=pdf-page-image-0]', { timeout: 30000 });
   }, 600);
+  // An image over the cap (S-1915): the too-large note with Download.
+  await step('image-too-big', async () => {
+    await p.locator('.fv-crumb:visible').first().click();
+    await p.locator('.fl-row', { hasText: 'huge.png' }).first().click();
+    await p.waitForSelector('[data-testid=image-too-big]');
+  }, 600);
   // The Process view (S-873): a process drawn read-only, and a node's ITSAs in a sheet.
   await step('process', async () => {
     await phoneLeft();

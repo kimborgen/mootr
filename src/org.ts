@@ -293,17 +293,18 @@ function busyDescendants(id: string): number {
 // it, so the change climbs the tree and stops at the root. `source: 'stam'` marks it
 // ours, against a wait an agent declares itself.
 // Returns whether it changed the wait.
-function syncChildrenWait(a: Pick<db.Agent, 'id'>, n = busyDescendants(a.id)): boolean {
+// What it changed, or false for nothing.
+function syncChildrenWait(a: Pick<db.Agent, 'id'>, n = busyDescendants(a.id)): 'added' | 'cleared' | 'updated' | false {
   const w = db.listWaits(a.id).find(isChildrenWait);
   if (!n) {
     if (w) db.clearWaits(a.id, 'children', null);
-    return !!w;
+    return w ? 'cleared' : false;
   }
   const detail = n === 1 ? '1 child' : `${n} children`;
   if (!w) db.addWait({ agent_id: a.id, kind: 'children', source: 'stam', detail });
   else if (w.detail !== detail) db.updateWaitDetail(w.id, detail);
   else return false;
-  return true;
+  return w ? 'updated' : 'added';
 }
 
 const isChildrenWait = (w: db.Wait): boolean => w.kind === 'children' && w.target === null && w.source === 'stam';
@@ -335,11 +336,22 @@ export function syncChildrenWaits(id: string): void {
       if (--budget < 0) break;
       due.delete(x);
       const a = agents.get(x);
-      if (!a || !syncChildrenWait(a, counts.get(x) ?? 0)) continue;
+      const changed = a && syncChildrenWait(a, counts.get(x) ?? 0);
+      if (!changed) continue;
       const now = db.getAgent(x)!;
       agents.set(x, now);
-      if (now.activity === a.activity || db.hasPendingPermission(x)) continue;
-      const step = now.activity === 'waiting' ? 1 : -1;
+      let step: number;
+      if (db.restOwned(now)) {
+        // A resting agent's activity stays 'unknown'; it is busy while it has a wait (db.isBusy, S-1982). Only the
+        // children wait changed, so the other waits it has now are the ones it had before.
+        const n = db.listWaits(x).length;
+        const wasBusy = changed === 'added' ? n > 1 : changed === 'cleared' ? true : n > 0;
+        if ((n > 0) === wasBusy || db.hasPendingPermission(x)) continue;
+        step = n > 0 ? 1 : -1;
+      } else {
+        if (now.activity === a.activity || db.hasPendingPermission(x)) continue;
+        step = now.activity === 'waiting' ? 1 : -1;
+      }
       if (step < 0) quiet.add(x);
       for (const p of tree.ancestorsIn(parents, x)) {
         counts.set(p, (counts.get(p) ?? 0) + step);
@@ -432,8 +444,11 @@ function lastMessage(a: db.Agent): string {
 // marks that turn; idle_notified holds the value a tree-idle notice was sent for, so a
 // restart neither loses nor repeats one. An unresolved permission request keeps it busy,
 // so its turn isn't done and no notice is owed yet.
+// A resting agent (S-1982) is quiet once it has no wait: its parents are owed the notice as for an idle one, and
+// telling them doesn't wake it. The rest keeps its idle_since for this.
 function needsTreeIdleNotice(a: db.Agent): boolean {
-  return a.lifecycle === 'active' && a.activity === 'idle' && !!a.idle_since && a.idle_notified !== a.idle_since && !db.hasPendingPermission(a.id);
+  const quiet = (a.lifecycle === 'active' && a.activity === 'idle') || (db.restOwned(a) && !db.isBusy(a));
+  return quiet && !!a.idle_since && a.idle_notified !== a.idle_since && !db.hasPendingPermission(a.id);
 }
 
 // Tell the tree-idle parents of an idle agent, and of each idle ancestor whose turn also
@@ -484,6 +499,15 @@ export function recoverTreeIdle(): void {
 
 export function watchActivity(): void {
   db.onPeerBusyChange(peerBusyChanged);
+  // A resting agent's waits changed (S-1982): recount the busy agents above it, as an activity change would, and if
+  // that left it quiet, announce the tree-idle notice owed for it and its ancestors, as going idle would. Inside a
+  // settle, the settle does both.
+  db.onRestingWaitsChange((id) => {
+    if (settling?.has(id)) return;
+    timed('resting waits change: children waits', () => syncChildrenWaits(id));
+    const a = db.getAgent(id);
+    if (a && !db.isBusy(a)) announceTreeIdle(a);
+  });
   db.onActivityChange((before, after, requested) => {
     const detail = after.activity_detail ?? '';
     if (after.activity === 'blocked') {

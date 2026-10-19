@@ -1213,6 +1213,9 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .mail-toggle:hover, .mail-swipe:hover { color: var(--control-hover-fg); }
 .mail-toggle[aria-pressed='true'], .mail-swipe[aria-pressed='true'] { color: var(--accent-text); }
 .mail-side-list { flex: 1; overflow: auto; padding: 2px 0 var(--space-2); }
+.history-side.bare { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.mrow.dead, .mrow.dead .t { color: var(--text-disabled); cursor: default; }
+.mrow.dead:hover { background: none; }
 .mrow-wrap { position: relative; overflow: hidden; }
 /* The archive affordance waits behind the row on a phone; the row slides left over it. */
 .mrow-act { display: none; position: absolute; inset: 0; align-items: center; justify-content: flex-end; gap: var(--space-15); padding: 0 var(--space-3); color: var(--accent-text); font-size: var(--type-chrome-sm); font-weight: var(--weight-medium); }
@@ -2627,7 +2630,7 @@ body.board-dragging, body.board-dragging * { cursor: grabbing !important; }
 .work-bar .w-groupcol.on { background: var(--accent-subtle); color: var(--accent-text); border-color: var(--accent); }
 .work-bar .w-filter { flex: 0 1 calc(var(--space-12) * 5); min-width: calc(var(--space-12) * 3); }
 .work-empty { height: auto; flex: 1; }
-.w-table { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.w-table { flex: 1; min-height: 0; overflow: auto; overflow-x: hidden; overscroll-behavior: contain; }
 .w-head, .w-row { display: grid; grid-template-columns: var(--w-cols); column-gap: var(--space-3); padding: 0 var(--space-5); min-width: 0; }
 .w-headgroup { position: sticky; top: 0; z-index: 1; }
 .w-head { height: var(--size-row-table); align-items: center; background: var(--table-header-bg); border-bottom: 1px solid var(--table-border); color: var(--table-header-fg); font-size: var(--type-chrome-sm); font-weight: var(--weight-medium); }
@@ -2650,7 +2653,16 @@ body.board-dragging, body.board-dragging * { cursor: grabbing !important; }
 .w-row:hover { background: var(--table-row-hover); }
 .w-row:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--focus-ring-width) var(--focus-ring); }
 .w-row.context .w-title, .w-row.closed .w-title { color: var(--text-secondary); }
-.w-cell.wc-work { padding-left: calc(var(--depth, 0) * var(--space-4)); }
+.w-cell.wc-work { padding-left: calc(min(var(--depth, 0), var(--work-depth-max)) * var(--space-4)); }
+/* A row's fold (S-1437): the chevron before the title, the body that truncates, the hidden count after it. */
+.w-fold { display: flex; align-items: flex-start; gap: var(--space-1); min-width: 0; }
+.w-foldbody { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.w-rowtoggle { flex: none; display: grid; place-items: center; width: var(--size-work-fold); height: var(--size-work-fold); border-radius: var(--radius-xs); color: var(--text-muted); }
+button.w-rowtoggle:hover { background: var(--control-hover-bg); color: var(--text-primary); }
+button.w-rowtoggle:focus-visible { outline: none; box-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring); }
+.w-rowtoggle .chev { display: grid; place-items: center; }
+.w-rowtoggle .chev.open svg { transform: rotate(90deg); }
+.w-hidden { flex: none; align-self: center; color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: var(--type-chrome-sm); }
 /* Columns: the header's drag and resize. The right edge is the resize target, six px wide
    (space-15); the drop slot is a focus-ring-width bar in the drag-indicator colour. */
 .w-head { position: relative; }
@@ -2733,7 +2745,7 @@ body.board-dragging, body.board-dragging * { cursor: grabbing !important; }
 a.w-link-body:hover .w-link-label { text-decoration: underline; }
 .w-link-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .w-link-more, .w-pr, .w-review, .w-tests, .w-window, .w-cost { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.w-review, .w-tests, .w-health { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.w-review, .w-tests, .w-health, .w-cost, .w-window, .w-time-work, .w-agent > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .w-link-more { color: var(--text-secondary); }
 .w-pr { color: var(--text-secondary); }
 .w-pr::before { content: "· "; }
@@ -3024,6 +3036,7 @@ a.wg-link:focus-visible { outline: none; box-shadow: 0 0 0 var(--focus-ring-widt
 .ov-tool > summary b, .ov-tools > summary b { flex: none; font-weight: var(--weight-medium); color: var(--text-primary); }
 .ov-tool > summary code, .ov-tools > summary code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); color: var(--text-secondary); }
 .ov-tool-st { display: inline-flex; flex: none; }
+.ov-tool-ic { display: inline-flex; flex: none; color: var(--text-muted); }
 .ov-tools-n { flex: none; color: var(--text-primary); }
 .ov-tools-rows { margin: var(--space-1) 0 0; padding-left: var(--space-5); display: grid; gap: var(--space-1); }
 .ov-tool-st.running { color: var(--st-working); }
@@ -3067,7 +3080,7 @@ details[open] > summary .ov-what-sum > span { white-space: normal; }
 
 /* The working indicator (S-205), where the agent's next output will appear: three dots in the
    working colour, then what the agent does and for how long. The one motion on screen that
-   runs on its own, by Kim's ask: a slow wave passes along the dots while a tool runs or the
+   runs on its own, by the user's ask: a slow wave passes along the dots while a tool runs or the
    agent writes, and they breathe together while it thinks. It arrives at duration-base and
    leaves at 0ms, with the turn. At rest (reduced motion) the dots step down in strength, a
    wave held still. A waiting permission turns it into a still warning line. */
@@ -3098,7 +3111,7 @@ details[open] > summary .ov-what-sum > span { white-space: normal; }
 }
 
 /* The loading mark (S-1451, Loading.tsx): the stam logo at work, in place of the empty state
-   while a view's first load runs. Kim's ask, the second exception to "motion never performs"
+   while a view's first load runs. The user's ask, the second exception to "motion never performs"
    after the working dots. Four stacked layers, each moved by transform or opacity alone, so the
    loop composites without repainting while the page fetches: the ring's track, an accent arc
    that turns once per duration-loader and breathes, and the bot, which bobs on the same beat
@@ -3124,6 +3137,12 @@ details[open] > summary .ov-what-sum > span { white-space: normal; }
 @keyframes stam-loader-blink { 0%, 90%, 100% { transform: none; } 95% { transform: scaleY(0.1); } }
 
 .ov-empty { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-4) var(--pad-pane); color: var(--text-muted); }
+/* A first-load wrapper centres its loader on both axes, whatever empty-state class it borrows (S-1907).
+   In a flex column (a pane, or a list with rows above it) it takes the space left and no more. */
+.loading { display: flex; align-items: center; justify-content: center; flex: 1; min-height: 0; }
+.mail-empty.loading { padding: var(--space-2) var(--space-3); }
+.mail-side-list:has(> .loading), .issues-list:has(> .loading), .mail-list:has(> .loading), .tree:has(> .loading) { display: flex; flex-direction: column; }
+.mail-side-list:has(> .loading) > :not(.loading), .issues-list:has(> .loading) > :not(.loading), .mail-list:has(> .loading) > :not(.loading), .tree:has(> .loading) > :not(.loading) { flex-shrink: 0; }
 
 @media (pointer: coarse) {
   .ov-reasoning > summary, .ov-tool > summary, .ov-tools > summary, .ov-older, .ov-mail-foot button, .ov-mail-notice button, .ov-notice button { min-height: var(--size-hit-touch); }
@@ -3364,4 +3383,22 @@ details[open] > summary .ov-what-sum > span { white-space: normal; }
 @media (pointer: coarse) {
   /* The hit area grows to the right only, to at least 44px wide: a taller one would cover the lines above and below and the PR link. */
   .md a.pr-gh { padding-right: var(--space-3); min-width: var(--size-hit-touch); display: inline-block; box-sizing: border-box; }
+}
+
+/* --- A suggestion's preview (S-1910): the menu popover's content; a bottom sheet on a phone ---- */
+.sgp-head { display: flex; align-items: center; gap: var(--space-2); min-height: var(--size-row-menu); }
+.sgp-head .pal-ico { flex: none; display: grid; place-items: center; width: 20px; }
+.sgp-title { flex: 1; min-width: 0; margin: 0; font-size: var(--type-chrome-md); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.sgp-title .ikey { margin-right: var(--space-1); }
+.sgp-facts { margin: 0 0 var(--space-2); display: flex; flex-direction: column; gap: var(--space-05); font-size: var(--type-chrome-sm); }
+.sgp-fact { display: grid; grid-template-columns: var(--space-12) minmax(0, 1fr); gap: var(--space-2); }
+.sgp-fact dt { color: var(--text-muted); }
+.sgp-fact dd { margin: 0; overflow-wrap: anywhere; }
+.sgp-body { margin: 0 0 var(--space-2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--type-chrome-sm); color: var(--text-secondary); max-height: calc(var(--size-row-menu) * 5); overflow-y: auto; }
+.sgp-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
+.sg-prev { display: inline-grid; place-items: center; height: calc(var(--size-row-menu) - var(--space-2)); min-width: calc(var(--size-row-menu) - var(--space-2)); border-radius: var(--radius-sm); color: var(--text-muted); }
+.sg-prev:hover, .sg-prev:focus-visible { background: var(--control-hover-bg); color: var(--text-primary); }
+@media (max-width: 760px) {
+  .sg-prev { display: none; }
+  .sgp-actions .btn { min-height: var(--size-hit-touch); min-width: var(--size-hit-touch); }
 }

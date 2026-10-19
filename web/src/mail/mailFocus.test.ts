@@ -46,7 +46,7 @@ describe('settleFocus', () => {
     expect(pendingFocus()).toEqual({ id: 'm3228ca5', tid: 't1' })
   })
 
-  it('is cleared when Kim goes to another view', () => {
+  it('is cleared when the user goes to another view', () => {
     askFocus('m3228ca5', 't1')
     doneFocus()
     expect(settleFocus('t1', ['m3228ca5'])).toBeNull()

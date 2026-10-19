@@ -13,8 +13,8 @@ const home = tempHome('stam-mail-note-display-');
 process.env.STAM_HOME = home;
 for (const k of ['STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT']) delete process.env[k];
 
-const NOTE = 'Routing was uncertain: Kim typed this without picking a recipient.';
-const mail = (note) => ({ id: 'm1', thread_id: 'm1', subject: 'Q', from_id: 'human', from_name: 'Kim', created_at: '2026-10-18T00:00:00Z', body: 'what is up?', recipients: [{ id: 'a1' }], attachments: [], ...(note ? { note } : {}) });
+const NOTE = 'Routing was uncertain: Dana typed this without picking a recipient.';
+const mail = (note) => ({ id: 'm1', thread_id: 'm1', subject: 'Q', from_id: 'human', from_name: 'Dana', created_at: '2026-10-18T00:00:00Z', body: 'what is up?', recipients: [{ id: 'a1' }], attachments: [], ...(note ? { note } : {}) });
 let withNote = true;
 const daemon = createServer((req, res) => {
   req.resume();

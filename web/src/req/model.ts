@@ -1,7 +1,7 @@
 // Requirements in the web UI (S-461), free of the store so it can be
 // tested alone: the shapes `/api/requirements` returns, a requirement's conformity from its
 // latest verdicts, the tree's roll-up, and how a verdict is worded. A check is only an
-// indication, never the truth (Kim): every word here says "likely".
+// indication, never the truth: every word here says "likely".
 import type { Itsa } from '../types'
 
 export type ReqStatus = 'draft' | 'in_force' | 'suspended' | 'obsolete'

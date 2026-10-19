@@ -186,9 +186,12 @@ export function groupByColumn(all: Itsa[], col: SortFilterCol, opts: GroupOption
 
 // The fold keys without those of agents that are gone (`column:agents:<id>`); the same object when
 // none is, so a caller can tell nothing changed. The blank group's key (no id) stays.
-export function pruneFolded(folded: Record<string, boolean>, agentIds: Set<string>): Record<string, boolean> {
+export function pruneFolded(folded: Record<string, boolean>, agentIds: Set<string>, itsaIds?: Set<string>): Record<string, boolean> {
   const P = 'column:agents:'
-  const gone = Object.keys(folded).filter((k) => k.startsWith(P) && k.length > P.length && !agentIds.has(k.slice(P.length)))
+  // A row fold (`row:<mode>:<id>`, S-1437) goes with its ITSA, once the ITSAs have loaded. The Agents tree has
+  // no row folds (its group heads fold), so a saved `row:agents:` key always goes.
+  const rowGone = (k: string) => /^row:agents:/.test(k) || (!!itsaIds && /^row:[a-z]+:./.test(k) && !itsaIds.has(k.replace(/^row:[a-z]+:/, '')))
+  const gone = Object.keys(folded).filter((k) => rowGone(k) || (k.startsWith(P) && k.length > P.length && !agentIds.has(k.slice(P.length))))
   if (!gone.length) return folded
   return Object.fromEntries(Object.entries(folded).filter(([k]) => !gone.includes(k)))
 }
@@ -215,4 +218,23 @@ export function since(t: string, now = Date.now()) {
 // The agents on an ITSA: its owner, then its other participants, without the human.
 export function agentIdsOf(x: Pick<Itsa, 'owner' | 'participants'>) {
   return [...new Set([x.owner, ...(x.participants ?? [])])].filter((id): id is string => !!id && id !== 'human')
+}
+
+// Row folds (S-1437): a row's subrows are the rows after it that sit deeper, up to the next row at its
+// depth or above. `kids` counts them for every row that has any; `rows` is what shows once the rows
+// `folded` says are folded hide their subrows.
+export function foldRows(rows: WorkRow[], folded: (r: WorkRow) => boolean): { rows: WorkRow[]; kids: Map<string, number> } {
+  const kids = new Map<string, number>()
+  const shown: WorkRow[] = []
+  let skipBelow = Infinity
+  rows.forEach((r, i) => {
+    let n = 0
+    while (rows[i + 1 + n] && rows[i + 1 + n].depth > r.depth) n++
+    if (n) kids.set(r.it.id, n)
+    if (r.depth > skipBelow) return
+    skipBelow = Infinity
+    shown.push(r)
+    if (n && folded(r)) skipBelow = r.depth
+  })
+  return { rows: shown, kids }
 }

@@ -313,6 +313,8 @@ function testStdio(command: string, args: string[], env: Record<string, string>)
         }
       }
     });
+    // A server that exits at once fails these writes with EPIPE; its exit reports the failure.
+    child.stdin.on('error', () => {});
     const send = (o: unknown) => child.stdin.write(JSON.stringify(o) + '\n');
     send(rpc(1, 'initialize', { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: 'stam', version: '2' } }));
     send({ jsonrpc: '2.0', method: 'notifications/initialized' });

@@ -437,6 +437,24 @@ test('pr_open warns only for a stam worktree, and relink refuses the live checko
   }
 });
 
+test('a linked worktree is never the live deploy checkout, even when settings name it as stam2 (S-1863)', () => {
+  const repo = repoWith(join(work, 'own-repo'), [''], 'own');
+  const real = ws.createWorkspace({ kind: 'worktree', repo, branch: 'stam/own' }, 'own');
+  const settingsFile = join(process.env.STAM_HOME, 'settings.json');
+  try {
+    // A CLI run from a worktree's own copy defaults itsa.repos.stam2 to that worktree.
+    writeFileSync(settingsFile, JSON.stringify({ itsa: { repos: { stam2: real.cwd } } }));
+    assert.equal(ws.liveCheckoutRefusal(real.cwd), null);
+    assert.equal(ws.relinkRefusal(real.cwd), null);
+    // A real checkout named the same way is still the live one, and still refused.
+    writeFileSync(settingsFile, JSON.stringify({ itsa: { repos: { stam2: repo } } }));
+    assert.match(ws.relinkRefusal(repo, true), /live deploy checkout/);
+  } finally {
+    rmSync(settingsFile, { force: true });
+    ws.cleanupWorkspace(real, true);
+  }
+});
+
 // Waits on state, not time: true once `check` holds, polling the event loop.
 const until = async (check) => {
   for (let i = 0; i < 400 && !check(); i++) await new Promise((r) => setTimeout(r, 25));

@@ -1,3 +1,4 @@
+import { cleanFilters } from './sortfilter'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Layout, ViewStore } from './views'
 import { clampWidth, clearFilters, setFilter, setSort, setSortKeys, settle, defaultLayout, deleteView, emptyStore, fullOrder, isDirty, moveBy, moveTo, revertView, saveAs, saveView, setGroup, setShown, setWidth, useView, VIEWS_KEY } from './views'
@@ -505,6 +506,14 @@ describe('saved view tabs', () => {
     const reordered = { ...setFilter(st.layout, 'status', { kind: 'values', values: ['b', 'a'] }), quick: ['pr', 'stale'] as Layout['quick'] }
     expect(isDirty({ ...st, layout: reordered }, IDS)).toBe(false)
     expect(isDirty({ ...st, layout: setFilter(st.layout, 'status', { kind: 'values', values: ['a'] }) }, IDS)).toBe(true)
+  })
+
+  it('a not rule round-trips a saved view, and its order does not mark it edited', () => {
+    const st = saved(setFilter(defaultLayout(IDS), 'status', { kind: 'values', not: ['a', 'b'] }))
+    expect(st.layout.filters).toEqual({ status: { kind: 'values', not: ['a', 'b'] } })
+    expect(cleanFilters(JSON.parse(JSON.stringify(st.layout.filters)))).toEqual(st.layout.filters)
+    expect(isDirty({ ...st, layout: setFilter(st.layout, 'status', { kind: 'values', not: ['b', 'a'] }) }, IDS)).toBe(false)
+    expect(isDirty({ ...st, layout: setFilter(st.layout, 'status', { kind: 'values', not: ['a'] }) }, IDS)).toBe(true)
   })
 
   it('Save overwrites the current view with the working layout, and clears the mark', () => {

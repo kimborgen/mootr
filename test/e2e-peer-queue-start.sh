@@ -35,6 +35,8 @@ daemon_up twin
 fail() { echo "FAIL: $1"; exit 1; }
 jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 MAIN_URL=$(on main sh -c 'echo "$STAM_URL"'); MAIN_TOKEN=$(cat "$TEST_TMP/main/token")
+# stam's own mail (from_stam) is set only by a peer's own daemon (S-2033): main's peer token, forwarding as a peer does.
+PEER_TOKEN=$(cat "$TEST_TMP/main/peer-token")
 TWIN_URL=$(on twin sh -c 'echo "$STAM_URL"'); TWIN_TOKEN=$(cat "$TEST_TMP/twin/token")
 api() {
   _url=$MAIN_URL; _tok=$MAIN_TOKEN
@@ -70,7 +72,7 @@ printf "%s" "$R" | jget "'queued' in d" | grep -qx False || fail "broadcast was 
 [ "$(starts)" = 0 ] || fail "a broadcast started twin"
 
 echo "-- stam's own mail to far queues without starting twin"
-R=$(api POST /api/mail "{\"from\":\"$BOSS\",\"to\":[\"far\"],\"subject\":\"stam notice\",\"body\":\"x\",\"from_stam\":true}")
+R=$(curl -s -X POST -H "authorization: Bearer $PEER_TOKEN" -H 'x-stam-local: 1' -H 'content-type: application/json' -d "{\"from\":\"$BOSS\",\"to\":[\"far\"],\"subject\":\"stam notice\",\"body\":\"x\",\"from_stam\":true}" "$MAIN_URL/api/mail")
 printf "%s" "$R" | jget "d['queued']" | grep -qx True || fail "stam mail to far wasn't queued (got: $R)"
 sleep 2
 [ "$(starts)" = 0 ] || fail "stam mail started twin"

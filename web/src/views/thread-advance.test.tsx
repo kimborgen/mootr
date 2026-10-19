@@ -85,7 +85,7 @@ describe('a thread reply and the next mail', () => {
     await flush(); await flush()
     expect(getRows()).toEqual([])
     expect(archives()).toHaveLength(1)
-    // Kim named no one: the thread's people are inferred, so one nobody can mail any more is skipped, not refused (S-603).
+    // The human named no one: the thread's people are inferred, so one nobody can mail any more is skipped, not refused (S-603).
     const [sent] = posts.filter((p) => p.path === '/api/mail')
     expect(sent.body.to).toEqual(['a1'])
     expect(sent.body.inferred).toEqual(['a1'])

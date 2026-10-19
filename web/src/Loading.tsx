@@ -1,12 +1,12 @@
 // A list's or a pane's first load: the stam logo at work, standing where the empty state would,
-// so the view doesn't jump when the rows arrive (S-1451, by Kim's ask; docs/design-system.md,
+// so the view doesn't jump when the rows arrive (S-1451, by the user's ask; docs/design-system.md,
 // "Empty, loading, and error"). An accent arc runs round the logo's ring while the bot bobs and
 // blinks. Each part is its own small layer moved by transform alone, so the loop stays on the
 // compositor while the page fetches. It fades in only after --duration-hold, so a fast load
 // shows nothing; reduced motion swaps the movement for a slow breathe of the arc.
 export function Loading({ className = 'pad muted', size = 'sm', label = 'Loading' }: { className?: string; size?: 'sm' | 'lg'; label?: string }) {
   return (
-    <div className={className} role="status" aria-label={label}>
+    <div className={'loading ' + className} role="status" aria-label={label}>
       <StamLoader size={size} />
     </div>
   )

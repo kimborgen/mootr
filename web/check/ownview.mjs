@@ -260,8 +260,8 @@ const ids = (p) => p.locator('.ov .ov-msg').evaluateAll((els) => els.map((e) => 
 }
 
 // --- Open thread from the assistant's overlay (S-378) --------------------------------------
-// oc is chief of staff, so the assistant overlay shows its conversation over the page. Kim's
-// mail to oc is a card there; Open thread takes Kim to the thread, and the overlay closes.
+// oc is chief of staff, so the assistant overlay shows its conversation over the page. The user's
+// mail to oc is a card there; Open thread takes the user to the thread, and the overlay closes.
 for (const [tag, vp] of [['desktop', { viewport: { width: 1500, height: 900 } }], ['360-light', { ...devices['Pixel 7'], viewport: { width: 360, height: 740 } }]]) {
   await call('POST', '/api/chief-of-staff', { agent: oc.id });
   const sent = await call('POST', '/api/mail', { from: 'human', to: [oc.id], new_thread: true, subject: `Check: open thread ${tag}`, body: 'A follow-up from the overlay.' });
@@ -279,7 +279,7 @@ for (const [tag, vp] of [['desktop', { viewport: { width: 1500, height: 900 } }]
   const world = await p.evaluate(() => window.stamDebug.shell.currentWorld());
   check(tag, world === 't:' + sent.thread_id, 'Open thread in the assistant opens that thread', world);
   check(tag, await p.locator('#top-world').count() === 0, 'the assistant overlay closes when the thread opens');
-  check(tag, (await p.locator('.thread-view:visible').innerText()).includes('A follow-up from the overlay.'), 'the thread shows the mail Kim sent');
+  check(tag, (await p.locator('.thread-view:visible').innerText()).includes('A follow-up from the overlay.'), 'the thread shows the mail the user sent');
   await p.context().close();
 }
 await call('POST', '/api/chief-of-staff', { agent: null });

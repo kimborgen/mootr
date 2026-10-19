@@ -4,7 +4,7 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it } from 'vitest'
-import { hideMenu, MenuLayer, showMenu } from './menu'
+import { hideMenu, MenuLayer, showMenu, showPopover } from './menu'
 
 afterEach(() => { hideMenu(); document.body.innerHTML = '' })
 
@@ -27,6 +27,28 @@ describe('menu item roles', () => {
       ['Multi', 'menuitemcheckbox', 'true'],
       ['Plain', 'menuitem', null],
     ])
+    act(() => { root.unmount() })
+  })
+})
+
+// Home and End move the caret in a text field in the menu; on a menu item they jump to the first and last.
+describe('Home and End in a menu', () => {
+  it('stay in a text field inside the menu, and on an item jump to the first', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    act(() => { root.render(<MenuLayer />) })
+    act(() => { showPopover(0, 0, 'Save view', <><input aria-label="Name" /><button>Save</button></>) })
+    const input = document.querySelector<HTMLInputElement>('.menu input')!
+    act(() => { input.focus() })
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Home' })) })
+    expect(document.activeElement).toBe(input)
+    act(() => { hideMenu() })
+    act(() => { showMenu(0, 0, [{ label: 'First' }, { label: 'Last' }]) })
+    const last = document.querySelectorAll<HTMLButtonElement>('.menu button')[1]
+    act(() => { last.focus() })
+    act(() => { last.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Home' })) })
+    expect(document.activeElement?.textContent).toBe('First')
     act(() => { root.unmount() })
   })
 })

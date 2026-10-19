@@ -23,6 +23,7 @@ export const stories: Story[] = [{
   ],
   states: [
     { name: 'List', routes, render: show(settings(), null) },
+    { name: 'Tool names, on by default', routes, render: show(settings(), 'toolNames') },
     { name: 'Tool summary, shipped instructions', routes, render: show(settings(), 'toolSummary') },
     { name: 'Tool summary, on with edited instructions', routes, render: show(settings({ tiny: { toolSummary: { enabled: true, model: 'google/gemma-3-4b-it', instructions: 'Summarise one tool call as {"tool","doing"}, in Swedish.' } } }), 'toolSummary') },
     { name: 'Mail titles, shipped prompts', routes, render: show(settings(), 'mailTitles') },

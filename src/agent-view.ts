@@ -465,9 +465,11 @@ export function turnTools(messages: ViewMessage[], hi: number): { tools: ToolCal
   const events: { at: number; tool?: ToolCall }[] = [];
   for (const m of messages) {
     if (m.kind === 'mail') {
-      // A mail the agent received starts its turn when the agent read it (its read_at), else when it was sent.
+      // A mail the agent received starts its turn when the agent read it (its read_at); unread, it started none.
       const p = m.parts[0];
-      events.push({ at: p?.type === 'mail' && !p.to && p.read_at !== null ? p.read_at : m.at });
+      if (p?.type === 'mail' && !p.to) {
+        if (p.read_at !== null) events.push({ at: p.read_at });
+      } else events.push({ at: m.at });
     } else if (m.role === 'user' || (m.role === 'system' && m.kind === 'notice')) events.push({ at: m.at });
     else m.parts.forEach((p, k) => p.type === 'tool' && events.push({ at: m.marks?.[k] ?? m.at, tool: p }));
   }
@@ -497,6 +499,13 @@ export async function mailTools(a: Agent, mailId: string): Promise<{ tools: Tool
   for (let page = 0; ; page++) {
     const p = await source.page(a, { before, limit: TOOL_PAGE });
     for (const m of withMail(a, p.messages, p.older !== null, until)) seen.set(m.id, m);
+    // A received mail is a boundary at its read_at, which can fall in this page's range though it was created on an older
+    // page: add the mail read in the range, so an early stop can't miss a later boundary.
+    const from = p.older !== null && p.messages.length ? p.messages[0].at : 0;
+    // Bounded by the target mail's time in SQL, before the row cap: reads at or after it are no boundary (turnTools drops them).
+    const to = Math.min(until, hi);
+    const iso = (ms: number) => new Date(ms).toISOString();
+    for (const m of db.mailReadIn(a.id, iso(from), iso(to)).map(mailMessage)) seen.set(m.id, m);
     const slice = turnTools([...seen.values()], hi);
     if (slice.done || !p.older) return { tools: slice.tools, truncated: false };
     if (page + 1 >= TOOL_PAGES) return { tools: slice.tools, truncated: true };

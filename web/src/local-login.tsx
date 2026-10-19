@@ -96,7 +96,7 @@ export function LocalLogin({ dir }: { dir: string }) {
   return (
     <main className="local-login" id="local-login">
       <h1><Icon name="lock" />Log in to mootr</h1>
-      <p className="lede">In a terminal outside mootr (not an agent's, not a stam web shell, where sudo's remembered password would let others act as root), run this, then press Log in. It works once, for 5 minutes; the login lasts 12 hours or until mootr restarts.</p>
+      <p className="lede">In a terminal outside mootr (not an agent's, not a mootr web shell, where sudo's remembered password would let others act as root), run this, then press Log in. It works once, for 5 minutes; the login lasts 12 hours or until mootr restarts.</p>
       <form onSubmit={submit}>
         <code id="local-login-command">{command}</code>
         <button className="btn primary" type="submit" disabled={busy || !pair}>Log in</button>

@@ -81,6 +81,22 @@ describe('right-click a table cell', () => {
     await rightClick(cell('i2', 'status'))
     await choose('Exclude this value')
     expect(rows()).toEqual(['S-3'])
+    expect(q('.w-ftoken[data-col=status] .w-ftext')?.textContent).toMatch(/^Status ≠ .+, .+/)
+  })
+
+  it('a status that first appears after an Exclude shows, and is ticked in the editor', async () => {
+    await rightClick(cell('i1', 'status'))
+    await choose('Exclude this value')
+    expect(rows().sort()).toEqual(['S-2', 'S-3'])
+    const { setData, getData } = await import('../store')
+    await act(async () => { setData({ itsas: [...getData().itsas, mk('i4', 'S-4', 'Delta', 'blocked')] }) })
+    await flush()
+    expect(rows().sort()).toEqual(['S-2', 'S-3', 'S-4'])
+    await act(async () => { q<HTMLElement>('.w-ftoken[data-col=status] .w-ftext')!.click() })
+    await flush()
+    const ticks = [...document.querySelectorAll('.rm-row')].map((r) => [r.querySelector('.ml')?.textContent?.toLowerCase(), r.getAttribute('aria-checked')])
+    expect(ticks.find(([n]) => n === 'blocked')?.[1]).toBe('true')
+    expect(ticks.filter(([, on]) => on === 'false').length).toBe(1)
   })
 
   it('Sort by this column sorts the rows', async () => {

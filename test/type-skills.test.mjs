@@ -29,7 +29,7 @@ const skill = (dir, name, description) => {
 const agentOf = (type) => ({ id: 'a1', name: 'a-one', role: 'dev', machine: 'x', harness: 'claude', model: null, effort: null, cwd: home, parent_id: null, session_id: null, type });
 
 before(async () => {
-  skill(join(user, '.claude', 'skills'), 'kim-style', 'How to write to Kim.');
+  skill(join(user, '.claude', 'skills'), 'user-style', 'How to write to the user.');
   skill(join(home, 'skills'), 'tidy', 'Tidy up scratch files.');
   db = await import('../src/db.ts');
   org = await import('../src/org.ts');
@@ -63,17 +63,17 @@ test('saveType rejects an unknown skill and a non-list; known names are kept onc
   assert.throws(() => save(['nope']), /unknown skill nope/);
   assert.throws(() => save('tidy'), /skills must be a list/);
   assert.throws(() => save([1]), /skills must be a list/);
-  save(['tidy', 'kim-style', 'tidy']);
-  assert.deepEqual(types.agentTypes().skilltest.skills, ['tidy', 'kim-style']);
+  save(['tidy', 'user-style', 'tidy']);
+  assert.deepEqual(types.agentTypes().skilltest.skills, ['tidy', 'user-style']);
 });
 
 test('the Skills available block sits after the type blocks and before the memory, with absolute SKILL.md paths', () => {
-  save(['tidy', 'kim-style']);
+  save(['tidy', 'user-style']);
   const text = org.typePrompt(asAgent());
   const at = (s) => text.indexOf(s);
   assert.ok(at('Do the thing.') >= 0 && at('Do the thing.') < at('## Skills available') && at('## Skills available') < at('REMEMBER THIS.'));
   assert.ok(text.includes(`- tidy: Tidy up scratch files. (${join(home, 'skills', 'tidy', 'SKILL.md')})`));
-  assert.ok(text.includes(`- kim-style: How to write to Kim. (${join(user, '.claude', 'skills', 'kim-style', 'SKILL.md')})`));
+  assert.ok(text.includes(`- user-style: How to write to the user. (${join(user, '.claude', 'skills', 'user-style', 'SKILL.md')})`));
   assert.match(text, /read its SKILL\.md/);
   assert.deepEqual(org.typeSegments(asAgent()).map((s) => s.key), ['type', 'skills', 'memory']);
 });
@@ -94,18 +94,18 @@ test('another type is untouched by a type\'s skills', () => {
 });
 
 test('a skill that disappears is skipped and flagged, never a throw', () => {
-  save(['tidy', 'kim-style']);
+  save(['tidy', 'user-style']);
   rmSync(join(home, 'skills', 'tidy'), { recursive: true });
   const text = org.typePrompt(asAgent());
-  assert.ok(text.includes('kim-style') && !text.includes('tidy'));
+  assert.ok(text.includes('user-style') && !text.includes('tidy'));
   const i = inv.typeInventory('skilltest');
   assert.ok(i.flags.some((f) => f.kind === 'type-skill-missing' && f.message.includes('tidy')));
-  assert.deepEqual(types.agentTypes().skilltest.skills, ['tidy', 'kim-style']);
-  rmSync(join(user, '.claude', 'skills', 'kim-style'), { recursive: true });
+  assert.deepEqual(types.agentTypes().skilltest.skills, ['tidy', 'user-style']);
+  rmSync(join(user, '.claude', 'skills', 'user-style'), { recursive: true });
   assert.ok(!org.typePrompt(asAgent()).includes('Skills available'));
   assert.ok(org.typePrompt(asAgent()).endsWith('REMEMBER THIS.'));
   skill(join(home, 'skills'), 'tidy', 'Tidy up scratch files.');
-  skill(join(user, '.claude', 'skills'), 'kim-style', 'How to write to Kim.');
+  skill(join(user, '.claude', 'skills'), 'user-style', 'How to write to the user.');
 });
 
 test('the inventory lists the block in the system-prompt layer with its tokens', () => {

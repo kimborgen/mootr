@@ -36,7 +36,7 @@ test('the default note "I authorize", in any case, adds nothing', () => {
 
 test('a custom note is appended as Kim\'s note, without its trailing punctuation doubled', () => {
   const t = approvedTyped('p1a2b3', 'Run npm test', 'only on the staging branch!');
-  assert.equal(t, "I authorize p1a2b3: Kim approved it (Run npm test). Go ahead with that action now; don't request it again. Kim's note: only on the staging branch.");
+  assert.equal(t, "I authorize p1a2b3: Kim approved it (Run npm test). Go ahead with that action now; don't request it again. The user's note: only on the staging branch.");
   assert.ok(!/try again/i.test(t));
 });
 

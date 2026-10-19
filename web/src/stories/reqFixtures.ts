@@ -42,7 +42,7 @@ export const VIEW_R2: RequirementView = {
   version: 2,
   text: 'When a reply is sent in a thread, the system shall archive that thread for the sender.',
   rationale: 'An answered thread left open keeps counting as waiting.',
-  source: 'Kim, 2026-10-12',
+  source: 'Dana, 2026-10-12',
   verification: [{ method: 'review', detail: 'A reviewer reads the diff for the archive call' }, { method: 'test', detail: 'test/mail-archive.test.ts' }],
   scope: { paths: ['src/mail/**'], roles: ['developer', 'reviewer'] },
   links: [

@@ -68,8 +68,8 @@ export function gateMail(subject: string, body: string, threadId?: string, sende
   return ask(subject, body, GATE_TIMEOUT_MS, threadId, sender);
 }
 
-// Kim's rule, word for word (S-985), given to the model under 'necessary' so it judges a mail against it.
-export const STRICT_RULE = 'decisions, blockers, done notes for work Kim asked for, and answers to Kim\'s questions';
+// The user's rule, word for word (S-985), given to the model under 'necessary' so it judges a mail against it.
+export const STRICT_RULE = 'decisions, blockers, done notes for work the user asked for, and answers to the user\'s questions';
 // Bounds on the thread context: the human's latest message is trimmed, and the whole block is capped.
 const CONTEXT_MESSAGE_CHARS = 600;
 const CONTEXT_CHARS = 1000;

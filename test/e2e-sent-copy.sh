@@ -97,7 +97,7 @@ api twin GET "/api/agents/$FAR/inbox?unread=0" | jget "len([m for m in d if m['i
 
 echo "-- the sender's copy is never unread for boss, and never in boss's inbox"
 api main GET "/api/agents/$BOSS/inbox?unread=1" | jget "len([m for m in d if m['id'] in ('$M1','$M2','$M3')])" | grep -qx 0 || fail "boss has its own sent mail unread"
-echo "-- each view on main shows mail once: boss's own views, then the human's (the mail Kim sends to far)"
+echo "-- each view on main shows mail once: boss's own views, then the human's (the mail Dana sends to far)"
 # count ID JSON: how many mail objects (dicts with that id) the response holds, at any depth.
 # countt ID JSON: how many search rows or thread entries hold that thread id.
 count() { printf "%s" "$2" | python3 -c "

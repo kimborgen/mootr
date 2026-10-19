@@ -177,11 +177,15 @@ describe('Work page fields', () => {
   })
 
   it('keeps the field column through a visibility change queued before the fields loaded', async () => {
+    let columnsButton: HTMLButtonElement | undefined
     const cols = await queued(async () => {
-      await act(async () => { [...host.querySelectorAll<HTMLButtonElement>('.w-tools button')].find((b) => b.textContent === 'Columns')!.click() })
+      columnsButton = [...host.querySelectorAll<HTMLButtonElement>('.w-tools button')].find((b) => b.textContent === 'Columns')!
+      await act(async () => { columnsButton!.click() })
       await act(async () => { [...document.querySelectorAll<HTMLElement>('.menu [role=menuitemcheckbox]')].find((m) => m.textContent === 'Cost')!.click() })
     })
     expect(cols).toEqual(['work', 'status', 'field:f1'])
+    // Toggling closes the panel and hands the focus back to the Columns button.
+    expect(document.activeElement).toBe(columnsButton)
   })
 
   it('keeps the field column through a save-as queued before the fields loaded', async () => {

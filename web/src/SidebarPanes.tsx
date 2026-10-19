@@ -9,6 +9,7 @@ import { CostSide } from './CostSide'
 import { Icon, type IconName } from './Icon'
 import { MachinesSide } from './MachinesSide'
 import { MailSide } from './MailSide'
+import { HistorySide } from './HistorySide'
 import { IssuesSide } from './itsa/IssuesSide'
 import { ReqSide } from './req/ReqSide'
 import { activate, setSidebarPanes, tabKey, useSidebarPanes } from './sidebar-panes'
@@ -22,6 +23,7 @@ export const TABS: Record<string, TabDef> = {
   agents: { label: 'Agents', icon: 'users', render: () => <Tree /> },
   issues: { label: 'Issues', icon: 'list-checks', page: () => openWorld('work'), render: (left) => <><IssuesSide leftRef={left} pane /><ReqSide /></> },
   mail: { label: 'Mail', icon: 'mail', render: (left) => <MailSide leftRef={left} pane /> },
+  history: { label: 'History', icon: 'clock', render: () => <HistorySide /> },
   cost: { label: 'Cost', icon: 'gauge', page: () => openWorld('usage'), render: () => <CostSide /> },
   machines: { label: 'Machines', icon: 'server', render: () => <MachinesSide pane /> },
 }

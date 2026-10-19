@@ -1,4 +1,4 @@
-// What an agent's token may read of cost data (S-593). Kim, the CLI and the bosses (the chief of
+// What an agent's token may read of cost data (S-593). The user, the CLI and the bosses (the chief of
 // staff, the assistant, a boss-flagged peer) keep every number. Any other agent sees the windows'
 // totals, forecasts and notices in full, but per-agent and per-tree shares only for its own tree and
 // its ancestors' trees; every other tree collapses into one "other" line. The scoping runs on the

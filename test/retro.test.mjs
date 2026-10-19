@@ -36,13 +36,13 @@ function fakeApi({ s1 = null, agents = [{ id: 'a1', name: 'alice', model: 'claud
       return s1;
     }
     if (method === 'GET' && url.pathname === '/api/itsas/search') {
-      searches.push({ kind: q.get('kind'), open: q.get('open'), offset: q.get('offset') });
+      searches.push({ kind: q.get('kind'), open: q.get('open'), limit: q.get('limit') });
       if (meaning === 'fail') throw Object.assign(new Error('the search route is down'), { status: 500 });
       if (meaning === 'keyword') return [{ by: 'keyword' }];
       // As the route does: open=1 drops closed matches, the ranking is best first, and the page is
       // limit hits from offset (S-729).
       const hits = (meaning ?? []).filter((h) => q.get('open') !== '1' || itsas.some((x) => x.id === h.id && !x.closed_at)).sort((a, b) => b.score - a.score);
-      const limit = Math.min(30, Math.max(1, Number(q.get('limit') ?? 10)));
+      const limit = Math.min(200, Math.max(1, Number(q.get('limit') ?? 10)));
       const offset = Math.max(0, Number(q.get('offset') ?? 0));
       return hits.slice(offset, offset + limit);
     }
@@ -213,8 +213,8 @@ test('metadata is read from the header only, so a detail that quotes it cannot s
   // An old item with none of the new lines reads as none and empty.
   assert.deepEqual(headerFields('Kind: improve\nTarget: type-developer\nReporter: bob\n\nOld details.'), { kind: 'improve', target: 'type-developer', evidence: 'none', evidenceDetail: '', when: '', details: 'Old details.' });
   // Detail: is the evidence detail, When: the condition, Evidence: the class.
-  const full = headerFields('Kind: improve\nTarget: none\nEvidence: human\nDetail: Kim said X\nWhen: on the UI\n\nD');
-  assert.deepEqual([full.evidence, full.evidenceDetail, full.when], ['human', 'Kim said X', 'on the UI']);
+  const full = headerFields('Kind: improve\nTarget: none\nEvidence: human\nDetail: Dana said X\nWhen: on the UI\n\nD');
+  assert.deepEqual([full.evidence, full.evidenceDetail, full.when], ['human', 'Dana said X', 'on the UI']);
 });
 
 test('a target with a newline is flattened to one line, so it cannot inject a header line', async () => {
@@ -265,18 +265,62 @@ test('search ranks open retro items by meaning when the embedder is ready, best 
   const g = fakeApi({ meaning: hits });
   const near = g.add({ kind: 'retro', title: 'Chromium download stalls', summary: 'Chromium download stalls', body: 'Kind: improve\n\nplaywright browser download is slow', status: 'idea' });
   const mid = g.add({ kind: 'retro', title: 'Browser lock', summary: 'Browser lock', body: 'Kind: improve\n\nthe shared chromium lock', status: 'idea' });
-  // The word-only item shares the query's words but is not near by meaning: it must not appear.
-  g.add({ kind: 'retro', title: 'Chromium download stalls the run', summary: 'Chromium download stalls the run', body: 'Kind: improve\n\nword overlap', status: 'idea' });
+  // The word-only item has no vector but shares two of the query's three words: it outranks the weaker meaning hit (S-1925).
+  const wordOnly = g.add({ kind: 'retro', title: 'Chromium download stalls the run', summary: 'Chromium download stalls the run', body: 'Kind: improve\n\nword overlap', status: 'idea' });
   await plusOne(g.api, 'a1', near.key, 'same on my run');
   // Out of order on purpose: the search keeps the route's ranking, best first.
   hits.push({ id: mid.id, by: 'meaning', score: 0.6 }, { id: near.id, by: 'meaning', score: 0.9 });
   const lines = (await searchRetros(g.api, 'browser download stalls')).split('\n');
   assert.deepEqual(lines, [
-    'Ranked by meaning.',
+    'Ranked by meaning and words.',
     `${near.key} "Chromium download stalls" [idea] · Kind: improve · 1 +1 · playwright browser download is slow`,
+    `${wordOnly.key} "Chromium download stalls the run" [idea] · Kind: improve · 0 +1s · word overlap`,
     `${mid.key} "Browser lock" [idea] · Kind: improve · 0 +1s · the shared chromium lock`,
   ]);
-  assert.deepEqual(g.searches, [{ kind: 'retro,feedback-report', open: '1', offset: '0' }]);
+  assert.deepEqual(g.searches, [{ kind: 'retro,feedback-report', open: '1', limit: '150' }]);
+});
+
+test('a near-exact paraphrase ranks first although its cosine is low, or its vector is missing (S-1925)', async () => {
+  const query = 'domain .com free check: no A record is not enough, use unregistered control domain';
+  for (const embedded of [true, false]) {
+    const hits = [];
+    const g = fakeApi({ meaning: hits });
+    const rdap = g.add({ kind: 'retro', title: 'RDAP domain check', summary: 'Check .com availability with registry RDAP (404 = free), not dig; registered domains often have no DNS', body: 'Kind: instruction\nTarget: ring topic template\n\ndig returned no NS records for a registered domain', status: 'idea' });
+    const others = ['Mail delivery lag', 'Control channel timeouts', 'Record keeping of enough tests'].map((t, i) =>
+      g.add({ kind: 'retro', title: t, summary: t, body: `Kind: improve\n\nunrelated ${i}`, status: 'idea' }));
+    // The three unrelated items outscore the paraphrase by cosine; with `embedded` false it has no vector at all.
+    others.forEach((o, i) => hits.push({ id: o.id, by: 'meaning', score: 0.5 - i / 100 }));
+    if (embedded) hits.push({ id: rdap.id, by: 'meaning', score: 0.3 });
+    const lines = (await searchRetros(g.api, query)).split('\n');
+    assert.match(lines[1], new RegExp(`^${rdap.key} "RDAP domain check"`), `embedded ${embedded}`);
+    assert.equal(lines.length, 4, 'the prefix and three hits');
+  }
+});
+
+test('a pure paraphrase with no shared words still beats items that each share one query word (S-721, S-1925)', async () => {
+  const hits = [];
+  const g = fakeApi({ meaning: hits });
+  const para = g.add({ kind: 'retro', title: 'Chromium stalls', summary: 'Chromium stalls', body: 'Kind: improve\n\nthe shared lock', status: 'idea' });
+  hits.push({ id: para.id, by: 'meaning', score: 0.65 });
+  for (const w of ['pipeline', 'compiler', 'quota']) {
+    const r = g.add({ kind: 'retro', title: `${w} notes`, summary: `${w} notes`, body: 'Kind: improve\n\nother', status: 'idea' });
+    hits.push({ id: r.id, by: 'meaning', score: 0.2 });
+  }
+  const lines = (await searchRetros(g.api, 'pipeline compiler quota browser')).split('\n');
+  assert.match(lines[1], new RegExp(`^${para.key} `));
+});
+
+test('a search over 2,000 open items makes one route call and scores in well under a second', async () => {
+  const hits = [];
+  const g = fakeApi({ meaning: hits });
+  for (let i = 0; i < 2000; i += 1) {
+    const r = g.add({ kind: 'retro', title: `item ${i} about topic${i % 50}`, summary: `summary ${i}`, body: `Kind: improve\n\ndetail ${i} words ${i % 7}`, status: 'idea' });
+    hits.push({ id: r.id, by: 'meaning', score: 0.2 + (i % 100) / 1000 });
+  }
+  const t0 = performance.now();
+  await searchRetros(g.api, 'topic3 detail words summary item');
+  assert.ok(performance.now() - t0 < 1000);
+  assert.equal(g.searches.length, 1, 'one route call');
 });
 
 test('the meaning search asks for open items only, so a closed hit cannot fill the three (S-729)', async () => {
@@ -290,7 +334,7 @@ test('the meaning search asks for open items only, so a closed hit cannot fill t
   assert.match(lines[1], new RegExp(`^${open.key} `));
 });
 
-test('the search pages past matches whose count the daemon refuses until it has the rest (S-729)', async () => {
+test('the search skips matches whose count the daemon refuses, from one route call (S-729, S-1925)', async () => {
   const hits = [];
   const g = fakeApi({ meaning: hits });
   const rows = [];
@@ -305,8 +349,8 @@ test('the search pages past matches whose count the daemon refuses until it has 
     return g.api(method, path, body);
   };
   const text = await searchRetros(guarded, 'item');
-  assert.equal(text, `Ranked by meaning.\n${readable.key} "item 30" [idea] · Kind: improve · 0 +1s · d30`);
-  assert.deepEqual(g.searches.map((s) => s.offset), ['0', '30'], 'the search paged past the first 30');
+  assert.equal(text, `Ranked by meaning and words.\n${readable.key} "item 30" [idea] · Kind: improve · 0 +1s · d30`);
+  assert.equal(g.searches.length, 1, 'one route call, so one embedding of the query');
 });
 
 test('when every meaning match is uncountable, the word search finds a countable one (S-729)', async () => {
@@ -348,7 +392,7 @@ test('search skips a match whose count the daemon refuses, and returns the rest 
   // The uncountable match is nearer (0.9 to 0.5), so it is tried first and skipped.
   hits.push({ id: hidden.id, by: 'meaning', score: 0.9 }, { id: readable.id, by: 'meaning', score: 0.5 });
   const text = await searchRetros(guarded, 'send mail reply_to slow');
-  assert.equal(text, `Ranked by meaning.\n${readable.key} "Mail is slow" [idea] · Kind: idea · 0 +1s · slow`);
+  assert.equal(text, `Ranked by meaning and words.\n${readable.key} "Mail is slow" [idea] · Kind: idea · 0 +1s · slow`);
 });
 
 test('search caps the hits at three and says so when nothing matches', async () => {

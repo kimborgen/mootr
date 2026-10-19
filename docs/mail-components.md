@@ -33,7 +33,7 @@ The renderer is `web/src/mail/mailblocks.ts` (framework-free; `web/src/mail/Thre
 | Timeline | ` ```timeline `: `TIME — event` per line, optional tone tag | A hairline with a dot per event in its tone. |
 | Math | ` ```math `, `$$…$$`, `\( … \)` | KaTeX 0.16.11, loaded on first use. A single `$` stays a dollar sign. |
 | Embed | ` ```embed ` (also `video`, `audio`, `image`, `file`): a URL or an absolute path, then an optional caption | YouTube (privacy-enhanced), Vimeo, Loom, Google Docs and Drive, and Figma in a sandboxed iframe; image, video, audio, and PDF URLs as players. A path on the sender's machine is attached by their daemon at send time (up to 100 MB) and played or shown from the attachment, which serves ranges and takes the token in its URL. Text files show their first 200 lines, highlighted. A YouTube, Vimeo, or Loom link alone on its line embeds too. |
-| Syntax highlighting | A language tag on a fenced code block | highlight.js 11.9.0 on stam's syntax tokens; untagged blocks are guessed only when the guess is confident. |
+| Syntax highlighting | A language tag on a fenced code block | highlight.js 11.9.0 on mootr's syntax tokens; untagged blocks are guessed only when the guess is confident. |
 | More charts | `type: scatter`, `radar`, `radial`, or `horizontal: yes` on bars | Scatter: x against one or more series, or named points from `label, x, y`, with a nearest-point readout. Radar: a spoke per category, a polygon per series. Radial: an arc per category as a share of the max (100 for percentages). Horizontal bars for long names. |
 | Diagram redraw | Automatic | A theme change redraws every diagram in the new colours. |
 | Pick several | ` ```pick ` block, like Decision; `(recommended)` options start ticked | Checkbox rows and **Send**; replies `Picked **A**, **B**.` Also has Decide later and Add a note. |
@@ -51,9 +51,9 @@ Shared React components in `web/src/mail/` that draw an agent's conversation the
 | Tool group | `ToolGroup` in `web/src/mail/ToolGroup.tsx`: `tools`, each a tool call with an `id` | A run of consecutive calls in one drawer, closed by default; the header counts the calls and shows the latest. |
 | Conversation mail card | `ConvMailCard` in `web/src/mail/ConvMailCard.tsx`: `m` (a mail-like object: sender, recipients with read times, subject, body, time, thread), optional `self` | Sender and recipients, read state, time, subject, body; a long body previews three lines with Show all; Open thread. A mail `self` sent heads with who it went to. Mail from or to the human (`withHuman`) reads raised, apart from mail between agents. |
 | Turn | `TurnFrame` in `web/src/mail/TurnFrame.tsx`: `id`, `kind`, `input`, children | One turn: its input as a card on top, the response full width below; turns separated by a hairline like a thread's messages. `kind` is `turnKind()`: `human`, `human-mail`, `mail`, `notice`, or `start`. |
-| Notice line | `NoticeLine` in `web/src/mail/TurnFrame.tsx`: `text`, optional `line` | A stam notice folded to one line (its first, or `line`); a tap or click opens the full text. |
+| Notice line | `NoticeLine` in `web/src/mail/TurnFrame.tsx`: `text`, optional `line` | A mootr notice folded to one line (its first, or `line`); a tap or click opens the full text. |
 
-The conversation's turns come from `turns()` in `web/src/views/ownview-model.ts`: each input (the human's message, a mail into the agent, a stam notice) opens a turn that runs until the next input; the notice that only says mail came joins the mail's turn. The input variants' look is one block in `web/style.css` (`.ov-turn`, `.conv-mail`).
+The conversation's turns come from `turns()` in `web/src/views/ownview-model.ts`: each input (the human's message, a mail into the agent, a mootr notice) opens a turn that runs until the next input; the notice that only says mail came joins the mail's turn. The input variants' look is one block in `web/style.css` (`.ov-turn`, `.conv-mail`).
 
 ## Not built, recommended
 
@@ -82,9 +82,9 @@ In the order to build them. Effort is for one session's work, including a browse
 | World block | Pane covers the case that matters, an agent's screen. |
 | Artifact embed | Embed covers files from the sender's machine. |
 | Cross-reference | Thread links cover references between mails; mail is too short to need numbered figures. |
-| Citation | No reference library in stam. |
+| Citation | No reference library in mootr. |
 | Hidden metadata | Agents mail each other directly; nothing to hide from the human. |
-| PDF quote | stam has no PDFs. |
+| PDF quote | mootr has no PDFs. |
 | Merged table cells | Complicates tables for a rare case. |
 | Spreadsheet table, dataset table | Mail is read, not edited; an agent can attach a CSV. |
 | Generated output | Charts and tables from the agent cover it. |

@@ -166,7 +166,7 @@ test('migration: a fallback other than Opus medium becomes reviewer-fallback; nu
 
 test('migration: a saved fallback with the target of an existing reviewer type maps to that type, not a new one', () => {
   const sonnet = { harness: 'claude', model: 'claude-sonnet-5-5', effort: 'low' };
-  // Kim's Opus 5.5 medium: the shipped reviewer-opus, so nothing changes
+  // Opus 5.5 at medium: the shipped reviewer-opus, so nothing changes
   assert.deepEqual(rm.reviewerMigration({ reviewer: { fallback: OPUS } }).changes, []);
   // Opus low is no existing type, so it stays a new one
   assert.deepEqual(rm.reviewerMigration({ reviewer: { fallback: { ...OPUS, effort: 'low' } } }).changes.map((c) => c.name), ['reviewer-fallback', 'reviewer']);

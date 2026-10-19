@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, chmodSync, realpathSync, lstatSync, readlinkSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
+import { existsSync, statSync, mkdirSync, chmodSync, realpathSync, lstatSync, readlinkSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -279,6 +279,15 @@ export function spawnWorkspaceSpec(body: any, type: AgentType | undefined, base:
   return { kind: 'dir', path: base };
 }
 
+// A linked worktree's `.git` is a file; a checkout's is a directory.
+const isLinkedWorktree = (dir: string): boolean => {
+  try {
+    return statSync(join(dir, '.git')).isFile();
+  } catch {
+    return false;
+  }
+};
+
 // The live deploy checkout (S-627): the repo the deploy watcher deploys from
 // (scripts/deploy-on-merge.mjs), where a deploy holds while it isn't a clean main. The watcher
 // names it with STAM_DEPLOY_REPO; else the repo settings name for stam2 (a release records the
@@ -322,6 +331,9 @@ export function liveCheckoutRefusal(dir: string): string | null {
     return null;
   }
   if (top !== checkout) return null;
+  // A linked worktree isn't the checkout (S-1863) unless STAM_DEPLOY_REPO names it: the repo settings
+  // default for a CLI or daemon run from a worktree's own copy is that worktree ("a checkout is its own").
+  if (!process.env.STAM_DEPLOY_REPO && isLinkedWorktree(top)) return null;
   return `${dir} is in the live deploy checkout ${top}, the repo the deploy watcher deploys from, so an agent that works there without its own worktree would block every deploy. Pass worktree: true, or a cwd outside it.`;
 }
 

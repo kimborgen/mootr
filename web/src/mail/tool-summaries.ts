@@ -119,12 +119,18 @@ export function useWatchCalls(agent: string | undefined, calls: SummaryCall[], e
   }, [statuses])
 }
 
+// What else follows what shows (the tool names, S-1933), so the page keeps one observer: asked when
+// something shows or hides, and which elements show now.
+export const onVisibleChange = new Set<() => void>()
+export const isShown = (el: Element): boolean => visible.has(el)
+
 function onIntersect(list: IntersectionObserverEntry[]): void {
   for (const x of list) {
     if (x.isIntersecting) visible.add(x.target)
     else visible.delete(x.target)
   }
   schedule(0)
+  for (const fn of onVisibleChange) fn()
 }
 
 // One flush pending at a time, at the earliest time asked: a retry waiting doesn't delay a

@@ -2,7 +2,7 @@
 
 Tests never depend on a real model: they must be deterministic. A test that needs a Claude Code agent runs `test/fake-claude/claude`, a scripted stand-in for the `claude` binary, instead of Claude Code.
 
-The real claude adapter (`src/adapters/claude.ts`) launches the fake unchanged, through `STAM_CLAUDE_BIN`. So the adapter's paths are what the test exercises: the hook and statusline commands in `--settings`, the stam MCP server and its channel from `--mcp-config`, the transcript, typing the first prompt into the pane, and mail pushed over the channel.
+The real claude adapter (`src/adapters/claude.ts`) launches the fake unchanged, through `STAM_CLAUDE_BIN`. So the adapter's paths are what the test exercises: the hook and statusline commands in `--settings`, the mootr MCP server and its channel from `--mcp-config`, the transcript, typing the first prompt into the pane, and mail pushed over the channel.
 
 Temporary folders (test daemons, screenshots, run logs) go under `STAM_TEST_TMPDIR`. When unset, that is `/tmp`, or `${XDG_CACHE_HOME:-$HOME/.cache}/stam-test` when `/tmp` is a tmpfs (RAM); see `test/tmpdir.sh`. Passing runs delete them; a named `OUT` (`OUT=dir sh web/check/run.sh NAME`) keeps screenshots. `KEEP=1` also keeps the check's daemon running, and prints the PIDs and home to stop it with.
 
@@ -43,7 +43,7 @@ To wait for a scripted reply that a turn's own mail can wake a second turn to re
 ```
 
 - `turns`: tried in order for every prompt; the first that matches runs.
-- `agents`: turns for one agent, by name, tried before `turns`. The fake asks stam `whoami` for its name only when `agents` is set.
+- `agents`: turns for one agent, by name, tried before `turns`. The fake asks mootr `whoami` for its name only when `agents` is set.
 - `default`: the turn when none matches. Without it, the fake replies `ok` and stops.
 
 A script can also be an `.mjs` module whose default export is the same object.
@@ -64,7 +64,7 @@ A prompt from the channel looks as Claude Code shows it: `<channel source="stam"
 | `{ "reply": "TEXT" }` | Writes an assistant message; the last one is the Stop hook's `last_assistant_message`. |
 | `{ "tool": "NAME", "input": {}, "output": "TEXT" }` | A tool use: PreToolUse, transcript rows, PostToolUse. Nothing runs. |
 | `{ "shell": "CMD", "save": ... }` | Runs CMD with `sh -c` in the agent's cwd, as its Bash tool would, wrapped in Pre/PostToolUse as `Bash`; the output is the tool result, and an exit code other than 0 is an error. `save` takes the output as below. |
-| `{ "mcp": "TOOL", "args": {}, "save": ..., "expect": "..." }` | Calls the stam MCP tool for real, wrapped in Pre/PostToolUse as `mcp__stam__TOOL`. A tool the server didn't list fails, as in Claude Code; the fake lists again on `tools/list_changed`. |
+| `{ "mcp": "TOOL", "args": {}, "save": ..., "expect": "..." }` | Calls the mootr MCP tool for real, wrapped in Pre/PostToolUse as `mcp__stam__TOOL`. A tool the server didn't list fails, as in Claude Code; the fake lists again on `tools/list_changed`. |
 | `{ "permission": "NAME", "input": {}, "output": "TEXT", "options": ["Yes", "No"] }` | PreToolUse, PermissionRequest (the agent goes `blocked`), then a dialog in the pane; `options` defaults to Yes, No, and an answer that doesn't start with Yes denies. For Claude Code's real menu for a read outside the working directories, give its four options: "Yes, and keep allowing any reads outside the working directories", "No, and block reads outside the working directories from now on", "No, and ask again next time", "Yes, but ask again next time" (`test/e2e-harness-dialog.sh`). |
 | `{ "ask": "QUESTION", "options": ["A", "B"] }` | AskUserQuestion: the same, with the options; the agent shows `blocked question`. |
 | `{ "await": "MATCH" }` | Holds the turn until a prompt (typed, or a channel message) matches; `true` takes any. |
@@ -72,13 +72,13 @@ A prompt from the channel looks as Claude Code shows it: `<channel source="stam"
 | `{ "hook": "EVENT", "payload": {} }` | Runs any hook, for rare events such as Notification or PreCompact. |
 | `{ "stop": { "background_tasks": [], "session_crons": [] } }` | Ends the turn now with these fields in the Stop payload, which become hook waits. |
 | `{ "fail": "rate_limit", "details": "..." }` | Ends the turn with StopFailure and that error class instead of Stop. |
-| `{ "lost_stop": true }` | Ends the turn without running Stop, as when the hook couldn't reach the daemon: stam still thinks the agent is working. |
+| `{ "lost_stop": true }` | Ends the turn without running Stop, as when the hook couldn't reach the daemon: mootr still thinks the agent is working. |
 | `{ "exit": true }` | Runs SessionEnd and exits, as if the human quit. |
 | `{ "exit": "hang" }` | Runs SessionEnd and stops its MCP servers, but doesn't exit: a harness that hangs on its way out, with its pane still live. |
 
 A turn that ends without `stop`, `fail`, or `exit` runs Stop with empty `background_tasks` and `session_crons`, then the statusline.
 
-Answer a dialog by typing into the agent's pane, as a human would: `1`, `2`, and so on picks an option, Enter the first, Esc cancels. The pane logs the option it closed with as `⎿ OPTION` (`⎿ cancelled` for Esc). Text stam types into an idle agent's input, such as "I authorize: ..." after an approved `request_permission`, arrives as a typed prompt. The answer is `${answer}`. A denied permission runs no PostToolUse.
+Answer a dialog by typing into the agent's pane, as a human would: `1`, `2`, and so on picks an option, Enter the first, Esc cancels. The pane logs the option it closed with as `⎿ OPTION` (`⎿ cancelled` for Esc). Text mootr types into an idle agent's input, such as "I authorize: ..." after an approved `request_permission`, arrives as a typed prompt. The answer is `${answer}`. A denied permission runs no PostToolUse.
 
 `save` keeps a tool result for later steps (MCP or `shell`), and the values also go into the session's transcript, so a `--resume SESSION` gets them back before its first turn. `save` keeps an MCP result for later steps: `"save": "NAME"` keeps the whole text as `${NAME}`, and `"save": { "NAME": "REGEX" }` keeps the regex's first group. For example, `{ "mcp": "read_mail", "save": { "mid": "(m[0-9a-f]{7})" } }` then `{ "mcp": "send_mail", "args": { "to": ["human"], "body": "done", "reply_to": "${mid}" } }`. When `expect` (a substring or `/regex/`) doesn't match the result, the turn ends with the reply `FAKE-CLAUDE EXPECT FAILED: ...`, which a test can check in `stam show`.
 
@@ -88,15 +88,15 @@ Strings in steps take `${...}`: `${self}` (the agent's id), `${name}` (its name,
 
 ## Compaction
 
-`claude -p --resume ID` (stam's compaction, which sends `/compact INSTRUCTIONS` on stdin) is answered with a JSON result and exit 0. The fake keeps the instructions as the session's summary, in `fake-compaction-SESSION.txt` in the stam home, and the resumed session reads it as `${summary}`. So a test can check that what it asked the summary to keep is still known after compaction. The compaction appends a summary row to the session's transcript, written in two parts, so a compactor killed mid-run leaves it half-written. Each compactor's session is appended to `fake-compact-runs` in the stam home, with an `OVERLAP` line when another still runs on the same session. `fake-compact-hold` holds a compaction open and `fake-compact-fail` makes it fail.
+`claude -p --resume ID` (mootr's compaction, which sends `/compact INSTRUCTIONS` on stdin) is answered with a JSON result and exit 0. The fake keeps the instructions as the session's summary, in `fake-compaction-SESSION.txt` in the mootr home, and the resumed session reads it as `${summary}`. So a test can check that what it asked the summary to keep is still known after compaction. The compaction appends a summary row to the session's transcript, written in two parts, so a compactor killed mid-run leaves it half-written. Each compactor's session is appended to `fake-compact-runs` in the mootr home, with an `OVERLAP` line when another still runs on the same session. `fake-compact-hold` holds a compaction open and `fake-compact-fail` makes it fail.
 
 ## What the agent was started with
 
-The fake writes the argv the adapter passed to `argv.json` in the agent's folder, on each start (a resume too). Every input submitted with Enter is appended, exactly as submitted and before trimming, to `typed.jsonl` there, one JSON string per line (`test/e2e-suggest-input.sh`). Under its box the pane draws a rule and a footer showing `-- INSERT --` (always in vim's insert mode, as Claude Code with vim keys); a backspace deletes one grapheme; and its box has Claude Code's bash mode (a `!` typed into an empty box becomes the box's mark; a backspace in the empty box leaves it) and a completion menu (under the footer, after a blank line) while its text is `/word` or ends in `@word`: Enter then submits `/menu-pick` or `@menu-pick`, and one Esc closes it until the text changes (text with `@@` opens one Esc doesn't close). A bash-mode prompt is recorded in the transcript as Claude Code records it, `<bash-input>TEXT AFTER THE !</bash-input>`. A number in a `drop-bs` file there makes that many backspaces do nothing, so a test can leave part of stam's typing in the box (`test/e2e-suggest-input.sh`). A script's top-level `rewrite` (`{"FROM": "TO"}`) changes a typed prompt before it is submitted, as if the harness had. A test reads it to check stam's inputs to Claude Code, such as `--append-system-prompt-file` and `--plugin-dir` (`test/e2e-instructions.sh`).
+The fake writes the argv the adapter passed to `argv.json` in the agent's folder, on each start (a resume too). Every input submitted with Enter is appended, exactly as submitted and before trimming, to `typed.jsonl` there, one JSON string per line (`test/e2e-suggest-input.sh`). Under its box the pane draws a rule and a footer showing `-- INSERT --` (always in vim's insert mode, as Claude Code with vim keys); a backspace deletes one grapheme; and its box has Claude Code's bash mode (a `!` typed into an empty box becomes the box's mark; a backspace in the empty box leaves it) and a completion menu (under the footer, after a blank line) while its text is `/word` or ends in `@word`: Enter then submits `/menu-pick` or `@menu-pick`, and one Esc closes it until the text changes (text with `@@` opens one Esc doesn't close). A bash-mode prompt is recorded in the transcript as Claude Code records it, `<bash-input>TEXT AFTER THE !</bash-input>`. A number in a `drop-bs` file there makes that many backspaces do nothing, so a test can leave part of mootr's typing in the box (`test/e2e-suggest-input.sh`). A script's top-level `rewrite` (`{"FROM": "TO"}`) changes a typed prompt before it is submitted, as if the harness had. A test reads it to check mootr's inputs to Claude Code, such as `--append-system-prompt-file` and `--plugin-dir` (`test/e2e-instructions.sh`).
 
 ## What the fake leaves out
 
-Interrupting with Esc and the spinner line, compaction beyond the summary above, background jobs that finish by themselves (a test types the `<task-notification>` prompt instead), MCP servers other than stam, permission modes, and Claude Code's launch dialogs. The transcript is `transcript-SESSION.jsonl` in the agent's folder in the stam home, not under `~/.claude`.
+Interrupting with Esc and the spinner line, compaction beyond the summary above, background jobs that finish by themselves (a test types the `<task-notification>` prompt instead), MCP servers other than mootr, permission modes, and Claude Code's launch dialogs. The transcript is `transcript-SESSION.jsonl` in the agent's folder in the mootr home, not under `~/.claude`.
 
 Assumed, not checked against Claude Code: a channel message starts a turn with UserPromptSubmit, and channel messages and typed prompts that arrive during a turn wait for it to end, unless an `await` step takes them.
 

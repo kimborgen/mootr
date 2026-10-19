@@ -52,6 +52,19 @@ echo "ok: an agent's own token is refused with 403"
 [ "$(codep "$TOKEN" /api/mail-titles '{"ids":[]}')" = 200 ] || fail "mail titles refused an empty list"
 echo "ok: mail titles refuse an agent and take only a list of ids"
 
+# The tool names route (S-1933) is the human's view too: an agent's token is refused, the request is checked,
+# an unknown agent is 404, and a registered agent's tools get the model's label once.
+[ "$(codep "$AGENT_TOKEN" /api/tool-names '{"agent":"reader","names":["Bash"]}')" = 403 ] || fail "an agent's token wasn't refused by tool names: $(cat "$TEST_TMP/out.json")"
+[ "$(codep "$TOKEN" /api/tool-names '{"names":["Bash"]}')" = 400 ] || fail "tool names took a request with no agent"
+[ "$(codep "$TOKEN" /api/tool-names '{"agent":"reader","names":"Bash"}')" = 400 ] || fail "tool names took names that aren't a list"
+[ "$(codep "$TOKEN" /api/tool-names '{"agent":"nobody","names":["Bash"]}')" = 404 ] || fail "tool names took an unknown agent"
+before=$(calls)
+[ "$(codep "$TOKEN" /api/tool-names '{"agent":"reader","names":["mcp__stam__send_mail"],"wait":5000}')" = 200 ] || fail "tool names for a registered agent failed: $(cat "$TEST_TMP/out.json")"
+grep -q '"mcp__stam__send_mail":"Stub send_mail"' "$TEST_TMP/out.json" || fail "no label: $(cat "$TEST_TMP/out.json")"
+[ "$(codep "$TOKEN" /api/tool-names '{"agent":"reader","names":["mcp__stam__send_mail"]}')" = 200 ] || fail "the second request failed"
+[ "$(calls)" = "$((before + 1))" ] || fail "the tool was named more than once"
+echo "ok: tool names refuse an agent and bad requests, and name a tool once"
+
 LONG=$(printf 'a%.0s' $(seq 1 201))
 [ "$(code "$TOKEN" '{"calls":[]}')" = 400 ] || fail "a request with no agent wasn't refused"
 [ "$(code "$TOKEN" '{"agent":"'"$LONG"'","calls":[]}')" = 400 ] || fail "an agent name of 201 characters wasn't refused"

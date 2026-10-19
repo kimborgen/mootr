@@ -65,6 +65,8 @@ before(() => {
   for (const id of ['sender', 'off']) agent(id);
   agent('nosrc', 'nosrc');
   for (const m of MAIL) mail(m.id, m.from, m.to, m.s);
+  // The human's mail was read as it came in; an unread one starts no turn (S-1844).
+  db.open().prepare('UPDATE mail_recipients SET read_at = ? WHERE mail_id = ?').run(new Date(at(30)).toISOString(), 'i1');
   mail('o1', 'off', ['human'], 20);
   mail('n1', 'nosrc', ['human'], 20);
 });
@@ -155,4 +157,59 @@ test('a transcript with no turn start in the cap is truncated, and says so', asy
   assert.equal(out.tools.length, 2000);
   const whole = await view.mailTools(db.getAgent('sender'), 's1');
   assert.equal(whole.truncated, false);
+});
+
+const readAt = (mailId, agentId, s) => db.open().prepare('UPDATE mail_recipients SET read_at = ? WHERE mail_id = ? AND agent_id = ?').run(new Date(at(s)).toISOString(), mailId, agentId);
+
+// A received mail the agent hadn't read before it sent the target mail can't have started a turn (S-1844).
+test('an unread received mail is not a turn boundary', async () => {
+  const tr = [
+    msg('u0', 'user', 0, [text('go')]),
+    msg('u1', 'assistant', 10, [tool('U1')], { marks: [at(10)] }),
+    msg('u2', 'assistant', 30, [tool('U2')], { marks: [at(30)] }),
+  ];
+  view.register('stub-unread', stub(tr));
+  db.createAgent({ id: 'unread', name: 'unread', role: 'dev', machine: 'x', harness: 'stub-unread', model: null, effort: null, cwd: '/tmp', parent_id: null, session_id: null });
+  mail('ui1', 'human', ['unread'], 20);
+  mail('us1', 'unread', ['human'], 40);
+  assert.deepEqual(ids(await mailTools(db.getAgent('unread'), 'us1')), ['U1', 'U2']);
+});
+
+// A received mail's boundary is its read_at, though it was created on an older page than the notice found first (S-1844).
+test('a later boundary read from an older page is not missed by an early stop', async () => {
+  const tr = [msg('e0', 'user', 0, [text('go')])];
+  for (let i = 1; i <= 120; i++) {
+    tr.push(msg(`ea${i}`, 'assistant', i, [tool(`E${i}`)]));
+    if (i === 80) tr.push({ id: 'en', role: 'system', kind: 'notice', at: at(80.5), parts: [text('notice')] });
+  }
+  view.register('stub-early', stub(tr));
+  db.createAgent({ id: 'early', name: 'early', role: 'dev', machine: 'x', harness: 'stub-early', model: null, effort: null, cwd: '/tmp', parent_id: null, session_id: null });
+  mail('ei1', 'human', ['early'], 10);
+  readAt('ei1', 'early', 100);
+  mail('es1', 'early', ['human'], 150);
+  const out = ids(await mailTools(db.getAgent('early'), 'es1'));
+  assert.equal(out[0], 'E101');
+  assert.equal(out.length, 20);
+});
+
+// The read query is capped, so reads after the target mail must be left out in SQL, before the cap (#662 review).
+test('mail read after the target mail cannot crowd out the real boundary', async () => {
+  const tr = [msg('g0', 'user', 0, [text('go')])];
+  for (let i = 1; i <= 120; i++) {
+    tr.push(msg(`ga${i}`, 'assistant', i, [tool(`G${i}`)]));
+    if (i === 80) tr.push({ id: 'gn', role: 'system', kind: 'notice', at: at(80.5), parts: [text('notice')] });
+  }
+  view.register('stub-crowd', stub(tr));
+  db.createAgent({ id: 'crowd', name: 'crowd', role: 'dev', machine: 'x', harness: 'stub-crowd', model: null, effort: null, cwd: '/tmp', parent_id: null, session_id: null });
+  mail('gi0', 'human', ['crowd'], 10);
+  readAt('gi0', 'crowd', 100);
+  for (let k = 1; k <= 200; k++) {
+    mail(`gl${k}`, 'human', ['crowd'], 10);
+    readAt(`gl${k}`, 'crowd', 151 + k);
+  }
+  mail('gs1', 'crowd', ['human'], 150);
+  const out = await view.mailTools(db.getAgent('crowd'), 'gs1');
+  assert.equal(out.truncated, false);
+  assert.equal(ids(out.tools)[0], 'G101');
+  assert.equal(out.tools.length, 20);
 });

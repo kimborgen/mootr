@@ -320,7 +320,7 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
       once.answered = true
     }
     if (!((body && !(perms.length && answersOnly)) || files.length)) {
-      // A permission answer or ITSA action sent from the mail is Kim responding to it: the thread
+      // A permission answer or ITSA action sent from the mail is the user responding to it: the thread
       // archives (it waits in Awaiting) and the next mail opens, as a reply does.
       // When every answer was stale, nothing was answered here: the thread stays open for its card.
       if ((perms.length > once.stale.length) || acts.length) archiveAndAdvance(client_id)
@@ -336,7 +336,7 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
     if (!once.shown) setPending((p) => [...p, (once.shown = pm)])
     requestAnimationFrame(() => { if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight })
     try {
-      // Kim names no one: the recipients come from the thread, so one nobody can mail any more is skipped, not refused (S-603).
+      // The human names no one: the recipients come from the thread, so one nobody can mail any more is skipped, not refused (S-603).
       // A cc picked in the box (S-1464) joins the thread's own recipients, and an ITSA pick files the reply on it.
       await api('POST', '/api/mail', { from: 'human', to: [...new Set([...to, ...(cc ?? [])])], inferred: to, reply_to: replyTo, body: reply, attachments: files.map((f) => ({ name: f.name, content_b64: f.content_b64 })), ...(itsa ? { itsa } : {}), client_id })
     } catch (e) {

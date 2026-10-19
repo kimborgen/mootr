@@ -415,7 +415,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await keyboard(false);
   });
 
-  // The draft is kept per agent: text typed for helper comes back when Kim switches to kid and back.
+  // The draft is kept per agent: text typed for helper comes back when the user switches to kid and back.
   await step('prompt draft', async () => {
     const ta = p.locator('#w-bottom .composer textarea');
     const draft = 'Draft kept across a switch';
@@ -734,6 +734,21 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     check(tag, 'Mail shows the mail list alone', await p.locator('.mail-side').isVisible() && !(await p.locator('#tree').isVisible()));
     await shot('mail');
     await layout('mail list');
+  });
+
+  // The History switch on the Mail tab (S-1456): the worlds shown, rows with touch height, the
+  // marked one; a tap on another row jumps there.
+  await step('history', async () => {
+    await p.locator('[data-history-toggle]').tap();
+    const rows = p.locator('#history-side [data-history]');
+    await rows.first().waitFor();
+    check(tag, 'History lists the worlds shown', await rows.count() >= 1);
+    check(tag, 'a History row is at least 44 px tall', (await rows.first().boundingBox()).height >= 44);
+    check(tag, 'exactly one History row is marked', await p.locator('#history-side [data-history].sel').count() === 1);
+    await shot('history');
+    await layout('history');
+    await p.locator('[data-history-toggle]').tap();
+    check(tag, 'the switch goes back to the mail list', await p.locator('#history-side').count() === 0);
   });
 
   // A tapped image alone, full screen (S-86): pinch-zoom and pan live there, so the page is
@@ -1469,7 +1484,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
       await p.locator('.thread-reply .cmp-send:visible').tap();
       await p.waitForTimeout(1500);
       check(tag, 'permission: approval sends by touch', await p.locator('.perm.approved').count() >= 1);
-      // Answering a permission from a mail is Kim responding to it: the thread archives, and the next mail opens.
+      // Answering a permission from a mail is the user responding to it: the thread archives, and the next mail opens.
       const archived = (await api('/api/agents/human/threads?limit=60&archived=1')).map((x) => x.thread_id);
       check(tag, 'permission: the answer archives its thread', archived.includes(permKey.slice(7)));
       check(tag, 'permission: the answer opens the next mail', (await p.locator('.pane .tab.active').getAttribute('data-key')) !== permKey, await p.locator('.pane .tab.active').getAttribute('data-key'));
@@ -1488,7 +1503,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     }
     // As Claude Code's PermissionRequest hook reports it; an earlier step's prompt to helper closes any seeded one.
     await api(`/api/hook/claude/${helper.id}`, 'POST', { hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'cd /home/user/projects/app && git fetch origin && git worktree add -b feature/perm-mail-readable /home/user/.cache/app-wt/perm-mail-readable origin/main && node scripts/deploy.mjs --dry-run', description: 'Fetch main and set up a worktree for the permission mail change' } });
-    // With a chief of staff live, the dialog goes to it first (S-520); it sends it on, so Kim gets the dialog mail, escalated.
+    // With a chief of staff live, the dialog goes to it first (S-520); it sends it on, so the user gets the dialog mail, escalated.
     let req;
     for (let i = 0; i < 50 && !req; i++) {
       req = (await api('/api/permissions?status=pending')).find((r) => r.agent_id === helper.id && r.dialog);
@@ -2044,6 +2059,13 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.waitForFunction((b) => document.querySelector('[data-testid=pdf-zoom-level]').textContent !== b, before);
     check(tag, 'pdf: zoom in changes the level', (await p.locator('[data-testid=pdf-zoom-level]').innerText()) !== before);
     await shot('pdf');
+    // An image over the cap (S-1915): the too-large note offers Download as a touch target.
+    await p.locator('.fv-crumb:visible').first().tap();
+    await p.waitForSelector('.fl .fl-machine').catch(dbg);
+    await p.locator('.fl-row', { hasText: 'huge.png' }).first().tap();
+    await p.waitForSelector('[data-testid=image-too-big]').catch(dbg);
+    check(tag, 'files: an image over the cap offers Download as a touch target', (await p.locator('[data-testid=image-too-big] button').boundingBox()).height >= 44);
+    await shot('image-too-big');
     await layout('files view');
   });
 
@@ -2400,6 +2422,35 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     check(tag, 'suggest: the box and the best card sit above the keyboard', await inViewport(p.locator('#suggest-modal textarea')) && await inViewport(p.locator(`#suggest-modal [data-suggest="agent:${helper.id}"]`)));
     await shot('suggest');
     await layout('suggest prompt');
+    // Preview (S-1910): a hold on a card opens a sheet that names it, with touch-size Close and Pick; Close
+    // leaves the cards and the text, and a hold then Pick picks as a tap does.
+    const [hx, hy] = await center(p.locator(`#suggest-modal [data-suggest="agent:${helper.id}"] .sg-pick`));
+    await longPress(hx, hy);
+    await p.waitForSelector('[data-preview]');
+    check(tag, 'suggest: a hold previews the card', await p.locator(`[data-preview="agent:${helper.id}"]`).isVisible());
+    const pb = await p.locator('[data-preview-pick]').boundingBox(), cb = await p.locator('[data-preview-close]').boundingBox();
+    check(tag, 'suggest: the preview\'s Pick and Close are touch targets', pb.height >= 43.5 && pb.width >= 43.5 && cb.height >= 43.5 && cb.width >= 43.5, `${pb.height},${cb.height}`);
+    check(tag, 'suggest: the preview is inside the screen', await p.locator('.menu.popover').evaluate((e) => { const r = e.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5; }));
+    await shot('suggest-preview');
+    await layout('suggest preview');
+    await p.locator('[data-preview-close]').tap();
+    await p.waitForSelector('[data-preview]', { state: 'detached' });
+    await p.waitForTimeout(300);
+    check(tag, 'suggest: Close returns to the list without picking', await p.locator('#suggest-modal .sg-card').count() === 2 && await p.locator('#suggest-modal .sg-chip').count() === 0 && await p.locator('#suggest-modal').isVisible());
+    check(tag, 'suggest: the typed text stays', (await p.locator('#suggest-modal textarea').inputValue()).includes('look at the'));
+    await longPress(hx, hy);
+    await p.waitForSelector('[data-preview]');
+    await p.goBack();
+    await p.waitForTimeout(500);
+    check(tag, 'suggest: back closes only the preview', !(await p.locator('[data-preview]').count()) && await p.locator('#suggest-modal .sg-card').count() === 2);
+    const [hx2, hy2] = await center(p.locator(`#suggest-modal [data-suggest="agent:${helper.id}"] .sg-pick`));
+    await longPress(hx2, hy2);
+    await p.waitForSelector('[data-preview]');
+    await p.locator('[data-preview-pick]').tap();
+    await p.waitForTimeout(300);
+    check(tag, 'suggest: Pick in the preview picks the card, as a chip', await p.locator(`#suggest-modal .sg-chip[data-pick="agent:${helper.id}"]`).isVisible());
+    await p.locator('#suggest-modal .sg-unpick').tap();
+    await p.waitForSelector('#suggest-modal .sg-card');
     await p.locator(`#suggest-modal [data-suggest="agent:${helper.id}"] .sg-pick`).tap();
     await p.waitForTimeout(300);
     check(tag, 'suggest: a tap picks the card, as a chip', await p.locator(`#suggest-modal .sg-chip[data-pick="agent:${helper.id}"]`).isVisible());

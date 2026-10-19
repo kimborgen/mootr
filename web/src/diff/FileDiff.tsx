@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import { Icon } from '../Icon'
 import type { DiffEditor, DiffEditorViews, DiffMode } from './mergeEditor'
 import type { DeclHit, DeclSide } from '../decl/declExt'
@@ -8,6 +8,8 @@ import { estimateLines, type DiffFileItem } from './diffModel'
 // One file of the PR diff (S-1531): its header (path, counts, Hide, Expand all, Viewed) and, once the file scrolls into
 // view, its diff in a CodeMirror merge view. Binary, over-cap, denied and unchanged-content files get a row, never a diff.
 export interface FileDiffProps {
+  // The scroll container the file sits in, the root of the draw-ahead observer; the viewport when absent.
+  scroller?: RefObject<HTMLElement | null>
   file: DiffFileItem
   refs: SideRef
   mode: DiffMode
@@ -35,6 +37,10 @@ type Data =
   | { s: 'binary'; size: number }
   | { s: 'large'; size: number }
 
+// A file draws within DRAW_MARGIN of the scroller and tears its editor down beyond FAR_MARGIN; the gap keeps a file at the
+// edge from drawing and tearing down on every scroll tick. About three screens of a phone.
+const DRAW_MARGIN = 800
+export const FAR_MARGIN = 3000
 // The server serves nothing above this, `all=1` included; an unknown size (a 413) offers no download either.
 const BINARY_CAP = 50 * 1024 * 1024
 const kb = (n: number) => `${Math.max(1, Math.round(n / 1024))} KB`
@@ -55,7 +61,7 @@ export async function loadFile(f: DiffFileItem, refs: SideRef, signal?: AbortSig
   return { s: 'text', base: sideText(base), head: sideText(head) }
 }
 
-export function FileDiff({ file, refs, mode, wrap, viewed, onViewed, onHide, onEditor, onDecl, hasDecl, forceOpen, target, onTarget }: FileDiffProps) {
+export function FileDiff({ scroller, file, refs, mode, wrap, viewed, onViewed, onHide, onEditor, onDecl, hasDecl, forceOpen, target, onTarget }: FileDiffProps) {
   const root = useRef<HTMLElement>(null)
   const host = useRef<HTMLDivElement>(null)
   const [near, setNear] = useState(typeof IntersectionObserver === 'undefined')
@@ -79,10 +85,48 @@ export function FileDiff({ file, refs, mode, wrap, viewed, onViewed, onHide, onE
   useEffect(() => {
     const el = root.current
     if (near || !el) return
-    const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) { setNear(true); io.disconnect() } }, { rootMargin: '800px 0px' })
+    const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) { setNear(true); io.disconnect() } }, { root: scroller?.current ?? null, rootMargin: `${DRAW_MARGIN}px 0px` })
     io.observe(el)
     return () => io.disconnect()
   }, [near])
+
+  // Tear a drawn editor down once its section leaves the far margin, so scrolling a long PR doesn't keep every EditorView
+  // alive. The section keeps its measured height meanwhile (`pinned`), so nothing above the viewport shifts.
+  const [pinned, setPinned] = useState(0)
+  const farOut = useRef(false)
+  // A jump to this file holds its editor from the new `target.n` until the far observer has seen the file in range:
+  // CodeMirror applies the scroll a frame after `reveal`, so a file jumped to from far away is still out of range at first.
+  const jumpHold = useRef(false)
+  useEffect(() => { if (target) jumpHold.current = true }, [target?.n])
+  useEffect(() => {
+    const el = root.current
+    if (!near || !drawn || !el || typeof IntersectionObserver === 'undefined') return
+    farOut.current = false
+    // Focus or a selection inside the file, or a jump still to land here, keeps the editor. `next` is where focus is going.
+    const held = (next: Node | null) => {
+      if (jumpHold.current) return true
+      if (next && host.current?.contains(next)) return true
+      const sel = document.getSelection()
+      return !!sel && !sel.isCollapsed && !!sel.anchorNode && el.contains(sel.anchorNode)
+    }
+    const tear = (next: Node | null = document.activeElement) => {
+      if (!farOut.current || !ed.current || held(next)) return
+      setPinned(el.offsetHeight)
+      setNear(false)
+    }
+    const io = new IntersectionObserver((es) => {
+      farOut.current = !es.some((e) => e.isIntersecting)
+      if (!farOut.current) jumpHold.current = false
+      tear()
+    }, { root: scroller?.current ?? null, rootMargin: `${FAR_MARGIN}px 0px` })
+    io.observe(el)
+    // A file held when it left tears down once the hold ends.
+    const onSel = () => tear()
+    const onOut = (e: FocusEvent) => tear(e.relatedTarget as Node | null)
+    document.addEventListener('selectionchange', onSel)
+    el.addEventListener('focusout', onOut)
+    return () => { io.disconnect(); document.removeEventListener('selectionchange', onSel); el.removeEventListener('focusout', onOut) }
+  }, [near, drawn])
 
   const fetching = near && open
   // What was fetched, so closing a file (Viewed) and opening it again keeps its data instead of fetching both sides again.
@@ -99,7 +143,7 @@ export function FileDiff({ file, refs, mode, wrap, viewed, onViewed, onHide, onE
 
   const text = data.s === 'text' ? data : null
   useEffect(() => {
-    if (!text || !host.current || !open) return
+    if (!text || !host.current || !open || !near) return
     let dead = false
     let made: DiffEditor | undefined
     const el = host.current
@@ -109,10 +153,11 @@ export function FileDiff({ file, refs, mode, wrap, viewed, onViewed, onHide, onE
       made = e
       ed.current = e
       setDrawn((n) => n + 1)
+      setPinned(0)
       onEditor?.(e.views, file.path)
     }, () => { if (!dead) setData({ s: 'error', message: 'Could not draw this file.' }) })
     return () => { dead = true; if (made) { ed.current = null; onEditor?.(null, file.path); made.destroy() } }
-  }, [text, open, mode, whole, wrap, file.path])
+  }, [text, open, near, mode, whole, wrap, file.path])
 
   // Once the editor is drawn, a pending jump expands, scrolls to and marks its line, once per jump.
   useEffect(() => {
@@ -139,7 +184,7 @@ export function FileDiff({ file, refs, mode, wrap, viewed, onViewed, onHide, onE
 
   const counts = file.denied ? null : <span className="dv-counts"><span className="add">+{file.additions}</span> <span className="del">−{file.deletions}</span></span>
   return (
-    <section ref={root} className="dv-file" data-dv-file={file.path} data-status={file.status} aria-label={file.path} style={{ ['--dv-lines' as string]: estimateLines(file) }}>
+    <section ref={root} className="dv-file" data-dv-file={file.path} data-status={file.status} aria-label={file.path} style={{ ['--dv-lines' as string]: estimateLines(file), ...(pinned && open && data.s === 'text' ? { minHeight: pinned } : {}) }}>
       <header className="dv-file-head">
         <span className="dv-path" title={file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}>
           {file.oldPath && <><span className="dv-old">{file.oldPath}</span><span className="dv-arrow" aria-hidden> → </span></>}{file.path}

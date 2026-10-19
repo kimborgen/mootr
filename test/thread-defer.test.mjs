@@ -92,3 +92,21 @@ test('a reply into a thread an agent deferred brings its older unread mail back 
   assert.equal(db.deferredCount('human') > 0, true);
   assert.equal(db.splitDeferred('human', [thread('th2', mail('h3'), mail('h4'))]).deferred.length, 0);
 });
+
+test('a system notice does not revive a deferred thread, on an agent box or the human one; agent mail does (S-1971)', () => {
+  const send = (id, thread_id, extra = {}, from_id = 'a9', to = ['agent-n']) => db.createMail({ id, from_id, from_name: from_id, subject: id, body: id, thread_id, reply_to: null, ...extra }, to);
+  send('n1', 'tn1');
+  db.deferThread('agent-n', 'tn1', ['n1']);
+  send('n2', 'tn1', { notice: true }, 'system:deploy');
+  send('n3', 'tn1', { notice: true });
+  assert.deepEqual(db.inbox('agent-n', true, 10).map((m) => m.id), []);
+  assert.equal(db.deferredCount('agent-n'), 1);
+  send('n4', 'tn1');
+  assert.deepEqual(db.inbox('agent-n', true, 10).map((m) => m.id).sort(), ['n1', 'n2', 'n3', 'n4']);
+  assert.equal(db.deferredCount('agent-n'), 0);
+
+  db.deferThread('human', 'tn2', ['p1']);
+  const sys = { id: 'p2', from_id: 'system:deploy', recipients: [{ id: 'human' }], notice: 1 };
+  assert.equal(db.splitDeferred('human', [thread('tn2', mail('p1'), sys)]).deferred.length, 1);
+  assert.equal(db.splitDeferred('human', [thread('tn2', mail('p1'), { ...sys, notice: 0, from_id: 'a9' })]).deferred.length, 0);
+});

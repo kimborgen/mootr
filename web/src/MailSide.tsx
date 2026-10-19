@@ -23,6 +23,7 @@ import { AskBlockLine } from './itsa/AskBlockLine'
 import { isPlainWait, useDeferred, useToAnswerCount, useWaiting, type WaitingRow } from './itsa/WaitingList'
 import { swipeRow } from './mail/swipeRow'
 import { nameFor } from './mail/ThreadPanel'
+import { HistorySide } from './HistorySide'
 import { currentWorld, useShell } from './shell/layout'
 import { byId, hasPendingPermission, isUnreadForHuman, useData } from './store'
 import { getUi, setUi } from './ui/state'
@@ -43,7 +44,7 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
   const waiting = useWaiting()
   const deferred = useDeferred()
   // Which list the header shows: the inbox (with the attention list), the awaiting threads, the archived ones, or the deferred ones (S-976).
-  const [view, setView] = useState<'inbox' | 'awaiting' | 'archived' | 'deferred' | 'toanswer'>('inbox')
+  const [view, setView] = useState<'inbox' | 'awaiting' | 'archived' | 'deferred' | 'toanswer' | 'history'>('inbox')
   const archived = view === 'archived'
   const archivedIds = new Set(humanArchived.map((t) => t.thread_id))
   const deferredIds = new Set(humanDeferred.map((t) => t.thread_id))
@@ -115,7 +116,7 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
   const nAsk = att.length
   const count = [nAsk ? <span key="a" className="asks" title="Everything waiting on you is listed under To answer">{nAsk} waiting on you</span> : null, unreadThreads.length ? `${unreadThreads.length} unread` : null].filter(Boolean)
   const countNode = view === 'toanswer' ? toAnswerN : view === 'archived' ? humanArchived.length : view === 'deferred' ? humanDeferred.length : view === 'awaiting' ? awaitingAll.length : count.length ? count.map((c, i) => <span key={i}>{i ? ' · ' : ''}{c}</span>) : String(humanThreads.length || '')
-  const pick = (v: 'awaiting' | 'archived' | 'deferred' | 'toanswer') => { setView(view === v ? 'inbox' : v); if (list.current) list.current.scrollTop = 0 }
+  const pick = (v: 'awaiting' | 'archived' | 'deferred' | 'toanswer' | 'history') => { setView(view === v ? 'inbox' : v); if (list.current) list.current.scrollTop = 0 }
 
   // A thread's row. An ITSA waiting on you (x) marks its ask thread's row with its status, and
   // the row opens the ITSA, whose view holds that thread and the action bar; an ask that sits
@@ -184,7 +185,7 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
     <>
       {pane ? null : <div className="sep h side-sep" id="sep-mail" title="Drag to resize the mail list" onPointerDown={drag} />}
       <div className={'mail-side' + (pane ? ' in-pane' : '')} id="mail-side" ref={side} style={pane ? undefined : { height: height() }}>
-        <div className="section eyebrow"><Icon name="mail" size="xs" />{view === 'archived' ? 'Archived' : view === 'deferred' ? 'Deferred' : view === 'toanswer' ? 'To answer' : view === 'awaiting' ? 'Awaiting reply' : 'Mail'}
+        <div className="section eyebrow"><Icon name="mail" size="xs" />{view === 'archived' ? 'Archived' : view === 'deferred' ? 'Deferred' : view === 'toanswer' ? 'To answer' : view === 'awaiting' ? 'Awaiting reply' : view === 'history' ? 'History' : 'Mail'}
           <span className="count">{countNode}</span>
         </div>
         <div className="mail-views" role="group" aria-label="Mail lists">
@@ -198,8 +199,10 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
             onClick={() => pick('deferred')}>{view === 'deferred' ? 'Inbox' : `Deferred (${humanDeferred.length})`}</button>
           <button className="mail-toggle" data-to-answer aria-pressed={view === 'toanswer'} title={view === 'toanswer' ? 'Back to your mail' : 'Everything still waiting on your answer, archived or deferred too'}
             onClick={() => pick('toanswer')}>To answer{view === 'toanswer' ? '' : ` (${toAnswerN})`}</button>
+          {pane ? null : <button className="mail-toggle" data-history-toggle aria-pressed={view === 'history'} title={view === 'history' ? 'Back to your mail' : 'The pages, agents, threads and issues you visited'}
+            onClick={() => pick('history')}>{view === 'history' ? 'Inbox' : 'History'}</button>}
         </div>
-        <div className="mail-side-list" ref={list}>
+        {view === 'history' ? <HistorySide bare /> : <div className="mail-side-list" ref={list}>
           {att.map((a) => attRow(a))}
           {delegated.length ? <details className="mail-delegated" data-delegated-group>
             <summary><Icon name="chevron-right" size="xs" />With parent or chief of staff ({delegated.length})</summary>
@@ -220,7 +223,7 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
             {def.map((a) => attRow(a, true))}
           </details> : null}
           {shown.length ? shown.map((t) => threadRow(t)) : !loaded.mail ? <Loading className="mail-empty" /> : att.length || def.length || delegated.length ? null : <div className="mail-empty muted">{view === 'archived' ? 'Threads you archive show here.' : view === 'deferred' ? 'Threads you defer show here.' : view === 'toanswer' ? 'Nothing waits on your answer.' : view === 'awaiting' ? 'Threads waiting for an answer show here.' : 'Mail agents send you shows here.'}</div>}
-        </div>
+        </div>}
       </div>
     </>
   )

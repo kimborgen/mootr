@@ -18,7 +18,7 @@ for w in $(find "$cd_/worktrees" -mindepth 1 -maxdepth 1 -type d -mmin -1 2>/dev
 done
 while read -r old new ref; do
   if [ "$ref" = HEAD ] && [ "$new" != "ref:refs/heads/main" ]; then
-    echo "refused: this is the live deploy checkout, and HEAD must stay on main (S-990). Use a worktree under ~/.cache/stam-review/ (git worktree add). Kim or a manager can set STAM_ALLOW_LIVE_CHECKOUT=1." >&2
+    echo "refused: this is the live deploy checkout, and HEAD must stay on main (S-990). Use a worktree under ~/.cache/stam-review/ (git worktree add). The user or a manager can set STAM_ALLOW_LIVE_CHECKOUT=1." >&2
     exit 1
   fi
 done

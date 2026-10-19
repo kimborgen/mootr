@@ -9,7 +9,7 @@ const layout = (panes: typeof DEFAULT_PANES, tabBar: 'compact' | 'regular' = 'co
 export const stories: Story[] = [{
   name: 'Sidebar panes',
   group: 'Tree and shell',
-  what: 'The body of the desktop left sidebar: a vertical stack of panes. A pane with two or more tabs has a tab strip and shows one tab\'s list; a pane with one tab has no strip and shows that list with its own header. The default layout is Agents and Issues in the first pane, Mail in the second, and Cost with Machines in the third (Cost showing). Requirements sit under the issues, in the Issues tab.',
+  what: 'The body of the desktop left sidebar: a vertical stack of panes. A pane with two or more tabs has a tab strip and shows one tab\'s list; a pane with one tab has no strip and shows that list with its own header. The default layout is Agents and Issues in the first pane, Mail with History in the second, and Cost with Machines in the third (Cost showing). Requirements sit under the issues, in the Issues tab.',
   when: 'The left sidebar on a desktop (above 760 px). A phone does not draw panes: it shows Agents, Mail, and Issues one at a time from the bottom navigation. The layout is kept in settings as `sidebarPanes`, so it follows the human to every device; a tab id the page does not know is dropped, and a tab left out of the layout is not shown.',
   code: ['web/src/SidebarPanes.tsx#SidebarPanes', 'web/src/SidebarPanes.tsx#TABS'],
   rules: [

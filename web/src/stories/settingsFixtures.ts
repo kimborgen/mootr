@@ -13,7 +13,7 @@ export const SETTINGS = {
   decisions: { mailCheck: true },
   promptDefaultMode: 'mail',
   mail: { titles: { model: '' } },
-  tiny: { toolSummary: { enabled: false, model: 'google/gemma-3-4b-it', instructions: '' }, mailTitles: { titleInstructions: '', summaryInstructions: '' }, blockSummaries: { instructions: '' } },
+  tiny: { toolSummary: { enabled: false, model: 'google/gemma-3-4b-it', instructions: '' }, toolNames: { enabled: true, model: 'google/gemma-3-4b-it' }, mailTitles: { titleInstructions: '', summaryInstructions: '' }, blockSummaries: { instructions: '' } },
   activity: { classify: { enabled: true, maxUsdPerDay: 0.5, concurrency: 2 } },
   context: { warnTokens: 150000, instructTokens: 200000, enforceTokens: 250000 },
   idleCompaction: { enabled: true, growthTokens: 40000, idleMinutes: 50, minTokens: 60000 },
@@ -46,6 +46,7 @@ export const TINY_MODELS = [
   { id: 'activityClassify', label: 'Activity classifier', enabled: false, model: 'microsoft/microsoft-decision-1', usedBy: null, purpose: 'Labels the activity items the rules cannot settle.', toggle: 'activity.classify.enabled', modelPath: 'decisions.model', instructions: NO_PROMPT, extras: [
     { path: 'activity.classify.maxUsdPerDay', kind: 'number', label: 'Daily cap', help: 'No more than this is spent in a UTC day.', unit: '$', min: 0, step: 0.05 }] },
   { id: 'toolSummary', label: 'Tool summary', enabled: false, model: 'google/gemma-3-4b-it', usedBy: null, purpose: 'Summarises one tool call into two fields.', toggle: 'tiny.toolSummary.enabled', modelPath: 'tiny.toolSummary.model', instructions: { default: 'Summarise one tool call. Answer with JSON: {"tool": "...", "doing": "..."}.', editable: true, path: 'tiny.toolSummary.instructions' }, extras: [] },
+  { id: 'toolNames', label: 'Tool names', enabled: true, model: 'google/gemma-3-4b-it', usedBy: null, purpose: 'Names each tool once in plain English.', toggle: 'tiny.toolNames.enabled', modelPath: 'tiny.toolNames.model', instructions: { default: 'You name one tool an AI coding agent can call.', editable: false, path: null }, extras: [] },
 ]
 
 export const REGISTRY = {

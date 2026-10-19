@@ -1,5 +1,5 @@
 // Saved views kept in stam settings (S-293): a record of named values under one settings field,
-// written as the human, so a view made on one device follows Kim to the others. Each write is a
+// written as the human, so a view made on one device follows the user to the others. Each write is a
 // partial patch the daemon applies to the file in one step, and a view record merges per id there,
 // so a page sends only the views it changed and never overwrites another page's. Writes are
 // debounced and serialized; a write still waiting when the page hides or closes is sent with

@@ -144,7 +144,7 @@ export const WORK_COLUMNS: WorkColumn[] = ([
   {
     id: 'work', label: 'Work', width: 'minmax(calc(var(--space-12) * 5), 3fr)',
     render: ({ it }) => (<>
-      <span className="w-line"><span className="ikey">{it.key}</span><span className="w-title">{it.title}</span></span>
+      <span className="w-line"><span className="ikey">{it.key}</span><span className="w-title" title={it.title}>{it.title}</span></span>
       {it.summary ? <span className="w-summary">{it.summary}</span> : null}
     </>),
   },

@@ -16,7 +16,7 @@ vi.mock('./parts', () => ({ openReq: vi.fn() }))
 const it1 = { id: 'a1', kind: 'requirement-approval', closed_at: null, updated_at: 'u1' }
 const view = {
   itsa: 'S-24',
-  items: [{ key: 'R-4', title: 'One line per draft', text: 'The approval shall list each draft.', rationale: 'Kim approves what they read.', rev: 1, status: 'draft', dropped: false }],
+  items: [{ key: 'R-4', title: 'One line per draft', text: 'The approval shall list each draft.', rationale: 'Dana approves what they read.', rev: 1, status: 'draft', dropped: false }],
 }
 
 let root: Root

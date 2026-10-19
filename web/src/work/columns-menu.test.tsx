@@ -56,6 +56,8 @@ describe('ColumnsPanel', () => {
     await type('nope')
     expect(labels()).toEqual([])
     expect(host.querySelector('.rm-none')!.textContent).toBe('No column matches “nope”')
+    // The empty state sits beside the list, not in role=menu, which may own only menu items.
+    expect(host.querySelector('.cm-list .rm-none')).toBeNull()
     await type('')
     expect(labels()).toHaveLength(4)
   })
@@ -74,13 +76,7 @@ describe('ColumnsPanel', () => {
     expect(toggle).toHaveBeenCalledWith('cost', true)
   })
 
-  it('Home and End in the search stay there; the list is a menu of checkboxes', async () => {
-    const outer = vi.fn()
-    document.body.addEventListener('keydown', outer)
-    await key(search(), 'Home')
-    await key(search(), 'End')
-    expect(outer).not.toHaveBeenCalled()
-    document.body.removeEventListener('keydown', outer)
+  it('the list is a menu of checkboxes', async () => {
     expect(host.querySelector('.cm-list')!.getAttribute('role')).toBe('menu')
   })
 

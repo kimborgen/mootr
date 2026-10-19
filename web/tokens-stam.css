@@ -18,6 +18,11 @@
   --size-side-pane-min: var(--size-tab-min);
   /* The active tab's indicator line in a sidebar pane (S-1421). */
   --size-tab-indicator: 2px;
+  /* The Work table (S-1437): the least a column shrinks to before its cell truncates, so the table fits its pane;
+     the most a row's depth indents, in steps of space-4 (a unitless count). */
+  --size-work-col-min: 32px;
+  --work-depth-max: 5;
+  --size-work-fold: var(--space-5);
   /* Agent state, on the status vocabulary. Working borrows indigo, as in-progress does. */
   --st-working: var(--accent);
   --st-idle: var(--status-success-fg);

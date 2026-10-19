@@ -91,7 +91,7 @@ export function peerUiOrigins(peerUrls: string[], list?: Node[]): Set<string> {
   return out;
 }
 
-// The origin Kim's browser reaches a peer's UI at (`stam web serve`): HTTPS on its full tailnet name, and none
+// The origin the user's browser reaches a peer's UI at (`stam web serve`): HTTPS on its full tailnet name, and none
 // when tailscale doesn't know the peer, since an http://host:port address is no proof of the human (the web then
 // says to open stam on that machine). Only a test daemon, with the test key set, names the peer's own daemon URL.
 // A human write for that peer's agent goes there (S-544).

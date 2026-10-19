@@ -1,6 +1,6 @@
 // A mail link can name one mail in a thread (S-415). The link asks for that mail here, with the
 // thread that holds it; the thread opens the mail, scrolls it below the sticky header, and
-// highlights it. The ask ends once its thread has loaded, or when Kim goes to another view, so a
+// highlights it. The ask ends once its thread has loaded, or when the user goes to another view, so a
 // later thread never takes it.
 export interface Focus { id: string; tid: string }
 let wanted: Focus | null = null

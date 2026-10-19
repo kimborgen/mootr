@@ -30,6 +30,7 @@ export const stories: Story[] = [{
     'Layout follows the pane\'s width, not the window\'s: the list column from 720 px, both sides next to each other from 900 px, otherwise unified with the files sheet. Long lines scroll sideways inside the code, never the page.',
     'Controls, list rows, the Viewed checkbox and the prev and next buttons are `--size-hit-touch` (44 px) on a phone (' + ds('Density') + ').',
     'The merge view\'s editors are handed to the caller (the `onEditor` prop).',
+    'A file draws within 800 px of the scroll container and tears its editor down (`destroy()`, `onEditor(null)`) beyond 3000 px, so a long PR keeps few EditorViews. Its fetched text, Viewed, Expand all and a pending jump stay, and its height is pinned while torn down so nothing shifts. A file with focus or a selection, or a jump still to land, is kept.',
     'Go to declaration (S-1532): Ctrl/Cmd-click (desktop) or tap (phone) an identifier, read from the syntax tree. It is looked up in the declaration index at the PR head, or at the merge base on deleted lines. One match in a file of the PR un-hides and opens that file, scrolls to it, expands to the line and marks it (`--highlight-1`, faded in from `--highlight-3` over `--duration-focus`); one elsewhere shows its lines with Open file; several show the `Declaration picker`. With Ctrl/Cmd held an identifier that has a declaration is underlined on hover.',
   ],
   states: [

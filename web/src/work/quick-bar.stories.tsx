@@ -11,7 +11,7 @@ function Bar({ start = [], phone = false }: { start?: QuickId[]; phone?: boolean
 export const stories: Story[] = [{
   name: 'Work quick filters',
   group: 'ITSA and work',
-  what: 'Six one-tap toggles for the Work page: Waiting on Kim (a status that waits on the human), Mine (the human owns it or takes part), Stale (active, no update in 2 days), Blocked, In review (the review category), and Has PR (a GitHub pull request link). Each is a named preset; the ones on combine with AND, and with the column filters.',
+  what: 'Six one-tap toggles for the Work page: Waiting on you (a status that waits on the human), Mine (the human owns it or takes part), Stale (active, no update in 2 days), Blocked, In review (the review category), and Has PR (a GitHub pull request link). Each is a named preset; the ones on combine with AND, and with the column filters.',
   when: 'A "Quick" row under the Work bar on the desktop table, and a row under the header of the glance on a phone or a pane under 900 px. The layout keeps which are on, so a saved view carries them.',
   code: ['web/src/work/quick-bar.tsx#QuickBar', 'web/src/work/quick.ts#QUICK', 'web/src/work/quick.ts#quickKeeps', 'web/src/work/views.ts#setQuick'],
   rules: [

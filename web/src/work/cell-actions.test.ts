@@ -50,14 +50,19 @@ describe('what an entry does', () => {
     const l = run(es, 'Filter to this value', { ...base, filters: { health: { kind: 'values', values: ['on_track', 'at_risk'] } } })
     expect(l.filters).toEqual({ health: { kind: 'values', values: [BLANK] } })
   })
-  it('exclude takes the value off an existing values filter, else lists every other value', () => {
+  it('exclude adds the value to a standing not rule, or takes it off an include list', () => {
     const es = cellActions(col('status'), row({ status: 'todo' }), cx(), base, opts('todo', 'done', 'in_review'))
-    expect(run(es, 'Exclude this value').filters).toEqual({ status: { kind: 'values', values: ['done', 'in_review'] } })
+    expect(run(es, 'Exclude this value').filters).toEqual({ status: { kind: 'values', not: ['todo'] } })
     const had = { ...base, filters: { status: { kind: 'values' as const, values: ['todo', 'done'] } } }
     expect(run(es, 'Exclude this value', had).filters).toEqual({ status: { kind: 'values', values: ['done'] } })
-    // A second exclusion adds to the first.
-    const twice = run(cellActions(col('status'), row({ status: 'done' }), cx(), had, opts('todo', 'done')), 'Exclude this value', run(es, 'Exclude this value'))
-    expect(twice.filters).toEqual({ status: { kind: 'values', values: ['in_review'] } })
+    // A second exclusion adds to the rule, and the same value twice adds it once.
+    const done = cellActions(col('status'), row({ status: 'done' }), cx(), base, opts('todo', 'done'))
+    const twice = run(done, 'Exclude this value', run(es, 'Exclude this value'))
+    expect(twice.filters).toEqual({ status: { kind: 'values', not: ['todo', 'done'] } })
+    expect(run(es, 'Exclude this value', twice).filters).toEqual({ status: { kind: 'values', not: ['todo', 'done'] } })
+    // A stored pair (never made by the menu) collapses: the value leaves the list, and the rule's values with it.
+    const both = { ...base, filters: { status: { kind: 'values' as const, values: ['todo', 'done', 'x'], not: ['x'] } } }
+    expect(run(es, 'Exclude this value', both).filters).toEqual({ status: { kind: 'values', values: ['done'] } })
   })
   it('a row with several values offers each', () => {
     const es = cellActions(col('agents'), row({ owner: 'a1', participants: ['a2'] }), cx(), base, opts('a1', 'a2'))

@@ -93,9 +93,12 @@ function Menu({ m }: { m: MenuState }) {
     const at = bs.indexOf(document.activeElement as HTMLButtonElement)
     if (e.key === 'ArrowDown') { e.preventDefault(); bs[(at + 1) % bs.length]?.focus() }
     if (e.key === 'ArrowUp') { e.preventDefault(); bs[(at - 1 + bs.length) % bs.length]?.focus() }
-    if (e.key === 'Home') bs[0]?.focus()
-    if (e.key === 'End') bs[bs.length - 1]?.focus()
-    if (e.key === 'Escape') hideMenu(true)
+    // In a text field Home and End move the caret, so the menu leaves them to the browser.
+    const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement
+    if (e.key === 'Home' && !typing) bs[0]?.focus()
+    if (e.key === 'End' && !typing) bs[bs.length - 1]?.focus()
+    // Esc closes the menu alone: an overlay under it (the Alt+A prompt) stays open.
+    if (e.key === 'Escape') { e.stopPropagation(); hideMenu(true) }
   }
   if (m.body) return <div className="menu popover" role="dialog" aria-label={m.label} tabIndex={-1} ref={ref} onKeyDown={key} style={{ left: m.x, top: m.y }}>{m.body}</div>
   return (

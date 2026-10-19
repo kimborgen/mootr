@@ -306,10 +306,10 @@ export async function sendMail(input: SendInput): Promise<SentMail> {
   const asComment = async (parent: ReplyParent | undefined) => {
     if (!parent?.itsa_id || input.itsa_id || input.forwarded) return undefined;
     const { postRouted } = await import('./itsa.ts');
-    // An answer to Kim's own mail reaches Kim only when it names them, like any comment: mail between
-    // agents in a thread Kim started stays in the thread, out of Kim's inbox (S-542; S-308 added Kim always).
+    // An answer to the user's own mail reaches the user only when it names them, like any comment: mail between
+    // agents in a thread the user started stays in the thread, out of the user's inbox (S-542; S-308 added the user always).
     // An agent's reply posts only where the agent may post (S-480); stam's own mail stands in as an agent and isn't checked.
-    return postRouted(parent.itsa_id, { by: from!, to: input.to, inferred: input.inferred, subject: input.subject, body: input.body, attachments: input.attachments, reply_to: parent.id, override: input.override }, input.from_stam ? undefined : via);
+    return postRouted(parent.itsa_id, { by: from!, to: input.to, inferred: input.inferred, subject: input.subject, body: input.body, attachments: input.attachments, reply_to: parent.id, override: input.override, from_stam: input.from_stam }, input.from_stam ? undefined : via);
   };
   // The mail replied to may live only on a peer (its recipient's machine, S-359). A peer's
   // forwarded copy already carries its thread, so it doesn't ask again. An agent's reply asks
@@ -771,7 +771,7 @@ function storeMail(id: string, threadId: string, from: string, fromName: string,
     if (isDeferralOnly(body, files.length)) db.setThreadDeferred(threadId, id);
     else { db.clearThreadDeferred(threadId); db.clearDecisionMails(threadId); }
   } else {
-    // Only mail to the human brings a deferred ask back: a note between agents doesn't reach Kim (S-353).
+    // Only mail to the human brings a deferred ask back: a note between agents doesn't reach the user (S-353).
     if (to.includes(HUMAN)) db.clearThreadDeferred(threadId);
     if (to.includes(HUMAN) && input.kind !== 'ask' && !input.from_stam && !input.permission_id && !/^\[stam\]/.test(input.subject ?? '') && hasDecisionBlock(body)) db.addDecisionMail(id, threadId);
   }
@@ -893,7 +893,7 @@ export async function holdingPushes<T>(agentId: string, fn: () => Promise<T>): P
   }
 }
 
-// Set by lifecycle.ts: wakes a resting standing agent (S-897). Mail and notices call
+// Set by lifecycle.ts: wakes a resting agent (S-897, S-1982). Mail and notices call
 // schedulePush, so it is the one place that sees all of them.
 let restWaker: ((agentId: string) => void) | null = null;
 export function onRestWake(fn: (agentId: string) => void): void {

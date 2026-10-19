@@ -57,9 +57,9 @@ test('parseSubject: a team-prefixed issue is polled; a team is not yet', () => {
 });
 
 test('normalizeIssue and normalizeComments read names, objects, and bare values defensively', () => {
-  const n = linear.normalizeIssue({ issue: issue({ assignee: { displayName: 'Kim' }, priority: 3 }) }, 'ENG-1');
+  const n = linear.normalizeIssue({ issue: issue({ assignee: { displayName: 'Dana' }, priority: 3 }) }, 'ENG-1');
   assert.equal(n.state, 'Todo');
-  assert.equal(n.assignee, 'Kim');
+  assert.equal(n.assignee, 'Dana');
   assert.equal(n.priority, '3');
   assert.equal(linear.normalizeIssue({}, 'ENG-2').title, null);
   const c = linear.normalizeComments({ nodes: [{ id: 9, user: { name: 'bob' }, body: 'hi' }, { body: 'no id' }] });
@@ -72,7 +72,7 @@ test('diffIssue: the first poll is silent; each change emits once with a key tha
   assert.deepEqual(linear.diffIssue('linear:ENG-1', null, first, []), [], 'the first poll is silent');
   assert.deepEqual(linear.diffIssue('linear:ENG-1', snap, first, []), [], 'no change, no event');
 
-  const moved = linear.normalizeIssue(issue({ state: { name: 'In Progress' }, assignee: { name: 'Kim' }, priority: { name: 'Urgent', value: 1 }, title: 'Fix login now', updatedAt: '2026-10-11T11:00:00Z' }), 'ENG-1');
+  const moved = linear.normalizeIssue(issue({ state: { name: 'In Progress' }, assignee: { name: 'Dana' }, priority: { name: 'Urgent', value: 1 }, title: 'Fix login now', updatedAt: '2026-10-11T11:00:00Z' }), 'ENG-1');
   const events = linear.diffIssue('linear:ENG-1', snap, moved, [{ id: '5', author: 'bob', body: 'on it\nmore', createdAt: null }]);
   assert.deepEqual(
     events.map((e) => e.type),

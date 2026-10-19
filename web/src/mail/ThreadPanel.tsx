@@ -187,7 +187,7 @@ interface Props {
 
 // The comments an ask in the thread repeats: the ask replies to the comment, so the thread shows it once.
 // Only a comment the ask's sender left in the same thread, whose text the ask carries, counts; any
-// other mail an ask replies to (Kim's own earlier mail, say) stays visible.
+// other mail an ask replies to (the user's own earlier mail, say) stays visible.
 export function repeatedIds(mails: Mail[]): Set<string> {
   const byId = new Map(mails.map((m) => [m.id, m]))
   const ids = new Set<string>()

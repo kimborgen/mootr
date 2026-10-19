@@ -6,7 +6,7 @@
 // event per change, with dedupe keys that name the change's time. The first poll records the
 // snapshot silently. No login, or no `linear` server, is logged once and skipped. The tool
 // names are settings (`watch.linearTools`); the real names and result shapes are unverified
-// until Kim logs in, so the parsing is defensive. See docs/design.md, Event subscriptions.
+// until the user logs in, so the parsing is defensive. See docs/design.md, Event subscriptions.
 import * as db from '../db.ts';
 import * as watch from '../watch.ts';
 import { settings } from '../settings.ts';

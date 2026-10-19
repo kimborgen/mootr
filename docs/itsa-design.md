@@ -1,10 +1,10 @@
-# ITSAs: stam's issue management (design proposal)
+# ITSAs: mootr's issue management (design proposal)
 
 Status: agreed, 2026-10-11. Steps 1-5 and 8 are built. Revised after a critique by an advisor (comment delivery, cross-machine, ids, status overlap, cuts).
 
 ## The model
 
-One nestable type, the **ITSA** (ITS-artifact). Initiative, project, milestone, issue, and sub-issue are only a `kind` label on it; any ITSA can hold any other, to any depth. Like everything in stam, it's optional: agents and the human can ignore it and use mail alone.
+One nestable type, the **ITSA** (ITS-artifact). Initiative, project, milestone, issue, and sub-issue are only a `kind` label on it; any ITSA can hold any other, to any depth. Like everything in mootr, it's optional: agents and the human can ignore it and use mail alone.
 
 | Field | Meaning |
 | --- | --- |
@@ -64,7 +64,7 @@ Owning an ITSA means: you drive it to Closed, keep its status true, post updates
 
 ## Where the human attends
 
-- **Human statuses** are the hook. An agent moves an ITSA to `needs_review` (with its branch and any external link); stam adds the human as participant and mails them in the ITSA thread with the matching action: Approve or Request changes, Merge (the merge queue's action, 8b), a Decision block for `needs_input`. The `request_permission` flow stays as it is; it only joins the same list.
+- **Human statuses** are the hook. An agent moves an ITSA to `needs_review` (with its branch and any external link); mootr adds the human as participant and mails them in the ITSA thread with the matching action: Approve or Request changes, Merge (the merge queue's action, 8b), a Decision block for `needs_input`. The `request_permission` flow stays as it is; it only joins the same list.
 - **One attention list:** pinned at the top of the human's mail list: pending permission requests and every ITSA in a human status, merged, oldest first. No second mechanism. The same filter works on any board.
 - **Closing:** the owner closes its own ITSA; the human gates through human statuses the owner chooses to pass through (review, merge).
 - **Buttons act**: Approve moves the ITSA to its next status (configurable per status, `settings.itsa.actions`; `ready_to_merge` isn't a human status by default, since a manager merges); Request changes moves it back to `in_progress` and sends the reply text to the owner.
@@ -92,7 +92,7 @@ Plus `spawn_agent itsa=ID`. The system prompt gets a short `itsa.md` template: w
 
 ## Links to external tools
 
-stam's ITSA is the hub; an external item is linked to it by URL (any URL, icon by host), never the other way round. Decision (2026-10-11): stam complements GitHub and Linear and won't sync with them — no imports, no two-way sync, no GitHub PR polling — and external connections and events are covered elsewhere (S-5).
+mootr's ITSA is the hub; an external item is linked to it by URL (any URL, icon by host), never the other way round. Decision (2026-10-11): mootr complements GitHub and Linear and won't sync with them — no imports, no two-way sync, no GitHub PR polling — and external connections and events are covered elsewhere (S-5).
 
 ## Islands
 
@@ -127,6 +127,6 @@ Steps 1 and 2 together are the first usable slice: agents and the assistant trac
 1. Comments and updates live in the ITSA's own mail thread.
 2. ITSAs live on one home daemon, with readable keys like `S-42`.
 3. The owner closes its ITSA; the human gates through review and merge statuses.
-4. stam complements GitHub and Linear and won't sync with them: links only. External connections and events are covered elsewhere (S-5).
+4. mootr complements GitHub and Linear and won't sync with them: links only. External connections and events are covered elsewhere (S-5).
 
 Decided by the manager: ownership is loosely tied to the agent tree; categories are fixed and statuses editable in Settings; one attention list.

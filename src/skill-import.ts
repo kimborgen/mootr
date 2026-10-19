@@ -137,6 +137,8 @@ function git(args: string[], cwd: string | undefined, allowFile: boolean, input?
           }
         }, limits.pollMs)
       : undefined;
+    // A git that exits before reading fails this write with EPIPE; the callback reports the exit (S-2040).
+    child.stdin?.on('error', () => {});
     if (input !== undefined) child.stdin?.end(input);
   });
 }

@@ -1,4 +1,5 @@
 import { ToolCall, ToolGroup, type ToolCallItem } from './ToolGroup'
+import { resetToolNames, seedNamesEnabled, seedToolName } from './tool-names'
 import { resetToolSummaries, seedEnabled, seedToolSummary } from './tool-summaries'
 import { OnMount } from '../stories/helpers'
 import { ds, type Story } from '../stories/types'
@@ -11,6 +12,14 @@ const RUN: ToolCallItem[] = [
   { id: 't3', name: 'Bash', input: { command: 'npx vitest run web/src/Tree.test.tsx' }, result: '1 failed: expected 3, got 2', status: 'error' },
 ]
 const AGENT = 'fixture-dev'
+const MCP: ToolCallItem[] = [
+  { id: 'm1', name: 'mcp__stam__send_mail', input: { to: 'convo-mgr', subject: 'Branch ready' }, result: 'sent', status: 'done' },
+  { id: 'm2', name: 'mcp__claude_ai_Gmail__search_threads', input: { query: 'from:kim' }, result: '3 threads', status: 'done' },
+]
+// Both tools named: the label of the tool part, the server in front.
+const named = () => { resetToolNames(); resetToolSummaries(); seedEnabled(false); seedNamesEnabled(true); seedToolName(AGENT, 'send_mail', { label: 'Send mail' }); seedToolName(AGENT, 'search_threads', { label: 'Search threads' }) }
+// The daemon couldn't name them (no model or key): the prettified raw names.
+const unnamed = () => { resetToolNames(); resetToolSummaries(); seedEnabled(false); seedNamesEnabled(false) }
 const SUMS: Record<string, { tool: string; doing: string }> = {
   t1: { tool: 'read file', doing: 'reading the tree test to find the row count' },
   t2: { tool: 'edit file', doing: 'changing the tree test to expect three rows' },
@@ -31,10 +40,12 @@ const landLate = () => { for (const t of RUN) seedToolSummary(AGENT, t.id, { s: 
 export const stories: Story[] = [{
   name: 'Tool calls',
   group: 'Mail',
-  what: "An agent's tool calls as the conversation draws them (S-1483). A tool call is one row: its status icon, name, and one-line input; open, its full input and its result. A tool group is a run of calls in one drawer, closed by default, whose header counts the calls and shows the latest, so progress stays in view while it's closed. With the Tool summary tiny model on (S-1481), a call reads as its summary instead: the tool in plain English, then what the agent is doing; open, the raw name and input come first.",
+  what: "An agent's tool calls as the conversation draws them (S-1483). A tool call is one row: its status icon, name, and one-line input; open, its full input and its result. A tool group is a run of calls in one drawer, closed by default, whose header counts the calls and shows the latest, so progress stays in view while it's closed. A call carries a small icon by its tool (S-1934): the stam mark for stam MCP tools, a terminal for Bash, a file for Read and Write, a pencil for Edit, a magnifier for Grep and Glob, a globe for web tools, people for Agent, a plug for any other MCP server, and a wrench for a tool nothing knows. A call is named by its tool's label, one per tool (S-1933): a built-in as Read or Web search, an MCP tool with its server in front as stam · Send mail; the raw name is the hover title. With the Tool summary tiny model on (S-1481, off by default), a call reads as its summary instead: the tool in plain English, then what the agent is doing; open, the raw name and input come first.",
   when: "In an agent's own view (`web/src/views/OwnView.tsx`): each run of consecutive tool calls in a message is a group, broken by text, thinking, or a permission card. A lone call outside a run (inside a split message) is a plain tool call. Summaries are asked for only while the group shows (`web/src/mail/tool-summaries.ts`), the latest group and its latest call first.",
   code: ['web/src/mail/ToolGroup.tsx#ToolGroup', 'web/src/mail/ToolGroup.tsx#ToolCall'],
   rules: [
+    "The icon (`src/tool-icons.ts`) is chosen from the harness and tool name alone, with no model call: the built-ins by their label in every harness's spelling (`Bash`, `exec_command`, `bash` are all a terminal). It is decoration, `aria-hidden`, drawn `--text-muted` at the small size between the status and the label, so a row doesn't grow or wrap.",
+    "A tool's name is its stored label (`web/src/mail/tool-names.ts`): the built-ins of each harness are labelled in code, any other tool is named once by the summaries tiny model and kept, so a tool is named once however many agents show it. An MCP tool (`mcp__server__tool`) reads `server · Label`; the label is for the tool part only. Without a label, with the model off or the key missing, the name reads prettified: `mcp__stam__send_mail` is `stam · Send mail`, `Bash` stays `Bash`.",
     "A Read, Edit or Write call's one-line input, when it is the file's path, is a link to the file view (S-1529); a relative path resolves in the viewed agent's cwd. A click on it opens the file and does not toggle the call.",
     "A call's status is its icon and its colour together: pending `--text-muted`, running `--st-working`, done `--st-idle`, error `--st-errored`; an error's result is `--status-error-fg`.",
     'Rows are `--size-control` high, `--size-hit-touch` on a phone; the one-line input cuts with an ellipsis in `--font-mono` (' + ds('Density') + '). A summary is in the body font, its sentence cut with an ellipsis.',
@@ -54,6 +65,10 @@ export const stories: Story[] = [{
     { name: 'Waiting for its summary', setup: waiting, routes: STILL, render: () => <ToolGroup tools={RUN} agent={AGENT} /> },
     { name: 'No summary in time: raw', setup: timedOut, routes: STILL, render: () => <ToolGroup tools={RUN} agent={AGENT} /> },
     { name: 'Summary lands late: fades in', setup: timedOut, routes: STILL, render: () => <OnMount run={landLate}><ToolGroup tools={RUN} agent={AGENT} /></OnMount> },
+    { name: 'Icons by tool', render: () => <ToolGroup tools={[{ id: 'i1', name: 'Bash', status: 'done' }, { id: 'i2', name: 'Read', status: 'done' }, { id: 'i3', name: 'Edit', status: 'done' }, { id: 'i4', name: 'Grep', status: 'done' }, { id: 'i5', name: 'WebFetch', status: 'done' }, { id: 'i6', name: 'Task', status: 'done' }, { id: 'i7', name: 'mcp__stam__send_mail', status: 'done' }, { id: 'i8', name: 'mcp__x__y', status: 'done' }]} />, },
+    { name: 'MCP tools, named', setup: named, render: () => <ToolGroup tools={MCP} agent={AGENT} /> },
+    { name: 'MCP tools, open', setup: named, render: () => <OnMount run={(el) => { openFirst(el); for (const d of el.querySelectorAll<HTMLDetailsElement>('.ov-tools-rows details')) d.open = true }}><ToolGroup tools={MCP} agent={AGENT} /></OnMount> },
+    { name: 'MCP tools, no label: prettified', setup: unnamed, render: () => <ToolGroup tools={MCP} agent={AGENT} /> },
     { name: 'Step off: raw, no wait', setup: () => { resetToolSummaries(); seedEnabled(false) }, render: () => <ToolGroup tools={RUN} agent={AGENT} /> },
   ],
 }]

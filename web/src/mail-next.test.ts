@@ -5,10 +5,10 @@ import { nextMail } from './actions'
 const list = ['a', 'b', 'c', 'd'].map((thread_id) => ({ thread_id }))
 
 describe('nextMail', () => {
-  it('opens the one below when Kim came from above', () => {
+  it('opens the one below when the user came from above', () => {
     expect(nextMail(list, 'b', 'a')).toBe('c')
   })
-  it('opens the one above when Kim came from below (working bottom up)', () => {
+  it('opens the one above when the user came from below (working bottom up)', () => {
     expect(nextMail(list, 'c', 'd')).toBe('b')
   })
   it('falls back to the one below when there is no prior mail', () => {

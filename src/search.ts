@@ -158,7 +158,7 @@ const SECTIONS = [
   { key: 'spend', label: 'Spending' },
   { key: 'machines', label: 'Machines' },
   { key: 'instructions', label: 'Instructions' },
-  { key: 'messages', label: 'Messages stam sends' },
+  { key: 'messages', label: 'Messages mootr sends' },
   { key: 'advanced', label: 'Advanced' },
 ];
 const INSTRUCTION_ITEMS = [

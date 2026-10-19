@@ -793,6 +793,7 @@ export const tools: Tool[] = [
           },
         },
         timeout_minutes: { type: 'number', description: 'Give up after this many minutes.' },
+        expect_minutes: { type: 'number', description: 'Optional: about how many minutes until you expect the answer. Nothing fires then; it tells stam how long you will likely wait, so a long wait lets your harness rest until the answer wakes you.' },
         note: { type: 'string', description: 'What you wait for, shown as your wait detail.' },
       },
       required: ['on'],
@@ -800,11 +801,11 @@ export const tools: Tool[] = [
     run: async (a) => {
       // Only the declared parameters go to the daemon, and an unknown one is named rather than
       // sent: the daemon reads `from` as the identity a request acts as (S-302).
-      const known = ['self', 'on', 'target', 'thread', 'filter', 'timeout_minutes', 'note'];
+      const known = ['self', 'on', 'target', 'thread', 'filter', 'timeout_minutes', 'expect_minutes', 'note'];
       const unknown = Object.keys(a ?? {}).filter((k) => !known.includes(k));
-      if (unknown.length) throw new Error(`wait_for has no parameter ${unknown.map((k) => `'${k}'`).join(', ')}; its parameters are on, target (the agent to wait for, an id or name), thread, filter, timeout_minutes, note`);
+      if (unknown.length) throw new Error(`wait_for has no parameter ${unknown.map((k) => `'${k}'`).join(', ')}; its parameters are on, target (the agent to wait for, an id or name), thread, filter, timeout_minutes, expect_minutes, note`);
       if (a.on === 'agent' && !a.target) throw new Error("wait_for on 'agent' needs target (an agent id or name)");
-      const w = await api<any>('POST', `/api/agents/${me(a)}/waits/declared`, { on: a.on, target: a.target, thread: a.thread, filter: a.filter, timeout_minutes: a.timeout_minutes, note: a.note, by: me(a) });
+      const w = await api<any>('POST', `/api/agents/${me(a)}/waits/declared`, { on: a.on, target: a.target, thread: a.thread, filter: a.filter, timeout_minutes: a.timeout_minutes, expect_minutes: a.expect_minutes, note: a.note, by: me(a) });
       return text(`Waiting (${w.id}) for ${w.detail}${w.until ? `, timing out at ${w.until}` : ''}.${w.kind === 'human' && w.target ? ` It is about your request ${w.target}, so it clears when that request is answered or closed.` : ''} Clear it with wait_done ${w.id}.`);
     },
   },

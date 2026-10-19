@@ -2,7 +2,7 @@
 // transcript (JSONL, `transcript_path`) is the history and the live feed: each row is a block
 // when Claude Code writes it, so text shows when it ends, not as it's written
 // (`can_stream: false`). Activity comes from the hooks (db); permissions are the recorded
-// requests, shown read-only, because stam has no blocking permission hook (Kim, S-81).
+// requests, shown read-only, because stam has no blocking permission hook (S-81).
 // Prompts go into the terminal's input box and Esc interrupts, as the human's do.
 import { statSync } from 'node:fs';
 import type { Agent } from '../db.ts';

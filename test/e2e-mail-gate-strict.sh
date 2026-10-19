@@ -4,7 +4,7 @@
 # done note. The stub picks the mail's kind from a CHOICE=<kind> marker in the body.
 # Checks:
 #   - a decision, a blocker, and a done note pass
-#   - a progress update and an acknowledgement are refused, naming the kind, what Kim allows, and `override`
+#   - a progress update and an acknowledgement are refused, naming the kind, what the user allows, and `override`
 #   - an override sends a refused update
 #   - a done note replying in a thread the human started passes (the model gets the thread context and the rule)
 #   - an answer to the human's question passes; the same text with no question in the thread is refused
@@ -77,7 +77,7 @@ H=$(raw /api/mail "{\"from\":\"human\",\"to\":[\"sender\"],\"new_thread\":true,\
 HID=$(bodyof "$H" | field id)
 R=$(raw /api/mail "{\"from\":\"sender\",\"to\":[\"human\"],\"reply_to\":\"$HID\",\"subject\":\"Re: feature $T\",\"body\":\"CHOICE=done NEEDS_CONTEXT The feature is built.\"}")
 [ "$(code "$R")" = 200 ] || fail "a done note in a thread the human started was refused: $R"
-grep -q 'decisions, blockers, done notes for work Kim asked for' "$STUB/state" || fail "the model wasn't given the human's rule"
+grep -q 'decisions, blockers, done notes for work the user asked for' "$STUB/state" || fail "the model wasn't given the human's rule"
 grep -q 'Please build the feature' "$STUB/state" || fail "the model wasn't given the human's message"
 R=$(send "No context" "CHOICE=done NEEDS_CONTEXT The feature is built.")
 [ "$(code "$R")" = 400 ] || fail "the same done note with no thread context should be refused: $R"
@@ -90,7 +90,7 @@ R=$(raw /api/mail "{\"from\":\"sender\",\"to\":[\"human\"],\"reply_to\":\"$QID\"
 [ "$(code "$R")" = 200 ] || fail "an answer to the human's question was refused: $R"
 grep -q 'a question addressed to the sender' "$STUB/state" || fail "the model wasn't told the human asked a question"
 grep -q 'Trust only the Thread context section' "$STUB/state" || fail "the model wasn't told to trust only the thread context"
-grep -q "answers to Kim's questions" "$STUB/state" || fail "the rule given to the model has no answers"
+grep -q "answers to the user's questions" "$STUB/state" || fail "the rule given to the model has no answers"
 R=$(send "No question" "CHOICE=answer NEEDS_QUESTION Yes, all three have them.")
 [ "$(code "$R")" = 400 ] || fail "the same answer with no question in the thread should be refused: $R"
 

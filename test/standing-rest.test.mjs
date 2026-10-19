@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // S-897: a standing agent idle past standing.idleHours rests (paused for 'standing-idle', its
 // harness stopped, no model turn), and mail, a fired wake_me or an assigned ITSA wakes it.
-// A non-standing agent never rests, and a pause by the human or a cost blocker is never lifted
+// Other agents rest by the S-1982 rules (test/rest.test.mjs). A pause by the human or a cost blocker is never lifted
 // by a wake. Runs against a throwaway STAM_HOME and tmux socket with a fake harness; no daemon,
 // no models: `node --test test/standing-rest.test.mjs`.
 import { test, before, after } from 'node:test';
@@ -87,7 +87,7 @@ test('a standing agent idle for less than the threshold does not rest', () => {
   assert.equal(db.getAgent(a.id).lifecycle, 'active');
 });
 
-test('a non-standing agent never rests', () => {
+test('a non-standing agent idle for under rest.afterMinutes does not rest (test/rest.test.mjs has its rules)', () => {
   const a = agent({ standing: false });
   lifecycle.restSweep();
   assert.equal(db.getAgent(a.id).lifecycle, 'active');

@@ -48,7 +48,7 @@ R=$(send "$BOB" alice "$M1" "Agreed.")
 [ "$(thread_of "$R")" = "$M1" ] || fail "bob's reply isn't in the thread (got: $R)"
 
 echo "-- the human and boss, the chief of staff, may reply too"
-R=$(send human bob "$M1" "From Kim." human)
+R=$(send human bob "$M1" "From Dana." human)
 [ "$(thread_of "$R")" = "$M1" ] || fail "the human's reply isn't in the thread (got: $R)"
 R=$(send "$BOSS" bob "$M1" "From boss.")
 [ "$(thread_of "$R")" = "$M1" ] || fail "boss's reply isn't in the thread (got: $R)"

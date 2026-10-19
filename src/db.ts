@@ -6,6 +6,8 @@ import { STAM_HOME, MACHINE } from './config.ts';
 import * as events from './events.ts';
 import { namedKeys } from './itsa-keys.ts';
 import { timed } from './stall.ts';
+import { isSystemNotice } from './mail-notice.ts';
+import { splitDeferredThreads } from './defer-split.ts';
 
 export type Lifecycle = 'active' | 'paused' | 'shut_down' | 'archived';
 export type Activity = 'starting' | 'working' | 'waiting' | 'blocked' | 'errored' | 'idle' | 'unknown';
@@ -135,6 +137,8 @@ CREATE TABLE IF NOT EXISTS mail_recipients (
 -- The unread rows of one agent: the hook path counts them on every tool call (inTurnNotice, unreadCount),
 -- and the primary key leads with mail_id, so without this every count scanned the whole table (S-1025).
 CREATE INDEX IF NOT EXISTS mail_recipients_unread ON mail_recipients (agent_id) WHERE read_at IS NULL;
+-- The rows an agent read, by time: the tool-call slice finds the mail read inside a page's range (mailReadIn, S-1844).
+CREATE INDEX IF NOT EXISTS mail_recipients_read ON mail_recipients (agent_id, read_at) WHERE read_at IS NOT NULL;
 -- The ITSAs a mail is linked to (S-986): what the sender named (itsa), keys written in its subject or
 -- body (named), and the ITSA whose thread it is in (thread). Links are not mail: no recipient, no
 -- notice, no unread state. One row per mail and ITSA, the first source in that order winning.
@@ -622,6 +626,16 @@ CREATE TABLE IF NOT EXISTS tool_summaries (
   model TEXT NOT NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY (agent_id, call_id, input_hash)
+);
+-- A tool's human-readable label (src/tool-names.ts, S-1933), one per (harness, tool name), made once by
+-- the summaries tiny model and kept; the built-in tools are seeded in code and have no row.
+CREATE TABLE IF NOT EXISTS tool_names (
+  harness TEXT NOT NULL,
+  name TEXT NOT NULL,
+  label TEXT NOT NULL,
+  model TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (harness, name)
 );
 -- One row per one-off data migration that has run (runOnce below).
 CREATE TABLE IF NOT EXISTS migrations (
@@ -1205,6 +1219,18 @@ export function hasEventSinceStart(agentId: string, type: string): boolean {
   ).get(agentId, type, agentId));
 }
 
+// When the agent's latest event of any of these types was recorded, or null.
+export function lastEventAt(agentId: string, types: string[]): string | null {
+  const r = open().prepare(`SELECT ts FROM events WHERE agent_id = ? AND type IN (${types.map(() => '?').join(', ')}) ORDER BY id DESC LIMIT 1`).get(agentId, ...types) as { ts: string } | undefined;
+  return r?.ts ?? null;
+}
+
+// The times of an agent's events of one type since `since` (an ISO time), oldest first.
+export function eventTimes(agentId: string, type: string, since: string): string[] {
+  const rows = open().prepare('SELECT ts FROM events WHERE agent_id = ? AND type = ? AND ts >= ? ORDER BY id').all(agentId, type, since) as { ts: string }[];
+  return rows.map((r) => r.ts);
+}
+
 export function listEvents(agentId: string, limit = 50): { id: number; ts: string; type: string; data: string | null }[] {
   return open()
     .prepare('SELECT id, ts, type, data FROM events WHERE agent_id = ? ORDER BY id DESC LIMIT ?')
@@ -1333,6 +1359,16 @@ export function setToolSummary(agentId: string, callId: string, hash: string, to
         'WHERE tool_summaries.config_hash IS NOT excluded.config_hash',
     )
     .run(agentId, callId, hash, tool, doing, model, new Date().toISOString(), configHash);
+}
+
+// A tool's stored label (src/tool-names.ts, S-1933), or undefined.
+export function getToolName(harness: string, name: string): string | undefined {
+  return (open().prepare('SELECT label FROM tool_names WHERE harness = ? AND name = ?').get(harness, name) as { label: string } | undefined)?.label;
+}
+
+// Stores a tool's label once: a label already stored stays as it is.
+export function setToolName(harness: string, name: string, label: string, model: string): void {
+  open().prepare('INSERT OR IGNORE INTO tool_names (harness, name, label, model, created_at) VALUES (?, ?, ?, ?, ?)').run(harness, name, label, model, new Date().toISOString());
 }
 
 // A decision mail to the human (src/decision-mail.ts), and the human's reply that answers the
@@ -1497,8 +1533,13 @@ export function createMail(
   const ins = d.prepare('INSERT OR IGNORE INTO mail_recipients (mail_id, agent_id, quiet) VALUES (?, ?, ?)');
   for (const a of to) ins.run(m.id, a, quiet.includes(a) ? 1 : 0);
   // New mail in a thread an agent deferred brings the whole thread back, its older unread mail too
-  // (S-1880). The human's box is left to splitDeferred.
-  for (const a of to) if (a !== 'human' && a !== m.from_id) undeferThread(a, m.thread_id);
+  // (S-1880). The human's box is left to splitDeferred. A system notice doesn't bring it back: it joins
+  // the deferred thread, out of the agent's list, as the sender's own mail does (S-1971).
+  const notice = isSystemNotice({ from_id: m.from_id, notice: m.notice });
+  for (const a of to) if (a !== 'human' && a !== m.from_id) {
+    if (notice) keepDeferred(a, m.thread_id, m.id);
+    else undeferThread(a, m.thread_id);
+  }
   // The sender's own view shows the mail it sent.
   mailChanged([...new Set([...to, m.from_id])]);
 }
@@ -1527,6 +1568,19 @@ export function mailTo(agentId: string, since: string, before: string, limit = 2
        JOIN mail_recipients r ON r.mail_id = m.id
        WHERE r.agent_id = ? AND m.from_id != ? AND m.created_at >= ? AND m.created_at < ?
        ORDER BY m.created_at DESC LIMIT ?`,
+    )
+    .all(agentId, agentId, since, before, limit)
+    .reverse() as unknown as Mail[];
+}
+
+// Mail to an agent from others, read in [since, before), whenever it was created, oldest first.
+export function mailReadIn(agentId: string, since: string, before: string, limit = 200): Mail[] {
+  return open()
+    .prepare(
+      `SELECT m.id, m.from_id, m.from_name, m.subject, m.body, m.created_at, m.thread_id, r.read_at FROM mail m
+       JOIN mail_recipients r ON r.mail_id = m.id
+       WHERE r.agent_id = ? AND r.read_at IS NOT NULL AND m.from_id != ? AND r.read_at >= ? AND r.read_at < ?
+       ORDER BY r.read_at DESC LIMIT ?`,
     )
     .all(agentId, agentId, since, before, limit)
     .reverse() as unknown as Mail[];
@@ -1841,24 +1895,19 @@ export function deferredCount(mailbox: string): number {
   return (open().prepare('SELECT COUNT(*) AS n FROM thread_defer WHERE mailbox_id = ?').get(mailbox) as { n: number }).n;
 }
 
-// Splits threads into the ones deferred and the rest. A thread is deferred while every message sent to
-// the mailbox is one the deferral recorded; a thread in `keep` stays out. A pending permission request can be
-// deferred too (S-1068): it stays pending and listed to answer.
-export function splitDeferred<T extends { thread_id: string; mails: { id: string; permission?: { status?: string } | null; recipients?: { id: string }[] }[] }>(
+// Splits threads into the ones deferred and the rest (splitDeferredThreads holds the rule). A pending
+// permission request can be deferred too (S-1068): it stays pending and listed to answer.
+export function splitDeferred<T extends { thread_id: string; mails: { id: string; from_id?: string | null; notice?: number | boolean | null; permission?: { status?: string } | null; recipients?: { id: string }[] }[] }>(
   mailbox: string,
   threads: T[],
   keep: Set<string> = new Set(),
 ): { rest: T[]; deferred: T[] } {
   const d = open();
-  const rows = d.prepare('SELECT thread_id FROM thread_defer WHERE mailbox_id = ?').all(mailbox) as { thread_id: string }[];
-  const taken = new Set(rows.map((r) => r.thread_id));
+  const recorded = new Map<string, Set<string>>();
+  for (const r of d.prepare('SELECT thread_id FROM thread_defer WHERE mailbox_id = ?').all(mailbox) as { thread_id: string }[]) recorded.set(r.thread_id, new Set());
   const idsFor = d.prepare('SELECT mail_id FROM thread_defer_mail WHERE mailbox_id = ? AND thread_id = ?');
-  const isDeferred = (t: T) => {
-    if (!taken.has(t.thread_id) || keep.has(t.thread_id)) return false;
-    const known = new Set((idsFor.all(mailbox, t.thread_id) as { mail_id: string }[]).map((r) => r.mail_id));
-    return t.mails.every((m) => known.has(m.id) || !(m.recipients?.some((r) => r.id === mailbox) ?? true));
-  };
-  return { rest: threads.filter((t) => !isDeferred(t)), deferred: threads.filter(isDeferred) };
+  for (const [threadId, ids] of recorded) for (const r of idsFor.all(mailbox, threadId) as { mail_id: string }[]) ids.add(r.mail_id);
+  return splitDeferredThreads(mailbox, threads, recorded, keep);
 }
 
 // Splits a mailbox's threads, as any daemon serving a list merged them, into the ones
@@ -2417,6 +2466,11 @@ export function setWaitUntil(id: string, until: string): void {
   open().prepare('UPDATE waits SET until = ? WHERE id = ?').run(until, id);
 }
 
+let restingWaitsObserver: ((id: string) => void) | undefined;
+export function onRestingWaitsChange(fn: (id: string) => void): void {
+  restingWaitsObserver = fn;
+}
+
 // Sets an agent's activity from its waits: idle with waits becomes 'waiting', waiting
 // without becomes 'idle', and a waiting agent's detail follows its waits. Working,
 // blocked, errored, and starting agents keep theirs; their waits count once they go idle.
@@ -2424,6 +2478,9 @@ export function syncWaits(agentId: string): void {
   const a = getAgent(agentId);
   if (!a) return;
   const w = listWaits(agentId);
+  // A resting agent's activity doesn't follow its waits, yet whether it has any decides whether it counts as busy
+  // (RESTING_WAITING): the observer recomputes the children waits above it, as an activity change would.
+  if (restOwned(a)) restingWaitsObserver?.(agentId);
   if (a.activity === 'waiting' && !w.length) updateAgent(agentId, { activity: 'idle', activity_detail: 'waits cleared' });
   else if (a.activity === 'idle' && w.length) updateAgent(agentId, { activity: 'idle', activity_detail: a.activity_detail });
   else if (a.activity === 'waiting' && a.activity_detail !== waitSummary(w)) updateAgent(agentId, { activity_detail: waitSummary(w) });
@@ -2449,11 +2506,11 @@ export function onPeerBusyChange(fn: (id: string) => void): void {
 
 // `activity` and `pending_requests` come from a listing or a spawn reply; a call without activity keeps the busy
 // flag known. A busy change calls the onPeerBusyChange observer.
-export function rememberPeerAgent(a: { id: string; name: string; machine: string; lifecycle?: string; parents?: string[]; parent_id?: string | null; activity?: string; pending_requests?: number }): void {
+export function rememberPeerAgent(a: { id: string; name: string; machine: string; lifecycle?: string; parents?: string[]; parent_id?: string | null; activity?: string; pending_requests?: number; paused_by?: string | null; waits?: unknown[] }): void {
   // A listing carries every parent; a fresh spawn's reply (spawnOnPeer) carries only parent_id.
   const list = a.parents ?? (a.parent_id ? [a.parent_id] : undefined);
   const parents = list ? JSON.stringify(list) : null;
-  const busy = a.activity === undefined ? null : a.lifecycle !== 'archived' && ((BUSY_ACTIVITIES as readonly string[]).includes(a.activity) || (a.pending_requests ?? 0) > 0) ? 1 : 0;
+  const busy = a.activity === undefined ? null : a.lifecycle !== 'archived' && ((BUSY_ACTIVITIES as readonly string[]).includes(a.activity) || (a.pending_requests ?? 0) > 0 || restingWithWaits(a)) ? 1 : 0;
   // A busy agent is written again each refresh window, which keeps its busy_at fresh.
   const key = `${a.name}|${a.machine}|${a.lifecycle ?? ''}|${parents ?? ''}|${busy ?? ''}${busy ? '|' + Math.floor(Date.now() / PEER_BUSY_REFRESH_MS) : ''}`;
   if (remembered.get(a.id) === key) return;
@@ -2632,6 +2689,18 @@ export function getPermissionRequest(id: string): PermissionRequest | undefined 
 
 // Whether the agent has an unresolved permission request; org.ts counts that as busy, so
 // a parent's tree-idle notice waits for the answer.
+// A resting agent (S-1982) has no harness, so its activity is 'unknown', but one with a wait still waits: it
+// counts as busy, so its parent keeps its children wait and the tree above it hears no false tree-idle notice.
+// Rest-owned: paused with lifecycle.REST_OWNER among its pause owners, so a human, agent or cost pause added on
+// top of the rest (lifecycle.pause) doesn't change whether it counts as busy.
+const REST_OWNER_JSON = '"standing-idle"';
+export const REST_PAUSED_BY = `[${REST_OWNER_JSON}]`;
+const RESTING_WAITING = `(a.lifecycle = 'paused' AND instr(a.paused_by, '${REST_OWNER_JSON}') > 0 AND EXISTS (SELECT 1 FROM waits w WHERE w.agent_id = a.id))`;
+export const restOwned = (a: { lifecycle?: string; paused_by?: string | null }): boolean =>
+  a.lifecycle === 'paused' && !!a.paused_by && a.paused_by.includes(REST_OWNER_JSON);
+export const restingWithWaits = (a: { lifecycle?: string; paused_by?: string | null; waits?: unknown[] }): boolean =>
+  restOwned(a) && (a.waits?.length ?? 0) > 0;
+
 // How many agents below `id` (children, their children, and so on, through adoptions and the parents remembered
 // for peer agents) are busy: a local one working, blocked, waiting, starting, or holding a pending permission
 // request; a peer one with a busy flag fresher than PEER_BUSY_FRESH_MS (S-1652). One recursive query over the
@@ -2655,12 +2724,24 @@ export function busyDescendantCount(id: string): number {
        )
        SELECT count(*) AS n FROM d
        WHERE EXISTS (SELECT 1 FROM agents a WHERE a.id = d.id AND (a.activity IN ('working', 'blocked', 'waiting', 'starting')
-               OR EXISTS (SELECT 1 FROM permission_requests r WHERE r.agent_id = a.id AND r.status = 'pending')))
+               OR EXISTS (SELECT 1 FROM permission_requests r WHERE r.agent_id = a.id AND r.status = 'pending') OR ${RESTING_WAITING}))
           OR (NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = d.id)
               AND EXISTS (SELECT 1 FROM peer_agents pa WHERE pa.id = d.id AND pa.busy = 1 AND pa.busy_at > ?2))`,
     )
     .get(id, fresh) as { n: number };
   return r.n;
+}
+
+// Whether a local agent is busy by the rules busyIds and busyDescendantCount apply in SQL: a busy activity, a
+// pending permission request, or resting with a wait. Every reader of one agent's busy-ness in JS uses this.
+export function isBusy(a: Agent): boolean {
+  return (BUSY_ACTIVITIES as readonly string[]).includes(a.activity) || hasPendingPermission(a.id) || restingWithWaits({ ...a, waits: listWaits(a.id) });
+}
+
+// Whether the agent keeps a machine that shuts itself down when idle up (daemon.ts, STAM_HOME/busy): an active one
+// with a busy activity, or a resting one with a wait, whose timer or answer needs the daemon running (S-1982).
+export function keepsMachineUp(a: Agent): boolean {
+  return (a.lifecycle === 'active' && BUSY_ACTIVITIES.includes(a.activity)) || restingWithWaits({ ...a, waits: listWaits(a.id) });
 }
 
 // Every agent busyDescendantCount counts as busy, local and peer, by the same rules: what tree.busyDescendantCounts
@@ -2670,7 +2751,7 @@ export function busyIds(): string[] {
   const rows = open()
     .prepare(
       `SELECT a.id FROM agents a WHERE a.activity IN ('working', 'blocked', 'waiting', 'starting')
-          OR EXISTS (SELECT 1 FROM permission_requests r WHERE r.agent_id = a.id AND r.status = 'pending')
+          OR EXISTS (SELECT 1 FROM permission_requests r WHERE r.agent_id = a.id AND r.status = 'pending') OR ${RESTING_WAITING}
        UNION SELECT pa.id FROM peer_agents pa WHERE pa.busy = 1 AND pa.busy_at > ?
           AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = pa.id)`,
     )

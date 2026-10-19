@@ -14,7 +14,7 @@ const STALE_AFTER = 2 * 24 * 3_600_000
 interface Quick { id: QuickId; label: string; hint: string; test(it: Itsa, st: StatusLookup, now: number): boolean }
 
 export const QUICK: Quick[] = [
-  { id: 'waiting', label: 'Waiting on Kim', hint: 'In a status that waits on the human', test: (it, st) => st.human(it.status) },
+  { id: 'waiting', label: 'Waiting on you', hint: 'In a status that waits on the human', test: (it, st) => st.human(it.status) },
   { id: 'mine', label: 'Mine', hint: 'The human owns it or takes part', test: (it) => it.owner === 'human' || (it.participants ?? []).includes('human') },
   { id: 'stale', label: 'Stale', hint: 'Active, with no update in 2 days', test: (it, st, now) => st.category(it.status) === 'active' && now - Date.parse(it.updated_at) > STALE_AFTER },
   { id: 'blocked', label: 'Blocked', hint: 'Status blocked', test: (it) => it.status === 'blocked' },

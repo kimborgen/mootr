@@ -31,6 +31,7 @@ import * as events from './events.ts';
 import { render, humanMailPrompt, listTemplates, saveTemplate, resetTemplate } from './templates.ts';
 import * as lifecycle from './lifecycle.ts';
 import { admit, admitSpawn, accountHeld } from './admission.ts';
+import { developerCapRefusal, isDeveloperSpawn, reserveSlot, releaseSlot } from './developer-cap.ts';
 import * as blockers from './blockers.ts';
 import * as context from './context.ts';
 import * as permissions from './permissions.ts';
@@ -118,6 +119,7 @@ import { cleanupWorkspace, depsReport, prOpenDepsRelink, deployCheckout, createW
 import { registry, capabilitiesFor, preset } from './registry.ts';
 import { tinyModels } from './tiny-models.ts';
 import { toolSummaries, readCalls, ID_CHARS } from './tool-summaries.ts';
+import { toolNames, readNames } from './tool-names.ts';
 import { openRouterModels, harnessModels } from './model-catalog.ts';
 import { freeFallback } from './reviewer-chain.ts';
 import { agentType, agentTypes, NAME_RE, renderBrief, saveType, removeType, type AgentType } from './agent-types.ts';
@@ -237,7 +239,7 @@ function notAgentToken(caller: Caller, what: string): void {
 }
 
 // The agent whose cost data is scoped for this request (S-593): an agent's token, or the OpenCode server
-// naming its agent with `as`. Undefined for Kim, the CLI and the bosses (chief of staff, assistant, a
+// naming its agent with `as`. Undefined for the user, the CLI and the bosses (chief of staff, assistant, a
 // boss-flagged peer), who read everything. A peer's agent unknown here sees only itself.
 function usageViewer(caller: Caller, url: URL): string | undefined {
   if (caller.kind !== 'agent' && caller.kind !== 'opencode') return undefined;
@@ -445,6 +447,15 @@ function freeName(): string {
 // `onCreated` gets the new agent's id as soon as its row exists, so a caller whose spawn then fails
 // knows exactly which agent is its own to clean up.
 async function spawnAgent(body: any, human = false, onCreated?: (id: string) => void): Promise<db.Agent> {
+  const slot: { name?: string } = {};
+  try {
+    return await spawnAgentIn(body, human, onCreated, slot);
+  } finally {
+    if (slot.name) releaseSlot(slot.name);
+  }
+}
+
+async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) => void) | undefined, slot: { name?: string }): Promise<db.Agent> {
   // An agent type sets the preset, role, visibility, child notices, and brief; anything
   // given explicitly wins. Without a type and with no input at all, the agent gets the
   // defaults in settings.spawnDefaults and a free name.
@@ -553,6 +564,15 @@ async function spawnAgent(body: any, human = false, onCreated?: (id: string) => 
     spec = spawnWorkspaceSpec(body, type, base);
   } catch (e) {
     throw new HttpError(400, e instanceof Error ? e.message : String(e));
+  }
+  // The developer slot cap (S-2008), checked before any worktree exists so a refusal leaves nothing
+  // behind. The check and the reservation run with no await between them.
+  const capRefusal = developerCapRefusal(db.listAgents(), agentTypes(), type, spec.kind === 'worktree', settings().developerCap, MACHINE);
+  if (capRefusal && !human) throw new HttpError(409, capRefusal);
+  // Held until the spawn ends, so a second spawn in the same seconds counts this one.
+  if (isDeveloperSpawn(type, spec.kind === 'worktree')) {
+    reserveSlot(name);
+    slot.name = name;
   }
   let ws;
   try {
@@ -1833,7 +1853,7 @@ const trimSlash = (u: string) => u.replace(/\/+$/, '');
 const escapeHtml = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 function sendHtml(res: ServerResponse, status: number, text: string): void {
   res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
-  res.end(`<!doctype html><meta charset="utf-8"><title>stam</title><p>${escapeHtml(text)}</p>\n`);
+  res.end(`<!doctype html><meta charset="utf-8"><title>mootr</title><p>${escapeHtml(text)}</p>\n`);
 }
 
 // Layout routes: a stale base or a non-empty replace is a 409 carrying the current layout; an
@@ -2259,10 +2279,10 @@ export async function runDaemon(): Promise<void> {
   // Cost fallbacks: run the ones that came due while the daemon was down, and reschedule.
   void costFallback.reschedule();
   // STAM_HOME/busy is touched while any active agent here is starting, working, blocked, or
-  // waiting (db.BUSY_ACTIVITIES), so a machine that shuts itself down when idle (such as
-  // storage) doesn't shut down under an agent waiting for a reply or a timer.
+  // waiting (db.BUSY_ACTIVITIES), or resting with a wait (S-1982), so a machine that shuts itself
+  // down when idle (such as storage) doesn't shut down under an agent waiting for a reply or a timer.
   setInterval(() => {
-    if (db.listAgents().some((a) => a.lifecycle === 'active' && db.BUSY_ACTIVITIES.includes(a.activity)))
+    if (db.listAgents().some(db.keepsMachineUp))
       writeFileSync(join(STAM_HOME, 'busy'), new Date().toISOString());
   }, 30_000);
 
@@ -2629,6 +2649,27 @@ export async function runDaemon(): Promise<void> {
         return toolSummaries(body.agent, calls, Number.isFinite(wait) && wait > 0 ? wait : 0);
       },
     ],
+    // Tool names (S-1933): the labels of the tools the human's view shows, as {agent, names, wait}. The
+    // labels are per harness, read from the agent; seeded and stored ones come back, missing ones are
+    // asked for (waiting up to `wait` ms) once, with no model or key nothing is asked.
+    [
+      'POST',
+      /^\/api\/tool-names$/,
+      async (_m, body, _url, _res, _local, human) => {
+        if (!human) throw new HttpError(403, 'tool names are for the human\'s view');
+        if (typeof body?.agent !== 'string' || !body.agent || body.agent.length > ID_CHARS) throw new HttpError(400, 'agent is required, at most 200 characters');
+        const agent = db.getAgent(body.agent);
+        if (!agent) throw new HttpError(404, 'no such agent');
+        let names;
+        try {
+          names = readNames(body.names);
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
+        const wait = Number(body.wait);
+        return toolNames(agent.harness, names, Number.isFinite(wait) && wait > 0 ? wait : 0);
+      },
+    ],
     [
       'POST',
       /^\/api\/mail-titles$/,
@@ -2916,6 +2957,9 @@ export async function runDaemon(): Promise<void> {
         // mail in any thread, or skip the checks on its sender, so they are refused.
         const own = (caller.kind === 'agent' || caller.kind === 'opencode') && !local ? mail.DAEMON_FIELDS.filter((f) => body?.[f] !== undefined) : [];
         if (own.length) throw new HttpError(403, `${own.join(', ')} ${own.length > 1 ? 'are' : 'is'} set only by stam, not in an agent's mail`);
+        // from_stam marks stam's own notice, so it lands as one in any thread, even an ITSA's (S-2033). Only a peer's
+        // daemon forwarding its own mail may set it, as the ITSA post route allows.
+        if (body?.from_stam !== undefined && !(local && caller.kind === 'shared')) throw new HttpError(403, 'from_stam is set only by stam');
         // The human replies from the web UI; agents mail as themselves.
         // `forwarded` is a peer's relay. Under auth.humanStrict it counts only from a peer (the peer token), never
         // from the shared token; and `system` also passes for a deploy watcher sender from a non-agent caller (S-543).
@@ -4055,7 +4099,7 @@ export async function runDaemon(): Promise<void> {
       (_m, _b, url) =>
         itsaRoute(() =>
           searchItsas(url.searchParams.get('q') ?? '', {
-            limit: Math.min(30, Math.max(1, Number(url.searchParams.get('limit') ?? 10))),
+            limit: Math.min(200, Math.max(1, Number(url.searchParams.get('limit') ?? 10))),
             kinds: (url.searchParams.get('kind') ?? '')
               .split(',')
               .map((k) => k.trim())
@@ -4627,7 +4671,7 @@ export async function runDaemon(): Promise<void> {
       'POST',
       /^\/api\/push\/notify$/,
       async (_m, body, _u, _r, local) => {
-        // Only a peer daemon relays: an agent's token reaches this route too, and a close from it must not close Kim's notifications.
+        // Only a peer daemon relays: an agent's token reaches this route too, and a close from it must not close the user's notifications.
         if (!local) throw new HttpError(403, 'only a peer daemon relays notifications');
         try {
           return await webpush.onRelay(body);
@@ -4638,7 +4682,7 @@ export async function runDaemon(): Promise<void> {
     ],
     ['GET', /^\/api\/permissions$/, (_m, _b, url, _r, _l, _h, _q, caller) => {
         const audience = url.searchParams.get('audience');
-        // An agent's token lists its own requests and its tree's (S-593); the bosses and Kim list all.
+        // An agent's token lists its own requests and its tree's (S-593); the bosses and the user list all.
         const viewer = usageViewer(caller, url);
         const own = viewer === undefined ? undefined : usageScope.ownTree(viewer);
         return db.listPermissionRequests(url.searchParams.get('status') ?? undefined).filter((r) => (!audience || r.audience === audience) && (!own || own.has(r.agent_id)));

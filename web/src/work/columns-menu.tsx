@@ -21,8 +21,6 @@ export function ColumnsPanel({ cols, onToggle, onReset }: { cols: ColumnChoice[]
   const shown = matchColumns(cols, q)
   const rows = () => [...list.current!.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')]
   const searchKey = (e: React.KeyboardEvent) => {
-    // Home and End edit the text here; the Menu would jump them to the first and last column.
-    if (e.key === 'Home' || e.key === 'End') { e.stopPropagation(); return }
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
     e.preventDefault(); e.stopPropagation()
     const bs = rows()
@@ -44,8 +42,8 @@ export function ColumnsPanel({ cols, onToggle, onReset }: { cols: ColumnChoice[]
           <span className={'tick' + (c.on ? '' : ' off')}><Icon name="check" /></span>
         </button>
       ))}
-      {shown.length ? null : <p className="rm-none muted" role="status">No column matches “{q.trim()}”</p>}
     </div>
+    {shown.length ? null : <p className="rm-none muted" role="status">No column matches “{q.trim()}”</p>}
     <hr />
     <button type="button" onClick={onReset}><span className="ml">Reset to default</span></button>
   </div>

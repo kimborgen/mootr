@@ -4,6 +4,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
+    "mootr": "bin/mootr",
     "stam": "bin/stam"
   },
   "engines": {

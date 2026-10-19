@@ -2,14 +2,19 @@
 // show them too. A ToolCall is one call: its status icon, name, one-line input, and, open,
 // its full input and result. A ToolGroup is a run of calls in one drawer, closed by default;
 // its header counts the calls and shows the latest, so progress stays in view while closed.
-// Given the agent, a call reads as its summary (S-1481, ./tool-summaries.ts): the tool in plain
-// English and what the agent is doing, with the raw name and input behind the expand.
+// Given the agent, a call is named by its tool's stored label with the MCP server in front (S-1933,
+// ./tool-names.ts: "stam · Send mail"). With the Tool summary tiny model on it reads as its summary
+// instead (S-1481, ./tool-summaries.ts): the tool in plain English and what the agent is doing, with
+// the raw name and input behind the expand.
 import { useRef } from 'react'
 import { useFileBase } from '../files/fileBase'
 import { fileHref } from '../files/fileKey'
 import { fileLinkClick, resolvePath } from '../files/pathLinks'
 import { Icon } from '../Icon'
+import { byId } from '../store'
+import { toolIcon } from '../../../src/tool-icons.ts'
 import { toolLine, type ToolStatus } from '../views/ownview-model'
+import { useToolTitle, useWatchNames } from './tool-names'
 import { useToolSummary, useWatchCalls, type CallView } from './tool-summaries'
 
 export interface ToolCallProps { name: string; input?: unknown; result?: string; status: ToolStatus; agent?: string; id?: string; watch?: boolean }
@@ -17,6 +22,9 @@ export type ToolCallItem = Omit<ToolCallProps, 'agent' | 'id' | 'watch'> & { id:
 
 const TOOL_ICON: Record<ToolStatus, string> = { pending: 'circle', running: 'circle-dot', done: 'circle-check', error: 'circle-x' }
 const Status = ({ status }: { status: ToolStatus }) => <span className={'ov-tool-st ' + status} title={status}><Icon name={TOOL_ICON[status]} size="xs" /></span>
+
+// The tool's icon (S-1934), by harness and name alone; decoration beside the label.
+const ToolIcon = ({ agent, name }: { agent?: string; name: string }) => <span className="ov-tool-ic"><Icon name={toolIcon(agent ? byId(agent)?.harness : undefined, name)} size="xs" /></span>
 
 // A file tool's one-line input (the path it reads or writes) is a link to that file (S-1529), resolved in the viewed agent's cwd.
 const FILE_TOOLS = /^(read|edit|write|multiedit|notebookedit|view)$/i
@@ -34,10 +42,11 @@ function ToolInput({ name, input }: { name: string; input?: unknown }) {
 // line is drawn invisible, so nothing moves when it lands; once the raw line has shown, the
 // summary fades in over it. `enter`: the line replaces another call's in a group's header, so it
 // fades in. Keyed by call, so one call's raw line never carries over to the next.
-function What({ view, name, input, enter }: { view: CallView; name: string; input?: unknown; enter?: boolean }) {
+function What({ view, name, input, enter, agent }: { view: CallView; name: string; input?: unknown; enter?: boolean; agent?: string }) {
   const shownRaw = useRef(false)
+  const title = useToolTitle(agent, name)
   if (!view.summary && !view.held) shownRaw.current = true
-  const raw = (fading: boolean) => <span className="ov-what-raw" aria-hidden={fading || undefined}><b>{name}</b><ToolInput name={name} input={input} /></span>
+  const raw = (fading: boolean) => <span className="ov-what-raw" aria-hidden={fading || undefined}><b title={title === name ? undefined : name}>{title}</b><ToolInput name={name} input={input} /></span>
   const cls = 'ov-what' + (enter ? ' enter' : '')
   if (!view.summary) return <span className={cls + (view.held ? ' held' : '')}>{raw(false)}</span>
   const sum = <span className="ov-what-sum"><b>{view.summary.tool}</b><span>{view.summary.doing}</span></span>
@@ -47,12 +56,13 @@ function What({ view, name, input, enter }: { view: CallView; name: string; inpu
 export function ToolCall({ name, input, result, status, agent, id = '', watch = true }: ToolCallProps) {
   const el = useRef<HTMLDetailsElement>(null)
   useWatchCalls(watch ? agent : undefined, [{ id, name, input, status }], el)
+  useWatchNames(watch ? agent : undefined, [name], el)
   const view = useToolSummary(agent, id)
   const line = toolLine(input)
   const full = input === undefined ? '' : JSON.stringify(input, null, 2)
   return (
     <details className={'ov-tool ' + status} ref={el}>
-      <summary><Icon name="chevron-right" size="xs" /><Status status={status} /><What view={view} name={name} input={input} /></summary>
+      <summary><Icon name="chevron-right" size="xs" /><Status status={status} /><ToolIcon agent={agent} name={name} /><What view={view} name={name} input={input} agent={agent} /></summary>
       {view.summary ? <p className="ov-tool-raw"><b>{name}</b><ToolInput name={name} input={input} /></p> : null}
       {full && full !== JSON.stringify(line) ? <pre className="ov-tool-in">{full}</pre> : null}
       {result !== undefined ? <pre className="ov-tool-out">{result || '(no output)'}</pre> : status === 'running' || status === 'pending' ? <p className="ov-tool-wait">Running</p> : null}
@@ -67,6 +77,7 @@ export function ToolGroup({ tools, agent }: { tools: ToolCallItem[]; agent?: str
   const last = tools[tools.length - 1]
   const el = useRef<HTMLDetailsElement>(null)
   useWatchCalls(agent, tools, el)
+  useWatchNames(agent, tools.map((t) => t.name), el)
   const view = useToolSummary(agent, last.id)
   const shown = useRef<ToolCallItem | null>(null)
   // The call whose line faded in after standing in for it, and whether the last draw stood in.
@@ -82,7 +93,7 @@ export function ToolGroup({ tools, agent }: { tools: ToolCallItem[]; agent?: str
   stoodIn.current = !!prev
   return (
     <details className={'ov-tools ' + last.status} ref={el}>
-      <summary><Icon name="chevron-right" size="xs" /><span className="ov-tools-n">{tools.length} tool call{tools.length === 1 ? '' : 's'}</span><Status status={last.status} /><What key={head.id} view={prev ? { ...prevView, held: false } : view} name={head.name} input={head.input} enter={entered.current === head.id} /></summary>
+      <summary><Icon name="chevron-right" size="xs" /><span className="ov-tools-n">{tools.length} tool call{tools.length === 1 ? '' : 's'}</span><Status status={last.status} /><ToolIcon agent={agent} name={head.name} /><What key={head.id} view={prev ? { ...prevView, held: false } : view} name={head.name} input={head.input} enter={entered.current === head.id} agent={agent} /></summary>
       <div className="ov-tools-rows">{tools.map((t) => <ToolCall key={t.id} {...t} agent={agent} watch={false} />)}</div>
     </details>
   )

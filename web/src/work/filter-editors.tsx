@@ -22,17 +22,28 @@ function Row({ role, on, label, n, onClick }: { role: 'checkbox' | 'radio'; on: 
 
 // The distinct values with counts, as a checklist with a search box. Nothing filtered = every value
 // ticked; ticking them all again drops the filter. All and None act on the values the search shows.
+// A column with no filter, or a standing exclude rule (`not`), edits the rule: unticking adds to it,
+// ticking removes from it, so a value that appears later stays ticked. Only an include list
+// (`values`) stays an include list, and None makes an empty one.
 export function ValuesEditor({ options, filter, onChange }: EditorProps<'values'> & { options: FilterValue[] }) {
   const [q, setQ] = useState('')
-  const picked = new Set(filter ? filter.values : options.map((o) => o.value))
+  const include = !!filter?.values
+  const hidden = new Set(filter?.not)
+  const picked = new Set(filter?.values ?? options.map((o) => o.value))
+  for (const v of hidden) picked.delete(v)
   const needle = q.trim().toLowerCase()
   const shown = needle ? options.filter((o) => o.label.toLowerCase().includes(needle)) : options
-  const set = (next: Set<string>) => onChange(options.every((o) => next.has(o.value)) ? null : { kind: 'values', values: [...next] })
+  const set = (next: Set<string>) => {
+    // Nothing ticked is an empty include list, so ticking one then picks it alone.
+    if (include || (options.length && options.every((o) => !next.has(o.value)))) return onChange(options.every((o) => next.has(o.value)) ? null : { kind: 'values', values: [...next] })
+    // A rule value the options no longer list stays in the rule.
+    const not = [...[...hidden].filter((v) => !options.some((o) => o.value === v)), ...options.filter((o) => !next.has(o.value)).map((o) => o.value)]
+    onChange(not.length ? { kind: 'values', not } : null)
+  }
   const toggle = (v: string) => { const n = new Set(picked); if (n.has(v)) n.delete(v); else n.add(v); set(n) }
   const all = (on: boolean) => { const n = new Set(picked); for (const o of shown) { if (on) n.add(o.value); else n.delete(o.value) } set(n) }
   return <div className="fm-values">
-    <input className="rm-search" type="search" value={q} placeholder="Search values" aria-label="Search values" autoComplete="off" spellCheck={false} onChange={(e) => setQ(e.target.value)}
-      onKeyDown={(e) => { if (e.key === 'Home' || e.key === 'End') e.stopPropagation() }} />
+    <input className="rm-search" type="search" value={q} placeholder="Search values" aria-label="Search values" autoComplete="off" spellCheck={false} onChange={(e) => setQ(e.target.value)} />
     <div className="fm-bulk">
       <button type="button" className="btn text" disabled={!shown.length} onClick={() => all(true)}>All</button>
       <button type="button" className="btn text" disabled={!shown.length} onClick={() => all(false)}>None</button>
@@ -119,7 +130,11 @@ export function FilterEditor({ kind, filter, options, onChange }: { kind: Filter
 // What a filter says, for its token: the part after "Status:".
 export function describeFilter(f: ColFilter, options: FilterValue[] = []): string {
   switch (f.kind) {
-    case 'values': return f.values.length ? f.values.map((v) => options.find((o) => o.value === v)?.label ?? (v === '' ? '(Blank)' : v)).join(', ') : 'none'
+    case 'values': {
+      const name = (v: string) => options.find((o) => o.value === v)?.label ?? (v === '' ? '(Blank)' : v)
+      const [inc, not] = [f.values ? (f.values.length ? f.values.map(name).join(', ') : 'none') : '', f.not?.length ? `≠ ${f.not.map(name).join(', ')}` : '']
+      return [inc, not].filter(Boolean).join('; ')
+    }
     case 'text': return `contains “${f.q.trim()}”`
     case 'range': return f.min !== undefined && f.max !== undefined ? `${f.min} to ${f.max}` : f.min !== undefined ? `at least ${f.min}` : `at most ${f.max}`
     case 'date': return [f.preset ? PRESET_LABEL[f.preset] : '', f.from ? `from ${f.from}` : '', f.to ? `to ${f.to}` : ''].filter(Boolean).join(', ')
@@ -127,3 +142,6 @@ export function describeFilter(f: ColFilter, options: FilterValue[] = []): strin
     case 'check': return f.value ? 'Yes' : 'No'
   }
 }
+
+// A filter's token: "Status: Todo, Done", or "Status ≠ blocked" for a standing exclude rule.
+export const filterText = (label: string, f: ColFilter, options: FilterValue[] = []) => `${label}${f.kind === 'values' && !f.values ? ' ' : ': '}${describeFilter(f, options)}`

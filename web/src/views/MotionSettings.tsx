@@ -1,6 +1,6 @@
 // Settings › Motion (S-696): a master toggle for all animation and one toggle per kind of motion
 // (MOTION_KINDS in motion-gate.ts). All are on by default; the kind toggles are off-limits while
-// the master is off. Saved in the human's settings, so they follow Kim across devices. The system
+// the master is off. Saved in the human's settings, so they follow the user across devices. The system
 // view is exempt and ignores them.
 import { useEffect, useState } from 'react'
 import { loadMotion, motionOn, MASTER, MOTION_KINDS, setMotion, subscribeMotion } from '../motion-gate'

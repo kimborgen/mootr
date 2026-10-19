@@ -1594,6 +1594,20 @@ async function back() {
   await p.waitForTimeout(500);
   check(await sec() === 'Context and compaction', 'back steps between Settings sections', await sec());
   await shot(p, 'back-2-settings');
+  // The sidebar's History tab lists the things shown, newest first, with the one showing marked
+  // (S-1456). A section change updated Settings' entry in place; a row jumps there and the list stays.
+  await sideTab(p, 'history');
+  const rows = () => p.locator('#history-side [data-history]').evaluateAll((els) => els.map((e) => e.getAttribute('data-history')));
+  const before = await rows();
+  check(before.length >= 2 && before[0] === 'w:config' && before[1] === helper.id, 'History lists the worlds shown, newest first', before.join(','));
+  check(before.filter((k) => k === 'w:config').length === 1, 'a Settings section change updates the entry in place', before.join(','));
+  check(await p.locator('#history-side [data-history].sel').getAttribute('data-history') === 'w:config', 'the world showing is marked');
+  await shot(p, 'back-3-history');
+  await p.locator(`#history-side [data-history="${helper.id}"]`).click();
+  await p.waitForTimeout(500);
+  check(await current() === helper.id, 'a History row jumps to that world', await current());
+  check((await rows()).join(',') === before.join(','), 'the list stays after a jump', (await rows()).join(','));
+  check(await p.locator('#history-side [data-history].sel').getAttribute('data-history') === helper.id, 'the marker moved to the row');
   await p.context().close();
 }
 
@@ -1859,10 +1873,38 @@ async function work() {
   }
   // The only buttons in the rows open an agent; the glance's two below its sections show more and go to Issues; the Filter button and the quick-filter chips only set the view.
   const actions = () => p.evaluate(() => [...document.querySelectorAll('.work-view .w-table button')]
-    .filter((b) => b.offsetParent !== null && !b.matches('.w-agent, .w-time-cell, .w-gtoggle, .w-hmenu, .wg-ghead, .wg-more, .wg-browse, .wg-filter, .wg-view, .w-qchip')).map((b) => b.className || b.textContent))
+    .filter((b) => b.offsetParent !== null && !b.matches('.w-agent, .w-time-cell, .w-gtoggle, .w-rowtoggle, .w-hmenu, .wg-ghead, .wg-more, .wg-browse, .wg-filter, .wg-view, .w-qchip')).map((b) => b.className || b.textContent))
   const wide = await pane(1500)
   check(!wide.card && wide.overflow <= 0, 'work: at 1,500 px the table fits its pane', JSON.stringify(wide))
   same(await actions(), [], 'work: the table has no action buttons (S-363)')
+  // Row folds (S-1437): a chevron on rows with subrows folds them, shows the hidden count, and never opens the row;
+  // Collapse all and Expand all work on every row; the table fits its pane at 1,024 and 1,280 px with every column.
+  const toggles = w().locator('.w-row button.w-rowtoggle')
+  check(await toggles.count() > 0, 'work: rows with subrows have a fold chevron')
+  const before = await w().locator('.w-row[data-itsa]').count()
+  await toggles.first().click()
+  check(await p.evaluate(() => window.stamDebug.shell.currentWorld()) === 'w:work', 'work: the chevron doesn\'t open the row')
+  check(await w().locator('.w-row[data-itsa]').count() < before && await w().locator('.w-row [data-hidden]').count() === 1 && await toggles.first().getAttribute('aria-expanded') === 'false', 'work: folding hides the subrows and shows their count')
+  await w().locator('[data-fold-all=expand]').click()
+  same(await w().locator('.w-row[data-itsa]').count(), before, 'work: Expand all brings every row back')
+  await w().locator('[data-fold-all=collapse]').click()
+  check(await w().locator('.w-row [data-hidden]').count() > 0 && await w().locator('.w-row[data-itsa]').count() < before, 'work: Collapse all folds every row with subrows')
+  await w().locator('[data-fold-all=expand]').click()
+  // The keyboard: Enter folds a focused chevron and Space unfolds it, as real keys in the browser.
+  await toggles.first().focus()
+  await p.keyboard.press('Enter')
+  check(await toggles.first().getAttribute('aria-expanded') === 'false' && await p.evaluate(() => window.stamDebug.shell.currentWorld()) === 'w:work', 'work: Enter on the chevron folds the row and doesn\'t open it')
+  await toggles.first().focus()
+  await p.keyboard.press('Space')
+  check(await toggles.first().getAttribute('aria-expanded') === 'true', 'work: Space on the chevron unfolds it')
+  // A 1,024 px window leaves a pane under 900 px beside the sidebar (the glance, with no table), so the table is
+  // measured at the narrowest windows that show it: 1,210 px (a pane of about 910) and 1,280 px.
+  for (const width of [1210, 1280]) {
+    const m = await pane(width)
+    check(!m.card && m.overflow <= 0, `work: at ${width} px the table is shown and has no sideways scroll`, JSON.stringify(m))
+    await p.screenshot({ path: `${out}/work-fold-${width}.png` })
+  }
+  await pane(1500)
   // The Quick row (S-1515): six toggles; Blocked narrows the count to "N of M", a second press restores it.
   check(await w().locator('.w-quick .w-qchip').count() === 6, 'work: the Quick row has six toggles')
   await w().locator('.w-qchip[data-quick="blocked"]').click()
@@ -3032,7 +3074,7 @@ async function inputCard() {
     await shot(p, `input-${name}`);
     await p.context().close();
   }
-  // Kim's long command at phone width: it wraps in full, and nothing scrolls sideways.
+  // A long command at phone width: it wraps in full, and nothing scrolls sideways.
   const lp = await page({ width: 360, height: 780 });
   const lc = await openCard(lp, hReq, true);
   const wide = await lc.locator('[data-input-text]').evaluate((el) => el.scrollWidth - el.clientWidth);
@@ -3478,7 +3520,7 @@ async function batchApprovalFlow() {
     await setHumanMail({ 'claude-haiku-5-5': true });
     const got = await api('/api/requirements/batch', { method: 'POST', body: JSON.stringify({ by: 'helper', requirements: [
       { ref: 'bt', title: 'Batch approval top', text: 'The batch shall be readable.' },
-      { parent: 'bt', title: 'One line per draft', text: 'The approval shall list each draft on one line.', rationale: 'Kim approves what they read.', verification: ['decision'], scope: { subjects: ['mail-to-human'] }, mode: 'observe' },
+      { parent: 'bt', title: 'One line per draft', text: 'The approval shall list each draft on one line.', rationale: 'Dana approves what they read.', verification: ['decision'], scope: { subjects: ['mail-to-human'] }, mode: 'observe' },
       { parent: 'bt', title: 'Drop keeps the rest', text: 'Dropping a draft shall leave the other drafts as they were.', rationale: 'One weak draft must not block the batch.', verification: ['decision'], scope: { subjects: ['mail-to-human'] }, mode: 'observe' },
     ] }) });
     const k = (title) => got.requirements?.find((r) => r.title === title);
@@ -3495,7 +3537,7 @@ async function batchApprovalFlow() {
     check(await rows.count() === 3, 'the approval lists each draft in its own row', await rows.count());
     check(await p.locator('.itsa-summary').count() === 0, 'the ITSA summary, which repeats the count, is not shown for a batch');
     const oneText = await list.locator(`[data-batch-item="${one}"]`).innerText();
-    check(oneText.includes('The approval shall list each draft on one line.') && oneText.includes('Kim approves what they read.'), 'a row carries the draft\'s text and why', oneText);
+    check(oneText.includes('The approval shall list each draft on one line.') && oneText.includes('Dana approves what they read.'), 'a row carries the draft\'s text and why', oneText);
     const approveText = await p.locator('[data-act="approve"]').innerText();
     check(/Approve all/.test(approveText), 'the approve button reads Approve all', approveText);
     // A shared token with x-stam-human is not the human: the drop is refused and the draft stays a draft.
@@ -3660,6 +3702,31 @@ async function suggestFlow() {
   same(await p.locator('#suggest-modal .sg-card').evaluateAll((els) => els.map((e) => e.getAttribute('data-suggest'))), [`agent:${helper.id}`, 'thread:nope'], 'the cards show, best first');
   check(/Goes to|No pick/.test(await p.locator('#suggest-modal .cmp-target').innerText()), 'with no pick the box names the default', await p.locator('#suggest-modal .cmp-target').innerText());
   await shot(p, 'suggest-1-cards');
+  // Preview (S-1910): Alt+P previews the best card, focus moves into it, Esc closes only the preview
+  // (the prompt, the cards and the box focus stay), and Pick does what a click on the card does.
+  await p.keyboard.press('Alt+p');
+  await p.waitForSelector('[data-preview]');
+  check(await p.locator(`[data-preview="agent:${helper.id}"]`).count() === 1, 'Alt+P previews the best card');
+  check(await p.evaluate(() => !!document.activeElement?.closest('.menu.popover')), 'focus moves into the preview');
+  check(/helper/.test(await p.locator('[data-preview]').innerText()), 'the preview names the agent', await p.locator('[data-preview]').innerText());
+  await shot(p, 'suggest-1b-preview');
+  await p.keyboard.press('Escape');
+  await p.waitForSelector('[data-preview]', { state: 'detached' });
+  check(await p.locator('#suggest-modal .sg-card').count() === 2 && await p.locator('#suggest-modal .sg-chip').count() === 0, 'Esc closes the preview and keeps the cards, with no pick');
+  check(await p.evaluate(() => document.activeElement?.matches('#suggest-modal textarea')), 'focus returns to the box');
+  await p.locator('#suggest-modal [data-suggest="thread:nope"] [data-preview-btn]').click();
+  await p.waitForSelector('[data-preview="thread:nope"]');
+  check(/not picked here/.test(await p.locator('[data-preview]').innerText()), 'the Preview button shows a mail card\'s text', await p.locator('[data-preview]').innerText());
+  await p.keyboard.press('Escape');
+  await p.waitForSelector('[data-preview]', { state: 'detached' });
+  // The mouse is over the mail card, so Alt+P previews that highlighted card.
+  await p.keyboard.press('Alt+p');
+  await p.waitForSelector('[data-preview="thread:nope"]');
+  await p.locator('[data-preview-pick]').click();
+  await p.locator('#suggest-modal .sg-chip[data-pick="thread:nope"]').waitFor();
+  check(true, 'Pick in the preview picks the card, as a chip');
+  await p.locator('#suggest-modal .sg-unpick').click();
+  await p.waitForSelector('#suggest-modal .sg-card');
   // Arrow up then Enter picks the best card instead of sending; the others go.
   await p.keyboard.press('ArrowUp');
   await p.keyboard.press('Enter');
@@ -3695,6 +3762,29 @@ async function suggestFlow() {
   await p.keyboard.press('Alt+a');
   await p.waitForSelector('#suggest-modal', { state: 'detached' });
   check(true, 'Escape and a second Alt+A close it');
+  // The preview over the prompt: back closes the preview alone and focus returns to the box; a click on
+  // the scrim closes the preview and the prompt, and the prompt stays closed (the history settles).
+  await open();
+  await p.keyboard.type('UI check, not real work: ');
+  await p.waitForSelector('#suggest-modal .sg-card');
+  await p.keyboard.press('Alt+p');
+  await p.waitForSelector('[data-preview]');
+  await p.goBack();
+  await p.waitForSelector('[data-preview]', { state: 'detached' });
+  check(await p.locator('#suggest-modal').count() === 1 && await p.locator('#suggest-modal .sg-card').count() === 2, 'back closes the preview and leaves the prompt and its cards');
+  check(await p.evaluate(() => document.activeElement?.matches('#suggest-modal textarea')), 'focus returns to the box after back');
+  await p.keyboard.press('Alt+p');
+  await p.waitForSelector('[data-preview]');
+  await p.mouse.click(4, 4);
+  await p.waitForSelector('#suggest-modal', { state: 'detached' });
+  await p.waitForTimeout(500);
+  check(await p.locator('#suggest-modal').count() === 0 && await p.locator('[data-preview]').count() === 0, 'a scrim click with the preview open closes both, and the prompt stays closed');
+  // The closed prompt kept its draft; clear it so the Go to checks that follow start empty.
+  await open();
+  await p.keyboard.press('Control+a');
+  await p.keyboard.press('Backspace');
+  await p.keyboard.press('Escape');
+  await p.waitForSelector('#suggest-modal', { state: 'detached' });
   // Go to (S-1463): reached by keyboard, it opens the agent, closes the prompt and drafts the text
   // in the agent's box; a second Go to adds its text after the first draft.
   const goTo = async (text) => {

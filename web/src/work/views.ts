@@ -1,6 +1,6 @@
 // The Work table's layout: which columns show, in what order, at what widths, and the named
 // views that save them. The state transitions are pure. The views (columns, order, grouping,
-// filter) are kept in stam settings (S-293), so they follow Kim across devices; the column widths
+// filter) are kept in stam settings (S-293), so they follow the user across devices; the column widths
 // stay on this device, in localStorage. Every column id is checked against the registry the
 // caller passes in, so a stale or corrupt store falls back to the default instead of hiding work.
 import { fieldIdOf, isFieldCol } from '../itsa/fields'
@@ -387,7 +387,7 @@ function baseline(store: ViewStore, ids: string[]): { layout: Layout; show: Show
 // resizing a column or a new field doesn't mark a view edited.
 const stable = (x: unknown): string => JSON.stringify(x, (_, v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1))) : v))
 // The order a checklist's values were ticked in isn't state: sorted. (cleanLayout already puts the quick filters in their own order.)
-const filtersShape = (f: Record<string, ColFilter> | undefined) => Object.fromEntries(Object.entries(f ?? {}).map(([c, x]) => [c, x.kind === 'values' ? { ...x, values: x.values.slice().sort() } : x]))
+const filtersShape = (f: Record<string, ColFilter> | undefined) => Object.fromEntries(Object.entries(f ?? {}).map(([c, x]) => [c, x.kind === 'values' ? { ...x, ...(x.values ? { values: x.values.slice().sort() } : {}), ...(x.not ? { not: x.not.slice().sort() } : {}) } : x]))
 const shape = (l: Layout, show: Show) => stable({ cols: l.cols, group: l.group, groupBy: l.group === 'column' ? l.groupBy : null, show, sort: l.sort ?? [], filters: filtersShape(l.filters), quick: l.quick ?? [] })
 
 // Whether the working layout differs from what the current view was saved as: its columns, grouping,

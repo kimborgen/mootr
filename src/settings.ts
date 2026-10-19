@@ -92,6 +92,12 @@ export const DEFAULTS = {
   // Growth (S-920): a standing agent over any threshold is told to propose helpers, a split or a team (standing-growth.ts).
   // openItsas: ITSAs it owns in ready or active; leadHours: median lead time of its last ten closed; contextPct: context size as a percent of the compaction threshold.
   standing: { idleHours: 4, growth: { enabled: true, openItsas: 8, leadHours: 48, contextPct: 80 } },
+  // Any agent with only stam-held waits rests (S-1982, lifecycle.restSweep): after graceMinutes idle when
+  // its expected wake (a wake_me, a wait_for timeout or expect_minutes) is more than afterMinutes away,
+  // or after afterMinutes idle with no known time. types: false keeps an agent type up (keyed as
+  // agent-class typeOf names it; `cos` is the chief of staff). Both rules apply to standing agents too, a wait with no
+  // time included; only a standing agent with no wait at all keeps standing.idleHours instead.
+  rest: { enabled: true, afterMinutes: 20, graceMinutes: 2, types: { cos: false, assistant: false } as Record<string, boolean> },
   exitRecovery: { percentOfWindow: 85, windowTokens: 350_000, repeatMinutes: 5 },
   // Harness menus that pop up over an idle agent's input and block delivery. When one is
   // on screen, stam sends these keys. Escape cancels a menu without touching a draft.
@@ -159,9 +165,11 @@ export const DEFAULTS = {
   // shipped prompt in src/mail-title.ts / src/block-summaries.ts.
   tiny: {
     toolSummary: { enabled: false, model: 'google/gemma-3-4b-it', instructions: '' },
+    // The tool name map (S-1933): each tool gets one stored label, made once by this model. On by default.
+    toolNames: { enabled: true, model: 'google/gemma-3-4b-it' },
     mailTitles: { titleInstructions: '', summaryInstructions: '' },
     blockSummaries: { instructions: '' },
-  } as { toolSummary: { enabled: boolean; model: string; instructions: string }; mailTitles: { titleInstructions: string; summaryInstructions: string }; blockSummaries: { instructions: string } },
+  } as { toolSummary: { enabled: boolean; model: string; instructions: string }; toolNames: { enabled: boolean; model: string }; mailTitles: { titleInstructions: string; summaryInstructions: string }; blockSummaries: { instructions: string } },
   // The model classifier for activity items the rules leave NULL (src/activity-classify.ts, S-214).
   // Off by default: nothing is spent until a human turns it on. maxUsdPerDay caps its day's spend
   // (UTC); concurrency is how many items it asks at once.
@@ -187,6 +195,9 @@ export const DEFAULTS = {
   // Blocked and errored children always reach a parent. A new agent starts with this;
   // a parent can change its own. See org.ts and the `stam child-notices` command.
   childNotices: 'tree-idle' as 'turn' | 'tree-idle' | 'none',
+  // The most developer-type agents active on this machine at once (S-2008); a spawn over it is
+  // refused with the holders named. 0 turns the cap off. Reviewers and other types are never capped.
+  developerCap: 6,
   // Which view the human's web UI opens an agent in (S-82): stam's own view of its
   // conversation where its harness has one (the default), or its terminal, which is also
   // what an agent with no view opens in. An agent's own choice wins.
@@ -992,6 +1003,7 @@ function readSettings(): { value: Settings; cacheable: boolean } {
     context: { ...DEFAULTS.context, ...user.context },
     idleCompaction: { ...DEFAULTS.idleCompaction, ...user.idleCompaction },
     standing: { ...DEFAULTS.standing, ...user.standing, growth: { ...DEFAULTS.standing.growth, ...user.standing?.growth } },
+    rest: { ...DEFAULTS.rest, ...user.rest, types: { ...DEFAULTS.rest.types, ...user.rest?.types } },
     exitRecovery: { ...DEFAULTS.exitRecovery, ...user.exitRecovery },
     peers: Array.isArray(user.peers) ? user.peers : [],
     cost,
@@ -1009,6 +1021,10 @@ function readSettings(): { value: Settings; cacheable: boolean } {
         enabled: user.tiny?.toolSummary?.enabled === true,
         model: typeof user.tiny?.toolSummary?.model === 'string' && user.tiny.toolSummary.model.trim() ? user.tiny.toolSummary.model.trim() : DEFAULTS.tiny.toolSummary.model,
         instructions: typeof user.tiny?.toolSummary?.instructions === 'string' ? user.tiny.toolSummary.instructions : '',
+      },
+      toolNames: {
+        enabled: user.tiny?.toolNames?.enabled !== false,
+        model: typeof user.tiny?.toolNames?.model === 'string' && user.tiny.toolNames.model.trim() ? user.tiny.toolNames.model.trim() : DEFAULTS.tiny.toolNames.model,
       },
       mailTitles: {
         titleInstructions: typeof user.tiny?.mailTitles?.titleInstructions === 'string' ? user.tiny.mailTitles.titleInstructions : '',
@@ -1042,6 +1058,7 @@ function readSettings(): { value: Settings; cacheable: boolean } {
     childNotices: ['turn', 'tree-idle', 'none'].includes(user.childNotices) ? user.childNotices : DEFAULTS.childNotices,
     agentView: { default: user.agentView?.default === 'terminal' ? 'terminal' : 'conversation' },
     promptDefaultMode: user.promptDefaultMode === 'direct' ? 'direct' : 'mail',
+    developerCap: Number.isInteger(user.developerCap) && user.developerCap >= 0 ? user.developerCap : DEFAULTS.developerCap,
     staleWorkingMinutes: typeof user.staleWorkingMinutes === 'number' && user.staleWorkingMinutes > 0 ? user.staleWorkingMinutes : DEFAULTS.staleWorkingMinutes,
     startingTimeoutMinutes: typeof user.startingTimeoutMinutes === 'number' && user.startingTimeoutMinutes > 0 ? user.startingTimeoutMinutes : DEFAULTS.startingTimeoutMinutes,
     dialogEscalateMinutes: typeof user.dialogEscalateMinutes === 'number' && user.dialogEscalateMinutes >= 0 ? user.dialogEscalateMinutes : DEFAULTS.dialogEscalateMinutes,

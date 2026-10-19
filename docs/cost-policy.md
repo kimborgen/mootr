@@ -1,6 +1,6 @@
-# Cost policy: managers control cost, stam tracks and enforces the user's rules
+# Cost policy: managers control cost, mootr tracks and enforces the user's rules
 
-Design, 2026-10-11, third revision. The brief: "The key here is that managers can manage the cost. CoS especially." Stam tracks usage, attributes it, estimates, notifies, and offers tools. Managers, the chief of staff above all, make the calls, guided by the user's free-text cost instructions. Stam enforces only what the user states as a rule.
+Design, 2026-10-11, third revision. The brief: "The key here is that managers can manage the cost. CoS especially." Mootr tracks usage, attributes it, estimates, notifies, and offers tools. Managers, the chief of staff above all, make the calls, guided by the user's free-text cost instructions. Mootr enforces only what the user states as a rule.
 
 ## Terms
 
@@ -12,9 +12,9 @@ Design, 2026-10-11, third revision. The brief: "The key here is that managers ca
 
 ## The user's part
 
-**Cost instructions**: free text in Settings (`cost.instructions`). Stam puts it into the chief of staff's template, into every manager's spawn prompt, into every cost notice, and into `usage_info`. Managers follow it with stam's numbers.
+**Cost instructions**: free text in Settings (`cost.instructions`). Mootr puts it into the chief of staff's template, into every manager's spawn prompt, into every cost notice, and into `usage_info`. Managers follow it with mootr's numbers.
 
-**Rules**: only what the user states as a rule becomes config that stam enforces:
+**Rules**: only what the user states as a rule becomes config that mootr enforces:
 
 - `paid: false` on an account: never spend extra credits there. When a window reads 100%, the account's agents stop until it resets.
 - `budget` on an account or globally: paid dollars per `day`, `week` or `month`, or a `cap` that holds until raised.
@@ -40,28 +40,28 @@ The example user's rules: never extra credits on Claude or Codex; OpenRouter is 
 }
 ```
 
-The only rules here are the two `paid: false`. OpenRouter has no stam budget: the key's own $10 is the limit, and `credits-out` stops work when it's gone. The `on*` actions are fallbacks (below), not policy. The user might then tell the chief of staff "give the stam2 tree about 30% of the 5-hour window": an allocation, not a rule.
+The only rules here are the two `paid: false`. OpenRouter has no mootr budget: the key's own $10 is the limit, and `credits-out` stops work when it's gone. The `on*` actions are fallbacks (below), not policy. The user might then tell the chief of staff "give the mootr tree about 30% of the 5-hour window": an allocation, not a rule.
 
 ## Readings
 
-Stam reads limits continually, since providers change them often: Claude on every statusline refresh; Codex on `account/rateLimits/updated` plus `account/rateLimits/read` every 5 minutes while its agents run; OpenRouter credits every 5 minutes. A reading older than 15 minutes is unknown, and an unknown reading never clears a blocker. Limit errors per harness come from `classifyError` (built).
+Mootr reads limits continually, since providers change them often: Claude on every statusline refresh; Codex on `account/rateLimits/updated` plus `account/rateLimits/read` every 5 minutes while its agents run; OpenRouter credits every 5 minutes. A reading older than 15 minutes is unknown, and an unknown reading never clears a blocker. Limit errors per harness come from `classifyError` (built).
 
 ## Attribution and estimates
 
-Stam records each agent's tokens (input, output, cache read, cache write) and model per reading interval, not just per day, so every change in a window's percentage can be split among the agents that ran.
+Mootr records each agent's tokens (input, output, cache read, cache write) and model per reading interval, not just per day, so every change in a window's percentage can be split among the agents that ran.
 
 - **Weights**: tokens are weighted by model and token type, starting from the registry's API prices.
 - **Calibration**: each fresh reading fits the weights to the observed percent change, per account and window. A miss of more than 25% resets the fit (the formula changed).
-- **Share**: an agent's estimated percent of a window is its weighted tokens over all weighted tokens on that account in the interval, times the reading's change. A tree's share is the sum over its agents. Change no stam agent explains shows as **other** (the user's own use outside stam).
+- **Share**: an agent's estimated percent of a window is its weighted tokens over all weighted tokens on that account in the interval, times the reading's change. A tree's share is the sum over its agents. Change no mootr agent explains shows as **other** (the user's own use outside mootr).
 - **History**: percent per hour by account, tree and agent, kept by hour of day and day of week. It gives projections ("five_hour reaches 100% around 15:40 at today's rate") and estimates for planned work ("a tree like this used about 12% of a 5-hour window").
 
 All estimates are labelled as estimates. They time notices and inform managers; they never set or clear a blocker.
 
 ## Allocations
 
-The user or a manager sets an allocation on a tree: "tree T may use about X% of ACCOUNT's `five_hour` window" or "about $Y per day of paid spend". A manager may allocate only within its own tree's allocation; stam warns, never refuses, when children's allocations add up past it.
+The user or a manager sets an allocation on a tree: "tree T may use about X% of ACCOUNT's `five_hour` window" or "about $Y per day of paid spend". A manager may allocate only within its own tree's allocation; mootr warns, never refuses, when children's allocations add up past it.
 
-Allocations aren't enforced. At 80% and 100% of an allocation, stam notifies the tree's manager and the tree's root, with the numbers, the projection, and the user's instructions. What happens next is the manager's call.
+Allocations aren't enforced. At 80% and 100% of an allocation, mootr notifies the tree's manager and the tree's root, with the numbers, the projection, and the user's instructions. What happens next is the manager's call.
 
 ## Notices to managers
 
@@ -77,7 +77,7 @@ Each cost event goes to the responsible manager through `queueNotice` (in-turn n
 
 Every notice carries the user's instructions, the tree's usage and estimate, the options it has (the tools below), and the fallback that runs if nobody acts. The agent itself gets `cost-warning.md` or `cost-prepare.md` (keep `HANDOVER.md` current).
 
-**Fallback**: when a notice about a blocked or exhausted agent goes `fallbackMinutes` without its manager acting on that agent (any tool below, or `cost_ack`), stam applies the account's `onSubExhausted`, `onBudgetExhausted`, `onCreditsOut` or `onError` action, and tells the chief of staff. If the chief of staff is itself unavailable or blocked, stam mails the human. Without a configured action the fallback is `wait`.
+**Fallback**: when a notice about a blocked or exhausted agent goes `fallbackMinutes` without its manager acting on that agent (any tool below, or `cost_ack`), mootr applies the account's `onSubExhausted`, `onBudgetExhausted`, `onCreditsOut` or `onError` action, and tells the chief of staff. If the chief of staff is itself unavailable or blocked, mootr mails the human. Without a configured action the fallback is `wait`.
 
 ## Manager tools
 
@@ -85,7 +85,7 @@ MCP tools and `stam` commands, usable by a manager on its own tree (the chief of
 
 - `usage_info tree=AGENT`: per agent and tree, each window's share, paid spend, allocations, projection, history, blockers, and the user's instructions.
 - `cost_allocate TREE`: set or clear an allocation.
-- `cost_pause TREE until=reset`: pause agents until a fresh reading shows the window reset, or until a time. A cost pause is its own lifecycle owner, lifted by stam on that reading.
+- `cost_pause TREE until=reset`: pause agents until a fresh reading shows the window reset, or until a time. A cost pause is its own lifecycle owner, lifted by mootr on that reading.
 - `cost_switch AGENT PRESET`: move the work to another preset with a handover (below).
 - `cost_ack EVENT`: "handled, leave it", which stops the fallback timer.
 
@@ -105,7 +105,7 @@ Each agent carries a persisted set of blockers, each with its own clear conditio
 | `credits-out:ACCOUNT` | verified balance ≤ 0, a 402, or `spendControlReached` | a fresh balance ≥ `lowCreditsUsd`; Claude, with no balance: a probe succeeds |
 | `error:ACCOUNT` | provider error after the harness's retries | a probe succeeds (1, 2, 4, 8, 16 min) |
 
-Stam runs an agent only when its blocker set is empty and no human, parent or cost pause holds it. **Admission gate**: `admit(agent, kind)` before every model turn: mail prompts, `pushPrompt`, ring turns, compaction, resume, restart, unpause, spawn. A blocked agent's mail waits unread until its blockers clear; paused agents get mail as before. When a limit error ends a turn the agent is already stopped; when a rule trips mid-turn, stam soft-stops it (hard-stop after 10 minutes via adapter `interrupt()`).
+Mootr runs an agent only when its blocker set is empty and no human, parent or cost pause holds it. **Admission gate**: `admit(agent, kind)` before every model turn: mail prompts, `pushPrompt`, ring turns, compaction, resume, restart, unpause, spawn. A blocked agent's mail waits unread until its blockers clear; paused agents get mail as before. When a limit error ends a turn the agent is already stopped; when a rule trips mid-turn, mootr soft-stops it (hard-stop after 10 minutes via adapter `interrupt()`).
 
 ### Budgets across machines
 
@@ -113,7 +113,7 @@ A budget counts every machine's paid spend (S-395). Each daemon serves its own t
 
 ### System vs agent budget (S-1077)
 
-Stam's own model calls bill to the account `openrouter-system`, apart from the agents' `openrouter`. Both are OpenRouter-billed (the same credit and key), so the global budget counts both. `cost.accounts.openrouter.budget` is the agents' budget; the system budget is `cost.accounts['openrouter-system'].budget`, on an account with a match no agent has, for example `{ "match": { "harness": "stam" }, "budget": { "usd": 3, "per": "day" } }`. A spent agents budget never stops a system call. A spent system budget (`budgets.systemHeld`) makes `decide`, the mail titles and the block summaries skip their call, and `decide` records a `decide:error` event, as it does for any failure. The 90% notice for the system scope goes to the chief of staff, and the human gets the usual raise Decision. Only the human edits either budget. The first start after this change moves old `stam` rows from `openrouter` to `openrouter-system` once.
+Mootr's own model calls bill to the account `openrouter-system`, apart from the agents' `openrouter`. Both are OpenRouter-billed (the same credit and key), so the global budget counts both. `cost.accounts.openrouter.budget` is the agents' budget; the system budget is `cost.accounts['openrouter-system'].budget`, on an account with a match no agent has, for example `{ "match": { "harness": "stam" }, "budget": { "usd": 3, "per": "day" } }`. A spent agents budget never stops a system call. A spent system budget (`budgets.systemHeld`) makes `decide`, the mail titles and the block summaries skip their call, and `decide` records a `decide:error` event, as it does for any failure. The 90% notice for the system scope goes to the chief of staff, and the human gets the usual raise Decision. Only the human edits either budget. The first start after this change moves old `stam` rows from `openrouter` to `openrouter-system` once.
 
 The two accounts share one OpenRouter credit, so the agents can't be left to spend the system's share of it (the reserve). While the last credit reading (`credits.ts`, fetched whole within 15 minutes; an older one decides nothing and asks for a fresh poll) is at or below the reserve, the `openrouter` scope carries a `budget` blocker (clear `{ reserve }`, a reason with no amount, so a moving reserve doesn't rewrite it) and `spawnHeld` refuses new OpenRouter agents; a top-up clears it. `credits.ts` polls while agents are held for it, and a refused spawn asks for a fresh balance, so a top-up with no OpenRouter agent running still lifts the hold. The reserve is the unspent part of the system budget, or `cost.openrouterSystemReserveUsd` (default 1) when that account has none. System calls are never stopped by it. A `reserve-near` notice goes to the managers on OpenRouter and the chief of staff once per top-up, when the credit is within twice the reserve. An agents budget that is spent takes precedence over the reserve blocker.
 
@@ -122,7 +122,7 @@ The two accounts share one OpenRouter credit, so the agents can't be left to spe
 Every code path that writes paid spend to the `usage` table must tell the budgets, or a spent budget goes unseen until the next unrelated evaluation (retro S-309). There are three:
 
 - `usage.report` (`src/usage.ts`): an agent's cost and tokens. Calls `budgets.onSpend(account)` itself.
-- `recordCost` in `src/decide.ts`: stam's own model calls (mail gate, summaries, titles, decisions) on the `openrouter-system` account. Must call `budgets.ledgerChanged()`.
+- `recordCost` in `src/decide.ts`: mootr's own model calls (mail gate, summaries, titles, decisions) on the `openrouter-system` account. Must call `budgets.ledgerChanged()`.
 - `reconcile()` in `src/reconcile.ts`: scales the OpenCode rows down to the billed amount. Must call `budgets.ledgerChanged('reconciled')`.
 
 A new writer calls `budgets.ledgerChanged()` after its write and is added to this list.

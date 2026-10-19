@@ -51,7 +51,8 @@ export async function announceToolChanges(): Promise<void> {
   if (!before) return;
   const d = diff(before, now);
   if (!d.added.length && !d.removed.length && !d.changed.length) return;
-  const running = db.listAgents().filter((a) => a.machine === MACHINE && (a.lifecycle === 'active' || a.lifecycle === 'paused'));
+  // A resting agent (S-1982) loads the new tools when it next starts; a notice would only wake it for nothing.
+  const running = db.listAgents().filter((a) => a.machine === MACHINE && (a.lifecycle === 'active' || a.lifecycle === 'paused') && !db.restOwned(a));
   for (const a of running) {
     db.addEvent(a.id, 'mcp-tools:changed', d);
     const text = noticeText(d, a.harness);

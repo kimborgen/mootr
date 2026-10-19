@@ -21,7 +21,8 @@ export const stories: Story[] = [{
   when: 'In the popover the header\'s ▾ button opens (Alt and the down arrow on a focused header), under the sort items, and from a filter token in the active-filter row. A column with two kinds (Branch: has or text) shows a switch between them.',
   code: ['web/src/work/filter-editors.tsx#FilterEditor', 'web/src/work/filter-editors.tsx#ValuesEditor', 'web/src/work/filter-editors.tsx#TextEditor', 'web/src/work/filter-editors.tsx#RangeEditor', 'web/src/work/filter-editors.tsx#DateEditor', 'web/src/work/filter-editors.tsx#HasEditor', 'web/src/work/filter-editors.tsx#CheckEditor', 'web/src/work/header-menu.tsx#HeaderMenuBody', 'web/src/work/sortfilter.ts#ColFilter'],
   rules: [
-    'The values checklist starts with every value ticked, which is no filter; unticking one filters to the rest, and ticking them all again removes the filter. A row with no value is "(Blank)". All and None act on the values the search shows.',
+    'The values checklist starts with every value ticked, which is no filter; unticking one hides it as an exclude rule (so a value that appears later shows), and ticking it again removes the filter. Inside an include list (Filter to this value) unticking stays an include list. A row with no value is "(Blank)". All and None act on the values the search shows.',
+    'A standing exclude rule (Exclude this value on a cell, or unticking with no filter) reads in the same checklist: the excluded values are unticked and every other value, including one that first appears later, is ticked. A row listing several values (agents) is hidden when any one is excluded. Its token reads `Status ≠ Blocked`.',
     'Rows are the menu\'s checklist rows (`.rm-row`): the label, the count in `--text-muted`, and the tick on the right (' + ds('Menus') + '). Inputs and the From and To fields are the menu\'s search field. Only design tokens.',
     'Home and End in the Search values box move the caret to the start and end of the text; they don\'t jump to the first and last row of the menu.',
     'Choosing the chosen preset or choice again clears it. A number field keeps what is typed and filters once it parses.',
@@ -29,6 +30,7 @@ export const stories: Story[] = [{
   states: [
     { name: 'Values, nothing filtered', render: () => <Live kind="values" options={STATUSES} /> },
     { name: 'Values, two ticked', render: () => <Live kind="values" options={STATUSES} start={{ kind: 'values', values: ['in_review', 'testing'] }} /> },
+    { name: 'Values, an exclude rule (Blocked hidden)', render: () => <Live kind="values" options={STATUSES} start={{ kind: 'values', not: ['blocked'] }} /> },
     { name: 'Text', render: () => <Live kind="text" start={{ kind: 'text', q: 'stam/' }} /> },
     { name: 'Range', render: () => <Live kind="range" start={{ kind: 'range', min: 1 }} /> },
     { name: 'Date, a preset and a from day', render: () => <Live kind="date" start={{ kind: 'date', preset: '7d', from: '2026-10-01' }} /> },
