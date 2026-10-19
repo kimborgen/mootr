@@ -1,0 +1,18 @@
+{
+  "jsonrpc": "2.0",
+  "method": "account/rateLimits/updated",
+  "params": {
+    "rateLimits": {
+      "primary": {
+        "usedPercent": 42,
+        "resetsAt": 1893456000,
+        "windowDurationMins": 300
+      },
+      "credits": {
+        "hasCredits": true,
+        "unlimited": false,
+        "balance": "18.40"
+      }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"type": "user", "message": {"role": "user", "content": "<bash-input> echo s422-smoke  a;b</bash-input>"}}

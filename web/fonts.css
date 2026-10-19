@@ -1,0 +1,9 @@
+/*
+ * The chrome faces: Adobe's own builds of Source Sans 3 and Source Code Pro, subset
+ * with an OpenType keep-list, self-hosted. The family names match tokens.css.
+ * stam has no document serif, so there are no STIX faces.
+ */
+@font-face { font-family: 'Source Sans 3 Variable'; font-style: normal; font-weight: 200 900; font-display: swap; src: url('fonts/source-sans-3-roman.woff2') format('woff2-variations'); }
+@font-face { font-family: 'Source Sans 3 Variable'; font-style: italic; font-weight: 200 900; font-display: swap; src: url('fonts/source-sans-3-italic.woff2') format('woff2-variations'); }
+@font-face { font-family: 'Source Code Pro Variable'; font-style: normal; font-weight: 200 900; font-display: swap; src: url('fonts/source-code-pro-roman.woff2') format('woff2-variations'); }
+@font-face { font-family: 'Source Code Pro Variable'; font-style: italic; font-weight: 200 900; font-display: swap; src: url('fonts/source-code-pro-italic.woff2') format('woff2-variations'); }

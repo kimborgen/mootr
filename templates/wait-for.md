@@ -1,0 +1,1 @@
+[stam] {{name}} is waiting for your reply{{thread}}.

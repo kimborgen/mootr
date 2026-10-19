@@ -1,0 +1,1 @@
+[stam] Retro reminder: record what's worth keeping with `retro`, a time sink, a misleading instruction, a trick that worked, or an idea. Search first and +1 a match. Your history file still has the details.

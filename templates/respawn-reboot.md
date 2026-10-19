@@ -1,0 +1,1 @@
+Nobody shut you down on purpose: {{reason}}, which closed your terminal. Everything you had running there, such as a command, a build, a server, or a background job, was killed. Check what finished before relying on it, and restart what you still need. If you were in the middle of a task, carry on with it; otherwise wait for mail. Don't mail anyone just to say you are back.

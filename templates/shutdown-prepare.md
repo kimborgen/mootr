@@ -1,0 +1,1 @@
+[stam] Your harness will be shut down when you finish your current step. Wrap up: stop programs you started and note where you are, then end your turn. Running tool calls end when the harness quits. You can be resumed later with your full conversation.

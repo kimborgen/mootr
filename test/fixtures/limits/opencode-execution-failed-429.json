@@ -1,0 +1,12 @@
+{
+  "type": "session.execution.failed",
+  "data": {
+    "sessionID": "ses_2f8a1c9d0e",
+    "messageID": "msg_7b6a5c4d",
+    "error": {
+      "type": "provider.rate-limit",
+      "message": "Too many requests",
+      "status": 429
+    }
+  }
+}

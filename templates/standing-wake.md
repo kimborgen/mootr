@@ -1,0 +1,1 @@
+[stam] You were resting, idle as a standing agent, and have been woken: {{why}}. Your conversation is resumed and your workspace at {{cwd}} is unchanged. Re-read your workspace index to pick up where you left off; the mail and notices that woke you follow.

@@ -1,0 +1,10 @@
+.env
+node_modules
+.claude/worktrees/
+web/dist/
+tsconfig.tsbuildinfo
+# stam writes these into an agent's worktree; ignored so archive can remove it (S-904)
+HANDOVER.md
+.check-shots/
+node_modules.old-*
+node_modules.new-*

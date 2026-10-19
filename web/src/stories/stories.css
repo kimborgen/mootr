@@ -1,0 +1,72 @@
+/*
+ * The stories page (/stories). Like style.css it consumes the token layer only: no colour,
+ * size, or duration of its own. The frame widths, 360 and 1280 px, are the viewports shown,
+ * set on the frames themselves.
+ */
+
+/* --- The page ------------------------------------------------------------------- */
+.sb { display: grid; grid-template-columns: var(--size-pane-min) minmax(0, 1fr); height: 100dvh; }
+.sb-bar { display: none; }
+.sb-nav { overflow-y: auto; background: var(--surface-pane); border-right: 1px solid var(--border-subtle); padding: var(--space-2) 0 var(--space-6); }
+.sb-title { padding: var(--space-2) var(--space-3); font-size: var(--type-chrome-lg); line-height: var(--leading-chrome-lg); font-weight: var(--weight-semibold); }
+.sb-group { padding: var(--space-3) var(--space-3) var(--space-1); }
+.sb-item { display: flex; align-items: center; width: 100%; min-height: var(--size-row-menu); padding: 0 var(--space-3); text-align: left; color: var(--text-secondary); }
+.sb-item:hover { background: var(--tree-row-hover); color: var(--text-primary); }
+.sb-item.sel { background: var(--tree-row-selected-bg); color: var(--tree-row-selected-fg); }
+.sb-item:focus-visible { box-shadow: inset 0 0 0 var(--focus-ring-width) var(--focus-ring); }
+.sb-main { overflow-y: auto; overflow-x: hidden; background: var(--surface-page); --focus-halo-surface: var(--surface-page); }
+
+/* --- A story ---------------------------------------------------------------------- */
+.sb-doc { max-width: calc(var(--size-pane-min) * 4); padding: var(--space-6) var(--space-6) var(--space-12); }
+.sb-doc h1 { margin: var(--space-1) 0 var(--space-4); font-size: var(--type-chrome-xl); line-height: var(--leading-chrome-xl); font-weight: var(--weight-semibold); }
+.sb-doc h2 { margin: var(--space-6) 0 var(--space-2); font-size: var(--type-chrome-lg); line-height: var(--leading-chrome-lg); font-weight: var(--weight-semibold); }
+.sb-doc h3 { margin: var(--space-6) 0 var(--space-2); font-size: var(--type-chrome-md); line-height: var(--leading-chrome-md); font-weight: var(--weight-medium); }
+.sb-doc p { margin: 0; max-width: var(--doc-measure); color: var(--text-secondary); }
+.sb-doc a { color: var(--accent-text); }
+.sb-doc code { font-family: var(--font-mono); font-size: var(--type-chrome-sm); white-space: nowrap; }
+.sb-doc ul { margin: 0; padding-left: var(--space-4); max-width: var(--doc-measure); color: var(--text-secondary); }
+.sb-doc li + li { margin-top: var(--space-1); }
+.sb-code { list-style: none; padding-left: 0 !important; }
+.sb-code a { font-size: var(--type-chrome-sm); overflow-wrap: anywhere; }
+
+.sb-controls { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-2); }
+.sb-seg { display: flex; align-items: center; gap: var(--space-1); }
+.sb-seg > span { margin-right: var(--space-1); font-size: var(--type-chrome-sm); }
+.sb-seg .btn.on { background: var(--accent-subtle); border-color: var(--accent-subtle-border); color: var(--text-primary); }
+
+.sb-frames { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+.sb-frame { margin: 0; min-width: 0; max-width: 100%; }
+.sb-frame.w360 { flex: 0 1 auto; }
+.sb-frame.w1280 { flex: 1 1 100%; }
+.sb-frame figcaption { margin-bottom: var(--space-1); font-size: var(--type-chrome-sm); font-variant-numeric: tabular-nums; }
+.sb-frame-box { position: relative; overflow: hidden; outline: 1px solid var(--border-subtle); }
+.sb-frame-box.actual { overflow-x: auto; }
+.sb-frame-size { overflow: hidden; }
+.sb-frame-box iframe { display: block; border: 0; transform-origin: 0 0; background: var(--surface-app); }
+
+/* --- A phone: the sidebar is a drawer behind the bar's menu button ------------------- */
+@media (max-width: 760px) {
+  .sb { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .sb-bar { display: flex; align-items: center; gap: var(--space-2); height: var(--size-tab-bar); padding: 0 var(--space-1); background: var(--tabbar-bg); border-bottom: 1px solid var(--tabbar-border); }
+  .sb-menu { width: var(--size-hit-touch); height: var(--size-hit-touch); }
+  .sb-bar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--weight-medium); }
+  .sb-nav { position: fixed; z-index: var(--z-modal); top: 0; bottom: 0; left: 0; width: min(calc(var(--size-pane-min) * 1.25), calc(100vw - var(--size-hit-touch)));
+    border-right: 1px solid var(--border-default); box-shadow: var(--shadow-raised); transform: translateX(-100%); visibility: hidden;
+    transition: transform var(--duration-slow) var(--ease-in), visibility 0s var(--duration-slow); }
+  .drawer-open .sb-nav { transform: none; visibility: visible; transition: transform var(--duration-slow) var(--ease-out); }
+  .sb-scrim { position: fixed; inset: 0; z-index: var(--z-scrim); background: var(--surface-scrim); }
+  .sb-item { min-height: var(--size-hit-touch); }
+  .sb-main { grid-row: 2; }
+  .sb-doc { padding: var(--space-4) var(--space-4) var(--space-12); }
+  .sb-seg .btn { min-height: var(--size-hit-touch); }
+}
+
+/* --- A frame: one state alone, its document sized by its content ----------------- */
+html.story-frame, html.story-frame body { height: auto; overflow: visible; }
+.story-state { min-height: 0; }
+.story-pad { padding: var(--space-4); }
+.story-row { display: flex; flex-wrap: wrap; gap: var(--space-4); padding: var(--space-4); }
+.story-cell { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); font-size: var(--type-chrome-sm); }
+
+.story-side { max-width: 100%; background: var(--surface-pane); }
+@media (min-width: 761px) { .story-side { width: 300px; } }

@@ -1,0 +1,1 @@
+[stam] Stam stopped you to move your work to another agent, but the switch failed, so you continue yourself: {{reason}}. Your conversation and workspace are as you left them. Check `git status`, then carry on from where you stopped.

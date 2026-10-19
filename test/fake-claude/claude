@@ -1,0 +1,644 @@
+#!/usr/bin/env node
+// A scripted stand-in for the `claude` binary, so tests drive Claude Code agents without a
+// model (docs/testing.md has the how-to). The real claude adapter launches it unchanged
+// when STAM_CLAUDE_BIN points here, so its hooks, statusline, transcript, MCP, and
+// channel paths are what a test exercises.
+//
+// It reads the argv the adapter passes (--session-id or --resume, --settings, --mcp-config,
+// --model, the rest ignored), runs the settings' hook and statusLine commands as Claude
+// Code does (JSON on stdin, hook stdout read back), starts the stam MCP server from
+// --mcp-config and speaks MCP to it, and writes a JSONL transcript next to the settings
+// file. In its tmux pane it shows an input box (❯) that takes typed and pasted prompts;
+// channel messages from the stam server are prompts too. Each prompt runs one turn, picked
+// from the script that STAM_FAKE_CLAUDE_SCRIPT names (JSON, or an .mjs module whose default
+// export is the same object). Steps run one after another; nothing waits on a timer.
+//
+// Left out (no test needs them yet): interrupting with Esc, the spinner line, compaction
+// beyond `-p` answering (the summary is the /compact text, read as `${summary}`), background
+// jobs that finish on their own, servers in --mcp-config other than stam, permission modes,
+// and Claude Code's launch dialogs.
+import { spawn } from 'node:child_process';
+import { appendFileSync, readFileSync, readdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
+import { pathToFileURL } from 'node:url';
+
+const argv = process.argv.slice(2);
+const opt = (name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
+
+if (argv.includes('--version')) {
+  console.log('2.1.296 (Claude Code, fake)');
+  process.exit(0);
+}
+// Where a compaction's summary is kept: its instructions, which the resumed session reads as
+// `${summary}`. In the test's stam home, so each test's daemon has its own.
+const summaryFile = (id) => join(process.env.STAM_HOME ?? process.cwd(), `fake-compaction-${id}.txt`);
+// Headless (`-p`): stam's compaction sends `/compact INSTRUCTIONS` on stdin, then resumes the session.
+// The fake keeps the instructions as the summary, appends a summary row to the transcript, and answers with a result.
+if (argv.includes('-p')) {
+  // Each compaction run appends its session, so a test can count compactors per session (S-358),
+  // and an OVERLAP line when another compactor still runs on the same session.
+  const fakeHome = process.env.STAM_HOME ?? process.cwd();
+  const runs = join(fakeHome, 'fake-compact-runs');
+  const lock = join(fakeHome, `fake-compact-active-${opt('--resume')}`);
+  if (existsSync(lock)) {
+    try {
+      process.kill(Number(readFileSync(lock, 'utf8')), 0);
+      appendFileSync(runs, `OVERLAP ${opt('--resume')}\n`);
+    } catch {}
+  }
+  appendFileSync(runs, `${opt('--resume')}\n`);
+  writeFileSync(lock, String(process.pid));
+  const unlock = () => {
+    try {
+      if (readFileSync(lock, 'utf8') === String(process.pid)) rmSync(lock);
+    } catch {}
+  };
+  process.on('exit', unlock);
+  process.on('SIGTERM', () => process.exit(143));
+  // The compaction writes the session as it goes, like Claude Code appending to its transcript: a
+  // compactor killed mid-compaction (a restarted daemon stops it) leaves this line half-written.
+  const agentsDir = join(fakeHome, 'agents');
+  const session = (existsSync(agentsDir) ? readdirSync(agentsDir) : [])
+    .map((d) => join(agentsDir, d, `transcript-${opt('--resume')}.jsonl`))
+    .find((f) => existsSync(f));
+  const partial = '{"type":"summary","summary":"compacting';
+  if (session) appendFileSync(session, partial);
+  let stdin = '';
+  for await (const chunk of process.stdin) stdin += chunk;
+  // A test holds the compaction open by leaving this flag file in its stam home, until it removes it.
+  while (existsSync(join(process.env.STAM_HOME ?? process.cwd(), 'fake-compact-hold'))) await new Promise((r) => setTimeout(r, 100));
+  // A test makes the compaction fail by leaving this flag file in its stam home.
+  if (existsSync(join(process.env.STAM_HOME ?? process.cwd(), 'fake-compact-fail'))) {
+    console.error('fake compaction failed');
+    process.exit(1);
+  }
+  writeFileSync(summaryFile(opt('--resume')), stdin.trim());
+  if (session) appendFileSync(session, ' (fake)"}\n');
+  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'compacted (fake)' }));
+  process.exit(0);
+}
+
+const resumed = argv.includes('--resume');
+const sessionId = opt('--resume') ?? opt('--session-id') ?? randomUUID();
+const model = opt('--model') ?? 'claude-fake';
+const settingsFile = opt('--settings');
+const settings = settingsFile ? JSON.parse(readFileSync(settingsFile, 'utf8')) : {};
+const mcpConfig = opt('--mcp-config') ? JSON.parse(readFileSync(opt('--mcp-config'), 'utf8')) : { mcpServers: {} };
+const transcript = join(settingsFile ? dirname(settingsFile) : process.cwd(), `transcript-${sessionId}.jsonl`);
+const self = process.env.STAM_AGENT_ID ?? '';
+// The argv the adapter passed, in the agent's folder, for tests that check what stam hands Claude Code.
+if (settingsFile) writeFileSync(join(dirname(settingsFile), 'argv.json'), JSON.stringify(argv));
+
+async function loadScript() {
+  const file = process.env.STAM_FAKE_CLAUDE_SCRIPT;
+  if (!file) return {};
+  if (file.endsWith('.mjs') || file.endsWith('.js')) return (await import(pathToFileURL(file).href)).default;
+  return JSON.parse(readFileSync(file, 'utf8'));
+}
+const script = await loadScript();
+
+// ---- The pane: an input box, log lines, and dialogs ----
+
+const write = (s) => process.stdout.write(s);
+const log = (s) => write(`${s.replace(/\n/g, '\n  ')}\n`);
+let input = '';
+let busy = false;
+let dialog = null; // { options, resolve, lines }
+
+function drawIdle() {
+  write(`\n  fake-claude · ${model} · auto mode · ? for shortcuts\n`);
+  drawBox();
+}
+
+// The box, then a rule and the footer under it, as Claude Code draws them: always in vim's insert
+// mode, as Claude Code shows it with vim keys (the test machines' setting). The cursor goes back
+// to the end of the box's text by drawing its line again, so wide characters need no column math.
+const FOOTER = `\r\n${'─'.repeat(40)}\r\n  -- INSERT --`;
+const boxLine = () => `\r\x1b[2K${bash ? '!' : '❯'} ${input}`;
+function drawBox() {
+  write(`${boxLine()}${FOOTER}\x1b[2A${boxLine()}`);
+}
+
+function openDialog(title, options) {
+  // Claude Code draws a rule above its dialogs.
+  const lines = ['─'.repeat(40), ...title.split('\n'), ...options.map((o, i) => `${i ? '  ' : '❯ '}${i + 1}. ${o}`), 'Enter to confirm · Esc to cancel'];
+  write(lines.join('\n') + '\n');
+  return new Promise((resolve) => (dialog = { options, resolve, lines: lines.length }));
+}
+
+function closeDialog(answer) {
+  const d = dialog;
+  dialog = null;
+  // Erase it, so a later screen check doesn't see "Esc to cancel" left on screen.
+  write(`\x1b[${d.lines}A\r\x1b[J`);
+  log(`  ⎿ ${answer ?? 'cancelled'}`);
+  d.resolve(answer);
+}
+
+// Bash mode: a ! typed into an empty box becomes the box's mark, as in Claude Code.
+let bash = false;
+// A completion menu under the box while its text is `/word` or ends in `@word`: Enter takes its
+// item instead of the text, and one Esc closes it until the text changes. Text with `@@` opens
+// one that Esc doesn't close.
+let menu = null;
+let menuDismissed = false;
+function syncMenu() {
+  const want = !busy && !pasting && !menuDismissed && (/^\/\S*$/.test(input) || /(^|\s)@\S*$/.test(input)) ? (input.startsWith('/') ? '/menu-pick' : '@menu-pick') : null;
+  // Under the footer after a blank line (Claude Code draws it over the box; stam checks both).
+  if (want && !menu) write(`\r\n\r\n\r\n\r\n  ▸ ${want}\x1b[4A${boxLine()}`);
+  else if (!want && menu) write(`\r\n\r\n\r\n\x1b[J\x1b[3A${boxLine()}`);
+  menu = want;
+}
+
+// The count in a drop-bs file next to the settings: that many backspaces do nothing (a partial erase).
+function dropBackspace() {
+  if (!settingsFile) return false;
+  const f = join(dirname(settingsFile), 'drop-bs');
+  try {
+    const n = Number(readFileSync(f, 'utf8'));
+    if (n > 0) writeFileSync(f, String(n - 1));
+    return n > 0;
+  } catch {
+    return false;
+  }
+}
+
+let pasting = false;
+// A chunk can split a UTF-8 character or an escape sequence (a paste marker, say), so the
+// decoder keeps a partial character, and a trailing partial escape waits for the next chunk.
+const decoder = new StringDecoder('utf8');
+let held = '';
+const partialEscape = /^\x1b(\[[0-9;]*)?$/;
+function onKeys(data) {
+  let s = held + decoder.write(data);
+  held = '';
+  if (dialog) {
+    if (s === '\x1b') return closeDialog(null);
+    if (s === '\r') return closeDialog(dialog.options[0]);
+    const n = Number(s);
+    if (n >= 1 && n <= dialog.options.length) closeDialog(dialog.options[n - 1]);
+    return;
+  }
+  if (menu && s === '\x1b') {
+    if (!input.includes('@@')) (menuDismissed = true), syncMenu();
+    return;
+  }
+  // No dialog here, so a lone Esc may still start a paste marker; it waits for the next chunk.
+  const esc = s.lastIndexOf('\x1b');
+  if (esc >= 0 && partialEscape.test(s.slice(esc))) (held = s.slice(esc)), (s = s.slice(0, esc));
+  while (s) {
+    if (s.startsWith('\x1b[200~')) (pasting = true), (s = s.slice(6));
+    else if (s.startsWith('\x1b[201~')) (pasting = false), (s = s.slice(6));
+    else if (s.startsWith('\x1b')) s = s.slice(/^\x1b\[[0-9;]*[A-Za-z~]/.exec(s)?.[0].length ?? 1);
+    else {
+      const c = s[0];
+      s = s.slice(1);
+      if (c === '\x03' || c === '\x04') return exit('prompt_input_exit');
+      if (c === '\r' && !pasting) {
+        if (menu) {
+          (input = menu), (menu = null);
+        }
+        const raw = (bash ? '!' : '') + input;
+        // Every submitted input exactly as submitted, before trimming, one JSON string per line.
+        if (settingsFile && raw) appendFileSync(join(dirname(settingsFile), 'typed.jsonl'), JSON.stringify(raw) + '\n');
+        // A script's `rewrite` ({FROM: TO}) changes what is submitted, as if the harness had.
+        let text = raw.trim();
+        for (const [from, to] of Object.entries(script.rewrite ?? {})) text = text.split(from).join(to);
+        (input = ''), (bash = false), (menuDismissed = false);
+        if (!busy) write('\r\x1b[J');
+        if (text) enqueue(text, 'typed');
+        else if (!busy) drawBox();
+      } else if ((c === '\x7f' || c === '\b') && dropBackspace()) {
+        // A test's erase that falls short: the next N backspaces (the number in drop-bs) are ignored.
+      } else if (c === '\x7f' || c === '\b') {
+        // One grapheme per backspace, as Claude Code deletes; the box is redrawn.
+        if (input) {
+          const last = [...new Intl.Segmenter().segment(input)].pop().segment;
+          input = input.slice(0, input.length - last.length);
+          busy || write(boxLine());
+        }
+        else if (bash && !busy) (bash = false), write('\r\x1b[2K❯ ');
+        menuDismissed = false;
+        syncMenu();
+      } else if (c === '!' && !input && !bash && !busy && !pasting) {
+        bash = true;
+        write('\r\x1b[2K! ');
+      } else {
+        const ch = c === '\r' || c === '\n' ? '\n' : c;
+        input += ch;
+        if (!busy) write(ch === '\n' ? ' ' : ch);
+        menuDismissed = false;
+        syncMenu();
+      }
+    }
+  }
+}
+
+// ---- Hooks, statusline, transcript ----
+
+const base = () => ({ session_id: sessionId, transcript_path: transcript, cwd: process.cwd(), permission_mode: 'auto' });
+
+function runCommand(command, payload) {
+  return new Promise((resolve) => {
+    const child = spawn('sh', ['-c', command], { stdio: ['pipe', 'pipe', 'ignore'] });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.on('close', () => resolve(out));
+    child.on('error', () => resolve(''));
+    child.stdin.end(JSON.stringify(payload));
+  });
+}
+
+// Runs the event's hook commands in order and returns the context they add, as Claude Code
+// does: JSON with hookSpecificOutput.additionalContext, or plain stdout for the events
+// that take it (UserPromptSubmit, SessionStart).
+// The reason a PreToolUse hook denied the tool call in progress, or null.
+let denied = null;
+
+async function hook(event, fields = {}) {
+  const payload = { ...base(), hook_event_name: event, ...fields };
+  const added = [];
+  for (const group of settings.hooks?.[event] ?? []) {
+    if (group.matcher && fields.tool_name && !new RegExp(`^(${group.matcher})$`).test(fields.tool_name)) continue;
+    for (const h of group.hooks ?? []) {
+      if (h.type !== 'command') continue;
+      const out = (await runCommand(h.command, payload)).trim();
+      if (!out) continue;
+      let ctx;
+      try {
+        const specific = JSON.parse(out)?.hookSpecificOutput;
+        ctx = specific?.additionalContext;
+        // A PreToolUse deny stops the tool call, as Claude Code does; the reason is its result.
+        if (specific?.permissionDecision === 'deny') denied = specific.permissionDecisionReason ?? 'denied';
+      } catch {
+        if (event === 'UserPromptSubmit' || event === 'SessionStart') ctx = out;
+      }
+      if (ctx) added.push(ctx);
+    }
+  }
+  for (const ctx of added) {
+    log(`  ⎿ ${event} context: ${ctx}`);
+    record({ type: 'attachment', attachment: { type: 'hook_additional_context', hookEvent: event, content: [ctx] } });
+  }
+  return added.join('\n');
+}
+
+// What the statusline reports; a `status` step changes it. Before the first turn there's
+// no usage yet, as in Claude Code before its first model call.
+const status = { context_tokens: 20000, context_window: 200000, cost: 0, output_tokens: 100 };
+let calledModel = false;
+
+async function statusline() {
+  const cmd = settings.statusLine?.type === 'command' ? settings.statusLine.command : null;
+  if (!cmd) return;
+  const usage = { input_tokens: status.context_tokens, output_tokens: status.output_tokens, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+  await runCommand(cmd, {
+    ...base(),
+    hook_event_name: 'Status',
+    model: { id: model, display_name: model },
+    cost: { total_cost_usd: status.cost },
+    context_window: { context_window_size: status.context_window, total_input_tokens: calledModel ? status.context_tokens : 0, current_usage: calledModel ? usage : null },
+    ...(status.rate_limits ? { rate_limits: status.rate_limits } : {}),
+  });
+}
+
+let lastUuid = null;
+function record(row) {
+  const uuid = randomUUID();
+  appendFileSync(transcript, JSON.stringify({ parentUuid: lastUuid, sessionId, uuid, timestamp: new Date().toISOString(), cwd: process.cwd(), ...row }) + '\n');
+  lastUuid = uuid;
+}
+function recordAssistant(content) {
+  calledModel = true;
+  const usage = { input_tokens: status.context_tokens, output_tokens: status.output_tokens, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+  record({ type: 'assistant', message: { id: `msg_fake_${randomUUID()}`, role: 'assistant', model, content, usage } });
+}
+
+// ---- MCP: the stam server from --mcp-config ----
+
+function mcpClient(name, cfg) {
+  const child = spawn(cfg.command, cfg.args ?? [], { env: { ...process.env, ...(cfg.env ?? {}) }, stdio: ['pipe', 'pipe', 'ignore'] });
+  const pending = new Map(); // id -> { resolve, reject }
+  let next = 1;
+  let buf = '';
+  let gone = null; // set once the server has exited or its pipe has closed
+  // The server's tool names, as Claude Code keeps them: listed after initialize and again on
+  // tools/list_changed. A call to a tool not listed fails, as it would in Claude Code.
+  let toolNames = new Set();
+  let listed;
+  // Rejects every request still waiting, so a turn fails instead of hanging.
+  const lost = (why) => {
+    if (gone) return;
+    gone = new Error(`stam MCP server ${why}`);
+    for (const p of pending.values()) p.reject(gone);
+    pending.clear();
+  };
+  child.on('exit', (code) => lost(`exited (${code})`));
+  child.on('close', () => lost('closed its pipe'));
+  child.on('error', (e) => lost(`failed: ${e.message}`));
+  child.stdin.on('error', (e) => lost(`pipe failed: ${e.message}`));
+  child.stdout.on('data', (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line) continue;
+      const m = JSON.parse(line);
+      if (m.id !== undefined && pending.has(m.id)) {
+        pending.get(m.id).resolve(m);
+        pending.delete(m.id);
+      } else if (m.method === 'notifications/tools/list_changed') {
+        listed = listTools();
+      } else if (m.method === 'notifications/claude/channel') {
+        const attrs = Object.entries(m.params?.meta ?? {}).map(([k, v]) => ` ${k}="${v}"`).join('');
+        enqueue(`<channel source="${name}"${attrs}>\n${m.params?.content ?? ''}\n</channel>`, 'channel');
+      }
+    }
+  });
+  const request = (method, params) =>
+    new Promise((resolve, reject) => {
+      if (gone) return reject(gone);
+      const id = next++;
+      pending.set(id, { resolve, reject });
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    });
+  const ready = request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake-claude', version: '0' } }).then(() =>
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n'),
+  );
+  const listTools = () => request('tools/list', {}).then((r) => (toolNames = new Set((r.result?.tools ?? []).map((t) => t.name))));
+  listed = ready.then(listTools);
+  ready.catch(() => {}); // a call awaits it and reports the failure
+  listed.catch(() => {});
+  return {
+    child,
+    async call(tool, args) {
+      await ready;
+      await listed;
+      if (!toolNames.has(tool)) return { text: `No such tool available: mcp__${name}__${tool}`, isError: true };
+      const r = await request('tools/call', { name: tool, arguments: args });
+      const text = (r.result?.content ?? []).map((c) => c.text ?? '').join('\n') || r.error?.message || '';
+      return { text, isError: !!(r.result?.isError || r.error) };
+    },
+  };
+}
+const mcp = {};
+if (mcpConfig.mcpServers?.stam) mcp.stam = mcpClient('stam', mcpConfig.mcpServers.stam);
+
+// ---- The script: turns and steps ----
+
+const summary = existsSync(summaryFile(sessionId)) ? readFileSync(summaryFile(sessionId), 'utf8') : '';
+const vars = { self, session: sessionId, summary };
+const fill = (v) =>
+  typeof v === 'string'
+    ? v.replace(/\$\{([\w.:]+)\}/g, (_, k) => (k.startsWith('env:') ? (process.env[k.slice(4)] ?? '') : String(vars[k] ?? '')))
+    : Array.isArray(v)
+      ? v.map(fill)
+      : v && typeof v === 'object'
+        ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, fill(x)]))
+        : v;
+
+const toRegex = (m) => {
+  const r = /^\/(.*)\/([a-z]*)$/s.exec(m);
+  return r ? new RegExp(r[1], r[2]) : null;
+};
+// A match is a substring, or a regex written "/.../flags"; no match matches anything.
+// Returns the regex groups (or [text]) on a match, else null.
+const matchText = (m, text) => (m === undefined ? [text] : toRegex(m) ? toRegex(m).exec(text) : text.includes(m) ? [m] : null);
+
+let agentTurns;
+async function turnsFor() {
+  if (agentTurns) return agentTurns;
+  let own = [];
+  if (script.agents && mcp.stam) {
+    try {
+      vars.name = JSON.parse((await mcp.stam.call('whoami', {})).text).name;
+    } catch {}
+    own = script.agents[vars.name]?.turns ?? [];
+  }
+  return (agentTurns = [...own, ...(script.turns ?? [])]);
+}
+
+const used = new Set();
+async function pick(prompt, source) {
+  for (const t of await turnsFor()) {
+    if (used.has(t) || (t.source && t.source !== source)) continue;
+    const m = matchText(t.match, prompt);
+    if (!m) continue;
+    if (t.once) used.add(t);
+    m.forEach((g, i) => i && (vars[String(i)] = g ?? ''));
+    return t;
+  }
+  return script.default ?? { steps: [{ reply: 'ok' }] };
+}
+
+// Pre/PostToolUse around a tool call, with its transcript rows, as Claude Code writes them.
+async function toolUse(name, toolInput, run) {
+  const id = `toolu_fake_${randomUUID().slice(0, 8)}`;
+  denied = null;
+  await hook('PreToolUse', { tool_name: name, tool_input: toolInput, tool_use_id: id });
+  recordAssistant([{ type: 'tool_use', id, name, input: toolInput }]);
+  log(`● ${name}(${JSON.stringify(toolInput).slice(0, 160)})`);
+  if (denied) {
+    const reason = denied;
+    denied = null;
+    log(`  ⎿ denied by a hook: ${reason.slice(0, 160)}`);
+    record({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: reason, is_error: true }] } });
+    return { text: reason, isError: true };
+  }
+  const result = await run();
+  if (result === undefined) return;
+  record({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: result.text, is_error: result.isError }] } });
+  if (result.text) log(`  ⎿ ${result.text.split('\n')[0].slice(0, 160)}`);
+  await hook('PostToolUse', { tool_name: name, tool_input: toolInput, tool_use_id: id, tool_response: result.text });
+  return result;
+}
+
+// Keeps values in the variables and in the transcript, so a resumed session gets them back.
+function save(spec, text) {
+  const saved = typeof spec === 'string' ? { [spec]: text } : Object.fromEntries(Object.entries(spec ?? {}).map(([k, re]) => [k, new RegExp(re).exec(text)?.[1] ?? '']));
+  Object.assign(vars, saved);
+  record({ type: 'fake-save', save: saved });
+}
+
+// Runs a shell command in the agent's cwd, as its Bash tool would; output and exit code.
+function runShell(command) {
+  return new Promise((resolve) => {
+    const child = spawn('sh', ['-c', command], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (out += d));
+    child.on('close', (code) => resolve({ text: out.trim(), isError: code !== 0 }));
+    child.on('error', (e) => resolve({ text: e.message, isError: true }));
+  });
+}
+
+class TurnEnd {
+  constructor(how) {
+    this.how = how;
+  }
+}
+
+// One step; throws TurnEnd for the steps that end the turn.
+async function step(raw, turn) {
+  const s = fill(raw);
+  if (s.reply !== undefined) {
+    turn.last = s.reply;
+    recordAssistant([{ type: 'text', text: s.reply }]);
+    log(`● ${s.reply}`);
+  } else if (s.tool) {
+    const r = await toolUse(s.tool, s.input ?? {}, async () => ({ text: s.output ?? '', isError: false }));
+    if (s.save) save(s.save, r.text);
+  } else if (s.shell !== undefined) {
+    const r = await toolUse('Bash', { command: s.shell }, () => runShell(s.shell));
+    if (s.save && r) save(s.save, r.text);
+  } else if (s.mcp) {
+    const server = s.server ?? 'stam';
+    let r;
+    try {
+      r = await toolUse(`mcp__${server}__${s.mcp}`, s.args ?? {}, () => mcp[server]?.call(s.mcp, s.args ?? {}) ?? { text: `no MCP server ${server}`, isError: true });
+    } catch (e) {
+      // The server went away mid-call: the turn fails visibly, as Claude Code's does.
+      log(`● FAKE-CLAUDE: ${e.message}`);
+      await hook('StopFailure', { error: 'server_error', error_details: e.message, last_assistant_message: turn.last ?? '' });
+      throw new TurnEnd('failed');
+    }
+    vars.result = r.text;
+    if (s.save) save(s.save, r.text);
+    if (s.expect && !matchText(s.expect, r.text)) {
+      turn.last = `FAKE-CLAUDE EXPECT FAILED: ${s.mcp} returned: ${r.text}`;
+      recordAssistant([{ type: 'text', text: turn.last }]);
+      log(`● ${turn.last}`);
+      throw new TurnEnd('stop');
+    }
+  } else if (s.permission || s.ask) {
+    // Claude Code runs PreToolUse, then PermissionRequest, then shows its dialog; the
+    // answer comes from keys typed into the pane (1, 2, ..., Enter for the first, Esc).
+    const name = s.ask ? 'AskUserQuestion' : s.permission;
+    const options = s.options ?? ['Yes', 'No'];
+    const toolInput = s.ask ? { questions: [{ question: s.ask, options: options.map((label) => ({ label })) }] } : (s.input ?? {});
+    await toolUse(name, toolInput, async () => {
+      await hook('PermissionRequest', { tool_name: name, tool_input: toolInput });
+      // Like Claude Code's, a permission dialog shows the call it asks about.
+      const answer = await openDialog(s.ask ?? `${name}(${Object.values(toolInput).join(', ')})\nAllow ${name}?`, options);
+      vars.answer = answer ?? '';
+      // Any option starting "Yes" allows, as in Claude Code's menus; "No, ..." or Esc denies.
+      if (!answer || (!s.ask && !/^Yes\b/.test(answer))) return undefined; // denied: no PostToolUse
+      return { text: s.ask ? `User answered: ${answer}` : (s.output ?? ''), isError: false };
+    });
+  } else if (s.await !== undefined) {
+    // Holds the turn until the next prompt (typed, or a channel message) that matches.
+    // A matching prompt may already be queued (it arrived during an earlier call or hook),
+    // so take that first; only then wait for one that comes later.
+    const match = s.await === true ? undefined : s.await;
+    const i = queue.findIndex((q) => matchText(match, q.prompt));
+    if (i >= 0) {
+      const [q] = queue.splice(i, 1);
+      log(`> ${q.prompt.replace(/\s+/g, ' ').slice(0, 200)}`);
+      record({ type: 'user', message: { role: 'user', content: q.prompt } });
+      vars.input = q.prompt;
+    } else {
+      log('  ⎿ waiting for input');
+      vars.input = await new Promise((resolve) => (waiter = { match, resolve }));
+    }
+  } else if (s.status) {
+    Object.assign(status, s.status);
+    calledModel = true;
+    await statusline();
+  } else if (s.hook) {
+    await hook(s.hook, s.payload ?? {});
+  } else if (s.stop) {
+    turn.stop = s.stop;
+    throw new TurnEnd('stop');
+  } else if (s.fail) {
+    await hook('StopFailure', { error: s.fail, error_details: s.details ?? '', last_assistant_message: turn.last ?? '' });
+    throw new TurnEnd('failed');
+  } else if (s.exit !== undefined) {
+    hangOnExit = s.exit === 'hang';
+    throw new TurnEnd('exit');
+  } else if (s.lost_stop) {
+    throw new TurnEnd('lost');
+  } else {
+    log(`● FAKE-CLAUDE: unknown step ${JSON.stringify(raw)}`);
+  }
+}
+
+async function runTurn(prompt, source) {
+  vars.prompt = prompt;
+  await hook('UserPromptSubmit', { prompt });
+  // A bash-mode command is recorded as Claude Code records one.
+  record({ type: 'user', message: { role: 'user', content: prompt.startsWith('!') ? `<bash-input>${prompt.slice(1)}</bash-input>` : prompt } });
+  const t = await pick(prompt, source);
+  const turn = { last: undefined, stop: t.stop };
+  let how = 'stop';
+  try {
+    for (const s of t.steps ?? []) await step(s, turn);
+  } catch (e) {
+    if (!(e instanceof TurnEnd)) throw e;
+    how = e.how;
+  }
+  if (how === 'exit') return exit('other');
+  if (how === 'stop') await hook('Stop', { stop_hook_active: false, last_assistant_message: turn.last ?? '', background_tasks: [], session_crons: [], ...(turn.stop ?? {}) });
+  await statusline();
+}
+
+const queue = [];
+let waiter = null; // an `await` step's { match, resolve }
+function enqueue(prompt, source) {
+  if (waiter && matchText(waiter.match, prompt)) {
+    const w = waiter;
+    waiter = null;
+    log(`> ${prompt.replace(/\s+/g, ' ').slice(0, 200)}`);
+    record({ type: 'user', message: { role: 'user', content: prompt } });
+    return w.resolve(prompt);
+  }
+  queue.push({ prompt, source });
+  if (!busy) drain();
+}
+async function drain() {
+  if (!busy) (menu = null), write('\r\x1b[J'); // the box, its footer, and a menu go, as the turn starts
+  busy = true;
+  while (queue.length) {
+    const { prompt, source } = queue.shift();
+    log(`> ${prompt.replace(/\s+/g, ' ').slice(0, 200)}`);
+    await runTurn(prompt, source);
+  }
+  busy = false;
+  drawIdle();
+}
+
+// `{ "exit": "hang" }` (S-384): the session ends and the MCP servers go, but the process stays, as a
+// harness that hangs on its way out, so its pane lives on.
+let hangOnExit = false;
+async function exit(reason) {
+  await hook('SessionEnd', { reason });
+  for (const c of Object.values(mcp)) c.child.kill();
+  if (hangOnExit) return log('● FAKE-CLAUDE: session ended; hanging');
+  process.exit(0);
+}
+
+// ---- Start ----
+
+// A resumed session gets back the values its turns saved (`save`), from its transcript.
+if (resumed) {
+  try {
+    for (const line of readFileSync(transcript, 'utf8').split('\n')) if (line.includes('"fake-save"')) Object.assign(vars, JSON.parse(line).save);
+  } catch {}
+}
+
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+write('\x1b[?2004h'); // bracketed paste, so a pasted prompt arrives as one
+process.stdin.on('data', onKeys);
+process.on('SIGHUP', () => exit('other'));
+process.on('SIGTERM', () => exit('other'));
+log(`fake-claude ${resumed ? 'resumed' : 'started'} session ${sessionId} (script: ${process.env.STAM_FAKE_CLAUDE_SCRIPT ?? 'none'})`);
+busy = true;
+await hook('SessionStart', { source: resumed ? 'resume' : 'startup', model });
+await statusline();
+if (queue.length) drain();
+else {
+  busy = false;
+  drawIdle();
+}

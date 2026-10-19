@@ -1,0 +1,66 @@
+import { itsa, itsaData, LONG, QUEUE, TREE, TREE_FIELDS, WAITING_ITSAS } from '../stories/itsaFixtures'
+import { FIELD_ROUTE, layout, WORK_ROUTES } from '../stories/workFixtures'
+import { ds, type Story } from '../stories/types'
+import type { Itsa } from '../types'
+import { OnMount } from '../stories/helpers'
+import { WorkView } from './WorkView'
+
+const page = (width?: number, height = 720) => <div style={{ height, width }}><WorkView viewKey="work" /></div>
+const busy = itsaData(TREE_FIELDS, { attention: WAITING_ITSAS, queue: QUEUE })
+const idle = itsaData(TREE_FIELDS)
+const closedOnly: Itsa[] = [itsa(995, null, 'Fixture finished project', 'done'), itsa(996, 995, 'Fixture last step', 'done')]
+// Two saved views; the working layout is the Review queue plus one more quick filter, so its tab has the dot.
+const VIEW_COLS = ['work', 'status', 'agents', 'cost', 'updated']
+const savedViews = { 'GET /api/config/settings': { text: JSON.stringify({ workViews: {
+  work: { current: 'v1', show: 'open', cols: VIEW_COLS, group: 'issues', quick: ['review', 'pr'] },
+  v1: { name: 'Review queue', show: 'open', cols: VIEW_COLS, group: 'issues', quick: ['review'] },
+  v2: { name: 'By agent', show: 'open', cols: VIEW_COLS, group: 'agents' },
+} }) } }
+const FIELD_COLS = ['work', 'status', 'field:fld-area', 'field:fld-est', 'field:fld-due', 'field:fld-flag', 'agents', 'cost', 'updated']
+
+export const stories: Story[] = [{
+  name: 'Work page',
+  group: 'ITSA and work',
+  what: 'Every open ITSA in one table, grouped by issue tree, by agent tree, or as one flat list. A pinned "Needs you" group sits on top: one row for each thing waiting on you (an ITSA in a human status, a permission request, an agent waiting for your reply) and each ready-to-merge ITSA in the merge queue, oldest first. Below it each group is a root issue, its rows the descendants indented by depth. The page shows and does not act: a row opens the ITSA, an agent opens the agent, a link opens in a new tab. In a narrow pane or on a phone it becomes the glance (see the Work glance story).',
+  when: 'The Work world (`w:work`, view key `work`), opened from the Work row at the top of the Issues list in the sidebar. The table shows when the pane is at least 900 px wide; narrower, and on every phone, the glance shows instead.',
+  code: ['web/src/work/WorkView.tsx#WorkView', 'web/src/work/quick-bar.tsx#QuickBar', 'web/src/work/columns-menu.tsx#ColumnsPanel', 'web/src/work/columns.tsx#WORK_COLUMNS', 'web/src/work/cell-actions.ts#cellActions', 'web/src/work/model.ts#groupWork', 'web/src/work/model.ts#groupByColumn', 'web/src/work/totals.ts#workTotals'],
+  rules: [
+    'Show (Open or All), Group (Issues, Agents, Flat, and By column…), and a search box sit in the bar. By column… opens a menu of the columns that can group (Status, Agents, GitHub, Health, Review, Tests, and the choice and check fields); the button then reads By Status and so on. Each group is headed with the value\'s label and a count, folds like the issue groups (the fold is per device; folds saved for agents that are gone are dropped once the agents have loaded), and holds its rows sorted by the view\'s sort. A (Blank) group, for rows with no value, comes last; Status groups follow the category order. An ITSA with several agents is listed under each of them, and counts once in the total. Filters and the search still apply, and a group they leave empty is not shown. The grouping is part of the layout, so a saved view keeps it. The box (placeholder "Search all columns") matches the text of every column, shown or hidden, case aside: agents, branch, PR, field values and stage as well as key, title and summary; a match keeps its ancestors as context rows. It has a "Nothing matches" state ("No issue has “…” in any column") with a "Clear the search" button. With a column filter on, the count reads "N of M" (the rows left of the rows the other settings keep) and an empty result offers "Clear the filters". The View menu holds saved layouts (Default, the saved views, Save, Revert, Save as…, Delete); the Columns popover has a search box (placeholder "Search columns", focused on open) over the column checkboxes, which narrows them by label as you type; no match reads "No column matches “…”". Typing on a column moves to the search, Arrow Down and Up move between columns, Space toggles the focused one (Work is always on; the list is a `role="menu"` of checkboxes, and Home and End in the search move the caret, not the focus), and Reset to default stays below the list. A toggle returns the focus to the Columns button as the menu closes.',
+    'A header click sorts (ascending, descending, off) and shift-click adds a key; a press past 4 px stays a reorder and the right edge stays a resize. At rest the header shows state glyphs only: the sort arrow with its rank when several keys are set, and a dot when the column is filtered. A ▾ button fades in on hover or focus (the reveal contract) and opens the sort and filter menu; Enter sorts a focused header and Alt and the down arrow opens the menu (see the Work filter editors story).',
+    'The saved views show as a tab strip under the bar (see the Work view tabs story): Default first, one click switches, and a dot on the current tab marks edits made after it was saved. Save (overwrite the current view; off on Default) and Revert (drop the edits) are in the View menu. A saved view keeps columns, order, grouping, show, sort, column filters and quick filters; widths and folds stay on this device.',
+    'The Quick row under the bar holds six one-tap toggles (Waiting on Kim, Mine, Stale, Blocked, In review, Has PR; see the Work quick filters story). They AND with each other and the column filters, count in "N of M", and Clear all removes them too.',
+    'The active-filter row under the bar has one bordered token for each filtered column, hidden columns too (`Status: In review, Testing`), a × on each and Clear all. A token opens that column\'s menu.',
+    'A right-click on a cell opens a menu of what that value stands for (a column\'s filter kinds decide the entries): values give Filter to this value and Exclude this value, has gives Has and Has not, a range or date gives At least this and At most this, and any sortable column gives Sort by this column, ascending or descending. An empty cell is the "(Blank)" value. Filter to this value replaces the column\'s filter; Exclude takes the value off an existing values filter, or lists every other value; At least and At most keep the other bound while it still fits. The row click still opens the ITSA, and a column with nothing to offer keeps the browser\'s own menu.',
+    'Columns, their order, grouping, show, the sort keys and the column filters are the layout, kept in settings (`workViews`) so a saved view carries them. Column widths and which groups are folded stay on this device.',
+    'Drag a header past 4 px to reorder; drag its right edge to size it (48 to 800 px; double-click resets it); Alt and the arrow keys move a focused header. The Work column cannot move.',
+    'Columns drop out as the pane narrows (`hideBelow`): Branch and GitHub below 948 px, Updated 1032, Test env 1060, Health 1116, Tests 1190, Linear and Other links 1240, Review 1260, Window 1320, Time 1400. Cost stays. A column the layout shows but the pane has no room for is hidden, not squeezed.',
+    'The Needs-you group has no fold control, so it cannot be collapsed away; its head carries a warning mark (`--is-waiting`) and the count, and an ITSA in it also gets a 2 px waiting bar on its row in the tree. Empty, it is one muted line, "Nothing needs you".',
+    'The header is sticky, with `--table-header-bg`, a hairline below, and no scroll shadow; rows have `--table-border` rules and a `--table-row-hover` wash; context rows (an ancestor the filter would hide) and closed rows take `--text-secondary` titles (' + ds('Tables, tree, and empty states') + ').',
+    'The footer is the table\'s last row, sticky at the bottom on `--table-header-bg` with a hairline above, and follows the shown columns: Work reads "N issues", Status the counts per category (`2 active · 1 review`), Cost and Time the sums of each ITSA\'s own cost and working time (not the roll-up, so a parent and its child shown together do not count twice), a number field its sum, and every other column is blank. It counts each non-context row that passes the filters and the search once, under any grouping, and is not shown when no row is.',
+    'Status is the glyph in its `--is-*` tone with the words; the row text is `--type-chrome-sm` with the title at `--type-chrome-md` (' + ds('State vocabulary') + ').',
+    'Loading shows the loading mark (`Loading`), large, an unreachable daemon shows the error with Retry, and an empty page says what fills it, each in the one stack of eyebrow, heading, body, and action (' + ds('Empty, loading, and error') + ').',
+  ],
+  states: [
+    { name: 'By issue tree, with a Needs-you group', data: busy, routes: WORK_ROUTES, render: () => page() },
+    { name: 'Nothing needs you', data: idle, routes: WORK_ROUTES, render: () => page() },
+    { name: 'By agent', data: busy, routes: { ...WORK_ROUTES, ...layout({ group: 'agents' }) }, render: () => page() },
+    { name: 'By column: Status', data: busy, routes: { ...WORK_ROUTES, ...layout({ group: 'column', groupBy: 'status' }) }, render: () => page() },
+    { name: 'By column: Health, with a (Blank) group last', data: busy, routes: { ...WORK_ROUTES, ...layout({ group: 'column', groupBy: 'health' }) }, render: () => page() },
+    { name: 'Totals footer, filtered to Todo', data: busy, routes: { ...WORK_ROUTES, ...layout({ cols: ['work', 'status', 'cost', 'time', 'updated'], filters: { status: { kind: 'values', values: ['todo'] } } }) }, render: () => page(undefined, 520) },
+    { name: 'Flat', data: busy, routes: { ...WORK_ROUTES, ...layout({ group: 'flat' }) }, render: () => page() },
+    { name: 'All, closed work included', data: busy, routes: { ...WORK_ROUTES, ...layout({ show: 'all' }) }, render: () => page() },
+    { name: 'Sorted by Status, filtered to Todo (the active-filter row shows)', data: busy, routes: { ...WORK_ROUTES, ...layout({ sort: [{ col: 'status', dir: 'asc' }], filters: { status: { kind: 'values', values: ['todo'] } } }) }, render: () => page() },
+    { name: 'Quick filters on: Mine and In review', data: busy, routes: { ...WORK_ROUTES, ...layout({ quick: ['mine', 'review'] }) }, render: () => page() },
+    { name: 'Saved view tabs: Review queue, edited since saved (the dot)', data: busy, routes: { ...WORK_ROUTES, ...savedViews }, render: () => page() },
+    { name: 'ITSA fields as columns', data: busy, routes: { ...WORK_ROUTES, ...FIELD_ROUTE, ...layout({ cols: FIELD_COLS }) }, render: () => page() },
+    { name: 'Right-click on a status cell', height: 420, overlay: '.menu', data: busy, routes: WORK_ROUTES,
+      render: () => <OnMount run={(el) => el.querySelector('.w-row[data-itsa] .w-cell[data-cell=status]')?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 320, clientY: 120 }))}>{page(undefined, 400)}</OnMount> },
+    { name: 'A long list: 65 issues under one root', data: itsaData([...LONG, ...TREE], { attention: WAITING_ITSAS, queue: QUEUE }), routes: WORK_ROUTES, render: () => page(undefined, 760) },
+    { name: 'A narrow pane shows the glance', data: busy, routes: WORK_ROUTES, render: () => page(600, 760) },
+    { name: 'Every issue closed', data: itsaData(closedOnly), routes: WORK_ROUTES, render: () => page(undefined, 360) },
+    { name: 'No work yet', data: itsaData([]), routes: WORK_ROUTES, render: () => page(undefined, 360) },
+    { name: 'Loading', data: { itsas: [], itsaStatuses: [], itsaError: null, loaded: { agents: true, mail: true, itsas: false } }, routes: WORK_ROUTES, render: () => page(undefined, 360) },
+    { name: 'Mail still loading', data: itsaData(TREE.filter((i) => i.status !== 'needs_input'), { agents: [], loaded: { agents: true, mail: false, itsas: true } }), routes: WORK_ROUTES, render: () => page(undefined, 360) },
+    { name: 'Error', data: itsaData([], { itsaError: 'fixture: the daemon is unreachable' }), routes: WORK_ROUTES, render: () => page(undefined, 360) },
+  ],
+}]

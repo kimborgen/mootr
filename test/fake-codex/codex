@@ -1,0 +1,10 @@
+#!/bin/sh
+# A scripted stand-in for the `codex` binary (STAM_CODEX_BIN), for UI checks of stam's own
+# agent view with no model: `app-server` runs the fake app-server (app-server.mjs) on the
+# socket stam names, or answers the hook probe on stdio; `resume` is a TUI that only waits,
+# since the view reads and writes through the app-server.
+case "$1" in
+  --version) echo "codex-cli 0.162.1-fake" ;;
+  app-server) shift; exec node "$(dirname "$(readlink -f "$0")")/app-server.mjs" "$@" ;;
+  *) printf 'fake Codex TUI\n\n› Ask Codex to do anything\n  ? for shortcuts\n'; exec sleep infinity ;;
+esac

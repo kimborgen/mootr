@@ -1,0 +1,102 @@
+#!/bin/sh
+# The cheap path for `stam hook` and `stam statusline`. Both run on every tool call and
+# every Claude Code status-line refresh, and starting node (TypeScript stripping plus the
+# whole CLI import graph) costs about 230 ms of CPU a call; under 20+ agents that is what
+# pushed the load. This does the same work in the shell: read the payload, POST it to the
+# daemon, print what it answers, and run the user's own status line. bin/stam sends the two
+# commands here, and this falls back to the node CLI (src/cli.ts) when curl, a JSON parser,
+# or `timeout` is missing. The output and the hook's semantics are the node path's, byte
+# for byte.
+here=$(dirname "$(readlink -f "$0")")
+node_cli() { exec node --no-warnings "$here/../src/cli.ts" "$@"; }
+
+cmd=${1:-}
+harness=${2:-}
+[ -n "$harness" ] || node_cli "$@"
+command -v curl >/dev/null 2>&1 || node_cli "$@"
+# The status line forwards to the user's own command behind `timeout`; the hook prints the
+# daemon's JSON notice, so it needs jq or python3 to unescape it.
+if [ "$cmd" = statusline ]; then
+  command -v timeout >/dev/null 2>&1 || node_cli "$@"
+else
+  command -v jq >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 || node_cli "$@"
+fi
+
+url=${STAM_URL:-http://127.0.0.1:${STAM_PORT:-7878}}
+# env STAM_TOKEN wins, then the daemon's token file, as src/config.ts readToken does.
+token=${STAM_TOKEN:-$(cat "${STAM_HOME:-$HOME/.local/share/stam}/token" 2>/dev/null)}
+id=${STAM_AGENT_ID:-}
+
+# The exact payload, kept in a stam-hook.* file (the prefix names a leftover from a hook killed
+# hard, where no trap runs; S-668): the daemon's route reads a JSON body, and a tool-call
+# hook's can exceed the 128 KB limit on one argument.
+in=$(mktemp "${TMPDIR:-/tmp}/stam-hook.XXXXXX") || node_cli "$@"
+trap 'rm -f "$in"' EXIT
+trap 'exit 0' INT TERM HUP
+cat >"$in"
+
+case "$cmd" in
+hook)
+  # A hook must never block or fail the agent: every failure exits 0 with no output.
+  # While the daemon is down (a deploy restarts it) the POST retries for up to 30 s, as the
+  # node path does: a lost Stop left an idle agent 'working' for hours (S-188). Only a refused
+  # connection (curl exit 7) retries; a timeout may mean the daemon took the event.
+  [ -n "$id" ] || exit 0
+  tries=0
+  while :; do
+    resp=$(curl -sS -m 3 -X POST -H "authorization: Bearer $token" -H 'content-type: application/json' \
+      --data-binary @"$in" "$url/api/hook/$harness/$id" 2>/dev/null) && break
+    [ $? -eq 7 ] && [ $tries -lt 60 ] || { resp=; break; }
+    tries=$((tries + 1))
+    sleep 0.5
+  done
+  [ -n "$resp" ] || exit 0
+  # Exactly the node path's `process.stdout.write(r.stdout)`, trailing newline included:
+  # jq's --join-output adds none, and the output goes straight out so a command
+  # substitution can't strip one.
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$resp" | jq --join-output '.stdout // empty' 2>/dev/null
+  else
+    printf '%s' "$resp" | python3 -c 'import json, sys
+d = json.load(sys.stdin)
+out = d.get("stdout") if isinstance(d, dict) else None
+sys.stdout.write(out or "")' 2>/dev/null
+  fi
+  exit 0
+  ;;
+statusline)
+  # A 1 s report, then the user's own status line, from the same payload. Its output is
+  # written straight through, so its bytes (a trailing newline included) are unchanged.
+  # The daemon answers {"viewed":true|false}; no answer keeps the 30 s cache (S-274).
+  ttl=30
+  unviewed=0
+  reply=
+  [ -n "$id" ] && reply=$(curl -s -m 1 -X POST -H "authorization: Bearer $token" -H 'content-type: application/json' \
+    --data-binary @"$in" "$url/api/statusline/$harness/$id" 2>/dev/null)
+  case "$reply" in *'"viewed":false'*) unviewed=1 ;; esac
+  printf '%s' "[stam ${id:-?}] "
+  # The user's status line runs at most once per ttl per agent (30 s; src/statusline-cache.ts,
+  # S-171, S-274). An agent nobody views never runs again once it has saved output (S-1055), and
+  # a refresh inside the ttl prints the saved output: the file's first line is the time.
+  if [ -n "${STAM_USER_STATUSLINE:-}" ]; then
+    cache="${STAM_HOME:-$HOME/.local/share/stam}/statusline-$id.out"
+    now=$(date +%s)
+    at=$(head -n 1 "$cache" 2>/dev/null)
+    case "$at" in ''|*[!0-9]*) at= ;; esac
+    if [ -n "$id" ] && [ -n "$at" ] && [ $((now - at)) -ge 0 ] && { [ $unviewed = 1 ] || [ $((now - at)) -lt $ttl ]; }; then
+      tail -n +2 "$cache"
+    else
+      # printf x keeps the output's trailing newlines through the command substitution.
+      out=$(timeout 5 sh -c "$STAM_USER_STATUSLINE" <"$in" 2>/dev/null; printf x)
+      out=${out%x}
+      if [ -n "$id" ]; then
+        mkdir -p "${cache%/*}" && printf '%s\n%s' "$now" "$out" >"$cache.tmp" && mv "$cache.tmp" "$cache"
+      fi
+      printf '%s' "$out"
+    fi
+  fi
+  exit 0
+  ;;
+esac
+rm -f "$in"
+node_cli "$@"

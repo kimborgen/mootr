@@ -1,0 +1,80 @@
+.dv { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; position: relative; background: var(--surface-pane); color: var(--text-primary); font-size: var(--type-chrome-md); }
+.dv .mono { font-family: var(--font-mono); }
+.dv-head { flex: none; display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-1) var(--space-3); border-bottom: 1px solid var(--border-subtle); min-width: 0; }
+.dv-title { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1) var(--space-3); min-width: 0; }
+.dv-shas { font-size: var(--type-chrome-sm); }
+.dv-count { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.dv-controls { display: flex; align-items: center; gap: var(--space-2); overflow-x: auto; min-width: 0; }
+.dv-spacer { flex: 1; }
+
+.dv-btn { min-height: var(--size-control); padding: 0 var(--space-3); font: inherit; font-size: var(--type-chrome-sm); color: var(--text-secondary); background: transparent; border: 1px solid var(--border-default); border-radius: var(--radius-sm); cursor: pointer; white-space: nowrap; flex: none; }
+.dv-btn:hover:not(:disabled) { background: var(--control-hover-bg); color: var(--control-hover-fg); }
+.dv-btn:disabled { opacity: 0.4; cursor: default; }
+.dv-btn[aria-pressed='true'] { color: var(--accent-text); border-color: var(--accent-text); }
+.dv-chip[aria-pressed='true'] { color: var(--text-muted); border-style: dashed; }
+.dv-mode { flex: none; }
+.dv-body { flex: 1; min-height: 0; display: flex; }
+.dv-side { flex: none; width: 17rem; overflow-y: auto; border-right: 1px solid var(--border-subtle); }
+.dv-main { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; }
+.dv-note { padding: var(--space-4); display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-3); }
+.dv-note p { margin: 0; }
+.dv-err { color: var(--menu-danger-fg); }
+.dv .add { color: var(--status-success-fg); }
+.dv .del { color: var(--status-error-fg); }
+
+.dv-list { list-style: none; margin: 0; padding: 0; }
+.dv-li { display: flex; align-items: center; gap: var(--space-2); width: 100%; min-height: var(--size-row-tree); padding: 0 var(--space-2); font: inherit; font-size: var(--type-chrome-sm); color: var(--text-primary); background: transparent; border: 0; text-align: left; cursor: pointer; }
+.dv-li:hover { background: var(--tree-row-hover); }
+.dv-li.cur { background: var(--tree-row-selected-bg); color: var(--tree-row-selected-fg); }
+.dv-li.off { color: var(--text-muted); }
+.dv-li-check { flex: none; width: 1ch; color: var(--status-success-fg); }
+.dv-li-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+.dv-li-dir { color: var(--text-muted); }
+.dv-li-n { flex: none; font-variant-numeric: tabular-nums; }
+
+.dv-file { border-bottom: 1px solid var(--border-subtle); }
+.dv-file-head { position: sticky; top: 0; z-index: var(--z-sticky); display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-3); min-height: var(--size-row-tree); background: var(--surface-raised); border-bottom: 1px solid var(--border-subtle); font-size: var(--type-chrome-sm); }
+.dv-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+.dv-old { color: var(--text-muted); }
+.dv-counts { flex: none; font-variant-numeric: tabular-nums; }
+.dv-file-actions { flex: none; display: flex; align-items: center; gap: var(--space-2); }
+.dv-viewed { display: inline-flex; align-items: center; gap: var(--space-1); cursor: pointer; }
+.dv-row { padding: var(--space-3); font-size: var(--type-chrome-sm); }
+.dv-loading { min-height: calc(var(--dv-lines, 4) * 1.5 * var(--code-font-size, var(--type-chrome-md))); }
+
+/* The code: the file view's CodeMirror theme, sized to its content; long lines scroll inside the code, never the page. */
+.dv-code { background: var(--code-bg); }
+.dv-code[hidden] { display: none; }
+.dv-code .cm-editor { height: auto; }
+.dv-code .cm-scroller { overflow-y: visible; }
+.dv-code .cm-mergeView { overflow-x: auto; }
+/* Changed lines tint only, on the status tokens mail diffs use; the deleted side is the error tint. */
+.dv .dv-code .cm-changedLine, .dv .dv-code .cm-inlineChangedLine { background-color: var(--status-success-bg); }
+.dv .dv-code .cm-merge-a .cm-changedLine, .dv .dv-code .cm-deletedChunk { background-color: var(--status-error-bg); }
+.dv .dv-code .cm-changedText { background: none; box-shadow: inset 0 -2px 0 var(--status-success-fg); }
+.dv .dv-code .cm-merge-a .cm-changedText, .dv .dv-code .cm-deletedChunk .cm-deletedText { background: none; box-shadow: inset 0 -2px 0 var(--status-error-fg); }
+.dv .dv-code .cm-merge-b .cm-deletedText { background: var(--status-error-bg); }
+.dv .dv-code .cm-changedLineGutter, .dv .dv-code .cm-merge-b .cm-changedLineGutter { background: var(--status-success-fg); }
+.dv .dv-code .cm-merge-a .cm-changedLineGutter, .dv .dv-code .cm-deletedLineGutter { background: var(--status-error-fg); }
+.dv .dv-code .cm-collapsedLines { display: flex; align-items: center; min-height: var(--size-row-tree); padding: 0 var(--space-3); color: var(--text-muted); background: var(--surface-sunken); font-family: var(--font-chrome); font-size: var(--type-chrome-sm); cursor: pointer; }
+.dv .dv-code .cm-collapsedLines::before, .dv .dv-code .cm-collapsedLines::after { content: none; }
+.dv .dv-code .cm-collapsedLines:hover { color: var(--accent-text); }
+.dv .dv-code .cm-deletedChunk { padding-left: 0; }
+.dv .dv-code .cm-mergeView .cm-editor { min-width: 0; }
+
+.dv-pager { flex: none; display: flex; gap: var(--space-2); padding: var(--space-1) var(--space-3); border-top: 1px solid var(--border-subtle); background: var(--surface-raised); }
+.dv-pager .dv-btn { flex: 1; }
+.dv-scrim { position: absolute; inset: 0; background: var(--surface-scrim); z-index: var(--z-scrim); }
+.dv-sheet { position: absolute; left: 0; right: 0; bottom: 0; max-height: 70%; display: flex; flex-direction: column; background: var(--surface-raised); border-top: 1px solid var(--border-default); box-shadow: var(--shadow-float); z-index: var(--z-modal); }
+.dv-sheet-head { display: flex; align-items: center; justify-content: space-between; padding: var(--space-1) var(--space-3); border-bottom: 1px solid var(--border-subtle); }
+.dv-sheet .dv-list { overflow-y: auto; }
+
+@media (pointer: coarse), (max-width: 480px) {
+  .dv-btn, .dv-touch { min-height: var(--size-hit-touch); min-width: var(--size-hit-touch); }
+  .dv-li { min-height: var(--size-hit-touch); }
+  .dv-viewed { min-height: var(--size-hit-touch); min-width: var(--size-hit-touch); }
+  .dv-viewed input { width: var(--space-5); height: var(--space-5); }
+  .dv .dv-code .cm-collapsedLines { min-height: var(--size-hit-touch); }
+  .dv-file-head { flex-wrap: wrap; }
+  .dv .seg button { min-height: var(--size-hit-touch); }
+}

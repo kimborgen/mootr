@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~/.cache/stam-test/stam-test.agd79.nYMZgP/work.VUfy
+
+▎ Channels (experimental) messages from server:stam inject directly in this session · restart without --dangerously-load-development-channels to stop
+▎ server:stam · no MCP server configured with that name
+  1 more notice hidden
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ❯ /recap                            Generate a one-line session recap now
+    /rename                           Rename the current conversation
+    /resume                           Resume a previous conversation
+    /rewind                           Restore the code and/or conversation to a previous point
+    /remote-env                       Choose the default environment for cloud agents
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /re
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  [stam azf7u] Model: Haiku 5.5 | Ctx: 0 | ⎇ no git | (no git)
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)

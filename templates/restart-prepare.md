@@ -1,0 +1,1 @@
+[stam] Your harness will restart when you finish your current step ({{reason}}). Finish the step you are on and end your turn; running tool calls end when the harness quits. You'll be resumed right away with your full conversation.

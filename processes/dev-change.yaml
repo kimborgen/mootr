@@ -1,0 +1,111 @@
+process: dev-change
+title: Dev change
+description: How one change moves from your mail to a deployed release, today.
+applies_to: { kind: [issue] }
+
+lanes:
+  human:     { type: human }
+  cos:       { type: cos, label: Chief of staff }
+  manager:   { type: manager }
+  developer: { type: developer }
+  reviewer:  { type: reviewer, fallback: reviewer-opus }
+  watcher:   { type: script, label: Deploy watcher }
+
+nodes:
+  request:
+    kind: start
+    lane: human
+    label: Mail from your user
+    # Drawn only in step 1: the start events that route work here, in event_subscriptions terms.
+    triggers:
+      # `example: true` triggers are drawn only; nothing ingests those events yet, and the runner makes no subscription for them.
+      - { source: mail, actors: [human], label: Mail from your user, example: true }
+      - { source: github, types: [issues.opened], example: true }
+      - { source: slack, types: [message], example: true }
+      - { source: feedback, types: [created], example: true }
+      - { source: retro, types: [created], example: true }
+      - { source: itsa, types: [created], example: true }
+      - { source: timer, cron: "0 6 * * *" }
+      - { source: manual }
+  route:
+    kind: agent
+    lane: cos
+    label: Route, pick type and preset
+    statuses: [backlog, todo, ready, scheduled]
+  plan:
+    kind: agent
+    lane: manager
+    label: Split into small changes
+    statuses: [planning, delegated, waiting]
+  code:
+    kind: agent
+    lane: developer
+    label: Implement, test, pr_open
+    statuses: [in_progress, blocked]
+    done_when: pr_opened
+    # The step's next-step text for its lane's brief ({{next_steps}} in the type's brief, S-925).
+    brief: |-
+      When the branch is ready, open its pull request with `pr_open` (branch, title, and the body per docs/pull-requests.md, with `itsa` set to your ITSA). It fetches the branch from storage, pushes it, opens the PR (or replaces the body of the open one), and links the PR and the branch to your ITSA. Then `watch_pr` the PR number it returns, so its checks and reviews reach you. Then mail {{parent}} your branch and commits, the PR link, what changed, what you tested and the results, and anything you weren't sure about. Then set your ITSA to `in_review`, and stop. Never set it to done; the deploy watcher closes it after deploy. If you're blocked, mail {{parent}} instead of guessing. Never mail the human; report to your parent.
+    boundary:
+      - { on: cost, action: pause }
+      - { on: error, action: block }
+  review:
+    kind: agent
+    lane: reviewer
+    label: Review the PR
+    statuses: [in_review, testing]
+    done_when: review_verdict
+    brief: |-
+      Watch the PR you review with `watch_pr` when it's open, so you hear its checks and any changes. When the review is of a PR, give your verdict with the `pr_review` tool (PR number, approve or request_changes, a one-line summary, and head: the full sha of the commit you reviewed), then mail {{parent}} your findings when you're done.
+    # Text another lane's brief carries about this step, verbatim.
+    tell:
+      lanes: [manager]
+      text: |-
+        A reviewer's task for a PR must include this sentence verbatim: "When the review is of a PR, watch it with `watch_pr`, and give your verdict with the `pr_review` tool (PR number, approve or request_changes, a one-line summary, and head: the full sha of the commit you reviewed)."
+  verdict:
+    kind: exclusive
+    lane: reviewer
+    label: Approved?
+  merge:
+    kind: script
+    lane: manager
+    label: Merge the PR
+    brief: |-
+      Once its reviewer's `stam/review` is success on the PR's current head, merge the PR (see Merging in docs/pull-requests.md).
+    statuses: [ready_to_merge, merging]
+  deploy:
+    kind: wait
+    lane: watcher
+    label: Deploy the merge
+    event: deploy
+    statuses: [deploying]
+  hold:
+    kind: human
+    lane: human
+    label: "Deploy unhealthy: hold"
+    ask: decide
+  ask:
+    kind: human
+    lane: human
+    label: An agent needs your input
+    ask: answer
+    statuses: [needs_input, needs_approval, needs_review, needs_test]
+  done:
+    kind: end
+    lane: watcher
+    status: done
+
+edges:
+  - [request, route]
+  - [route, plan]
+  - [plan, code]
+  - [code, review]
+  - [review, verdict]
+  - [verdict, code, { when: "verdict == changes", label: changes }]
+  - [verdict, merge, { when: "verdict == approve", label: approve }]
+  - [merge, deploy]
+  - [deploy, done]
+  - [deploy, hold, { when: "deploy_unhealthy", label: unhealthy }]
+  - [hold, deploy, { when: "hold_cleared", label: resume }]
+  - [code, ask, { when: "needs_human", label: needs input }]
+  - [ask, code, { when: "answered", label: answered }]

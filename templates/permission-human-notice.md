@@ -1,0 +1,1 @@
+[stam] {{requester}} asked your user for permission ({{action}}, request {{id}}). Only the human approves it. You can deny it with `answer_permission` (decision deny) if it must not happen; otherwise leave it.

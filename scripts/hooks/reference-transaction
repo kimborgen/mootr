@@ -1,0 +1,25 @@
+#!/bin/sh
+# Refuses any move of the live deploy checkout's HEAD off refs/heads/main (S-990). The deploy watcher
+# installs this hook into the checkout; a nonzero exit in the "prepared" state makes git abort the
+# checkout or switch before it happens. Other ref updates (the watcher's fast-forward of main, fetch,
+# update-ref) and linked worktrees are left alone. STAM_ALLOW_LIVE_CHECKOUT=1 bypasses it.
+# stam-live-head-guard (the deploy watcher overwrites only a hook that carries this marker)
+[ "${STAM_ALLOW_LIVE_CHECKOUT:-}" = 1 ] && { cat >/dev/null; exit 0; }
+[ "$1" = prepared ] || { cat >/dev/null; exit 0; }
+# A linked worktree has its own git dir apart from the common one.
+gd=$(git rev-parse --absolute-git-dir 2>/dev/null)
+cd_=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+if [ -n "$gd" ] && [ "$gd" != "$cd_" ]; then cat >/dev/null; exit 0; fi
+# `git worktree add` writes the new worktree's HEAD from the main worktree, while its admin dir
+# (worktrees/NAME) has no HEAD file yet; that isn't a move of this checkout's HEAD. Only a dir made in
+# the last minute counts: a killed `worktree add` leaves a stale HEAD-less dir that must not open the guard.
+for w in $(find "$cd_/worktrees" -mindepth 1 -maxdepth 1 -type d -mmin -1 2>/dev/null); do
+  [ -e "$w/HEAD" ] || { cat >/dev/null; exit 0; }
+done
+while read -r old new ref; do
+  if [ "$ref" = HEAD ] && [ "$new" != "ref:refs/heads/main" ]; then
+    echo "refused: this is the live deploy checkout, and HEAD must stay on main (S-990). Use a worktree under ~/.cache/stam-review/ (git worktree add). Kim or a manager can set STAM_ALLOW_LIVE_CHECKOUT=1." >&2
+    exit 1
+  fi
+done
+exit 0

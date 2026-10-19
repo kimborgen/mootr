@@ -1,0 +1,1 @@
+[stam] Your permission request {{id}} ({{action}}) was {{verdict}} by {{who}}. Their words: "{{note}}" {{next}}

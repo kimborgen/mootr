@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "method": "account/rateLimits/updated",
+  "params": {
+    "rateLimits": {
+      "spendControlReached": true,
+      "credits": {
+        "hasCredits": true,
+        "unlimited": false,
+        "balance": "0"
+      }
+    }
+  }
+}

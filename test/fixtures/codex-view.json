@@ -1,0 +1,28 @@
+{
+  "thread": {
+    "id": "thr-1",
+    "turns": [
+      {
+        "id": "turn-1",
+        "status": "completed",
+        "startedAt": 1000,
+        "items": [
+          { "id": "u-1", "type": "userMessage", "content": [{ "type": "text", "text": "list the files", "text_elements": [] }] },
+          { "id": "r-1", "type": "reasoning", "summary": ["Looking at the directory."], "content": [] },
+          { "id": "c-1", "type": "commandExecution", "command": "ls", "cwd": "/work", "status": "completed", "aggregatedOutput": "a.txt\nb.txt\n", "exitCode": 0, "source": "agent", "commandActions": [] },
+          { "id": "m-1", "type": "agentMessage", "text": "There are two files." }
+        ]
+      },
+      {
+        "id": "turn-2",
+        "status": "completed",
+        "startedAt": 1100,
+        "items": [
+          { "id": "u-2", "type": "userMessage", "content": [{ "type": "text", "text": "edit a.txt", "text_elements": [] }] },
+          { "id": "f-1", "type": "fileChange", "status": "completed", "changes": [{ "path": "/work/a.txt", "kind": { "type": "update", "move_path": null }, "diff": "-old\n+new" }] },
+          { "id": "m-2", "type": "agentMessage", "text": "Done." }
+        ]
+      }
+    ]
+  }
+}

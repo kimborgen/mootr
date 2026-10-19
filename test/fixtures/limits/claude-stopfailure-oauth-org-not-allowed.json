@@ -1,0 +1,9 @@
+{
+  "session_id": "9f2c4a1e-6b3d-4e7a-8c11-2d5f0a9b7e64",
+  "transcript_path": "/home/user/.claude/projects/-home-user-proj/9f2c4a1e-6b3d-4e7a-8c11-2d5f0a9b7e64.jsonl",
+  "cwd": "/home/user/proj",
+  "hook_event_name": "StopFailure",
+  "error": "oauth_org_not_allowed",
+  "error_details": "raw API message from the provider",
+  "last_assistant_message": "The API call failed; I will report it."
+}

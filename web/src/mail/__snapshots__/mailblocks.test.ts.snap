@@ -1,0 +1,208 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderMail > matches the legacy output for the helpers 1`] = `
+{
+  "num": [
+    1200,
+    4.2,
+    -3,
+    2000,
+    null,
+    null,
+    60,
+    3,
+  ],
+  "preview": "Pick the token lifetime.",
+  "shown": [
+    "old.png",
+    "https://example.com/new.png",
+    "notes.md",
+  ],
+}
+`;
+
+exports[`renderMail > matches the legacy output: callout 1`] = `
+"<div class="mb-callout success"><div class="mb-label"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="m9 12 2 2 4-4"></path></svg><span>Done</span></div><div class="mb-body">
+<p>Merged <strong>and</strong> deployed.</p>
+</div></div>
+<div class="mb-callout error"><div class="mb-label"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 9-6 6"></path><path d="M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"></path><path d="m9 9 6 6"></path></svg><span>Blocked</span></div><div class="mb-body">
+<p>Waiting on <code>storage</code>.</p>
+</div></div>
+<div class="mb-callout note"><div class="mb-label"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg><span>Note</span></div><div class="mb-body">
+<p>plain</p>
+</div></div>
+"
+`;
+
+exports[`renderMail > matches the legacy output: chart 1`] = `
+"<figure class="mb-chart">
+    <figcaption class="mb-ctitle">Usage</figcaption>
+    <div class="mb-legend"></div><div class="mb-cplot"></div><pre class="mb-csrc" hidden="">type: bar
+title: Usage
+unit: $
+Week,Claude Code,Codex
+W1,1.5,2
+W2,3,1</pre>
+    
+    <details class="mb-cdata"><summary><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg><span>Data</span></summary><table><thead><tr><th>Week</th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>W1</td><td>1.5</td><td>2</td></tr><tr><td>W2</td><td>3</td><td>1</td></tr></tbody></table></details>
+  </figure><div class="mb-diagram"><pre class="mb-dsrc"><code>graph TD; A--&gt;B</code></pre></div>"
+`;
+
+exports[`renderMail > matches the legacy output: checklist 1`] = `"<ul class="mb-checklist"><li class="done"><span class="mb-ci" title="Done"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="m9 12 2 2 4-4"></path></svg></span><span>done thing</span></li><li class="doing"><span class="mb-ci" title="In progress"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="1"></circle></svg></span><span>in progress</span></li><li class="todo"><span class="mb-ci" title="Next"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle></svg></span><span>next</span></li><li class="blocked"><span class="mb-ci" title="Blocked"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 9-6 6"></path><path d="M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"></path><path d="m9 9 6 6"></path></svg></span><span>blocked</span></li><li class="skipped"><span class="mb-ci" title="Skipped"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M8 12h8"></path></svg></span><span>skipped</span></li><li class="todo"><span class="mb-ci" title="Next"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle></svg></span><span>bare item</span></li></ul>"`;
+
+exports[`renderMail > matches the legacy output: code 1`] = `
+"<div class="mb-code"><pre><code class="language-ts">const x = 1;
+</code></pre><button class="mb-copy" data-copy="" type="button" title="Copy"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg></button></div>
+<div class="mb-code"><pre><code>plain block
+</code></pre><button class="mb-copy" data-copy="" type="button" title="Copy"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg></button></div>
+<p><a href="https://example.com" target="_blank" rel="noopener">link</a></p>
+"
+`;
+
+exports[`renderMail > matches the legacy output: compare 1`] = `
+"<figure class="mb-compare"><div class="mb-cmp-stage" style="--pos:50%">
+      <img class="after" data-ref="https://example.com/new.png" alt="After"><img class="before" data-ref="old.png" alt="Before">
+      <div class="mb-cmp-line"></div><span class="mb-cmp-tag l">Before</span><span class="mb-cmp-tag r">After</span>
+      <input type="range" min="0" max="100" value="50" step="0.5" data-compare="" aria-label="Slide between before and after">
+    </div><figcaption>The new layout.</figcaption></figure>"
+`;
+
+exports[`renderMail > matches the legacy output: decision 1`] = `
+"<p class="mb-tldr">Pick the token lifetime.</p><div class="mb-decision" data-decision="0">
+    <div class="mb-label"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01"></path></svg><span>Decision</span></div>
+    <div class="mb-q"><p>How long should SSO tokens live?</p>
+</div>
+    <div class="mb-options"><button class="mb-opt rec" data-choose="1 hour" type="button">
+      <span class="mb-mark"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg></span><span class="mb-opt-text"><span class="mb-opt-label">1 hour<span class="mb-rec">Recommended</span></span><span class="mb-why">safest, users re-login daily</span></span></button><button class="mb-opt" data-choose="12 hours" type="button">
+      <span class="mb-mark"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg></span><span class="mb-opt-text"><span class="mb-opt-label">12 hours</span><span class="mb-why">one login per workday</span></span></button><button class="mb-opt" data-choose="Never" type="button">
+      <span class="mb-mark"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg></span><span class="mb-opt-text"><span class="mb-opt-label">Never</span></span></button></div>
+    <div class="mb-foot"><span class="mb-status"></span><button class="mb-own" data-own="" type="button"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg>Add a note</button><button class="mb-own" data-defer="" type="button"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>Decide later</button></div>
+  </div><div class="mb-decision yesno" data-decision="1">
+    <div class="mb-label"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01"></path></svg><span>Question</span></div>
+    <div class="mb-q"><p>Run the full e2e suite for about $14?</p>
+</div>
+    <div class="mb-options"><button class="mb-opt rec" data-choose="Yes" type="button">
+      <span class="mb-mark"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg></span><span class="mb-opt-text"><span class="mb-opt-label">Yes<span class="mb-rec">Recommended</span></span></span></button><button class="mb-opt" data-choose="No" type="button">
+      <span class="mb-mark"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg></span><span class="mb-opt-text"><span class="mb-opt-label">No</span></span></button></div>
+    <div class="mb-foot"><span class="mb-status"></span><button class="mb-own" data-own="" type="button"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg>Add a note</button><button class="mb-own" data-defer="" type="button"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>Decide later</button></div>
+  </div>"
+`;
+
+exports[`renderMail > matches the legacy output: diff 1`] = `"<div class="mb-diff"><details class="mb-file" open=""><summary><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg><span class="mb-path">src/config.ts</span><span class="mb-count"><span class="add">+2</span> <span class="del">−1</span></span></summary><pre><code><span class="l hunk">@@ -11,9 +11,13 @@ export const MACHINE</span><span class="l add">+// Private to the user</span><span class="l ctx"> export function agentDir(id: string): string {</span><span class="l del">-  mkdirSync(dir, { recursive: true });</span><span class="l add">+  mkdirSync(dir, { recursive: true, mode: 0o700 });</span><span class="l ctx"> }</span></code></pre></details></div>"`;
+
+exports[`renderMail > matches the legacy output: embed 1`] = `
+"<figure class="mb-embed frame" data-frame="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=42" data-ratio="16 / 9" data-site="YouTube"><div class="mb-eslot" style="aspect-ratio:16 / 9"></div><div class="mb-esite"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg><a href="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=42" target="_blank" rel="noopener">YouTube</a></div><figcaption>A video</figcaption></figure><figure class="mb-embed image"><img src="https://example.com/a.png" alt=""></figure><figure class="mb-embed text" data-att-embed="notes.md" data-kind="text"><div class="mb-eslot"></div></figure><figure class="mb-embed file missing"><div class="mb-efile"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"></path><path d="M14 2v5a1 1 0 0 0 1 1h5"></path><path d="M10 9H8"></path><path d="M16 13H8"></path><path d="M16 17H8"></path></svg><span class="mono">/home/x/file.txt</span><span class="muted">is on the sender's machine and wasn't attached.</span></div></figure><figure class="mb-embed frame" data-frame="https://player.vimeo.com/video/12345" data-ratio="16 / 9" data-site="Vimeo"><div class="mb-eslot" style="aspect-ratio:16 / 9"></div><div class="mb-esite"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg><a href="https://player.vimeo.com/video/12345">Vimeo</a></div></figure>
+<p><a href="https://example.com/page" target="_blank" rel="noopener">https://example.com/page</a></p>
+"
+`;
+
+exports[`renderMail > matches the legacy output: error 1`] = `
+"<div class="mb-error">
+    <div class="mb-label"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 9-6 6"></path><path d="M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"></path><path d="m9 9 6 6"></path></svg><span>Error</span></div>
+    <pre class="mb-emsg"><code>codex app-server: refusing</code></pre>
+    <dl><dt>Where</dt><dd><p><code>config.ts</code></p>
+</dd><dt>Cause</dt><dd><p>mode 0775.</p>
+</dd><dt>Fix</dt><dd><p>use 0700.</p>
+</dd></dl>
+  </div>"
+`;
+
+exports[`renderMail > matches the legacy output: longTable 1`] = `"<figure class="mb-tfig"><div class="mb-table folded"><table><thead><tr><th data-sort="0" aria-sort="none">n<span class="mb-sort"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></span></th><th class="mb-num" data-sort="1" aria-sort="none">v<span class="mb-sort"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></span></th></tr></thead><tbody><tr><td>r0</td><td class="mb-num">0</td></tr><tr><td>r1</td><td class="mb-num">3</td></tr><tr><td>r2</td><td class="mb-num">6</td></tr><tr><td>r3</td><td class="mb-num">9</td></tr><tr><td>r4</td><td class="mb-num">12</td></tr><tr><td>r5</td><td class="mb-num">15</td></tr><tr><td>r6</td><td class="mb-num">18</td></tr><tr><td>r7</td><td class="mb-num">21</td></tr><tr><td>r8</td><td class="mb-num">24</td></tr><tr><td>r9</td><td class="mb-num">27</td></tr><tr><td>r10</td><td class="mb-num">30</td></tr><tr><td>r11</td><td class="mb-num">33</td></tr><tr><td>r12</td><td class="mb-num">36</td></tr><tr><td>r13</td><td class="mb-num">39</td></tr><tr><td>r14</td><td class="mb-num">42</td></tr><tr class="mb-more"><td>r15</td><td class="mb-num">45</td></tr><tr class="mb-more"><td>r16</td><td class="mb-num">48</td></tr><tr class="mb-more"><td>r17</td><td class="mb-num">51</td></tr><tr class="mb-more"><td>r18</td><td class="mb-num">54</td></tr><tr class="mb-more"><td>r19</td><td class="mb-num">57</td></tr><tr class="mb-more"><td>r20</td><td class="mb-num">60</td></tr><tr class="mb-more"><td>r21</td><td class="mb-num">63</td></tr><tr class="mb-more"><td>r22</td><td class="mb-num">66</td></tr><tr class="mb-more"><td>r23</td><td class="mb-num">69</td></tr><tr class="mb-more"><td>r24</td><td class="mb-num">72</td></tr></tbody></table><button class="mb-showall" data-table-more="" type="button">Show all 25 rows</button></div></figure>"`;
+
+exports[`renderMail > matches the legacy output: math 1`] = `
+"<p>Inline <span class="mb-math" data-tex="a^2+b^2"><code>a^2+b^2</code></span> and price $5 and $6.</p>
+<div class="mb-math display" data-tex="E = mc^2"><code>E = mc^2</code></div><div class="mb-math display" data-tex="\\int_0^1 x\\,dx"><code>\\int_0^1 x\\,dx</code></div>"
+`;
+
+exports[`renderMail > matches the legacy output: mentions 1`] = `
+"<p>Ask <a href="#" class="mention" data-open-agent="a1">lead</a> about <a href="#" class="threadlink" data-thread-link="m3228ca5"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7"></path><rect x="2" y="4" width="20" height="16" rx="2"></rect></svg><span>m3228ca5</span></a>, or @nobody. See <a href="#m3228ca5" target="_blank" rel="noopener" class="threadlink" data-thread-link="m3228ca5" data-keep="1">thread</a> and <code>m3228ca5</code> in code.</p>
+<details class="mb-details"><summary><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>More</summary>
+
+<p>Hidden <strong>text</strong></p>
+</details>"
+`;
+
+exports[`renderMail > matches the legacy output: metrics 1`] = `"<div class="mb-metrics"><div class="mb-metric success"><div class="mb-mlabel">Tests</div><div class="mb-mval">214/214</div><div class="mb-mnote">all green</div></div><div class="mb-metric"><div class="mb-mlabel">Spent</div><div class="mb-mval">$0.42</div></div><div class="mb-metric warning"><div class="mb-mlabel">Latency</div><div class="mb-mval">1.2 s</div></div></div>"`;
+
+exports[`renderMail > matches the legacy output: pane 1`] = `
+"<div class="mb-pane"><div class="mb-pane-head"><span><a href="#" class="mention" data-open-agent="a1" target="_blank" rel="noopener">lead</a><span class="muted">'s terminal</span></span><a href="#" class="mb-pane-open" data-open-agent="a1" target="_blank" rel="noopener"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19h8"></path><path d="m4 17 6-6-6-6"></path></svg>Open terminal</a></div>
+    </div><div class="mb-pane"><div class="mb-pane-head"><span><span class="mono">ghost</span><span class="muted">'s terminal · 2475 d ago</span></span></div>
+    <div class="mb-term"><div class="mb-code"><pre><code><span class="fg2">hello</span></code></pre><button class="mb-copy" data-copy="" type="button" title="Copy"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg></button></div></div></div>"
+`;
+
+exports[`renderMail > matches the legacy output: pick 1`] = `
+"<div class="mb-decision multi" data-decision="0">
+    <div class="mb-label"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 17 2 2 4-4"></path><path d="m3 7 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path></svg><span>Pick several</span></div>
+    <div class="mb-q"><p>Which checks?</p>
+</div>
+    <div class="mb-options"><button class="mb-opt rec sel" data-choose="Lint" type="button" aria-pressed="true">
+      <span class="mb-box"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="m9 12 2 2 4-4"></path></svg></span><span class="mb-opt-text"><span class="mb-opt-label">Lint<span class="mb-rec">Recommended</span></span><span class="mb-why">fast</span></span></button><button class="mb-opt" data-choose="Types" type="button" aria-pressed="false">
+      <span class="mb-box"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"></rect></svg></span><span class="mb-opt-text"><span class="mb-opt-label">Types</span></span></button><button class="mb-opt" data-choose="E2E" type="button" aria-pressed="false">
+      <span class="mb-box"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"></rect></svg></span><span class="mb-opt-text"><span class="mb-opt-label">E2E</span><span class="mb-why">slow</span></span></button></div>
+    <div class="mb-foot"><span class="mb-status"></span><button class="mb-own" data-own="" type="button"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg>Add a note</button><button class="mb-own" data-defer="" type="button"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>Decide later</button></div>
+  </div><div class="mb-decision rank" data-decision="1">
+    <div class="mb-label"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 17 2 2 4-4"></path><path d="m3 7 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path></svg><span>Rank</span></div>
+    <div class="mb-q"><p>Order the work</p>
+</div>
+    <ol class="mb-ranks"><li class="mb-rrow" data-rank="Auth" draggable="true">
+      <span class="mb-rnum"></span><span class="mb-opt-text"><span class="mb-opt-label">Auth</span><span class="mb-why">first</span></span>
+      <span class="mb-rmove"><button type="button" data-rank-move="-1" title="Move up" aria-label="Move up"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button><button type="button" data-rank-move="1" title="Move down" aria-label="Move down"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button></span></li><li class="mb-rrow" data-rank="Billing" draggable="true">
+      <span class="mb-rnum"></span><span class="mb-opt-text"><span class="mb-opt-label">Billing</span></span>
+      <span class="mb-rmove"><button type="button" data-rank-move="-1" title="Move up" aria-label="Move up"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button><button type="button" data-rank-move="1" title="Move down" aria-label="Move down"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button></span></li><li class="mb-rrow" data-rank="Search" draggable="true">
+      <span class="mb-rnum"></span><span class="mb-opt-text"><span class="mb-opt-label">Search</span></span>
+      <span class="mb-rmove"><button type="button" data-rank-move="-1" title="Move up" aria-label="Move up"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button><button type="button" data-rank-move="1" title="Move down" aria-label="Move down"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button></span></li></ol>
+    <div class="mb-foot"><span class="mb-status"></span><button class="mb-own" data-rank-keep="" type="button">Keep this order</button><button class="mb-own" data-own="" type="button"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg>Add a note</button><button class="mb-own" data-defer="" type="button"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>Decide later</button></div>
+  </div>"
+`;
+
+exports[`renderMail > matches the legacy output: plain 1`] = `""`;
+
+exports[`renderMail > matches the legacy output: progress 1`] = `"<div class="mb-progress"><div class="mb-prow"><div class="mb-ptext"><span>Build</span><span class="mb-pnum">3 of 5</span></div><div class="mb-bar"><i class="spent" style="width:60%"></i></div></div><div class="mb-prow"><div class="mb-ptext"><span>Review</span><span class="mb-pnum">60%</span></div><div class="mb-bar"><i class="spent" style="width:60%"></i></div></div><div class="mb-prow"><div class="mb-ptext"><span>Deploy</span><span class="mb-pnum">1 of 4</span></div><div class="mb-bar"><i class="spent" style="width:25%"></i></div></div></div>"`;
+
+exports[`renderMail > matches the legacy output: spend 1`] = `
+"<div class="mb-spend warning">
+    <div class="mb-label"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v16a2 2 0 0 0 2 2h16"></path><path d="M18 17V9"></path><path d="M13 17V5"></path><path d="M8 17v-3"></path></svg><span>Spend · Codex e2e</span></div>
+    <div class="mb-sline"><b>$4.20</b> spent of $10.00<span class="mb-est">, about $14.00 more, $18.20 in all</span><span class="mb-over">over budget</span></div>
+    <div class="mb-bar"><i class="spent" style="width:23.076923076923077%"></i><i class="est" style="width:76.92307692307693%"></i><b style="left:54.94505494505495%" title="Budget"></b></div>
+  </div>"
+`;
+
+exports[`renderMail > matches the legacy output: table 1`] = `
+"<figure class="mb-tfig"><figcaption>Agents</figcaption><div class="mb-table"><table><thead><tr><th data-sort="0" aria-sort="none">name<span class="mb-sort"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></span></th><th data-sort="1" aria-sort="none">tokens<span class="mb-sort"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></span></th><th class="mb-num" data-sort="2" aria-sort="none">cost<span class="mb-sort"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></span></th></tr></thead><tbody><tr><td>lead</td><td>1,200</td><td class="tone-success mb-num">$1.50</td></tr><tr><td>builder</td><td>300</td><td class="tone-error mb-num">$0.20</td></tr><tr><td>plain</td><td>—</td><td class="mb-num">-</td></tr></tbody></table></div></figure><div class="mb-table"><table>
+<thead>
+<tr>
+<th class="mb-num" data-sort="0" aria-sort="none">a<span class="mb-sort"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></span></th>
+<th data-sort="1" aria-sort="none">b<span class="mb-sort"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></span></th>
+</tr>
+</thead>
+<tbody><tr>
+<td class="mb-num">1</td>
+<td>x</td>
+</tr>
+<tr>
+<td class="mb-num">22</td>
+<td>y</td>
+</tr>
+</tbody></table></div>
+"
+`;
+
+exports[`renderMail > matches the legacy output: terminal 1`] = `
+"<div class="mb-term"><div class="mb-code"><pre><code><span class="cmd"><span class="ps">$</span> stat -c '%a %n' agents</span>
+<span class="fg3">775</span> agents
+<span class="fg2 b">quick</span> <span class="d">(3.1s)</span> skip <span class="fg15 bg1">hi</span> &lt;b&gt;</code></pre><button class="mb-copy" data-copy="" type="button" title="Copy"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg></button></div></div>"
+`;
+
+exports[`renderMail > matches the legacy output: tests 1`] = `
+"<div class="mb-tests failing">
+    <div class="mb-label"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2"></path><path d="M6.453 15h11.094"></path><path d="M8.5 2h7"></path></svg><span>Tests</span></div>
+    <div class="mb-tsum"><span class="pass">18 passed</span><span class="fail">2 failed</span><span class="skip">1 skipped</span></div>
+    <div class="mb-tnote">some note</div>
+    <div class="mb-bar"><i class="pass" style="width:85.71428571428571%"></i><i class="fail" style="width:9.523809523809524%"></i></div>
+    <details class="mb-fail" open=""><summary><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="m15 9-6 6"></path><path d="m9 9 6 6"></path></svg><span>e2e-codex &gt; spawns</span></summary><pre><code>exited 1: refusing
+at test/e2e-codex.sh:41</code></pre></details><div class="mb-fail"><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="m15 9-6 6"></path><path d="m9 9 6 6"></path></svg><span>bare</span></div>
+    <details class="mb-passes"><summary><svg class="i xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg><span>1 passing test</span></summary><ul><li>e2e-m2 &gt; mails</li></ul></details>
+  </div>"
+`;
+
+exports[`renderMail > matches the legacy output: timeline 1`] = `"<ol class="mb-timeline"><li class=""><span class="mb-tat">10:02</span><span class="mb-tdot"></span><span class="mb-twhat">started</span></li><li class="success"><span class="mb-tat">10:09</span><span class="mb-tdot"></span><span class="mb-twhat">built</span></li><li class="error"><span class="mb-tat">2026-10-11 10:15</span><span class="mb-tdot"></span><span class="mb-twhat">deploy failed</span></li><li class=""><span class="mb-tat"></span><span class="mb-tdot"></span><span class="mb-twhat">no time here</span></li></ol>"`;

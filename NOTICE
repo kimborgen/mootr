@@ -1,0 +1,28 @@
+mootr
+Copyright 2026 Kim Borgen
+
+This product is licensed under the Apache License, Version 2.0. See LICENSE.
+
+Third-party material
+====================
+
+The following material is bundled in this repository. Each item keeps its own license, and its license text is included alongside it.
+
+1. Source Sans 3 (web/fonts/source-sans-3-roman.woff2, web/fonts/source-sans-3-italic.woff2)
+   Copyright 2010-2024 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'. All Rights Reserved.
+   Licensed under the SIL Open Font License, Version 1.1. See web/fonts/LICENSE-source-sans.txt.
+   Upstream: https://github.com/adobe-fonts/source-sans
+
+2. Source Code Pro (web/fonts/source-code-pro-roman.woff2, web/fonts/source-code-pro-italic.woff2)
+   Copyright 2023 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'. All Rights Reserved.
+   Licensed under the SIL Open Font License, Version 1.1. See web/fonts/LICENSE-source-code-pro.txt.
+   Upstream: https://github.com/adobe-fonts/source-code-pro
+
+3. Noto Sans Symbols and Noto Sans Symbols 2, subsets (web/fonts/stam-symbols.woff2, web/fonts/stam-symbols-23bf.woff2, web/fonts/stam-braille.woff2)
+   Copyright 2022 The Noto Project Authors (https://github.com/notofonts/symbols)
+   Licensed under the SIL Open Font License, Version 1.1. See web/fonts/LICENSE-noto-symbols.txt.
+
+4. Agent skills copied from Emil Kowalski's skills (.claude/skills/animate, .claude/skills/animation-performance, .claude/skills/review-animations)
+   Copyright (c) 2026 Emil Kowalski
+   Licensed under the MIT License. See .claude/skills/LICENSE-emilkowalski.
+   Upstream: https://github.com/emilkowalski/skills at commit 2d228630ba1446365f614a108cb8252f1feda202, copied unchanged.

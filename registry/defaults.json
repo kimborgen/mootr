@@ -1,0 +1,97 @@
+{
+  "note": "Defaults shipped with stam. Override or extend any entry in STAM_HOME/registry.json; entries there replace these by key. null means unknown.",
+  "delegation": "A missing capability is not a dead end: find an agent that has it with find_agents, or spawn one with spawn_agent, and delegate that part of the task.",
+  "harnesses": {
+    "claude": {
+      "description": "Claude Code.",
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "tools": { "bash": true, "file_edit": true, "web_search": true, "web_fetch": true, "subagents": true }
+    },
+    "opencode": {
+      "description": "OpenCode 2, run against stam's private OpenCode server.",
+      "efforts": [],
+      "tools": { "bash": true, "file_edit": true, "web_search": null, "web_fetch": true, "subagents": true }
+    },
+    "codex": {
+      "description": "OpenAI Codex CLI: each agent runs its own Codex app-server with the Codex TUI attached.",
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "tools": { "bash": true, "file_edit": true, "web_search": true, "web_fetch": null, "subagents": true }
+    }
+  },
+  "models": {
+    "claude-opus-5-5": { "harnesses": ["claude"], "provider": "anthropic", "inputs": { "text": true, "image": true, "video": false } },
+    "claude-sonnet-5-5": { "harnesses": ["claude"], "provider": "anthropic", "inputs": { "text": true, "image": true, "video": false } },
+    "claude-haiku-5-5": { "harnesses": ["claude"], "provider": "anthropic", "inputs": { "text": true, "image": true, "video": false } },
+    "claude-fable-5-1": { "harnesses": ["claude"], "provider": "anthropic", "inputs": { "text": true, "image": true, "video": false } },
+    "openrouter/~deepseek/deepseek-v4-flash-latest": { "harnesses": ["opencode"], "provider": "openrouter", "inputs": { "text": true, "image": null, "video": false } },
+    "openrouter/deepseek/deepseek-v4.1-flash": { "harnesses": ["opencode"], "provider": "openrouter", "inputs": { "text": true, "image": null, "video": false } },
+    "gpt-6.1-sol": { "harnesses": ["codex"], "provider": "openai", "inputs": { "text": true, "image": true, "video": false } },
+    "gpt-6-astra": { "harnesses": ["codex"], "provider": "openai", "inputs": { "text": true, "image": true, "video": false } },
+    "gpt-6-luna": { "harnesses": ["codex"], "provider": "openai", "inputs": { "text": true, "image": true, "video": false } },
+    "openrouter/~openai/gpt-luna-latest": { "harnesses": ["opencode"], "provider": "openrouter", "inputs": { "text": true, "image": null, "video": null } }
+  },
+  "prices": {
+    "note": "Public API prices in USD per million tokens, by model and token type, used to weight tokens when splitting a subscription window among agents (docs/cost-policy.md, Attribution). null means unverified: a null model weighs 1 per token, a null type uses the model's input price. Claude: Anthropic's API prices (cache write is the 5-minute rate; Haiku's is the card for prompts up to 100K tokens). Others: OpenRouter's public model list, 2026-10-11.",
+    "claude-opus-5-5": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
+    "claude-sonnet-5-5": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 },
+    "claude-haiku-5-5": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 },
+    "claude-fable-5-1": { "input": 10, "output": 50, "cacheRead": 0.25, "cacheWrite": 12.5 },
+    "gpt-6.1-sol": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 },
+    "gpt-6-astra": { "input": 10, "output": 50, "cacheRead": 1, "cacheWrite": 12.5 },
+    "gpt-6-luna": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 },
+    "openrouter/~openai/gpt-luna-latest": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 },
+    "openrouter/deepseek/deepseek-v4.1-flash": { "input": 0.3, "output": 1.2, "cacheRead": 0.006, "cacheWrite": null },
+    "openrouter/~deepseek/deepseek-v4-flash-latest": { "input": 0.018, "output": 0.64, "cacheRead": 0.018, "cacheWrite": null }
+  },
+  "defaultReviewer": "reviewer",
+  "presets": {
+    "deep": { "harness": "claude", "model": "claude-opus-5-5", "effort": "high", "description": "Hard design, tricky debugging, and reviews where mistakes are expensive." },
+    "standard": { "harness": "claude", "model": "claude-sonnet-5-5", "effort": "medium", "description": "Most coding work." },
+    "fast": { "harness": "claude", "model": "claude-haiku-5-5", "effort": "low", "description": "Quick lookups, simple edits, and short-lived helper agents." },
+    "second-opinion": { "harness": "opencode", "model": "openrouter/~deepseek/deepseek-v4-flash-latest", "effort": null, "description": "A cheap model from another company, for a second opinion or bulk simple tasks." }
+  },
+  "types": {
+    "developer": {
+      "description": "One small, well-defined code change: implements it, tests it, and commits it on its own branch.",
+      "harness": "claude", "model": "claude-haiku-5-5", "effort": null, "worktree": true,
+      "brief": "Task: {{task}}\n\nYou work in {{cwd}}. Commit on the branch you were spawned on; don't create another. When the branch is ready, push it and open a pull request with `gh pr create`, naming your ITSA in the body; link the PR to your ITSA with `itsa_link`. Then `watch_pr` the PR, so its checks and reviews reach you. Then mail {{parent}} your branch and commits, the PR link, what changed, what you tested and the results, and anything you weren't sure about. Then set your ITSA to `in_review`, and stop. Never set it to done; whoever merges the PR does. If you're blocked, mail {{parent}} instead of guessing. Never mail the human; report to your parent."
+    },
+    "reviewer": {
+      "description": "Reviews a change for bugs and risks before it merges; reports findings, doesn't edit the code.",
+      "harness": "codex", "model": "gpt-6.1-sol", "effort": "low", "worktree": true,
+      "brief": "Review: {{task}}\n\nRead the diff; your review is read-only, so don't run tests or edit the code. Watch the PR you review with `watch_pr` when it's open, so you hear its checks and any changes. When the review is of a PR, give your verdict with `gh pr review PR_NUMBER --comment --body \"approve: SUMMARY\"` (or `request_changes: SUMMARY`), then mail {{parent}} your verdict and findings when you're done.",
+      "review": { "fallback": "reviewer-opus", "ring": null }
+    },
+    "reviewer-opus": {
+      "description": "Backup reviewer when Codex's window runs low.",
+      "harness": "claude", "model": "claude-opus-5-5", "effort": "medium", "worktree": true,
+      "brief": "Review: {{task}}\n\nRead the diff; your review is read-only, so don't run tests or edit the code. Watch the PR you review with `watch_pr` when it's open, so you hear its checks and any changes. When the review is of a PR, give your verdict with `gh pr review PR_NUMBER --comment --body \"approve: SUMMARY\"` (or `request_changes: SUMMARY`), then mail {{parent}} your verdict and findings when you're done.",
+      "review": { "fallback": null, "ring": null }
+    },
+    "review-ring": {
+      "description": "Risky, cross-cutting, or security-sensitive changes: Codex and Opus review in rounds until they agree.",
+      "harness": "", "model": null, "effort": null,
+      "review": { "fallback": "reviewer", "ring": { "format": "rounds", "members": ["reviewer", "reviewer-opus"], "moderator": null, "maxRounds": 3 } }
+    },
+    "manager": {
+      "description": "Owns a bigger or uncertain change: splits it into small changes, spawns a developer for each and a reviewer, and reports the result.",
+      "harness": "claude", "model": "claude-opus-5-5", "effort": "medium",
+      "brief": "Task: {{task}}\n\nA reviewer's task for a PR must include this sentence verbatim: \"When the review is of a PR, watch it with `watch_pr`, and give your verdict with `gh pr review N --comment --body \"approve: SUMMARY\"` (or `request_changes: SUMMARY`), and mail your parent the verdict.\"\n\nMerge each developer's PR with `gh pr merge N` once its reviewer's verdict is approve, unless your user merges, then set its ITSA to `done`. When it's done, mail {{parent}} the result: branches and commits, what changed, what was tested, and open questions."
+    },
+    "coordinator": {
+      "description": "A manager for routine work that doesn't need judgment: splits clear tasks, spawns developers, and collects their results.",
+      "harness": "claude", "model": "claude-sonnet-5-5", "effort": null,
+      "brief": "Task: {{task}}\n\nA reviewer's task for a PR must include this sentence verbatim: \"When the review is of a PR, watch it with `watch_pr`, and give your verdict with `gh pr review N --comment --body \"approve: SUMMARY\"` (or `request_changes: SUMMARY`), and mail your parent the verdict.\"\n\nMerge each developer's PR with `gh pr merge N` once its reviewer's verdict is approve, unless your user merges, then set its ITSA to `done`. When it's done, mail {{parent}} the result."
+    },
+    "retro-steward": {
+      "description": "After a retro digest, drafts one proposal of instruction and template edits that answer open retro items, for the human to approve; applies it only after Approve.",
+      "harness": "claude", "model": "claude-sonnet-5-5", "effort": null,
+      "brief": "{{task}}\n\nYou work in {{cwd}}. Mail {{parent}} when the proposal waits on your user, when it is approved and committed, or when there is nothing to propose."
+    },
+    "advisor": {
+      "description": "A powerful second mind for a hard decision, design, or problem; answers and advises, doesn't build.",
+      "harness": "claude", "model": "claude-fable-5-1", "effort": "medium",
+      "brief": "Question: {{task}}\n\nMail {{parent}} your answer."
+    }
+  }
+}

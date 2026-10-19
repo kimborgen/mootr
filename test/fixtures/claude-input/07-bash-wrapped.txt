@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~/.cache/stam-test/stam-test.agd79.p4EAbF/work.G2md
+
+▎ Channels (experimental) messages from server:stam inject directly in this session · restart without --dangerously-load-development-channels to stop
+▎ server:stam · no MCP server configured with that name
+  1 more notice hidden
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+!  cp ~/.local/share/stam/settings.json ~/.local/share/stam/settings.json.bak-s422  &&  stam registry migrate-reviewers --apply --from codex-gpt-6.1-sol-low --to claude-opus-5-5-low && echo
+  migrated-ok && ls -la ~/.local/share/stam/ | head -n 5 && echo   done-with-the-long-command-for-the-wrap-fixture
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  -- INSERT -- ! for shell mode

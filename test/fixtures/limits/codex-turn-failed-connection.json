@@ -1,0 +1,20 @@
+{
+  "jsonrpc": "2.0",
+  "method": "turn/completed",
+  "params": {
+    "threadId": "0191a2b3-c4d5-7e8f-9a0b-1c2d3e4f5061",
+    "turn": {
+      "id": "0191a2b3-c4d5-7e8f-9a0b-1c2d3e4f5062",
+      "status": "failed",
+      "items": [],
+      "error": {
+        "message": "Connection failed.",
+        "codexErrorInfo": {
+          "httpConnectionFailed": {
+            "httpStatusCode": 503
+          }
+        }
+      }
+    }
+  }
+}

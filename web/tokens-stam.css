@@ -1,0 +1,161 @@
+/*
+ * stam's additions to the token layer (docs/design-system.md, "In stam"). tokens.css is
+ * the base layer; this file adds only what stam needs on top of it,
+ * built from its primitives and semantics, plus stam's own palette: three harness
+ * hues. No new neutrals. Like tokens.css, each colour is defined in all three theme states.
+ */
+:root {
+  /* The thin bar under the main tab bar (S-1659), and the sidebar pane tab strips (S-1421):
+     compact, the default, is half the main tab bar. One token, so the two stay the same. */
+  --size-tab-bar-thin: calc(var(--size-tab-bar) / 2);
+  --size-pane-tab-compact: var(--size-tab-bar-thin);
+  /* The least a tab's name keeps before its wait badges fold into one (S-1659): a few characters. */
+  --size-tab-name-min: 48px;
+  /* The folded badge's list of waits (S-1659): the least and most it is wide. */
+  --size-wait-pop-min: 200px;
+  --size-wait-pop-max: 360px;
+  /* A sidebar pane's shortest height (S-1421): the tab minimum, so a pane keeps its tab strip and a few rows. */
+  --size-side-pane-min: var(--size-tab-min);
+  /* The active tab's indicator line in a sidebar pane (S-1421). */
+  --size-tab-indicator: 2px;
+  /* Agent state, on the status vocabulary. Working borrows indigo, as in-progress does. */
+  --st-working: var(--accent);
+  --st-idle: var(--status-success-fg);
+  --st-blocked: var(--status-warning-fg);
+  --st-errored: var(--status-error-fg);
+  --st-paused: var(--text-secondary);
+  --st-off: var(--text-disabled);
+  /* ITSA statuses, on the same vocabulary. The category picks the colour (the glyph's shape
+     says the category too): backlog muted, ready secondary, active and review in progress,
+     the closed category's first status (done) success and the rest muted. A status that is
+     blocked or waits on the human takes warning, as a blocked agent and a waiting approval do. */
+  --is-backlog: var(--text-muted);
+  --is-ready: var(--text-secondary);
+  --is-active: var(--st-working);
+  --is-review: var(--st-working);
+  --is-done: var(--st-idle);
+  --is-closed: var(--text-muted);
+  --is-waiting: var(--st-blocked);
+  /* Requirement conformity (S-461), on the status vocabulary: likely
+     conforms success, likely violates error, unsure warning, unverified muted. A check is an
+     indication, so the glyph's shape says the state too and the words always say "likely". */
+  --rq-conforms: var(--status-success-fg);
+  --rq-violates: var(--status-error-fg);
+  --rq-unsure: var(--status-warning-fg);
+  --rq-unverified: var(--text-muted);
+  /* Harness marks take stam's harness hues (below); the state ring around them keeps state. */
+  --h-claude: var(--clay);
+  --h-codex: var(--teal);
+  --h-opencode: var(--plum);
+  /* Model badges are neutral badges: a model is a fact, not a status. */
+  --m-other: var(--status-neutral-fg);
+  /* Terminals stay dark in both themes: a harness's screen is a fixed artifact, like a PDF sheet. */
+  --term-bg: var(--coal-800);
+  --term-fg: var(--coal-0);
+  --term-muted: var(--sand-500);
+  /* The 16 ANSI colours for terminal excerpts in mail and the terminal, from the base
+     primitives. The terminal is dark in both themes, so they're the light steps, one per hue.
+     Black and bright black are the exception: they must read on --term-bg, so they're the
+     lightest greys that do. Black (coal-200) is 3.2:1 on it, bright black (sand-500) 5.4:1,
+     and both stay under white (coal-100, 10:1), so the normal and bright order holds. */
+  --ansi-0: var(--coal-200); --ansi-1: var(--rust-300); --ansi-2: var(--moss-300); --ansi-3: var(--amber-300);
+  --ansi-4: var(--indigo-300); --ansi-5: var(--rose-500); --ansi-6: var(--sky-500); --ansi-7: var(--coal-100);
+  --ansi-8: var(--sand-500); --ansi-9: var(--rust-100); --ansi-10: var(--moss-100); --ansi-11: var(--amber-100);
+  --ansi-12: var(--indigo-200); --ansi-13: var(--rose-500); --ansi-14: var(--sky-500); --ansi-15: var(--coal-0);
+}
+
+/* stam's palette: one muted hue per harness, for its mark only, never for state or
+   interaction. Dusty like the indigo, and computed rather than estimated: at least 4.19:1
+   against the pane, raised, app, and selected-row surfaces in both themes. */
+:root { --clay: #a8553a; --teal: #2f7a69; --plum: #8b4e92; --rose: #a3486f; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) { --clay: #d98b6e; --teal: #6bb8a5; --plum: #c391c8; --rose: var(--rose-500); } }
+:root[data-theme='dark'] { --clay: #d98b6e; --teal: #6bb8a5; --plum: #c391c8; --rose: var(--rose-500); }
+
+/* Code syntax, on the code background: keywords take the accent, and the rest come from
+   stam's palette, never from the status hues. All at least 4.5:1 on --code-bg in both
+   themes; light strings use a darker teal to get there. */
+:root { --syntax-keyword: var(--accent-text); --syntax-string: #286d5e; --syntax-number: var(--plum); --syntax-attr: var(--rose); --syntax-comment: var(--text-muted); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) { --syntax-string: var(--teal); } }
+:root[data-theme='dark'] { --syntax-string: var(--teal); }
+
+/* Chart series, in this order; series 7 and on repeat it. A series colour means what the
+   chart's legend says and nothing else; a series named for a harness takes that harness's
+   hue instead. All at least 4.4:1 against the page, raised, and pane surfaces in both themes. */
+:root { --series-1: var(--indigo-500); --series-2: var(--amber-700); --series-3: var(--teal); --series-4: var(--rose); --series-5: var(--plum); --series-6: var(--clay); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) { --series-1: var(--indigo-400); --series-2: var(--amber-300); } }
+:root[data-theme='dark'] { --series-1: var(--indigo-400); --series-2: var(--amber-300); }
+
+/* Stroke width of a card's border (S-429): the input card, on the phone and the desktop. */
+:root { --stroke-card: 1px; }
+
+/* Touch. A finger needs a bigger target than a pointer: on a phone every control's hit area
+   is at least 44px (WCAG 2.5.5 and Apple's guideline), built from the spacing scale. The
+   glyph stays small; the padding is the target, as the density rule says. The phone's
+   bottom bar is one touch target plus the space above and below its labels. */
+:root {
+  --size-hit-touch: calc(var(--space-8) + var(--space-3));
+  --size-phone-nav: calc(var(--size-hit-touch) + var(--space-3));
+}
+
+/* stam's own view of an agent's conversation (S-79): one reading column, centred in a wide
+   pane and full width on a phone. Wide enough for a table or chart in a reply; prose inside
+   it keeps the mail measure. */
+:root { --measure-conversation: 48rem; }
+
+/* A mail's 1-3 word title (S-297) sits before its subject in a mail row: it may take up to this
+   share of the row, so the subject always keeps the larger part. */
+:root { --mail-title-max: 45%; }
+
+/* The mic level bar in the composer (S-129). A meter's widest run, not a pane, but it is sized
+   to the pane minimum so it keeps its width on a phone and a desktop alike. */
+:root { --size-level-track: var(--size-pane-min); }
+
+/* The own view's working indicator (S-205): one slow cycle of its wave, six of the slowest
+   transition, so it reads as calm rather than busy. Built on duration-slow, so reduced motion,
+   which zeroes that, stills it too. */
+:root { --duration-working: calc(var(--duration-slow) * 6); }
+
+/* The highlight on a mail a mail link points at (S-415): five of the slow transitions, so it
+   shows for about a second. Built on duration-slow, so reduced motion stills it too. */
+:root { --duration-focus: calc(var(--duration-slow) * 5); }
+
+/* The system view's motion (S-455, .claude/skills/system-view-motion). A flight is a mail sheet
+   crossing the tree. Its duration is the longest hop's: four of the slow transitions, 880 ms;
+   shorter hops scale down from it, to 400 ms at the least. A tick is one step of a rolling
+   number or a count bump: two of them. The flight eases in and out, as it travels between two
+   points on screen. A card is the pane minimum less the space-6 gutter, so a card fits a pane
+   with its margin. */
+:root {
+  --duration-flight: calc(var(--duration-slow) * 4);
+  --duration-tick: calc(var(--duration-slow) * 2);
+  --ease-flight: var(--ease-in-out);
+  /* How long a card that just got mail stays marked (S-459). Not built on duration-slow: under
+     reduced motion this still mark is what replaces the flight, so it must not zero. */
+  --duration-mark: 1200ms;
+  /* Under reduced motion a mode switch (S-572) crossfades the old picture into the new instead
+     of moving anything, so this is not built on duration-slow either: it must not zero. It is
+     the slow transition's length. */
+  --duration-crossfade: 220ms;
+  --size-card: calc(var(--size-pane-min) - var(--space-6));
+}
+
+/* How long a touch holds a control before it counts as a long press (S-610). Not built on
+   duration-slow: it is a threshold, not motion, so reduced motion must not zero it. */
+:root { --duration-hold: 400ms; }
+
+/* How long a tool call waits for its summary before it shows raw (S-1481): read by
+   web/src/mail/tool-summaries.ts. A threshold, not motion, so reduced motion must not zero it. */
+:root { --duration-summary-hold: 1000ms; }
+
+/* The loading mark (S-1451): the stam logo at work while a view's first load runs. A turn of
+   its arc, a bob of its bot, and three turns per blink are on duration-working, so reduced
+   motion stills them with the other motion tokens. The arc's breathe is not built on
+   duration-slow: under reduced motion it is the one change left that says "still loading", so
+   it must not zero; it is eight of the slow transitions. The mark is a control's height in a
+   list, and two of them where it stands alone in a pane. */
+:root {
+  --duration-loader: var(--duration-working);
+  --duration-loader-breathe: 1760ms;
+  --size-loader: var(--size-control);
+  --size-loader-lg: calc(var(--size-control) * 2);
+}

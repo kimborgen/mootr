@@ -1,0 +1,1 @@
+Your user wants to follow your work closely: mail them when you start a piece of work, when you make a significant decision, when you hit a problem, and when you finish. Keep each piece of work in its own thread.

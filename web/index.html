@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>mootr</title>
+<link rel="manifest" href="/web/manifest.webmanifest">
+<link rel="icon" href="/web/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/web/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="mootr">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- --surface-app in each theme (tokens.css): the browser and status bar match the page. -->
+<meta name="theme-color" content="#ece8e1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#161513" media="(prefers-color-scheme: dark)">
+<script>
+  // The theme applies before first paint, so a dark page doesn't flash light.
+  try { const t = localStorage.getItem('stam/theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch {}
+</script>
+<!-- The boot shell: static blocks drawn from the tokens before the bundle arrives. React replaces
+     #root on mount, so the layout it draws is the one that was already on screen. -->
+<link rel="stylesheet" href="./tokens.css">
+<style>
+  html, body { margin: 0; height: 100%; background: var(--surface-app); color: var(--text-primary); font-family: var(--font-chrome); }
+  .boot { display: flex; flex-direction: column; height: 100dvh; }
+  .boot-head { flex: none; height: var(--size-tab-bar); background: var(--tabbar-bg); border-bottom: 1px solid var(--tabbar-border); }
+  .boot-main { flex: 1; display: flex; min-height: 0; }
+  .boot-side { flex: none; width: var(--size-pane-min); background: var(--surface-pane); border-right: 1px solid var(--border-subtle); }
+  .boot-pane { flex: 1; background: var(--surface-page); }
+  .boot-nav { flex: none; height: var(--size-phone-nav); background: var(--tabbar-bg); border-top: 1px solid var(--tabbar-border); display: none; }
+  .boot-mark { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: var(--type-chrome-sm); color: var(--text-muted); }
+  .boot-mark span { display: inline-flex; align-items: center; height: 16px; padding: 0 var(--space-15); border-radius: var(--radius-xs); background: var(--status-progress-bg); color: var(--status-progress-fg); }
+  @media (max-width: 760px) { .boot-side { display: none; } .boot-nav { display: block; } }
+</style>
+</head>
+<body>
+<div id="root"><div class="boot" role="status" aria-label="Loading">
+  <div class="boot-head"></div>
+  <div class="boot-main"><div class="boot-side"></div><div class="boot-pane"></div></div>
+  <div class="boot-nav"></div>
+  <div class="boot-mark"><span>Loading</span></div>
+</div></div>
+<script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

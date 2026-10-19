@@ -1,0 +1,1 @@
+Your user wants mail about things that matter: decisions they need to make, problems and risks, finished pieces of work, and findings that change the plan. Skip routine progress. Mail them only for what they alone can decide or must read. If your parent agent or the chief of staff could decide something, ask them instead; they escalate to your user when needed.

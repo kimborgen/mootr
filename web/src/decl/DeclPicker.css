@@ -1,0 +1,29 @@
+/* Go to declaration's picker (S-1532): a popover on desktop, a bottom sheet on the phone. Tokens only. */
+.decl-pick { position: fixed; z-index: var(--z-popover); display: flex; flex-direction: column; min-width: 0; background: var(--surface-raised); color: var(--text-primary); border: 1px solid var(--border-default); box-shadow: var(--shadow-float); font-family: var(--font-chrome); font-size: var(--type-chrome-sm); }
+.decl-pop { width: min(calc(var(--size-pane-min) * 2), calc(100vw - var(--space-4))); max-height: min(calc(var(--size-pane-min) * 1.5), 60vh); border-radius: var(--radius-md); }
+.decl-sheet { left: 0; right: 0; bottom: 0; max-height: 60vh; border-width: 1px 0 0; }
+.decl-scrim { position: fixed; inset: 0; z-index: var(--z-scrim); background: var(--surface-scrim); }
+.decl-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3); border-bottom: 1px solid var(--border-subtle); }
+.decl-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+.decl-btn { min-height: var(--size-control); min-width: var(--size-control); padding: 0 var(--space-3); font: inherit; color: var(--text-secondary); background: transparent; border: 1px solid var(--border-default); border-radius: var(--radius-sm); cursor: pointer; flex: none; }
+.decl-btn:hover { background: var(--control-hover-bg); color: var(--control-hover-fg); }
+.decl-close { border-color: transparent; padding: 0 var(--space-2); }
+.decl-note { margin: 0; padding: var(--space-3); }
+.decl-err { color: var(--menu-danger-fg); }
+.decl-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; min-height: 0; }
+.decl-row { display: flex; flex-direction: column; justify-content: center; gap: var(--space-1); width: 100%; min-height: var(--size-hit-touch); padding: var(--space-1) var(--space-3); font: inherit; color: var(--text-primary); background: transparent; border: 0; border-bottom: 1px solid var(--border-subtle); text-align: left; cursor: pointer; }
+.decl-row:hover, .decl-row:focus-visible { background: var(--tree-row-hover); }
+.decl-row-at { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; font-family: var(--font-mono); white-space: nowrap; }
+.decl-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.decl-kind { flex: none; margin-left: auto; font-family: var(--font-chrome); }
+.decl-text { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); color: var(--text-secondary); }
+.decl-one { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); padding: var(--space-2) var(--space-3) var(--space-3); min-height: 0; overflow-y: auto; }
+.decl-one .decl-row-at { width: 100%; }
+.decl-lines { align-self: stretch; margin: 0; padding: var(--space-2) 0; overflow-x: auto; background: var(--code-bg); color: var(--code-fg); font-family: var(--font-mono); font-size: var(--type-chrome-sm); line-height: var(--leading-chrome-md); border-radius: var(--radius-sm); }
+.decl-line { display: block; padding-right: var(--space-3); }
+.decl-line.cur { background: var(--highlight-1); }
+.decl-ln { display: inline-block; min-width: 4ch; padding: 0 var(--space-2); color: var(--text-muted); text-align: right; user-select: none; }
+
+@media (pointer: coarse), (max-width: 480px) {
+  .decl-btn { min-height: var(--size-hit-touch); min-width: var(--size-hit-touch); }
+}

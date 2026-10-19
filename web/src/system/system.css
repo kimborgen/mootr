@@ -1,0 +1,471 @@
+/* The system view (S-458, web/src/system). Tokens only; its motion follows
+   .claude/skills/system-view-motion: transform and opacity only, every duration built on the
+   duration tokens, so reduced motion (which zeroes them) makes every change instant. */
+
+.sv {
+  /* The layout reads these through a probe (SystemView.tsx readPx), so CSS and layout agree. */
+  --sv-card-w: var(--size-card);
+  --sv-card-h: calc(var(--space-12) * 2);
+  --sv-gap-x: var(--space-6);
+  --sv-gap-y: calc(var(--space-12) + var(--space-2));
+  /* The least space down between two cards on the orbits (S-460). */
+  --sv-orbit-gap: var(--space-8);
+  /* At far zoom a chip (and Cards' name row) grows to fit its name up to this, and stops this
+     short of its neighbour's place (S-572). */
+  --sv-chip-max: calc(var(--space-12) * 4);
+  --sv-chip-clear: var(--space-1);
+  /* How far a stack overhangs its card's top-right corner (zoom.ts reads it). */
+  --sv-stack-over: var(--space-3);
+  /* In Cards, how far a stack sits out past its card's corner, on screen (deck.ts reads it too). */
+  --sv-stack-out: var(--space-3);
+  --sv-indent: var(--space-6);
+  --sv-row-gap: var(--space-4);
+  --sv-pad: var(--space-4);
+  /* On the phone, where a connector drops into a card's top edge: over its mark, which is a
+     space-5 glyph after the card's space-2 padding. */
+  /* The spend line's stroke: an icon's stroke. */
+  --sv-line: var(--icon-stroke);
+  /* A mail sheet, in a stack or in flight (S-459). */
+  --sv-sheet-w: var(--space-4);
+  --sv-sheet-h: var(--space-3);
+  /* Where a stack sits in from the card's right edge, so a sheet lands on it . */
+  --sv-land-in: 0px;
+  /* The sheets' motion, unitless factors and an angle, as GROW_FROM in SystemCard.tsx is (system-view-motion):
+     how much bigger a lifted sheet is (deck.ts reads it too), the landing's dip, how small a read
+     sheet gets as it slips into the card, and the count's stamp. */
+  --sv-lift: 1.14;
+  --sv-land-dip: 0.98;
+  --sv-read-to: 0.6;
+  --sv-stamp-tilt: -4deg;
+  --sv-panel-w: calc(var(--size-pane-min) + var(--space-12) + var(--space-8));
+  display: flex; flex-direction: column; height: 100%; min-height: 0; position: relative; container-type: inline-size;
+  background: var(--surface-pane); color: var(--text-primary); font-variant-numeric: tabular-nums;
+}
+.sv-probe { position: absolute; visibility: hidden; height: 0; pointer-events: none; }
+
+/* ---- Header: the system's instruments ---- */
+.sv-head {
+  flex: none; display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-4); row-gap: var(--space-1); min-height: var(--size-tab-bar); padding: var(--space-1) var(--space-3);
+  background: var(--tabbar-bg); border-bottom: 1px solid var(--tabbar-border); white-space: nowrap; overflow: clip;
+}
+
+.sv-head h2 { margin: 0; font-size: var(--type-chrome-md); font-weight: var(--weight-semibold); }
+.sv-grp { display: inline-flex; align-items: center; gap: var(--space-15); color: var(--text-secondary); font-size: var(--type-chrome-sm); }
+.sv-grp b { color: var(--text-primary); font-weight: var(--weight-medium); }
+.sv-st { display: inline-flex; align-items: center; gap: var(--space-1); margin-left: var(--space-1); }
+.sv-st .sglyph { margin-right: var(--space-05); }
+.sv-sep { flex: none; width: 1px; height: var(--space-4); background: var(--border-default); }
+.sv .dot { display: inline-block; flex: none; width: var(--space-2); height: var(--space-2); border-radius: 50%; }
+.sv-meter .track { width: calc(var(--space-12) + var(--space-2)); height: var(--space-1); border-radius: var(--radius-xs); background: var(--status-neutral-bg); overflow: hidden; }
+.sv-meter .track i { display: block; height: 100%; background: var(--st-working); transform-origin: left; transition: transform var(--duration-tick) var(--ease-out); }
+.sv-meter.warn .track i { background: var(--st-blocked); }
+.sv-meter.warn b { color: var(--status-warning-fg); }
+/* The harness mark stands in for the account's name below 1280 px, where the label goes (S-758). */
+.sv-meter-mark { display: none; align-items: center; }
+.sv-spark { width: calc(var(--space-12) + var(--space-6)); height: var(--space-5); overflow: visible; }
+.sv-spark path { fill: none; stroke: var(--series-1); stroke-width: var(--sv-line); vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.sv-head .spacer { flex: none; }
+/* Find, the switch and Fit stay one group, at the header's right end, and keep their width: a squeezed
+   segment clips its buttons, and a split group wraps the controls apart (S-758). */
+.sv-keys { flex: none; display: inline-flex; align-items: center; gap: var(--space-2); margin-left: auto; }
+.sv-modes button { height: calc(var(--size-control) - var(--space-1)); font-size: var(--type-chrome-sm); }
+.sv-fit { color: var(--control-fg); }
+.sv-fit:hover { color: var(--control-hover-fg); }
+/* Find (S-540): a button in the header opens the box; results drop over the stage. On the desktop
+   the open box takes the room of the ITSA counts, the spend line and the window meters. */
+.sv-head.finding :is(.sv-itsas, .sv-meter, .sv-meters, .sv-spark) { display: none; }
+.sv-find { display: inline-flex; align-items: center; gap: var(--space-15); flex: none; height: calc(var(--size-control) - var(--space-1)); padding: 0 var(--space-2);
+  border: 1px solid var(--input-border); border-radius: var(--radius-sm); background: var(--input-bg); color: var(--text-muted); }
+.sv-find:focus-within { border-color: var(--input-border-focus); }
+.sv-find input { width: var(--size-pane-min); min-width: 0; min-height: 0; height: 100%; padding: 0; border: 0; background: none; font-size: var(--type-chrome-sm); }
+.sv-find input::-webkit-search-cancel-button { display: none; }
+.sv-find-btn { color: var(--control-fg); }
+.sv-find-btn:hover { color: var(--control-hover-fg); }
+.sv-drop { position: absolute; top: var(--space-2); right: var(--space-3); z-index: 4; display: flex; flex-direction: column; width: calc(var(--size-pane-min) + var(--space-12) * 2);
+  max-height: 60%; padding: var(--space-1) 0; background: var(--menu-bg); border: 1px solid var(--menu-border); border-radius: var(--radius-md); box-shadow: var(--shadow-raised); }
+.sv-drop.narrow { top: 0; left: 0; right: 0; width: auto; max-height: 75%; padding: var(--space-2); border-radius: 0; border-width: 0 0 1px; }
+.sv-drop.narrow .sv-find { height: var(--size-hit-touch); }
+.sv-drop.narrow .sv-find input, .sv-drop.narrow .sv-find input:focus { flex: 1; width: auto; font-size: var(--type-chrome-md); }
+.sv-found { min-height: 0; overflow-y: auto; }
+.sv-drop.narrow .sv-found { margin-top: var(--space-1); }
+.sv-drop.narrow .pal-result { height: auto; min-height: var(--size-hit-touch); }
+/* The focus: the manager shown alone, and the way back to the whole tree. */
+.sv-focus { display: inline-flex; align-items: center; gap: var(--space-1); flex: none; height: calc(var(--size-control) - var(--space-1)); padding: 0 var(--space-2);
+  border-radius: var(--radius-sm); background: var(--accent-subtle); color: var(--text-primary); font-size: var(--type-chrome-sm); }
+.sv-focus-nm { max-width: var(--size-tab-min); overflow: hidden; text-overflow: ellipsis; }
+.sv-focus-nm::before { content: 'Focus: '; color: var(--text-secondary); }
+.sv.narrow .sv-focus, .sv.narrow .sv-find-btn { min-height: var(--size-hit-touch); }
+/* The phone's header in focus: the chip takes the state dots' room, and names the manager alone. */
+.sv.narrow[data-focus] .sv-head .sv-st { display: none; }
+.sv.narrow .sv-focus-nm::before { content: none; }
+/* The phone's switch and Fit (S-606): a row of their own under the instruments, finger-sized. */
+.sv.narrow .sv-head { flex-wrap: wrap; height: auto; min-height: var(--size-tab-bar); row-gap: 0; }
+.sv-tools { flex: 1 0 100%; display: flex; align-items: center; gap: var(--space-2); padding-bottom: var(--space-2); }
+.sv-tools .sv-modes { flex: 1; }
+.sv-tools .sv-modes button { flex: 1; justify-content: center; height: var(--size-hit-touch); font-size: var(--type-chrome-md); }
+.sv-tools .sv-fit { min-height: var(--size-hit-touch); }
+/* The phone's zoom, a pair of finger-sized buttons in the stage's corner (S-705): a way to zoom that needs no gesture. */
+.sv-zoom { position: absolute; right: var(--space-2); bottom: var(--space-2); z-index: 3; display: flex; flex-direction: column; gap: var(--space-1); }
+.sv-zoom .btn { width: var(--size-hit-touch); height: var(--size-hit-touch); justify-content: center; background: var(--surface-raised); border: 1px solid var(--border-default); color: var(--control-fg); }
+.sv-tools .sv-find-btn { min-width: var(--size-hit-touch); }
+/* Two accounts fit one row from 1280 px; below that the meters drop their labels first, and only then
+   wrap onto a second row, where the separators go (a separator could end a row). The switch, Fit and
+   Find keep their width (S-758). The spend line and the ITSA counts drop below 860 px. */
+@container (max-width: 1440px) { .sv-meter.minor { display: none; } }
+@container (max-width: 1280px) { .sv-meter-lbl { display: none; } .sv-meter-mark { display: inline-flex; } .sv-sep { display: none; } }
+@container (max-width: 860px) { .sv-spark, .sv-itsas { display: none; } }
+/* The phone's pane: its tab already says System. */
+@container (max-width: 599px) { .sv-head h2 { display: none; } .sv-head { gap: var(--space-3); } .sv-st { margin-left: 0; } }
+
+/* ---- The stage: a world layer that pans and zooms by transform ---- */
+.sv-body { flex: 1; display: flex; min-height: 0; position: relative; }
+.sv-stage { position: relative; flex: 1; min-width: 0; overflow: hidden; touch-action: none; cursor: default; outline: none; }
+.sv-stage.grab { cursor: grabbing; }
+.sv-stage.grab .sv-card { cursor: grabbing; }
+.sv-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.sv-stage.grab .sv-world { will-change: transform; }
+.sv-wires { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; animation: sv-wires-in var(--duration-base) var(--ease-out) var(--duration-slow) both; }
+/* A mode switch (S-572, transition.ts) stages its wires itself: the old ones fade on a ghost over
+   the stage, where they were on screen, and the new ones grow back one by one. */
+.sv-wires.staged { animation: none; }
+.sv-ghost { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; }
+.sv-ghost > * { pointer-events: none; }
+@keyframes sv-wires-in { from { opacity: 0; } }
+.sv-wire { fill: none; stroke: var(--border-strong); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+/* In Cards the cards are drawn small but the sheets at screen size, so a stack is drawn at screen
+   size too, and out past the card's corner, clear of its cost; flights land there (deck.ts). The
+   zoom's transform is written on it (zoom.ts), as on everything below drawn at screen size. */
+.sv[data-mode='cards'] .sv-stage .sv-card > .sv-stack, .sv.narrow[data-mode='tree'] .sv-stage .sv-card > .sv-stack { transform-origin: calc(100% - var(--space-3)) var(--space-3); }
+/* Cards zoomed out draws each card as the Tree's far chip (S-462): the same footprint, its name
+   and, where there is room, its ITSA at screen size, growing to fit its name, rather than a small
+   card under a name row that overhung it. */
+/* The Cards mode's orbits (S-460): faint dotted guides round the hub, under the spokes. */
+.sv-orbit { fill: none; stroke: var(--border-subtle); stroke-width: 1px; vector-effect: non-scaling-stroke; stroke-dasharray: var(--space-05) var(--space-15); }
+
+/* ---- A card: an instrument tile, square like chrome, a hairline, no shadow at rest ---- */
+.sv-card {
+  position: absolute; left: 0; top: 0; height: var(--sv-card-h); padding: var(--space-2);
+  display: grid; grid-template-rows: var(--space-5) var(--space-4) var(--space-4) var(--space-4); row-gap: var(--space-1); align-content: start;
+  background: var(--surface-page); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
+  font-size: var(--type-chrome-md); line-height: var(--space-5); cursor: pointer; user-select: none; -webkit-user-select: none;
+  /* Its transform and opacity are Motion's (SystemCard, S-463): one transform string, on springs. */
+  transition: background-color var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out);
+}
+.sv-card:hover { border-color: var(--border-strong); }
+.sv-card.sel { background: var(--accent-subtle); border-color: var(--accent-subtle-border); }
+.sv-card.human { background: var(--surface-raised); }
+.sv-card.leave { pointer-events: none; }
+/* Cards on the move into or out of a parent pass under it. */
+.sv-card { z-index: 1; }
+.sv-card.enter, .sv-card.leave { z-index: 0; }
+/* On the phone a card grows where it lands (S-462): over the cards still gliding out of its way. */
+.sv-card .glyph { --pip-cut: var(--surface-page); }
+.sv-card.human .glyph, .sv-card.sel .glyph { --pip-cut: var(--surface-raised); }
+
+.sv-r1, .sv-r2, .sv-r3 { display: flex; align-items: center; min-width: 0; }
+.sv-r1 { gap: var(--space-15); }
+.sv-nm { font-weight: var(--weight-semibold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; text-align: left; }
+/* The name without the words it shares with its parent's (names.ts, S-572) is the far chip's. */
+.sv-nm .short { display: none; }
+/* Cards draws full cards, fitted at zoom 1 (S-705), so a name is the chips' 14 px, the least a name draws at. */
+.sv[data-mode='cards'] .sv-card .sv-nm, .sv.narrow[data-mode='tree'] .sv-card .sv-nm { font-size: var(--type-chrome-lg); }
+/* The name is the card's button: its focus ring is the card's. */
+.sv-nm:focus-visible { box-shadow: none; }
+.sv-card:has(.sv-nm:focus-visible) { box-shadow: 0 0 0 var(--focus-ring-offset) var(--surface-pane), 0 0 0 calc(var(--focus-ring-offset) + var(--focus-ring-width)) var(--focus-ring); }
+.sv-mdl { flex: none; height: var(--space-4); padding: 0 var(--space-1); border-radius: var(--radius-xs); background: var(--status-neutral-bg); color: var(--status-neutral-fg);
+  font-size: var(--type-chrome-xs); line-height: var(--space-4); font-weight: var(--weight-medium); }
+.sv-cost { position: relative; margin-left: auto; flex: none; font-size: var(--type-chrome-sm); color: var(--text-secondary); }
+.sv-cost .tree { display: none; }
+.sv-card:hover .sv-cost.has-tree .own { display: none; }
+.sv-card:hover .sv-cost.has-tree .tree { display: inline; }
+.sv-r2 { position: relative; isolation: isolate; gap: var(--space-1); font-size: var(--type-chrome-sm); line-height: var(--space-4); }
+.sv-key { flex: none; color: var(--text-muted); }
+.sv-tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); min-width: 0; }
+.sv-tt.muted { color: var(--text-muted); }
+.sv-more { flex: none; margin-left: auto; color: var(--text-muted); font-size: var(--type-chrome-xs); }
+/* An ITSA's roll-up, its children done of all: it advances as each done sheet lands. */
+.sv-rollup { flex: none; display: inline-flex; margin-left: auto; color: var(--text-muted); font-size: var(--type-chrome-xs); }
+.sv-rollup + .sv-more { margin-left: var(--space-1); }
+
+/* ---- Cost and ITSA motion (S-463) ---- */
+/* The ITSA's mark stamps on a status change (Motion: from 1.15 and a slight turn, SystemCard),
+   and the row takes a wash of the accent's subtle fill that fades by opacity. The wash's time is
+   --duration-mark, which reduced motion keeps: the colour stays, only the travel goes. */
+.sv-stamp { flex: none; display: inline-flex; }
+.sv-wash { position: absolute; inset: calc(-1 * var(--space-05)) calc(-1 * var(--space-1)); z-index: -1; border-radius: var(--radius-xs); background: var(--accent-subtle); opacity: 0; pointer-events: none;
+  animation: sv-wash var(--duration-mark) var(--ease-out); }
+.sv-wash.done { background: var(--status-success-bg); }
+@keyframes sv-wash { 15%, 45% { opacity: 1; } }
+/* "+$" over a cost that grew: it drifts up and fades. Drawn only while motion runs (Roll.tsx). */
+/* It sits left of the number, clear of the stack on the card's corner. */
+.sv-rise { position: absolute; right: 100%; bottom: 0; margin-right: var(--space-1); font-size: var(--type-chrome-xs); line-height: var(--space-4); color: var(--text-muted); opacity: 0; pointer-events: none; white-space: nowrap;
+  animation: sv-rise var(--duration-focus) var(--ease-out); }
+@keyframes sv-rise {
+  from { opacity: 0; transform: translateY(var(--space-1)); }
+  20% { opacity: 1; }
+  to { opacity: 0; transform: translateY(calc(-1 * var(--space-2))); }
+}
+/* The day's spend rises inside the header bar, which clips. */
+.sv-spend { position: relative; }
+.sv-spend .sv-rise { right: auto; left: 100%; margin: 0 0 0 var(--space-1); }
+/* A badge that doesn't fit whole wraps onto a second line, which the row's height hides, rather
+   than being cut at the card's edge. */
+.sv-r3 { gap: var(--space-1); overflow: hidden; flex-wrap: wrap; align-content: flex-start; }
+.sv-r3 .badge { flex: none; font-size: var(--type-chrome-xs); font-weight: var(--weight-medium); }
+.sv-r3 .badge:not(.ok):not(.warn):not(.err):not(.progress) { background: var(--status-neutral-bg); color: var(--status-neutral-fg); }
+.sv-field { flex: none; display: inline-flex; font-size: var(--type-chrome-xs); }
+.sv-r4 { grid-row: 4; font-size: var(--type-chrome-sm); line-height: var(--space-4); color: var(--text-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* The context bar: a hairline along the foot, its fill grows by transform. */
+.sv-ctx { position: absolute; left: 0; right: 0; bottom: 0; height: var(--space-05); overflow: hidden; border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
+.sv-ctx i { display: block; height: 100%; background: var(--border-strong); transform-origin: left; transition: transform var(--duration-tick) var(--ease-out); }
+.sv-ctx.l1 i { background: var(--st-blocked); }
+.sv-ctx.l2 i { background: var(--st-errored); }
+
+/* Unread mail: sheets stacked against the top-right corner until read. */
+.sv-stack { position: absolute; right: calc(-1 * var(--sv-stack-over)); top: calc(-1 * var(--sv-stack-over)); width: var(--space-8); height: var(--space-6); cursor: pointer; }
+.sv-stack .sheet {
+  position: absolute; right: calc(var(--space-1) + var(--i) * var(--space-05)); top: calc(var(--space-15) - var(--i) * var(--space-05));
+  width: var(--sv-sheet-w); height: var(--sv-sheet-h); background: var(--surface-raised); border: 1px solid var(--text-muted); border-radius: var(--radius-xs); box-shadow: var(--shadow-float);
+}
+/* The envelope's flap: the hairline's ink, a step lighter than the edge. */
+.sv-stack .sheet::after, .sv-fly .sh::after { content: ''; position: absolute; left: 0; right: 0; top: 0; height: 50%; clip-path: polygon(0 0, 50% 100%, 100% 0); background: var(--border-strong); }
+.sv-stack .n { position: absolute; right: calc(100% - var(--space-1)); top: 0; padding: 0 var(--space-05); border-radius: var(--radius-xs); background: var(--surface-pane);
+  font-size: var(--type-chrome-xs); line-height: var(--space-4); font-weight: var(--weight-medium); color: var(--text-secondary); }
+.sv-stack:hover .sheet { border-color: var(--text-secondary); }
+.sv-stack:disabled { cursor: default; }
+/* A sheet that lands drops onto the stack and settles, a touch past and back (bounce under 0.2);
+   a read sheet slips down into the card; the count stamps once per change (system-view-motion). */
+.sv-stack .sheet.land { animation: sv-land var(--duration-slow) var(--ease-out) both; }
+@keyframes sv-land {
+  from { transform: translateY(calc(-1 * var(--space-2))) scale(var(--sv-lift)); opacity: 0; }
+  60% { transform: translateY(var(--space-05)) scale(var(--sv-land-dip)); opacity: 1; }
+}
+.sv-stack .sheet.read { animation: sv-read var(--duration-slow) var(--ease-out) forwards; pointer-events: none; }
+@keyframes sv-read { to { transform: translate(calc(-1 * var(--space-2)), var(--space-3)) scale(var(--sv-read-to)); opacity: 0; } }
+.sv-stack .n.bump, .sv-fly .n.bump { animation: sv-stamp var(--duration-slow) var(--ease-out); }
+@keyframes sv-stamp { from { transform: scale(var(--sv-lift)) rotate(var(--sv-stamp-tilt)); } }
+.sv-card.human .sv-stack .sheet, .sv-card.human .sv-stack .sheet::after { border-color: var(--st-blocked); }
+.sv-card.human .sv-stack .sheet::after { background: var(--st-blocked); }
+.sv-card.human .sv-stack .n { color: var(--status-warning-fg); }
+
+/* A card that just got mail: its hairline takes the accent a moment, or the warning hue for the
+   human and asks. Under reduced motion this mark is what shows instead of a flight. */
+.sv-card.hit { border-color: var(--accent); }
+.sv-card.hit.warn { border-color: var(--st-blocked); }
+.sv-stage.far .sv-card.hit .sv-chip { border-color: var(--accent); }
+.sv-stage.far .sv-card.hit.warn .sv-chip { border-color: var(--st-blocked); }
+
+/* ---- Mail in flight (S-459): sheets over the cards, moved only by transform from one rAF loop
+   (deck.ts), and each one's trail under them: its lit wire, or a dashed free arc ---- */
+.sv-flights { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 3; }
+.sv-fly { position: absolute; left: 0; top: 0; width: 0; height: 0; padding: 0; cursor: pointer; will-change: transform; }
+/* Zoomed out, a sheet keeps its screen size, as the far chips do (--sv-k, the zoom, is set on the
+   flights' layer alone, so its change restyles only the sheets in the air). */
+.sv-fly .sh {
+  position: absolute; left: calc(var(--sv-sheet-w) / -2); top: calc(var(--sv-sheet-h) / -2); width: var(--sv-sheet-w); height: var(--sv-sheet-h);
+  transform: scale(max(1, calc(1 / var(--sv-k, 1))));
+  background: var(--surface-raised); border: 1px solid var(--text-secondary); border-radius: var(--radius-xs); box-shadow: var(--shadow-float);
+}
+/* In the tree, zoomed out, it hangs from its top, as the far stack does from the chip's corner, so a
+   sheet at screen size grows down into its own card's stack spot, never up into the card above.
+   Cards keep their stacks out past the corner (--sv-stack-out), where the sheet stays centred. */
+.sv[data-mode='tree'] .sv-stage.far .sv-fly .sh { transform-origin: 50% 0; }
+/* A finger's, or a pointer's, target round the small sheet. */
+.sv-fly .sh::before { content: ''; position: absolute; inset: calc(-1 * var(--space-2)); }
+.sv-fly.warn .sh, .sv-fly.warn .sh::after { border-color: var(--st-blocked); }
+.sv-fly.warn .sh::after { background: var(--st-blocked); }
+.sv-fly .n:empty { display: none; }
+.sv-fly .n { position: absolute; left: calc(100% - var(--space-1)); bottom: calc(100% - var(--space-1)); padding: 0 var(--space-05); border-radius: var(--radius-xs);
+  background: var(--surface-raised); border: 1px solid var(--border-default); font-size: var(--type-chrome-xs); line-height: var(--space-3); font-weight: var(--weight-medium); color: var(--text-primary); }
+.sv-fly.warn .n { color: var(--status-warning-fg); }
+/* A done sheet (S-463): an ITSA's result on its way up to the parent, in the done hue. */
+.sv-fly.done .sh, .sv-fly.done .sh::after { border-color: var(--is-done); }
+.sv-fly.done .sh::after { background: var(--is-done); }
+.sv-trails { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.sv-trail { fill: none; stroke: var(--accent); stroke-width: var(--sv-line); vector-effect: non-scaling-stroke; stroke-dasharray: var(--space-05) var(--space-1); opacity: 0; transition: opacity var(--duration-base) var(--ease-out); }
+.sv-trail.wire { stroke-dasharray: none; }
+.sv-trail.warn { stroke: var(--st-blocked); }
+.sv-trail.done { stroke: var(--is-done); }
+.sv-trail.on { opacity: 1; }
+
+/* The fold control: revealed on approach on the desktop, always there when shut or on touch. */
+.sv-fold {
+  position: absolute; left: 50%; bottom: calc(-1 * var(--space-3)); transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: var(--space-05); height: var(--space-5); min-width: var(--space-5); padding: 0 var(--space-15); justify-content: center;
+  border-radius: var(--radius-sm); background: var(--surface-raised); border: 1px solid var(--border-default);
+  font-size: var(--type-chrome-xs); line-height: 1; color: var(--text-secondary); opacity: 0; transition: opacity var(--duration-fast) var(--ease-out);
+}
+.sv-fold .dot { width: var(--space-15); height: var(--space-15); }
+.sv-card:hover .sv-fold, .sv-card:focus-within .sv-fold, .sv-fold.shut { opacity: 1; }
+.sv-fold:hover { border-color: var(--border-strong); color: var(--text-primary); }
+@media (hover: none) { .sv-fold { opacity: 1; } }
+
+/* Far zoom: the card's own text would draw too small, so its chip takes its place, drawn at
+   screen size. The chip is the card's footprint times the zoom, scaled back up by its inverse, so
+   its box fills the card's place and its text keeps its size (written on it, zoom.ts). What fits
+   shows: the mark, name, unread, then the ITSA and activity as the height allows. */
+.sv-chip { display: none; }
+.sv-stage.far .sv-card { background: transparent; border-color: transparent; }
+/* The name button stays, unseen, so the keyboard still reaches every card. */
+.sv-stage.far .sv-card > :not(.sv-chip):not(.sv-r1):not(.sv-stack) { visibility: hidden; }
+.sv-stage.far .sv-r1 { opacity: 0; }
+/* The stack stays, drawn at screen size on the chip's corner, so mail still lands and opens there. */
+/* A chip grows to fit its name (S-572): --sv-chip-fit is the width its row needs, measured by the
+   view, up to the cap or the room to its neighbour, and its stack moves out with its corner (zoom.ts). */
+.sv-stage.far .sv-card > .sv-stack { transform-origin: 100% 0; z-index: 1; }
+.sv-stage.far .sv-chip {
+  position: absolute; left: -1px; top: -1px; display: flex; flex-direction: column; gap: var(--space-05); overflow: hidden;
+  transform-origin: 0 0;
+  padding: var(--space-1) var(--space-15); background: var(--surface-page); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
+  font-size: var(--type-chrome-sm); line-height: var(--space-4); color: var(--text-primary);
+}
+.sv-stage.far .sv-card:hover .sv-chip { border-color: var(--border-strong); }
+.sv-stage.far .sv-card.sel .sv-chip { background: var(--accent-subtle); border-color: var(--accent-subtle-border); }
+.sv-stage.far .sv-card.human .sv-chip { background: var(--surface-raised); }
+.sv-chip .c1, .sv-chip .c2 { display: flex; align-items: center; gap: var(--space-1); min-width: 0; flex: none; }
+.sv-chip .c1 { min-height: var(--space-5); }
+/* The stack rests on the chip's top-right corner: the name stops short of it. */
+.sv-chip .c1 { padding-right: var(--space-3); }
+/* The name draws at 14 px at screen size, as every name at the fit zoom (S-462); the rows under
+   it keep the chrome's small type. */
+.sv-chip .c1 b { font-size: var(--type-chrome-lg); font-weight: var(--weight-semibold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.sv-chip .c1 .badge { flex: none; }
+.sv-chip .c-more { flex: none; color: var(--text-muted); font-size: var(--type-chrome-xs); }
+.sv-chip .c2.warn { color: var(--status-warning-fg); }
+.sv-chip .c3 { flex: none; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A narrow chip gives the ITSA's title the room its key would take; a short one drops the rows
+   that don't fit whole (the ITSA, then the activity) rather than cutting them. Container queries
+   can't read tokens, so the heights are worked out from them: the chip's space-1 padding twice,
+   the name row's space-5, a space-05 gap and a space-4 row make 46px, so the ITSA row needs more
+   than 45px; another gap and row make 64px for the activity. */
+.sv-stage.far .sv-chip { container-type: size; }
+@container (max-width: 140px) { .sv-chip .c2 .sv-key { display: none; } }
+@container (max-height: 45px) { .sv-chip .c2 { display: none; } }
+@container (max-height: 63px) { .sv-chip .c3 { display: none; } }
+/* A chip with no room for its ITSA row but room for two lines of name, whose name can't grow to
+   fit (no room to its neighbour), wraps it onto a second line at a space or a hyphen, rather than
+   cutting it (S-462): two space-4 lines need 32px of the chip's content box. */
+@container (min-height: 32px) and (max-height: 45px) {
+  .sv-chip .c1 b { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+  /* A name of one word ("assistant") never breaks mid-word: it keeps one line and an ellipsis. */
+  .sv-chip .c1 b.one { white-space: nowrap; display: block; }
+}
+
+/* A finger's target round the fold control. */
+.sv.narrow .sv-fold::before { content: ''; position: absolute; inset: calc(-1 * var(--space-2)); }
+/* On the phone, a far card and an orb take a finger's size on screen however far out (S-606):
+   --sv-unk is the zoom's inverse, written on the world on the phone only. */
+.sv.narrow .sv-stage.far .sv-card::before, .sv.narrow .sv-orb::before {
+  content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: max(100%, calc(var(--size-hit-touch) * var(--sv-unk, 1))); height: max(100%, calc(var(--size-hit-touch) * var(--sv-unk, 1))); }
+/* A sheet just opened lets a double tap's second tap through to the stage. */
+.sv-panel.sheet.fresh { pointer-events: none; }
+/* A finger's target round the stack, as the sheet's controls have. */
+.sv.narrow .sv-stack::before { content: ''; position: absolute; left: 50%; top: 50%; width: var(--size-hit-touch); height: var(--size-hit-touch); transform: translate(-50%, -50%); }
+
+/* ---- The side panel, and on the phone a bottom sheet ---- */
+.sv-panel { flex: none; width: var(--sv-panel-w); overflow: auto; background: var(--surface-pane); border-left: 1px solid var(--border-default);
+  padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-4); }
+.sv-ph { display: flex; align-items: center; gap: var(--space-2); }
+.sv-ph h3 { margin: 0; font-size: var(--type-chrome-xl); line-height: var(--space-6); font-weight: var(--weight-semibold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sv-close { margin-left: auto; }
+.sv-sub { margin: calc(-1 * var(--space-3)) 0 0; color: var(--text-secondary); font-size: var(--type-chrome-sm); overflow-wrap: anywhere; }
+.sv-links { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.sv-links .btn { border: 1px solid var(--border-default); }
+.sv-panel section { display: flex; flex-direction: column; gap: var(--space-1); }
+.sv-panel .eyebrow { margin-bottom: var(--space-05); }
+.sv-itsa { display: flex; align-items: flex-start; gap: var(--space-15); text-align: left; padding: var(--space-1) 0; color: var(--text-primary); font-weight: var(--weight-medium); }
+.sv-itsa .sglyph { margin-top: var(--space-05); }
+.sv-itsa:hover span:last-child { text-decoration: underline; }
+.sv-facts { width: 100%; border-collapse: collapse; font-size: var(--type-chrome-sm); }
+.sv-facts th, .sv-facts td { padding: var(--space-1) 0; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; text-align: left; }
+.sv-facts th { width: 38%; color: var(--text-secondary); font-weight: var(--weight-regular); padding-right: var(--space-2); }
+.sv-facts td { min-width: 0; overflow-wrap: anywhere; }
+.sv-facts .w-status { border: 0; padding: 0; height: auto; }
+.sv-role { color: var(--text-secondary); }
+.sv-state { display: inline-flex; align-items: center; gap: var(--space-15); }
+.sv-linkish { color: var(--accent-text); }
+.sv-linkish:hover { text-decoration: underline; }
+.sv-note { margin: var(--space-1) 0 0; font-size: var(--type-chrome-sm); }
+.sv-grip { display: none; }
+
+.sv-panel.sheet {
+  position: absolute; left: 0; right: 0; bottom: 0; width: auto; max-height: 62%; z-index: 2;
+  border-left: 0; border-top: 1px solid var(--border-default); border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--surface-raised); box-shadow: var(--shadow-raised); padding-top: var(--space-1);
+  animation: sv-sheet-in var(--duration-slow) var(--ease-out);
+}
+@keyframes sv-sheet-in { from { transform: translateY(100%); } }
+.sv-panel.sheet .sv-grip { display: block; align-self: center; flex: none; width: var(--space-8); height: var(--space-1); border-radius: var(--radius-xs); background: var(--border-strong); }
+.sv-panel.sheet .sv-close { width: var(--size-hit-touch); height: var(--size-hit-touch); margin-right: calc(-1 * var(--space-2)); }
+.sv-panel.sheet .sv-links .btn { min-height: var(--size-hit-touch); }
+/* On the phone the links are an even two-column grid, not rows of ragged widths. */
+.sv-panel.sheet .sv-links { display: grid; grid-template-columns: 1fr 1fr; }
+.sv-panel.sheet .sv-links .btn { justify-content: flex-start; min-width: 0; }
+.sv-panel.sheet .sv-facts th, .sv-panel.sheet .sv-facts td { padding: var(--space-2) 0; }
+
+/* ---- Stars (S-539, stars.ts, StarCard.tsx): agents as orbs on rings round the chief of staff ---- */
+.sv {
+  /* An orb's least and largest radius (spend sizes it between them, stars.ts), and the human's. */
+  --sv-orb-min: var(--space-3);
+  --sv-orb-max: var(--space-6);
+  --sv-orb-human: var(--space-5);
+  /* The two label lines under an orb: their width, which a name ellipsizes to, height, and gap. */
+  --sv-star-label-w: calc(var(--space-12) * 2);
+  --sv-star-label-h: calc(var(--leading-chrome-sm) + var(--leading-chrome-xs));
+  --sv-star-label-gap: var(--space-1);
+  /* The least clear space between two orbs' labels. */
+  --sv-star-gap: var(--space-2);
+}
+.sv[data-mode='stars'] .sv-wire.ray { stroke: var(--border-default); }
+.sv-star { position: absolute; left: 0; top: 0; width: calc(var(--r) * 2); height: calc(var(--r) * 2); z-index: 1; cursor: pointer; user-select: none; -webkit-user-select: none; }
+.sv-star.enter, .sv-star.leave { z-index: 0; }
+.sv-star.leave { pointer-events: none; }
+/* The orb is the agent's mark at the orb's size: the harness hue inside the state ring. */
+.sv-orb { position: absolute; inset: 0; padding: 0; border: 0; border-radius: 50%; background: var(--surface-page); cursor: pointer;
+  outline: 2px solid transparent; outline-offset: var(--space-05); transition: outline-color var(--duration-fast) var(--ease-out); }
+.sv-star.human .sv-orb { background: var(--surface-raised); }
+.sv-orb .glyph { width: 100%; height: 100%; }
+.sv-orb .glyph svg.i { width: var(--r); height: var(--r); }
+.sv-orb .glyph.plain svg.i { width: var(--r); height: var(--r); }
+/* The pip sits on the ring, 45° down the right, as on the small mark: 0.29 is 1 - 1/√2, how far in
+   from the orb's square the ring runs there. */
+.sv-orb .glyph .pip { --pip-cut: var(--surface-pane); right: calc(var(--r) * 0.29 - var(--space-1)); bottom: calc(var(--r) * 0.29 - var(--space-1)); }
+.sv-star:hover .sv-orb { outline-color: var(--border-strong); }
+.sv-star.sel .sv-orb { outline-color: var(--accent); }
+/* Mail just landed: the accent a moment, or the warning hue for the human and asks. */
+.sv-star.hit .sv-orb { outline-color: var(--accent); }
+.sv-star.hit.warn .sv-orb { outline-color: var(--st-blocked); }
+/* The labels take no pointer: the orb is the star's control, and a label reaching over a
+   neighbour's orb never steals its click (S-462). */
+.sv-sl { position: absolute; left: 50%; top: calc(100% + var(--sv-star-label-gap)); width: var(--sv-star-label-w); transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; pointer-events: none; }
+/* Below zoom 1 the label is drawn at screen size (zoom.ts writes its scale), from the orb's foot, so
+   a name never draws under 14 px; one that would then cover another star or label is hidden, and
+   shows on hover, focus or selection, over the rest. */
+.sv-sl { transform-origin: 0 0; }
+.sv-star[data-hide] .sv-sl { visibility: hidden; }
+.sv-star[data-hide]:is(:hover, :focus-within, .sel) .sv-sl { visibility: visible; }
+.sv-star:is(:hover, :focus-within, .sel) { z-index: 2; }
+/* Each line sits on the pane's colour, so the rays converging on a busy orb pass under its words. */
+.sv-sl .sv-nm, .sv-sl .l2 { padding: 0 var(--space-05); border-radius: var(--radius-xs); background: var(--surface-pane); }
+.sv-sl .sv-nm { max-width: 100%; font-size: var(--type-chrome-lg); line-height: var(--leading-chrome-sm); text-align: center; }
+/* Zoomed out past where its small type reads, a star keeps its name and drops the key and cost. */
+.sv-stage.far .sv-sl .l2 { visibility: hidden; }
+.sv-star.sel .sv-nm { color: var(--accent-text); }
+.sv-sl .l2 { display: flex; align-items: center; gap: var(--space-1); max-width: 100%; overflow: hidden; white-space: nowrap;
+  font-size: var(--type-chrome-xs); line-height: var(--leading-chrome-xs); color: var(--text-muted); }
+.sv-sl .sv-stamp .sglyph { width: var(--space-3); height: var(--space-3); }
+.sv-sl .sv-cost { margin-left: 0; font-size: var(--type-chrome-xs); }
+.sv-sl .warn { color: var(--status-warning-fg); }
+.sv-orb:focus-visible { box-shadow: none; outline-color: var(--focus-ring); }
+.sv-star.human .sv-stack .sheet, .sv-star.human .sv-stack .sheet::after { border-color: var(--st-blocked); }
+.sv-star.human .sv-stack .sheet::after { background: var(--st-blocked); }
+.sv-star.human .sv-stack .n { color: var(--status-warning-fg); }
+/* A folded manager's count, on the orb's foot right. */
+.sv-star .sv-fold { left: auto; right: calc(-1 * var(--space-6)); bottom: calc(-1 * var(--space-1)); transform: none; }
+/* On a small orb the stack's box would cover the orb's middle: only its sheets and count take a click.
+   It never rises above the orb's slot (stars.ts sizes every slot for the largest orb), so it stays
+   clear of the labels of the star above. */
+.sv-star .sv-stack { pointer-events: none; top: max(calc(-1 * var(--space-3)), calc(var(--r) - var(--sv-orb-max))); }
+.sv-star .sv-stack .sheet, .sv-star .sv-stack .n { pointer-events: auto; }

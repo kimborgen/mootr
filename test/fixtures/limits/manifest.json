@@ -1,0 +1,172 @@
+{
+  "claude-stopfailure-rate-limit.json": {
+    "adapter": "claude",
+    "class": "limit",
+    "note": "StopFailure error 'rate_limit'"
+  },
+  "claude-stopfailure-billing-error.json": {
+    "adapter": "claude",
+    "class": "credits",
+    "note": "StopFailure error 'billing_error' (extra usage out)"
+  },
+  "claude-stopfailure-authentication-failed.json": {
+    "adapter": "claude",
+    "class": "auth",
+    "note": "StopFailure error 'authentication_failed'"
+  },
+  "claude-stopfailure-oauth-org-not-allowed.json": {
+    "adapter": "claude",
+    "class": "auth",
+    "note": "StopFailure error 'oauth_org_not_allowed'"
+  },
+  "claude-stopfailure-server-error.json": {
+    "adapter": "claude",
+    "class": "transient",
+    "note": "StopFailure error 'server_error' (5xx)"
+  },
+  "claude-stopfailure-overloaded.json": {
+    "adapter": "claude",
+    "class": "transient",
+    "note": "StopFailure error 'overloaded'"
+  },
+  "claude-stopfailure-max-output-tokens.json": {
+    "adapter": "claude",
+    "class": null,
+    "note": "StopFailure error 'max_output_tokens': a generation limit, not a policy signal"
+  },
+  "claude-stopfailure-unknown.json": {
+    "adapter": "claude",
+    "class": null,
+    "note": "StopFailure error 'unknown': unclassified"
+  },
+  "claude-stop-normal.json": {
+    "adapter": "claude",
+    "class": null,
+    "note": "a normal Stop hook, not a provider error"
+  },
+  "codex-turn-failed-usage-limit.json": {
+    "adapter": "codex",
+    "class": "limit",
+    "note": "turn/completed failed, codexErrorInfo usageLimitExceeded"
+  },
+  "codex-turn-failed-rate-limit.json": {
+    "adapter": "codex",
+    "class": "limit",
+    "note": "turn/completed failed, codexErrorInfo rateLimitExceeded"
+  },
+  "codex-turn-failed-session-budget.json": {
+    "adapter": "codex",
+    "class": "credits",
+    "note": "turn/completed failed, codexErrorInfo sessionBudgetExceeded"
+  },
+  "codex-turn-failed-unauthorized.json": {
+    "adapter": "codex",
+    "class": "auth",
+    "note": "turn/completed failed, codexErrorInfo unauthorized"
+  },
+  "codex-turn-failed-server-overloaded.json": {
+    "adapter": "codex",
+    "class": "transient",
+    "note": "turn/completed failed, codexErrorInfo serverOverloaded"
+  },
+  "codex-turn-failed-internal-server-error.json": {
+    "adapter": "codex",
+    "class": "transient",
+    "note": "turn/completed failed, codexErrorInfo internalServerError"
+  },
+  "codex-turn-failed-connection.json": {
+    "adapter": "codex",
+    "class": "transient",
+    "note": "turn/completed failed, codexErrorInfo httpConnectionFailed object"
+  },
+  "codex-turn-failed-connection-429.json": {
+    "adapter": "codex",
+    "class": "limit",
+    "note": "turn/completed failed, object variant httpStatusCode 429"
+  },
+  "codex-turn-failed-connection-401.json": {
+    "adapter": "codex",
+    "class": "auth",
+    "note": "turn/completed failed, object variant httpStatusCode 401"
+  },
+  "codex-turn-failed-connection-402.json": {
+    "adapter": "codex",
+    "class": "credits",
+    "note": "turn/completed failed, object variant httpStatusCode 402"
+  },
+  "codex-turn-failed-connection-null.json": {
+    "adapter": "codex",
+    "class": "transient",
+    "note": "turn/completed failed, object variant httpStatusCode null"
+  },
+  "codex-turn-failed-context-window.json": {
+    "adapter": "codex",
+    "class": null,
+    "note": "turn/completed failed, codexErrorInfo contextWindowExceeded: not a cost signal"
+  },
+  "codex-turn-completed-ok.json": {
+    "adapter": "codex",
+    "class": null,
+    "note": "a successful turn/completed"
+  },
+  "codex-ratelimits-rate-limit-reached.json": {
+    "adapter": "codex",
+    "class": "limit",
+    "note": "rateLimitReachedType rate_limit_reached"
+  },
+  "codex-ratelimits-usage-limit-reached.json": {
+    "adapter": "codex",
+    "class": "limit",
+    "note": "rateLimitReachedType workspace_owner_usage_limit_reached"
+  },
+  "codex-ratelimits-credits-depleted.json": {
+    "adapter": "codex",
+    "class": "credits",
+    "note": "rateLimitReachedType workspace_owner_credits_depleted"
+  },
+  "codex-ratelimits-spend-control.json": {
+    "adapter": "codex",
+    "class": "credits",
+    "note": "spendControlReached true"
+  },
+  "codex-ratelimits-normal.json": {
+    "adapter": "codex",
+    "class": null,
+    "note": "a normal rate-limit update, nothing reached"
+  },
+  "opencode-execution-failed-402.json": {
+    "adapter": "opencode",
+    "class": "credits",
+    "note": "HTTP 402, provider.quota"
+  },
+  "opencode-execution-failed-429.json": {
+    "adapter": "opencode",
+    "class": "limit",
+    "note": "HTTP 429, provider.rate-limit"
+  },
+  "opencode-execution-failed-auth.json": {
+    "adapter": "opencode",
+    "class": "auth",
+    "note": "HTTP 401, provider.auth"
+  },
+  "opencode-execution-failed-internal.json": {
+    "adapter": "opencode",
+    "class": "transient",
+    "note": "HTTP 500, provider.internal"
+  },
+  "opencode-execution-failed-quota-no-status.json": {
+    "adapter": "opencode",
+    "class": "credits",
+    "note": "provider.quota with no status field"
+  },
+  "opencode-execution-failed-status-only.json": {
+    "adapter": "opencode",
+    "class": "limit",
+    "note": "unknown type but status 429"
+  },
+  "opencode-execution-succeeded.json": {
+    "adapter": "opencode",
+    "class": null,
+    "note": "a successful execution, not an error"
+  }
+}

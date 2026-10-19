@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "method": "turn/completed",
+  "params": {
+    "threadId": "t1",
+    "turn": {
+      "id": "u1",
+      "status": "completed",
+      "items": []
+    }
+  }
+}

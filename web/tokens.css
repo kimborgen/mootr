@@ -1,0 +1,636 @@
+/*
+ * The token layer. SHELL owns it (REQ-SHELL-VIS-TOKENS) and every subsystem renders
+ * from it (REQ-SYS-DESIGN-TOKENS).
+ *
+ * The values are documented in docs/design-system.md; change a value here and update
+ * that document in the same change. Do not add a color, size, or duration to any stylesheet that is
+ * not defined in this file.
+ *
+ * Light and dark are a values-only swap of identical names (REQ-SHELL-VIS-THEME).
+ * Three theme states are handled: no attribute plus a light OS, no attribute plus a
+ * dark OS, and an explicit data-theme choice that must win over the OS in both
+ * directions. Never define a color only inside a media or [data-theme] block.
+ */
+
+/* ─────────────────────────── Primitives ───────────────────────────
+ * Naming is neutral; the semantic layer below owns meaning. Do not reference
+ * a primitive outside this file — components consume semantics only.
+ */
+:root {
+  /* sand — warm light neutrals. Channel spreads: 4, 6, 9, 11, 15, 17, 15, 16. */
+  --sand-0: #fcfbf8;
+  --sand-50: #fbf9f5;
+  --sand-100: #f5f2ec;
+  --sand-150: #ece8e1;
+  --sand-200: #e2ddd3;
+  --sand-300: #d0cabf;
+  --sand-400: #b5afa6;
+  --sand-500: #918b81;
+
+  /* coal — warm dark neutrals */
+  --coal-0: #e8e4dc;
+  --coal-100: #c6c0b7;
+  --coal-200: #6a655d;
+  --coal-300: #57524b;
+  --coal-400: #3b3833;
+  --coal-500: #2e2b27;
+  --coal-550: #2a2724;
+  --coal-600: #26231f;
+  --coal-650: #24221f;
+  --coal-700: #201e1b;
+  --coal-750: #1b1917;
+  --coal-800: #161513;
+  --coal-850: #111009;
+
+  /* indigo — the one interactive hue */
+  --indigo-100: #e3e9f5;
+  --indigo-200: #c4d1ec;
+  --indigo-300: #9ab2e4;
+  --indigo-400: #7e9cd6;
+  --indigo-500: #4a6db0;
+  --indigo-600: #3a5a99;
+  --indigo-700: #2f4a80;
+  --indigo-800: #232e45;
+  --indigo-900: #131a29;
+
+  /* status hues */
+  --moss-100: #e1eedf;
+  --moss-300: #93c08f;
+  --moss-600: #3e7040;
+  --moss-800: #243522;
+  --amber-100: #f6ecd4;
+  --amber-300: #d9a84e;
+  --amber-700: #8a5a10;
+  --amber-800: #3a2e17;
+  --rust-100: #f6dedb;
+  --rust-300: #e28e82;
+  --rust-600: #a63430;
+  --rust-800: #3d211e;
+
+  /* annotation hues — PDF highlights and find matches only, never chrome */
+  --marigold-500: #f2c230;
+  --marigold-600: #edba24;
+  --sky-500: #5ca6e8;
+  --sky-600: #4e9ce4;
+  --rose-500: #ee7fa9;
+  --rose-600: #ea6f9e;
+}
+
+/* ──────────────────── Theme-invariant tokens ────────────────────
+ * Type, space, radius, elevation order, motion, and icons do not swap.
+ */
+:root {
+  /* Typography — chrome. Three families ship, all OFL, all self-hosted. */
+  --font-chrome: 'Source Sans 3 Variable', 'Source Sans 3', ui-sans-serif, -apple-system,
+    'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'Source Code Pro Variable', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --type-chrome-xs: 0.6875rem; /* 11px */
+  --type-chrome-sm: 0.75rem; /* 12px */
+  --type-chrome-md: 0.8125rem; /* 13px — default */
+  --type-chrome-lg: 0.875rem; /* 14px */
+  --type-chrome-xl: 1rem; /* 16px */
+
+  --leading-chrome-xs: 0.875rem; /* 14px */
+  --leading-chrome-sm: 1rem; /* 16px */
+  --leading-chrome-md: 1.25rem; /* 20px */
+  --leading-chrome-lg: 1.25rem; /* 20px */
+  --leading-chrome-xl: 1.5rem; /* 24px */
+
+  --tracking-caps: 0.04em;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  /* 700 is banned in chrome. */
+
+  /* Typography — document. These eight are the override contract
+   * (REQ-WCS-STYLE-DOCUMENT); a document may redefine them on its own root
+   * and nothing else. */
+  --doc-font-body: 'STIX Two Text Variable', 'STIX Two Text', 'Times New Roman', Times, serif;
+  /* The default for a document that declares no face at all. It cannot serve as the
+     fallback for one that declares a body face: var() substitutes here, at :root, so this
+     resolves to the serif above and a document redefining --doc-font-body on its own root
+     never reaches it. style/css.ts emits the fallback beside the override instead. */
+  --doc-font-heading: var(--doc-font-body);
+  --doc-font-mono: var(--font-mono);
+  --doc-size-body: 1.0625rem; /* 17px — measured against STIX x-height 0.473em */
+  --doc-leading-body: 1.6;
+  --doc-measure: 75ch; /* 631px at 17px, measured digit advance 0.495em */
+  /* The floor the measure narrows to and no further. A digital-native document is bound
+     by no page, so it follows the pane down — but only to the bottom of the 45-75 character
+     range for continuous reading, below which the pane scrolls instead of the line getting
+     shorter (REQ-WCS-EDIT-WYSIWYG). In ch, so it tracks the body size and therefore the zoom.
+     Not in the style vocabulary: no document declares it. */
+  --doc-measure-min: 45ch;
+  --doc-para-space: 0.75em;
+  --doc-para-indent: 0; /* 1.5em switches the document to typeset paragraphing */
+
+  /* Document headings. Sized in em against doc-size-body so an override of the
+   * body size rescales the whole hierarchy for free. The ratios themselves are
+   * outside the override contract — a document needing different ones is a
+   * template concern. Deliberately shallow: a paper's h1 is a title, not a hero,
+   * and the bottom converges to body size differentiated by style instead of
+   * size, which is how print journals handle deep nesting. */
+  --doc-size-h1: 1.6em;
+  --doc-size-h2: 1.35em;
+  --doc-size-h3: 1.15em;
+  --doc-size-h4: 1em;
+  --doc-size-h5: 1em;
+  --doc-size-h6: 1em;
+  --doc-weight-h1: 600;
+  --doc-weight-h2: 600;
+  --doc-weight-h3: 600;
+  --doc-weight-h4: 600;
+  --doc-weight-h5: 400;
+  --doc-weight-h6: 500;
+  --doc-style-h5: italic;
+  --doc-style-h6: italic;
+  --doc-leading-heading: 1.25;
+  /* Space before a heading is twice the space after it, so a heading binds to
+   * the text it introduces rather than floating between two sections. */
+  --doc-space-heading-before: calc(var(--doc-para-space) * 2);
+
+  /* Apparatus — the system's proportions, outside the override contract.
+   * Em-derived, so a document override rescales them automatically. */
+  --doc-size-caption: 0.875em;
+  --doc-size-note: 0.875em;
+  /* Monospace runs optically large beside a serif, so document code sits below the
+   * body size rather than at it. Measured at the shipping faces: STIX at 17px has an
+   * x-height of 8.04px, and the mono face at 0.875em has one of 8.13px — the size at
+   * which code reads as the same size as the prose around it. */
+  --doc-size-code: 0.875em;
+  --doc-size-quote: 0.9375em;
+  --doc-indent-quote: 1.5em;
+  --doc-indent-hanging: 1.5em;
+  --doc-space-adjacent: 0.25em; /* between adjacent items of the same kind */
+
+  /* Spacing — base 4px, with one 6px sub-step for icon-to-label gaps */
+  --space-0: 0;
+  --space-05: 2px;
+  --space-1: 4px;
+  --space-15: 6px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* Density */
+  --size-tab-bar: 36px;
+  --size-row-tree: 24px;
+  --size-row-table: 28px;
+  --size-row-menu: 28px;
+  --size-control: 28px;
+  --size-hit-min: 24px;
+  --size-pane-min: 240px;
+  --size-tab-min: 96px;
+  --pad-pane: 12px;
+  --pad-page-block-start: 64px;
+  --pad-page-block-end: 96px;
+  --pad-page-inline: clamp(24px, 8%, 56px);
+  /* 75ch = 631px plus 24px of padding each side. A container query condition cannot
+   * read a custom property, so WcsPrototype.css repeats the number literally; this is
+   * where it is derived, and the two move together. */
+  --width-page-collapse: 679px;
+
+  /* Radius — nothing exceeds 8px, no pills, the page is never rounded */
+  --radius-none: 0;
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* Z-index — sparse by 100 so a layer can be inserted without renumbering */
+  --z-base: 0;
+  --z-sticky: 100;
+  --z-reveal: 200;
+  --z-drag: 300;
+  --z-top-overlay: 400;
+  --z-scrim: 500;
+  --z-modal: 600;
+  --z-popover: 700;
+
+  /* Motion. Every transition must consume a duration token — a hardcoded
+   * duration breaks prefers-reduced-motion, which works solely by zeroing these. */
+  --duration-fast: 80ms;
+  --duration-base: 140ms;
+  --duration-slow: 220ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ease-in: cubic-bezier(0.3, 0, 1, 1);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.25, 1);
+
+  /* Focus geometry. The color tokens live in the theme blocks below. */
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* Icons — lucide with absoluteStrokeWidth. 18, 22, and 24px are banned. */
+  --icon-xs: 14px;
+  --icon-sm: 16px;
+  --icon-md: 20px;
+  --icon-xl: 32px;
+  --icon-stroke: 1.5px;
+}
+
+/* ──────────────────── Semantics — light ────────────────────
+ * The complete palette lives on bare :root so the un-stamped default state
+ * always resolves. The dark blocks below redefine values only.
+ */
+:root {
+  /* Tell the user agent which scheme it is painting, so native selects,
+   * scrollbars, form controls, and the canvas behind the first paint follow the
+   * theme instead of staying light. Declared in all three theme states below,
+   * the same way every colour token is. */
+  color-scheme: light;
+
+  /* surfaces and elevation */
+  --surface-app: var(--sand-150);
+  --surface-pane: var(--sand-100);
+  --surface-raised: var(--sand-50);
+  --surface-sunken: var(--sand-200);
+  --surface-page: var(--sand-0);
+  --surface-scrim: rgba(38, 35, 31, 0.45);
+  --shadow-float: 0 1px 2px rgba(38, 35, 31, 0.06);
+  --shadow-raised: 0 4px 16px rgba(38, 35, 31, 0.14), 0 1px 3px rgba(38, 35, 31, 0.08);
+  --shadow-page: 0 1px 3px rgba(38, 35, 31, 0.1), 0 4px 12px rgba(38, 35, 31, 0.06);
+
+  /* borders */
+  --border-subtle: var(--sand-200);
+  --border-default: var(--sand-300);
+  --border-strong: var(--sand-400);
+
+  /* text */
+  --text-primary: var(--coal-600);
+  --text-secondary: var(--coal-300);
+  --text-muted: var(--coal-200);
+  --text-eyebrow: var(--coal-200);
+  --text-disabled: var(--sand-400);
+  --text-on-accent: var(--sand-0);
+
+  /* accent */
+  --accent: var(--indigo-500);
+  --accent-strong: var(--indigo-600);
+  --accent-text: var(--indigo-600);
+  --accent-subtle: var(--indigo-100);
+  --accent-subtle-border: var(--indigo-200);
+
+  /* focus and selection */
+  --focus-ring: var(--indigo-500);
+  --focus-ring-on-page: var(--indigo-500);
+  --selection-bg: rgba(74, 109, 176, 0.22);
+
+  /* tabs and pane header */
+  --tabbar-bg: var(--sand-150);
+  --tabbar-border: var(--sand-300);
+  --tab-bg-active: var(--sand-100);
+  --tab-bg-hover: rgba(38, 35, 31, 0.05);
+  --tab-fg-active-focused: var(--coal-600);
+  --tab-fg-inactive-focused: var(--coal-300);
+  --tab-fg-active-unfocused: var(--coal-300);
+  --tab-fg-inactive-unfocused: var(--coal-200);
+  --tab-indicator-focused: var(--indigo-500);
+  --tab-indicator-unfocused: var(--sand-400);
+  --tab-close-hover-bg: rgba(38, 35, 31, 0.08);
+  --tab-lock-fg: var(--coal-200);
+
+  /* controls */
+  --control-fg: var(--coal-300);
+  --control-hover-fg: var(--coal-600);
+  --control-hover-bg: rgba(38, 35, 31, 0.07);
+  --control-disabled-fg: var(--sand-400);
+  --reveal-bg: rgba(251, 249, 245, 0.92);
+
+  /* separators, drag and drop, scrollbars */
+  --separator-idle: var(--sand-200);
+  --separator-hover: var(--sand-400);
+  --separator-drag: var(--indigo-500);
+  --drop-fill: rgba(74, 109, 176, 0.12);
+  --drop-border: var(--indigo-500);
+  --split-preview-fill: rgba(74, 109, 176, 0.08);
+  --split-preview-border: rgba(74, 109, 176, 0.55);
+  --scrollbar-thumb: rgba(38, 35, 31, 0.28);
+  --scrollbar-thumb-hover: rgba(38, 35, 31, 0.55);
+
+  /* menus, overlays, inputs */
+  --menu-bg: var(--surface-raised);
+  --menu-border: var(--sand-300);
+  --menu-item-fg: var(--coal-600);
+  --menu-item-hover-bg: rgba(38, 35, 31, 0.06);
+  --menu-item-disabled-fg: var(--sand-400);
+  --menu-section-fg: var(--coal-200);
+  --menu-separator: var(--sand-200);
+  --menu-danger-fg: var(--rust-600);
+  --menu-danger-hover-bg: rgba(166, 52, 48, 0.08);
+  --overlay-panel-bg: var(--surface-raised);
+  --modal-bg: var(--surface-raised);
+  --input-bg: var(--sand-0);
+  --input-border: var(--sand-500); /* 3.02:1 worst — the old value failed 1.4.11 at 1.58:1 */
+  --input-border-focus: var(--indigo-500);
+
+  /* writing surface */
+  --page-rule: var(--sand-200);
+  --cite-ink: var(--indigo-600);
+  --cite-hover-bg: var(--indigo-100);
+  --cite-hover-border: var(--indigo-200);
+  --math-hover-bg: var(--sand-150);
+  --math-affordance-fg: var(--coal-300);
+  --math-hover-border: var(--sand-300);
+
+  /* pdf and annotation */
+  --pdf-viewport-bg: var(--surface-sunken);
+  --pdf-sheet-bg: var(--sand-0);
+  /*
+   * Ink on the sheet. Declared here and nowhere else on purpose: the sheet is dimmed in
+   * dark theme rather than inverted, so its text must not follow --text-primary and
+   * --text-eyebrow, which do invert. A semantic that resolves to the same value in all
+   * three theme states is still a semantic — what it must not be is a primitive read
+   * straight from a component stylesheet, which is what these two replace.
+   */
+  --pdf-sheet-fg: var(--coal-600);
+  --pdf-sheet-meta-fg: var(--coal-200);
+  --pdf-sheet-shadow: var(--shadow-page);
+  --highlight-1: rgba(242, 194, 48, 0.42);
+  --highlight-2: rgba(92, 166, 232, 0.35);
+  --highlight-3: rgba(238, 127, 169, 0.34);
+  --find-match-bg: rgba(242, 194, 48, 0.4);
+  --find-match-current-bg: rgba(242, 194, 48, 0.7);
+  --find-match-current-ring: var(--amber-700);
+  --swatch-border: var(--coal-200);
+
+  /* tables, code, tree, empty states */
+  --table-header-bg: var(--sand-150);
+  --table-header-fg: var(--coal-300);
+  --table-border: var(--sand-200);
+  --table-row-hover: rgba(38, 35, 31, 0.04);
+  --table-row-active-bg: var(--indigo-100);
+  --table-row-active-fg: var(--coal-600);
+  --code-bg: var(--sand-150);
+  --code-fg: var(--coal-400);
+  --tree-row-hover: rgba(38, 35, 31, 0.05);
+  --tree-row-selected-bg: var(--indigo-100);
+  --tree-row-selected-fg: var(--coal-600);
+  --empty-icon-fg: var(--coal-200);
+
+  /* status */
+  --status-neutral-fg: var(--coal-300);
+  --status-neutral-bg: var(--sand-200);
+  --status-progress-fg: var(--indigo-600);
+  --status-progress-bg: var(--indigo-100);
+  --status-success-fg: var(--moss-600);
+  --status-success-bg: var(--moss-100);
+  --status-warning-fg: var(--amber-700);
+  --status-warning-bg: var(--amber-100);
+  --status-error-fg: var(--rust-600);
+  --status-error-bg: var(--rust-100);
+}
+
+/* ──────────────────── Semantics — dark ────────────────────
+ * Values only. Every name above is redefined here or deliberately inherited.
+ * The two selectors are identical in content: the media query serves the
+ * un-stamped default on a dark OS, the attribute serves an explicit choice.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --surface-app: var(--coal-800);
+    --surface-pane: var(--coal-700);
+    --surface-raised: var(--coal-550);
+    --surface-sunken: var(--coal-850);
+    --surface-page: var(--coal-650);
+    --surface-scrim: rgba(0, 0, 0, 0.55);
+    --shadow-float: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+    --shadow-page: 0 2px 8px rgba(0, 0, 0, 0.5);
+
+    --border-subtle: var(--coal-500);
+    --border-default: var(--coal-400);
+    --border-strong: var(--coal-300);
+
+    --text-primary: var(--coal-0);
+    --text-secondary: var(--sand-400);
+    --text-muted: var(--sand-500);
+    --text-eyebrow: var(--sand-500);
+    --text-disabled: var(--coal-300);
+    --text-on-accent: var(--indigo-900);
+
+    --accent: var(--indigo-400);
+    --accent-strong: var(--indigo-300);
+    --accent-text: var(--indigo-300);
+    --accent-subtle: var(--indigo-800);
+    --accent-subtle-border: var(--indigo-700);
+
+    --focus-ring: var(--indigo-400);
+    --focus-ring-on-page: var(--indigo-600);
+    --selection-bg: rgba(126, 156, 214, 0.3);
+
+    --tabbar-bg: var(--coal-750);
+    --tabbar-border: var(--coal-400);
+    --tab-bg-active: var(--coal-700);
+    --tab-bg-hover: rgba(232, 228, 220, 0.06);
+    --tab-fg-active-focused: var(--coal-0);
+    --tab-fg-inactive-focused: var(--sand-400);
+    --tab-fg-active-unfocused: var(--sand-400);
+    --tab-fg-inactive-unfocused: var(--sand-500);
+    --tab-indicator-focused: var(--indigo-400);
+    --tab-indicator-unfocused: var(--coal-300);
+    --tab-close-hover-bg: rgba(232, 228, 220, 0.1);
+    --tab-lock-fg: var(--sand-500);
+
+    --control-fg: var(--sand-400);
+    --control-hover-fg: var(--coal-0);
+    --control-hover-bg: rgba(232, 228, 220, 0.08);
+    --control-disabled-fg: var(--coal-300);
+    --reveal-bg: rgba(42, 39, 36, 0.92);
+
+    --separator-idle: var(--coal-500);
+    --separator-hover: var(--coal-300);
+    --separator-drag: var(--indigo-400);
+    --drop-fill: rgba(126, 156, 214, 0.16);
+    --drop-border: var(--indigo-400);
+    --split-preview-fill: rgba(126, 156, 214, 0.1);
+    --split-preview-border: rgba(126, 156, 214, 0.55);
+    --scrollbar-thumb: rgba(232, 228, 220, 0.22);
+    --scrollbar-thumb-hover: rgba(232, 228, 220, 0.38);
+
+    --menu-border: var(--coal-400);
+    --menu-item-fg: var(--coal-0);
+    --menu-item-hover-bg: rgba(232, 228, 220, 0.07);
+    --menu-item-disabled-fg: var(--coal-300);
+    --menu-section-fg: var(--sand-500);
+    --menu-separator: var(--coal-500);
+    --menu-danger-fg: var(--rust-300);
+    --menu-danger-hover-bg: rgba(226, 142, 130, 0.12);
+    --input-bg: var(--coal-750);
+    --input-border: var(--sand-500);
+    --input-border-focus: var(--indigo-400);
+
+    --page-rule: var(--coal-400);
+    --cite-ink: var(--indigo-300);
+    --cite-hover-bg: var(--indigo-800);
+    --cite-hover-border: var(--indigo-700);
+    --math-hover-bg: var(--coal-500);
+    --math-affordance-fg: var(--sand-400);
+    --math-hover-border: var(--coal-400);
+
+    --pdf-sheet-bg: var(--sand-150); /* dimmed, never inverted — a PDF is a fixed artifact */
+    --highlight-1: rgba(237, 186, 36, 0.48);
+    --highlight-2: rgba(78, 156, 228, 0.42);
+    --highlight-3: rgba(234, 111, 158, 0.4);
+    --find-match-bg: rgba(237, 186, 36, 0.28);
+    --find-match-current-bg: rgba(237, 186, 36, 0.28);
+    --find-match-current-ring: var(--marigold-500);
+    --swatch-border: var(--sand-500);
+
+    --table-header-bg: var(--coal-750);
+    --table-header-fg: var(--sand-400);
+    --table-border: var(--coal-500);
+    --table-row-hover: rgba(232, 228, 220, 0.05);
+    --table-row-active-bg: var(--indigo-800);
+    --table-row-active-fg: var(--coal-0);
+    --code-bg: var(--coal-850);
+    --code-fg: var(--coal-100);
+    --tree-row-hover: rgba(232, 228, 220, 0.06);
+    --tree-row-selected-bg: var(--indigo-800);
+    --tree-row-selected-fg: var(--coal-0);
+    --empty-icon-fg: var(--sand-500);
+
+    --status-neutral-fg: var(--sand-400);
+    --status-neutral-bg: var(--coal-500);
+    --status-progress-fg: var(--indigo-300);
+    --status-progress-bg: var(--indigo-800);
+    --status-success-fg: var(--moss-300);
+    --status-success-bg: var(--moss-800);
+    --status-warning-fg: var(--amber-300);
+    --status-warning-bg: var(--amber-800);
+    --status-error-fg: var(--rust-300);
+    --status-error-bg: var(--rust-800);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --surface-app: var(--coal-800);
+  --surface-pane: var(--coal-700);
+  --surface-raised: var(--coal-550);
+  --surface-sunken: var(--coal-850);
+  --surface-page: var(--coal-650);
+  --surface-scrim: rgba(0, 0, 0, 0.55);
+  --shadow-float: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-page: 0 2px 8px rgba(0, 0, 0, 0.5);
+
+  --border-subtle: var(--coal-500);
+  --border-default: var(--coal-400);
+  --border-strong: var(--coal-300);
+
+  --text-primary: var(--coal-0);
+  --text-secondary: var(--sand-400);
+  --text-muted: var(--sand-500);
+  --text-eyebrow: var(--sand-500);
+  --text-disabled: var(--coal-300);
+  --text-on-accent: var(--indigo-900);
+
+  --accent: var(--indigo-400);
+  --accent-strong: var(--indigo-300);
+  --accent-text: var(--indigo-300);
+  --accent-subtle: var(--indigo-800);
+  --accent-subtle-border: var(--indigo-700);
+
+  --focus-ring: var(--indigo-400);
+  --focus-ring-on-page: var(--indigo-600);
+  --selection-bg: rgba(126, 156, 214, 0.3);
+
+  --tabbar-bg: var(--coal-750);
+  --tabbar-border: var(--coal-400);
+  --tab-bg-active: var(--coal-700);
+  --tab-bg-hover: rgba(232, 228, 220, 0.06);
+  --tab-fg-active-focused: var(--coal-0);
+  --tab-fg-inactive-focused: var(--sand-400);
+  --tab-fg-active-unfocused: var(--sand-400);
+  --tab-fg-inactive-unfocused: var(--sand-500);
+  --tab-indicator-focused: var(--indigo-400);
+  --tab-indicator-unfocused: var(--coal-300);
+  --tab-close-hover-bg: rgba(232, 228, 220, 0.1);
+  --tab-lock-fg: var(--sand-500);
+
+  --control-fg: var(--sand-400);
+  --control-hover-fg: var(--coal-0);
+  --control-hover-bg: rgba(232, 228, 220, 0.08);
+  --control-disabled-fg: var(--coal-300);
+  --reveal-bg: rgba(42, 39, 36, 0.92);
+
+  --separator-idle: var(--coal-500);
+  --separator-hover: var(--coal-300);
+  --separator-drag: var(--indigo-400);
+  --drop-fill: rgba(126, 156, 214, 0.16);
+  --drop-border: var(--indigo-400);
+  --split-preview-fill: rgba(126, 156, 214, 0.1);
+  --split-preview-border: rgba(126, 156, 214, 0.55);
+  --scrollbar-thumb: rgba(232, 228, 220, 0.22);
+  --scrollbar-thumb-hover: rgba(232, 228, 220, 0.38);
+
+  --menu-border: var(--coal-400);
+  --menu-item-fg: var(--coal-0);
+  --menu-item-hover-bg: rgba(232, 228, 220, 0.07);
+  --menu-item-disabled-fg: var(--coal-300);
+  --menu-section-fg: var(--sand-500);
+  --menu-separator: var(--coal-500);
+  --menu-danger-fg: var(--rust-300);
+  --menu-danger-hover-bg: rgba(226, 142, 130, 0.12);
+  --input-bg: var(--coal-750);
+  --input-border: var(--sand-500);
+  --input-border-focus: var(--indigo-400);
+
+  --page-rule: var(--coal-400);
+  --cite-ink: var(--indigo-300);
+  --cite-hover-bg: var(--indigo-800);
+  --cite-hover-border: var(--indigo-700);
+  --math-hover-bg: var(--coal-500);
+  --math-affordance-fg: var(--sand-400);
+  --math-hover-border: var(--coal-400);
+
+  --pdf-sheet-bg: var(--sand-150);
+  --highlight-1: rgba(237, 186, 36, 0.48);
+  --highlight-2: rgba(78, 156, 228, 0.42);
+  --highlight-3: rgba(234, 111, 158, 0.4);
+  --find-match-bg: rgba(237, 186, 36, 0.28);
+  --find-match-current-bg: rgba(237, 186, 36, 0.28);
+  --find-match-current-ring: var(--marigold-500);
+  --swatch-border: var(--sand-500);
+
+  --table-header-bg: var(--coal-750);
+  --table-header-fg: var(--sand-400);
+  --table-border: var(--coal-500);
+  --table-row-hover: rgba(232, 228, 220, 0.05);
+  --table-row-active-bg: var(--indigo-800);
+  --table-row-active-fg: var(--coal-0);
+  --code-bg: var(--coal-850);
+  --code-fg: var(--coal-100);
+  --tree-row-hover: rgba(232, 228, 220, 0.06);
+  --tree-row-selected-bg: var(--indigo-800);
+  --tree-row-selected-fg: var(--coal-0);
+  --empty-icon-fg: var(--sand-500);
+
+  --status-neutral-fg: var(--sand-400);
+  --status-neutral-bg: var(--coal-500);
+  --status-progress-fg: var(--indigo-300);
+  --status-progress-bg: var(--indigo-800);
+  --status-success-fg: var(--moss-300);
+  --status-success-bg: var(--moss-800);
+  --status-warning-fg: var(--amber-300);
+  --status-warning-bg: var(--amber-800);
+  --status-error-fg: var(--rust-300);
+  --status-error-bg: var(--rust-800);
+}
+
+/* Reduced motion is implemented solely by zeroing the duration tokens, which is
+ * why no component may hardcode a duration. Every end state still lands. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+    --duration-slow: 0ms;
+  }
+}

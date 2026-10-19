@@ -1,0 +1,48 @@
+process: retro-loop
+title: Retro loop
+description: After each retro digest, a steward proposes instruction edits for you to approve.
+applies_to: { kind: [proposal] }
+
+lanes:
+  script:  { type: script, label: Timer and digest }
+  steward: { type: retro-steward }
+  human:   { type: human }
+
+nodes:
+  timer:
+    kind: start
+    lane: script
+    label: The retro digest is due
+    triggers:
+      - { source: timer, cron: "0 9 * * *", label: Daily retro digest }
+  digest:
+    kind: script
+    lane: script
+    label: Send the retro digest
+    run: bin/stam retro --digest
+  steward:
+    kind: agent
+    lane: steward
+    label: Draft a proposal from the open retro items
+  approve:
+    kind: human
+    lane: human
+    label: Approve the proposal
+    ask: approve
+    statuses: [needs_approval]
+  apply:
+    kind: agent
+    lane: steward
+    label: Apply the edits, open the PR
+    statuses: [in_progress, ready_to_merge, merging, deploying]
+  done:
+    kind: end
+    lane: steward
+    status: done
+
+edges:
+  - [timer, digest]
+  - [digest, steward]
+  - [steward, approve]
+  - [approve, apply]
+  - [apply, done]

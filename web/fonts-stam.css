@@ -1,0 +1,8 @@
+/* Symbols that TUIs draw (Claude Code's ⏺ ⎿ ❯ ✻ ✳ ● ◐ ⏵ ⏸ ↯ and the like), which Source Code Pro lacks.
+   Each face is a subset of a Noto Sans Symbols face (SIL OFL 1.1, LICENSE-noto-symbols.txt):
+   the symbols list, U+23BF (⎿) from Noto Sans Symbols, and braille for the spinners. A face
+   downloads only when a glyph in its range is drawn, and the terminal's font stack names the
+   family after its primary face (TermSession.ts). */
+@font-face { font-family: 'Stam Terminal Symbols'; font-style: normal; font-weight: 400; font-display: swap; src: url('fonts/stam-symbols.woff2') format('woff2'); unicode-range: U+23FA,U+23F5,U+23F8,U+23F9,U+23F3,U+231B,U+276F,U+276E,U+273B,U+2733,U+2722,U+2736,U+273D,U+2713,U+2714,U+2717,U+2718,U+25CF,U+25CB,U+25C9,U+25D0,U+25D1,U+25D2,U+25D3,U+25C6,U+25B6,U+25BA,U+25B8,U+25A0,U+25AA,U+21AF,U+22EF,U+2192,U+2190,U+2191,U+2193; }
+@font-face { font-family: 'Stam Terminal Symbols'; font-style: normal; font-weight: 400; font-display: swap; src: url('fonts/stam-symbols-23bf.woff2') format('woff2'); unicode-range: U+23BF; }
+@font-face { font-family: 'Stam Terminal Symbols'; font-style: normal; font-weight: 400; font-display: swap; src: url('fonts/stam-braille.woff2') format('woff2'); unicode-range: U+2800-28FF; }

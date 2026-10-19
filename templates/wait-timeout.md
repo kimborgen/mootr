@@ -1,0 +1,1 @@
+[stam] Your wait for {{what}} timed out after {{minutes}} minutes.

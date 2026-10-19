@@ -1,0 +1,1 @@
+! cp ~/.local/share/stam/settings.json ~/.local/share/stam/settings.json.bak-s422  &&  stam registry migrate-reviewers --apply --from codex-gpt-6.1-sol-low --to claude-opus-5-5-low && echo migrated-ok && ls -la ~/.local/share/stam/ | head -n 5 && echo   done-with-the-long-command-for-the-wrap-fixture

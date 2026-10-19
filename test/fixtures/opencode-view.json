@@ -1,0 +1,487 @@
+{
+ "note": "OpenCode v2.0.26 events and stored messages for one session: a shell tool call that asked permission (answered once), then a text reply. Captured 2026-10-11 from a private server with DeepSeek V4 Flash.",
+ "session": "ses_ed30b69ddffed5obwVkRurB89V",
+ "events": [
+  {
+   "id": "evt_12cf498480018smm2lR8uzSoYC",
+   "created": 1791755589704,
+   "type": "session.inbox.enqueued",
+   "data": {
+    "inboxID": "msg_12cf49847001mwRqgrhYJZWZ6n",
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "item": {
+     "type": "user"
+    }
+   }
+  },
+  {
+   "id": "evt_12cf4984b001Zu7oSquN3UM7NL",
+   "created": 1791755589707,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V"
+   }
+  },
+  {
+   "id": "evt_12cf49857001k68mkjcmIv1v02",
+   "created": 1791755589719,
+   "type": "session.inbox.delivered",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "inboxID": "msg_12cf49847001mwRqgrhYJZWZ6n"
+   }
+  },
+  {
+   "id": "evt_12cf49e0f0012rSPxBiZJJK1Ih",
+   "created": 1791755591183,
+   "type": "session.step.started",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "agent": "build",
+    "model": {
+     "id": "~deepseek/deepseek-v4-flash-latest",
+     "providerID": "openrouter",
+     "variant": "default"
+    },
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE",
+    "started": 1791755589742
+   }
+  },
+  {
+   "id": "evt_12cf49e1300169apq6jZah176R",
+   "created": 1791755591187,
+   "type": "session.reasoning.started",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE",
+    "ordinal": 0,
+    "state": {
+     "reasoningField": "reasoning"
+    }
+   }
+  },
+  {
+   "id": "evt_12cf49e7a001yvo4D6Denk7BA2",
+   "created": 1791755591290,
+   "type": "session.reasoning.delta",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE",
+    "ordinal": 0,
+    "delta": "The user wants me to run a shell command `echo hello-view` and then reply with one"
+   }
+  },
+  {
+   "id": "evt_12cf49ebb001WKalMIHA6ghu0c",
+   "created": 1791755591355,
+   "type": "session.reasoning.delta",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE",
+    "ordinal": 0,
+    "delta": " short sentence."
+   }
+  },
+  {
+   "id": "evt_12cf49ebc001MQGFW9nDRen7fU",
+   "created": 1791755591356,
+   "type": "session.tool.input.started",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE",
+    "id": "call_c3e49b8d945c4fe79e198434",
+    "name": "shell"
+   }
+  },
+  {
+   "id": "evt_12cf49f16001o5JpQiXJDZUI03",
+   "created": 1791755591446,
+   "type": "session.reasoning.ended",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE",
+    "ordinal": 0,
+    "text": "The user wants me to run a shell command `echo hello-view` and then reply with one short sentence.",
+    "state": {
+     "reasoningField": "reasoning",
+     "reasoningDetails": [
+      {
+       "type": "reasoning.text",
+       "text": "The user wants me to run a shell command `echo hello-view` and then reply with one short sentence.",
+       "format": "unknown",
+       "index": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "evt_12cf49f19001jtKkf2qBkKNcz0",
+   "created": 1791755591449,
+   "type": "session.tool.input.ended",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE",
+    "id": "call_c3e49b8d945c4fe79e198434",
+    "text": "{\"command\": \"echo hello-view\"}"
+   }
+  },
+  {
+   "id": "evt_12cf49f1b0016axwpgqQKC0LSv",
+   "created": 1791755591451,
+   "type": "session.tool.called",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE",
+    "id": "call_c3e49b8d945c4fe79e198434",
+    "input": {
+     "command": "echo hello-view"
+    },
+    "executed": false
+   }
+  },
+  {
+   "id": "evt_12cf49f1d001oSD8IAYf6cMmmT",
+   "created": 1791755591453,
+   "type": "session.step.streamed",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE"
+   }
+  },
+  {
+   "id": "evt_12cf49f22002WQiqGZxUHIsTOS",
+   "created": 1791755591458,
+   "type": "permission.asked",
+   "data": {
+    "id": "per_12cf49f22001oV4W4glHRlx3Mn",
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "action": "shell",
+    "resources": [
+     "echo hello-view"
+    ],
+    "save": [
+     "echo *"
+    ],
+    "source": {
+     "type": "tool",
+     "messageID": "msg_12cf4985e001gZed6QvwsELOXE",
+     "id": "call_c3e49b8d945c4fe79e198434"
+    }
+   }
+  },
+  {
+   "id": "evt_12cf4a0550010yJ3KKeiAyXPkH",
+   "created": 1791755591765,
+   "type": "permission.replied",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "requestID": "per_12cf49f22001oV4W4glHRlx3Mn",
+    "reply": "once"
+   }
+  },
+  {
+   "id": "evt_12cf4a0580020ReELi4XpcRXXz",
+   "created": 1791755591768,
+   "type": "session.tool.progress",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE",
+    "id": "call_c3e49b8d945c4fe79e198434",
+    "metadata": {
+     "shellID": "sh_12cf4a056001h2jlFV7qbKyf4l"
+    }
+   }
+  },
+  {
+   "id": "evt_12cf4a05c001juIfw2KeqiK4MN",
+   "created": 1791755591772,
+   "type": "session.tool.success",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE",
+    "id": "call_c3e49b8d945c4fe79e198434",
+    "content": [
+     {
+      "type": "text",
+      "text": "hello-view\n"
+     }
+    ],
+    "metadata": {
+     "status": "completed",
+     "truncated": false,
+     "exit": 0
+    },
+    "executed": false
+   }
+  },
+  {
+   "id": "evt_12cf4a05f001PuqIIybriHQG6V",
+   "created": 1791755591775,
+   "type": "session.step.ended",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4985e001gZed6QvwsELOXE",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.000186512,
+    "tokens": {
+     "input": 8,
+     "output": 43,
+     "reasoning": 25,
+     "cache": {
+      "read": 7936,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_12cf4a061001QAv0GfFDvEy36U",
+   "created": 1791755591777,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "cost": 0.000186512,
+    "tokens": {
+     "input": 8,
+     "output": 43,
+     "reasoning": 25,
+     "cache": {
+      "read": 7936,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_12cf4a487001ZS7CLFijOjKcNR",
+   "created": 1791755592839,
+   "type": "session.step.started",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "agent": "build",
+    "model": {
+     "id": "~deepseek/deepseek-v4-flash-latest",
+     "providerID": "openrouter",
+     "variant": "default"
+    },
+    "assistantMessageID": "msg_12cf4a06b001TxG3HgHAAX5Ro4",
+    "started": 1791755591799
+   }
+  },
+  {
+   "id": "evt_12cf4a48b001s2zWLXUIgZ1TDC",
+   "created": 1791755592843,
+   "type": "session.text.started",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4a06b001TxG3HgHAAX5Ro4",
+    "ordinal": 0
+   }
+  },
+  {
+   "id": "evt_12cf4a490001zLlB7p0OW6EXPy",
+   "created": 1791755592849,
+   "type": "session.text.delta",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4a06b001TxG3HgHAAX5Ro4",
+    "ordinal": 0,
+    "delta": "The command output `hello-view`."
+   }
+  },
+  {
+   "id": "evt_12cf4a491001QQ2wDfEysMorAX",
+   "created": 1791755592849,
+   "type": "session.text.ended",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4a06b001TxG3HgHAAX5Ro4",
+    "ordinal": 0,
+    "text": "The command output `hello-view`."
+   }
+  },
+  {
+   "id": "evt_12cf4a494001S34Plj3xy5hh6N",
+   "created": 1791755592852,
+   "type": "session.step.streamed",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4a06b001TxG3HgHAAX5Ro4"
+   }
+  },
+  {
+   "id": "evt_12cf4a497001Pj0tphMIPYBkAd",
+   "created": 1791755592855,
+   "type": "session.step.ended",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "assistantMessageID": "msg_12cf4a06b001TxG3HgHAAX5Ro4",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00014920199999999997,
+    "tokens": {
+     "input": 7969,
+     "output": 8,
+     "reasoning": 1,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_12cf4a49a0015S0flwMPGoyQcy",
+   "created": 1791755592858,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V",
+    "cost": 0.000335714,
+    "tokens": {
+     "input": 7977,
+     "output": 51,
+     "reasoning": 26,
+     "cache": {
+      "read": 7936,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_12cf4a49b001KOapGGTZOkwxKw",
+   "created": 1791755592860,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_ed30b69ddffed5obwVkRurB89V"
+   }
+  }
+ ],
+ "messages": {
+  "data": [
+   {
+    "id": "msg_12cf4a49b001KOapGGTZOkwxKw",
+    "time": {
+     "created": 1791755592860
+    },
+    "type": "idle",
+    "outcome": "succeeded"
+   },
+   {
+    "id": "msg_12cf4a06b001TxG3HgHAAX5Ro4",
+    "time": {
+     "created": 1791755591799,
+     "streamed": 1791755592852,
+     "completed": 1791755592855
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+     "id": "~deepseek/deepseek-v4-flash-latest",
+     "providerID": "openrouter",
+     "variant": "default"
+    },
+    "content": [
+     {
+      "type": "text",
+      "text": "The command output `hello-view`."
+     }
+    ],
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00014920199999999997,
+    "tokens": {
+     "input": 7969,
+     "output": 8,
+     "reasoning": 1,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_12cf4985e001gZed6QvwsELOXE",
+    "time": {
+     "created": 1791755589742,
+     "streamed": 1791755591453,
+     "completed": 1791755591775
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+     "id": "~deepseek/deepseek-v4-flash-latest",
+     "providerID": "openrouter",
+     "variant": "default"
+    },
+    "content": [
+     {
+      "type": "reasoning",
+      "text": "The user wants me to run a shell command `echo hello-view` and then reply with one short sentence.",
+      "time": {
+       "created": 1791755591187,
+       "completed": 1791755591446
+      }
+     },
+     {
+      "type": "tool",
+      "id": "call_c3e49b8d945c4fe79e198434",
+      "name": "shell",
+      "executed": false,
+      "state": {
+       "status": "completed",
+       "input": {
+        "command": "echo hello-view"
+       },
+       "content": [
+        {
+         "type": "text",
+         "text": "hello-view\n"
+        }
+       ],
+       "metadata": {
+        "status": "completed",
+        "truncated": false,
+        "exit": 0
+       }
+      },
+      "time": {
+       "created": 1791755591356,
+       "ran": 1791755591451,
+       "completed": 1791755591772
+      }
+     }
+    ],
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.000186512,
+    "tokens": {
+     "input": 8,
+     "output": 43,
+     "reasoning": 25,
+     "cache": {
+      "read": 7936,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_12cf49847001mwRqgrhYJZWZ6n",
+    "time": {
+     "created": 1791755589719
+    },
+    "text": "Run the shell command `echo hello-view` with your bash tool, then reply with one short sentence.",
+    "type": "user"
+   }
+  ],
+  "cursor": {
+   "previous": "eyJpZCI6Im1zZ18xMmNmNGE0OWIwMDFLT2FwR0dUWk9rd3hLdyIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6InByZXZpb3VzIn0",
+   "next": "eyJpZCI6Im1zZ18xMmNmNDk4NDcwMDFtd1JxZ3JoWUpaV1o2biIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6Im5leHQifQ"
+  }
+ },
+ "permissions": {
+  "data": []
+ }
+}

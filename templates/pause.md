@@ -1,0 +1,1 @@
+[stam] You are being paused: you aren't needed for a while, from minutes to days. Stop any programs, servers, or background jobs you started, so they free memory. Keep your notes on what you were doing, so you can pick it up again at a moment's notice. Then stop working and wait.

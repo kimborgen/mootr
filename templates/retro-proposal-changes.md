@@ -1,0 +1,1 @@
+Your user requested changes on {{key}}; their comment is in its thread (`itsa_get` {{key}}, or your mail). Revise the edits, update the body's summary and diff, comment what changed, and set it back to `needs_approval`.

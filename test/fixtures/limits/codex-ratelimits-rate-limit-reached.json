@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "method": "account/rateLimits/updated",
+  "params": {
+    "rateLimits": {
+      "rateLimitReachedType": "rate_limit_reached",
+      "primary": {
+        "usedPercent": 100
+      }
+    }
+  }
+}

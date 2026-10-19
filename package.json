@@ -1,0 +1,36 @@
+{
+  "name": "stam2",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "stam": "bin/stam"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@lezer/common": "1.5.3",
+    "@lezer/go": "1.0.1",
+    "@lezer/javascript": "1.5.6",
+    "@lezer/lr": "1.4.11",
+    "@lezer/python": "1.1.19",
+    "@lezer/rust": "1.0.3",
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.3",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/ws": "8.18.1",
+    "typescript": "6.0.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "setup": "npm ci && npm --prefix web ci",
+    "install:chromium": "npm --prefix web exec -- playwright-core install chromium",
+    "build": "npm --prefix web run build",
+    "test": "sh test/run.sh",
+    "start": "sh bin/stam daemon run"
+  }
+}

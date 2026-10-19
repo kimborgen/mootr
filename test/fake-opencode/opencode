@@ -1,0 +1,9 @@
+#!/bin/sh
+# A scripted stand-in for the `opencode` binary (STAM_OPENCODE_BIN), for UI checks of
+# stam's own agent view with no model: `serve` runs the fake server (server.mjs), and any
+# other call is a TUI that only waits, since the view reads and writes through the server.
+case "$1" in
+  --version) echo "2.0.26-fake" ;;
+  serve) shift; exec node "$(dirname "$(readlink -f "$0")")/server.mjs" "$@" ;;
+  *) echo "fake OpenCode TUI $*"; exec sleep infinity ;;
+esac

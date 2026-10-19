@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>mootr stories</title>
+<link rel="icon" href="/web/icon.svg" type="image/svg+xml">
+<script>
+  // A frame takes its theme from its address; the page from the app's choice, before first paint.
+  try {
+    const q = new URLSearchParams(location.search).get('theme')
+    const t = q || localStorage.getItem('stam/theme')
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t
+  } catch {}
+</script>
+<!-- Absolute, because the daemon serves the build at /stories with assets under /web/. vite-ignore
+     keeps Vite from prefixing base (/web/) a second time in dev, where /web/... would then answer
+     with the page, not the script (S-763). -->
+<script src="/web/stories-isolate.js" vite-ignore></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/stories/main.tsx"></script>
+</body>
+</html>

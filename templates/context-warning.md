@@ -1,0 +1,1 @@
+[stam] System message, info: your context has reached {{tokens}} tokens. At {{instruct}} tokens stam will ask you to round off your current work and compact yourself; at {{enforce}} tokens you will be compacted by force.

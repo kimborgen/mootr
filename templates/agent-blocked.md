@@ -1,0 +1,1 @@
+[stam] Agent {{agent}}, {{relation}}, is blocked: {{detail}}. Open its terminal with `stam attach {{agent}}` or the web UI, or help it by mail. If it needs your user's sign-off, make sure the human knows, or answer its delegate ask.

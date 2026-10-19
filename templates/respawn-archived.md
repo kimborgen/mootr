@@ -1,0 +1,1 @@
+[stam] You were archived and have now been resumed with your full conversation. Your workspace was cleaned up when you were archived: {{cleanup}}. You are now in {{cwd}}. If your next task needs your old workspace, recreate it first. {{note}}
