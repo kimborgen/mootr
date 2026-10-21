@@ -10,7 +10,8 @@ import { toast } from '../ui/menu'
 export interface McpAuth {
   type: 'gh' | 'oauth'
   client_id?: string
-  client_secret?: string
+  // A reference into the secret store (S-2736) once saved; a typed value until the daemon stores it.
+  client_secret?: string | { secret: string }
   scopes?: string[]
 }
 export interface McpServer {
@@ -490,12 +491,14 @@ function RegistryAdd({ entry, servers, onAdd, onCancel }: { entry: RegistryEntry
 // Slack's MCP server (mcp.slack.com) only works with a Slack app's client ID and secret (docs/slack.md).
 const isSlackUrl = (url?: string): boolean => /^https:\/\/mcp\.slack\.com(?:[/:?#]|$)/i.test((url ?? '').trim());
 
-function McpForm({ name, server, servers, onDone, onSave }: { name: string; server: McpServer; servers: Servers; onDone: (changed: boolean) => void; onSave: (next: { name: string; server: McpServer }, renamedFrom?: string) => void }) {
+export function McpForm({ name, server, servers, onDone, onSave }: { name: string; server: McpServer; servers: Servers; onDone: (changed: boolean) => void; onSave: (next: { name: string; server: McpServer }, renamedFrom?: string) => void }) {
   const isNew = name === ''
   const [m, setM] = useState(name)
   const [s, setS] = useState<McpServer>({ args: [], env: {}, headers: {}, ...server })
   const [err, setErr] = useState('')
   const remote = isRemote(s)
+  // The reference the saved server holds, not the field's: a value typed over it and then cleared keeps it.
+  const secretRef = server.auth?.client_secret && typeof server.auth.client_secret === 'object' ? server.auth.client_secret.secret : undefined
   const kind = remote ? 'remote' : 'local'
   const set = (patch: Partial<McpServer>) => { setErr(''); setS((o) => ({ ...o, ...patch })) }
 
@@ -526,7 +529,7 @@ function McpForm({ name, server, servers, onDone, onSave }: { name: string; serv
             <Row label="Login" help="The daemon holds one login and gives it to every harness."><Seg value={s.auth?.type ?? null} opts={[{ v: null, label: 'None' }, { v: 'gh', label: 'GitHub CLI' }, { v: 'oauth', label: 'OAuth' }]} onPick={(v) => set({ auth: v ? { ...s.auth, type: v } : undefined })} /></Row>
             {s.auth?.type === 'oauth' ? <>
               <Row label="Client ID" help="Empty: mootr registers itself, when the server supports it."><input type="text" className="wide" value={s.auth.client_id ?? ''} placeholder="Optional" spellCheck={false} onChange={(e) => set({ auth: { ...s.auth, type: 'oauth', client_id: e.target.value || undefined } })} /></Row>
-              <Row label="Client secret"><input type="password" value={s.auth.client_secret ?? ''} placeholder="Optional" autoComplete="off" onChange={(e) => set({ auth: { ...s.auth, type: 'oauth', client_secret: e.target.value || undefined } })} /></Row>
+              <Row label="Client secret" help={secretRef ? `Stored as ${secretRef}. Type a new value to replace it.` : 'Saved in the secret store, not in settings.'}><input type="password" aria-label="Client secret" value={typeof s.auth.client_secret === 'string' ? s.auth.client_secret : ''} placeholder={secretRef ? `Stored as ${secretRef}` : 'Optional'} autoComplete="off" onChange={(e) => set({ auth: { ...s.auth, type: 'oauth', client_secret: e.target.value || (secretRef ? { secret: secretRef } : undefined) } })} /></Row>
             </> : null}
           </>
           : <>

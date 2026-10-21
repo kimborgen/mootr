@@ -133,6 +133,33 @@ describe('group by column', () => {
     expect(q('.work-bar > .count')!.textContent).toBe('4')
   })
 
+  it('lists an ITSA under its owner, and under a participant in another tree marked participant', async () => {
+    seed()
+    const { setData, getData } = await import('../store')
+    setData({ itsas: getData().itsas.map((x) => (x.id === 'i1' ? { ...x, owner: 'a1', participants: ['a2', 'human'] } : x)), agents: [{ id: 'a1', name: 'amy', harness: 'claude-code', parents: [] }, { id: 'a2', name: 'bo', harness: 'claude-code', parents: [] }] } as never)
+    await mount()
+    await click(q('[data-mode="agents"]'))
+    expect(rowKeys('a1')).toEqual(['i1'])
+    expect(rowKeys('a2')).toEqual(['i1'])
+    // Only the participant row says so; the owner row is the default.
+    expect(document.querySelector('[data-group="a1"] .w-row[data-itsa="i1"] .w-role')).toBeNull()
+    expect(document.querySelector('[data-group="a2"] .w-row[data-itsa="i1"] .w-role')!.textContent).toBe('participant')
+    expect(q('.work-bar > .count')!.textContent).toBe('4')
+  })
+
+  it('lists an ITSA once in a tree where its participant is the owner\'s parent, the head count too', async () => {
+    seed()
+    const { setData, getData } = await import('../store')
+    setData({ itsas: getData().itsas.map((x) => (x.id === 'i1' ? { ...x, owner: 'a2', participants: ['a1'] } : x)), agents: [{ id: 'a1', name: 'amy', harness: 'claude-code', parents: [] }, { id: 'a2', name: 'bo', harness: 'claude-code', parents: ['a1'] }] } as never)
+    await mount()
+    await click(q('[data-mode="agents"]'))
+    const keys = [...document.querySelectorAll('[data-group="a1"] .w-row[data-itsa]')].map((r) => r.getAttribute('data-itsa'))
+    expect(keys).toEqual(['i1'])
+    expect(new Set(keys).size).toBe(keys.length)
+    expect(document.querySelector('[data-group="a1"] .w-gtoggle .count')!.textContent).toBe('1')
+    expect(document.querySelector('[data-group="a1"] .w-row[data-itsa="i1"] .w-role')).toBeNull()
+  })
+
   it('shows a stored column grouping on a column that is gone as the issue tree', async () => {
     settings = { workViews: { work: { cols: ['work', 'status'], group: 'column', groupBy: 'field:gone', show: 'open' } } }
     await mount()

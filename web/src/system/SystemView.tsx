@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { flushSync } from 'react-dom'
 import { AnimatePresence, MotionConfig } from 'motion/react'
-import { openInbox, selectAgent, selectIssue, selectThread, showView } from '../actions'
+import { openInbox, openMail, selectAgent, selectIssue, selectThread, showView } from '../actions'
 import { costTitle, k, live, money, model, stateLabel, STATE_COLOR, stateOf } from '../format'
 import { RestBadge } from '../waits'
 import { Glyph, PlainGlyph } from '../Glyph'
@@ -472,7 +472,11 @@ export function SystemView({ viewKey }: { viewKey: string }) {
       if (!r || !b || !t || !r.offsetWidth) continue
       range.selectNodeContents(t)
       // On one line, however it is drawn now: a name wrapped onto two lines (system.css) adds up.
-      ms.push([el, sig, nameFit(r.offsetWidth, b.clientWidth, lineWidth(range.getClientRects()))])
+      // The name's boxes are as drawn, under every transform above them: a card still on its spring
+      // scales them too. Taken back to the chip's own size, the fit doesn't depend on that (S-1030).
+      const drawn = r.getBoundingClientRect().width, laid = parseFloat(getComputedStyle(r).width) || r.offsetWidth
+      const sc = drawn > 0 && laid > 0 ? drawn / laid : 1
+      ms.push([el, sig, nameFit(r.offsetWidth, b.clientWidth, lineWidth(range.getClientRects()) / sc)])
     }
     const k = view.current.k
     for (const [el, sig, fit] of ms) {
@@ -805,7 +809,7 @@ const whole = (v: number) => String(Math.round(v))
 const pct = (v: number) => Math.round(v) + '%'
 
 function openHumanInbox() {
-  if (shell.isPhone()) shell.phoneShow('mail')
+  if (shell.isPhone()) openMail()
   else shell.open('main', 'mail:human')
 }
 

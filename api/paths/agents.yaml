@@ -1,0 +1,31 @@
+get:
+  operationId: listAgents
+  tags: [agents]
+  summary: Every agent on this machine and its peers, with the extras the web tree shows.
+  parameters:
+    - name: q
+      in: query
+      description: Keeps agents matching the text.
+      schema:
+        type: string
+    - name: role
+      in: query
+      description: Keeps agents whose role or name contains the text, standing agents first.
+      schema:
+        type: string
+    - name: as
+      in: query
+      description: The agent whose visibility scopes the list.
+      schema:
+        type: string
+  responses:
+    '200':
+      description: A bare array, not an envelope.
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/Agent'
+    default:
+      $ref: '#/components/responses/Error'

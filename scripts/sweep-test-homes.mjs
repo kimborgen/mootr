@@ -27,12 +27,14 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSy
 import { homedir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { envVar, setEnvVar } from '../src/env.ts';
+import { isMain } from './main-guard.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const UNIT = 'stam-sweep-test-homes';
 
 // The prefixes test/*.mjs gives its temporary folders: tempHome('PREFIX-'), tempDir('PREFIX-') (the
-// S-668 helper), and mkdtemp(Sync)(join(tmpdir(), 'PREFIX-')). They are read from the sources at
+// S-668 helper), tempDirOutside('PREFIX-') (the same, in /tmp), and mkdtemp(Sync)(join(tmpdir(), 'PREFIX-')). They are read from the sources at
 // sweep time (S-775), so a test that adds a prefix is swept with no list to keep in step. Only a prefix matching PREFIX_SHAPE,
 // followed by the anchored random suffix, is swept; never a folder that merely starts with stam-
 // (deploy's, a person's). An unreadable test folder yields none, and the sweep then matches nothing:
@@ -44,7 +46,8 @@ const UNIT = 'stam-sweep-test-homes';
 // literal with a backslash or `${` is refused, failing closed. Comments, regex literals, and backtick
 // text are skipped. The sweep's own guards still apply: only /tmp and the test cache, only the
 // anchored random suffix, only old and unused folders, and never a symlink.
-const TEMP_HELPERS = new Set(['tempHome', 'tempDir', 'mkdtemp', 'mkdtempSync']);
+const TEMP_HELPERS = new Set(['tempHome', 'tempDir', 'tempDirOutside', 'mkdtemp', 'mkdtempSync']);
+const TEMP_FLAG_ARGS = new Set(['tempDir', 'tempDirOutside']);
 const PREFIX_SHAPE = /^stam-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const REGEX_AFTER = new Set(['return', 'typeof', 'case', 'in', 'of', 'do', 'else', 'new', 'delete', 'void', 'throw', 'yield', 'await']);
 
@@ -149,9 +152,12 @@ export function testPrefixes(dir = fileURLToPath(new URL('../test/', import.meta
       if (t.kind !== 'id' || !TEMP_HELPERS.has(t.value)) continue;
       if (ts[i + 1]?.kind !== 'p' || ts[i + 1].value !== '(') continue;
       let prefix = null;
-      if (t.value === 'tempHome' || t.value === 'tempDir') {
-        // tempHome(LITERAL) or tempDir(LITERAL): the literal is the whole argument, so `)` closes the call right after.
-        if (ts[i + 3]?.kind === 'p' && ts[i + 3].value === ')') prefix = literalPrefix(ts[i + 2]);
+      if (t.value === 'tempHome' || t.value === 'tempDir' || t.value === 'tempDirOutside') {
+        // tempHome(LITERAL), tempDir(LITERAL) or tempDirOutside(LITERAL): the literal is the whole argument, so `)` closes the call right after.
+        // tempHome(LITERAL, tempDirOutside) (or tempDir) also names one, the second argument being that helper, never a value.
+        const closesAt = (n, v) => ts[i + n]?.kind === 'p' && ts[i + n].value === v;
+        const outsideArg = t.value === 'tempHome' && closesAt(3, ',') && ts[i + 4]?.kind === 'id' && TEMP_FLAG_ARGS.has(ts[i + 4].value) && closesAt(5, ')');
+        if (closesAt(3, ')') || outsideArg) prefix = literalPrefix(ts[i + 2]);
       } else {
         // mkdtemp(Sync)(join(tmpdir(), LITERAL)): the literal is the whole first argument, and the
         // two calls close right after it.
@@ -177,9 +183,9 @@ export const TMP_PATTERN = tmpPattern(TEST_PREFIXES);
 
 // The folders to sweep: [folder, name pattern].
 export function roots(env = process.env) {
-  const cache = env.STAM_SWEEP_CACHE || join(env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'stam-test');
+  const cache = envVar('SWEEP_CACHE', env) || join(env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'stam-test');
   return [
-    [env.STAM_SWEEP_TMP || '/tmp', TMP_PATTERN],
+    [envVar('SWEEP_TMP', env) || '/tmp', TMP_PATTERN],
     [cache, /^stam-test\./],
   ];
 }
@@ -191,17 +197,17 @@ export function reviewRoots(env = process.env) {
   const cacheHome = env.XDG_CACHE_HOME || join(homedir(), '.cache');
   const dirName = /^(?:\.tmp-[\w.-]+|[A-Za-z0-9][\w.-]*)$/;
   return [
-    [env.STAM_SWEEP_REVIEW || join(cacheHome, 'stam-review'), dirName],
-    [env.STAM_SWEEP_CACHE || join(cacheHome, 'stam-test'), dirName],
-    [env.STAM_SWEEP_HOME_CACHE || cacheHome, /^review-[\w.-]+$/],
+    [envVar('SWEEP_REVIEW', env) || join(cacheHome, 'stam-review'), dirName],
+    [envVar('SWEEP_CACHE', env) || join(cacheHome, 'stam-test'), dirName],
+    [envVar('SWEEP_HOME_CACHE', env) || cacheHome, /^review-[\w.-]+$/],
   ];
 }
 
 // The text live agents hold: name, cwd, workspace, first prompt. null when it can't be read.
 export function liveAgentTexts(env = process.env) {
   try {
-    if (env.STAM_SWEEP_AGENTS) return JSON.parse(readFileSync(env.STAM_SWEEP_AGENTS, 'utf8')).map((a) => JSON.stringify(a));
-    const bin = env.STAM_BIN || 'stam';
+    if (envVar('SWEEP_AGENTS', env)) return JSON.parse(readFileSync(envVar('SWEEP_AGENTS', env), 'utf8')).map((a) => JSON.stringify(a));
+    const bin = envVar('BIN', env) || 'stam';
     const ls = spawnSync(bin, ['ls'], { encoding: 'utf8', timeout: 30_000 });
     if (ls.status !== 0) return null;
     const texts = [];
@@ -374,7 +380,7 @@ export function newest(dir, deep = false) {
 // treated as unset, with a warning, so a malformed filter scans every process instead of none.
 const PID_MAX = 4194304;
 export function pidsOf(env) {
-  const v = env.STAM_SWEEP_PIDS;
+  const v = envVar('SWEEP_PIDS', env);
   if (v === undefined) return null;
   // Each pid is at most Linux's pid_max ceiling, 2^22: a larger number names no process and would filter every one out.
   if (/^[1-9]\d*(,[1-9]\d*)*$/.test(v) && v.split(',').every((p) => Number(p) <= PID_MAX)) return v.split(',');
@@ -384,7 +390,7 @@ export function pidsOf(env) {
 
 // Returns [{ path, action: 'remove' | 'keep', why }]; removes unless `dryRun`.
 export function sweep({ hours = 2, reviewHours = 6, dryRun = false, now = Date.now(), env = process.env, claims, agents } = {}) {
-  const held = claims ?? claimedPaths(env.STAM_SWEEP_PROC || '/proc', pidsOf(env));
+  const held = claims ?? claimedPaths(envVar('SWEEP_PROC', env) || '/proc', pidsOf(env));
   const results = [];
   const texts = agents === undefined ? liveAgentTexts(env) : agents;
   const seen = new Set();
@@ -583,10 +589,10 @@ export function pruneBackups(home, { keep = KEEP_BACKUPS, claims, dryRun = false
 // The roots come from env (STAM_HOME, STAM_GATE_DEPS, STAM_SWEEP_MAIN), so a test names its own. The disk
 // gain is the df difference on the stam home, since hard links make du overcount.
 export function pruneCaches({ dryRun = false, env = process.env, claims } = {}) {
-  const held = claims ?? claimedPaths(env.STAM_SWEEP_PROC || '/proc', pidsOf(env));
-  const home = env.STAM_HOME || join(homedir(), '.local/share/stam');
-  const gate = env.STAM_GATE_DEPS || join(env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'stam-gate-deps');
-  const main = env.STAM_SWEEP_MAIN || join(homedir(), 'projects/stam2');
+  const held = claims ?? claimedPaths(envVar('SWEEP_PROC', env) || '/proc', pidsOf(env));
+  const home = envVar('HOME', env) || join(homedir(), '.local/share/stam');
+  const gate = envVar('GATE_DEPS', env) || join(env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'stam-gate-deps');
+  const main = envVar('SWEEP_MAIN', env) || join(homedir(), 'projects/stam2');
   const keys = currentKeys(main);
   let before = null;
   try {
@@ -605,7 +611,7 @@ export function pruneCaches({ dryRun = false, env = process.env, claims } = {}) 
 }
 
 export function install(env = process.env) {
-  const dir = env.STAM_SWEEP_UNIT_DIR || join(homedir(), '.config/systemd/user');
+  const dir = envVar('SWEEP_UNIT_DIR', env) || join(homedir(), '.config/systemd/user');
   mkdirSync(dir, { recursive: true });
   // A timer outlives the worktree this ran from, so it runs the deployed release's copy (else the main checkout's); and a user unit's PATH
   // lacks ~/.local/bin and node's dir, which `stam` (the live-agent check) needs.
@@ -614,9 +620,9 @@ export function install(env = process.env) {
   const path = [dirname(process.execPath), join(homedir(), '.local/bin'), '/usr/local/bin', '/usr/bin', '/bin'].join(':');
   writeFileSync(join(dir, `${UNIT}.service`), ['[Unit]', 'Description=Remove unused, old test homes and review clones (S-428, S-1235)', '', '[Service]', 'Type=oneshot', `Environment=PATH=${path}`, `ExecStart=${process.execPath} --no-warnings ${script}`, ''].join('\n'));
   writeFileSync(join(dir, `${UNIT}.timer`), ['[Unit]', 'Description=Sweep old test homes and review clones every hour (S-428, S-1235)', '', '[Timer]', 'OnCalendar=hourly', 'Persistent=true', `Unit=${UNIT}.service`, '', '[Install]', 'WantedBy=timers.target', ''].join('\n'));
-  if (!env.STAM_SWEEP_UNIT_DIR) spawnSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'inherit' });
-  if (!env.STAM_SWEEP_UNIT_DIR) spawnSync('systemctl', ['--user', 'enable', '--now', `${UNIT}.timer`], { stdio: 'inherit' });
-  console.log(`installed ${UNIT}.service and ${UNIT}.timer in ${dir}${env.STAM_SWEEP_UNIT_DIR ? '; not enabled (test dir)' : ' and enabled the timer'}`);
+  if (!envVar('SWEEP_UNIT_DIR', env)) spawnSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'inherit' });
+  if (!envVar('SWEEP_UNIT_DIR', env)) spawnSync('systemctl', ['--user', 'enable', '--now', `${UNIT}.timer`], { stdio: 'inherit' });
+  console.log(`installed ${UNIT}.service and ${UNIT}.timer in ${dir}${envVar('SWEEP_UNIT_DIR', env) ? '; not enabled (test dir)' : ' and enabled the timer'}`);
 }
 
 function main(args) {
@@ -630,10 +636,10 @@ function main(args) {
     else if (a === '--dry-run') dryRun = true;
     else if (a === '--hours') hours = Number(args[++i]);
     else if (a === '--review-hours') reviewHours = Number(args[++i]);
-    else if (a === '--review') env.STAM_SWEEP_REVIEW = args[++i];
-    else if (a === '--home-cache') env.STAM_SWEEP_HOME_CACHE = args[++i];
-    else if (a === '--tmp') env.STAM_SWEEP_TMP = args[++i];
-    else if (a === '--cache') env.STAM_SWEEP_CACHE = args[++i];
+    else if (a === '--review') setEnvVar('SWEEP_REVIEW', args[++i], env);
+    else if (a === '--home-cache') setEnvVar('SWEEP_HOME_CACHE', args[++i], env);
+    else if (a === '--tmp') setEnvVar('SWEEP_TMP', args[++i], env);
+    else if (a === '--cache') setEnvVar('SWEEP_CACHE', args[++i], env);
     else {
       console.error('usage: node scripts/sweep-test-homes.mjs [--dry-run] [--hours N] [--review-hours N] [--review DIR] [--home-cache DIR] [--tmp DIR] [--cache DIR] [--install]');
       process.exit(2);
@@ -650,12 +656,4 @@ function main(args) {
   if (freed != null && results.some((r) => r.action === 'remove')) console.log(`freed ${(freed / 2 ** 20).toFixed(0)} MiB on the stam disk (df)`);
 }
 
-// import.meta.url is the real path; argv[1] is as typed, so a symlinked checkout would run nothing.
-const isMain = (() => {
-  try {
-    return Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
-  } catch {
-    return false;
-  }
-})();
-if (isMain) main(process.argv.slice(2));
+if (isMain(import.meta.url)) main(process.argv.slice(2));

@@ -56,6 +56,8 @@ export interface Budget { usd: number; per: string; spent: number | null; remain
 export interface Account {
   account: string
   match: { harness: string; model?: string }
+  // The provider that bills it per token (S-2119): `openrouter`, a settings.providers id, or null.
+  provider?: string | null
   windows: Record<string, Window>
   updated_at: string | null
   age_ms: number | null

@@ -2,7 +2,7 @@
 // from it this way, and an ITSA thread can too, since it takes a plain mail-like object. The
 // header has the sender and recipients, whether they read it, and when; then the subject and
 // body. A long body starts as a three-line plain preview (unless `full`); Open thread opens its thread.
-// Mail from or to the human reads apart from mail between agents (`kim`); the variants'
+// Mail from or to the human reads apart from mail between agents (`human`); the variants'
 // look is one block in web/style.css (`.conv-mail`).
 import { useState, type ReactNode } from 'react'
 import { selectThread } from '../actions'
@@ -77,7 +77,7 @@ export function ConvMailCard({ m, self, full, chip, noThread, before, after, res
   const at = ms(m.created_at)
   const dir = youDir(m)
   return (
-    <article className={'conv-mail' + (sent ? ' out' : '') + (withHuman(m) ? ' kim' : '') + (dir ? ` ${dir}-you` : '') + (m.superseded_by ? ' superseded' : '')} data-mail={m.id} data-id={m.id}>
+    <article className={'conv-mail' + (sent ? ' out' : '') + (withHuman(m) ? ' human' : '') + (dir ? ` ${dir}-you` : '') + (m.superseded_by ? ' superseded' : '')} data-mail={m.id} data-id={m.id}>
       <div className="ov-mail-head">
         <Icon name={sent ? 'send' : 'mail'} size="xs" /><Avatar id={sent ? (m.recipients[0]?.id ?? m.from_id) : m.from_id} />
         {sent ? <span className="who">To {names(m.recipients)}</span>

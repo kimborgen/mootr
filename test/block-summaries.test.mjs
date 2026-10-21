@@ -178,6 +178,8 @@ test('a model with no OpenRouter key fails the block instead of leaving it pendi
   const env = join(home, 'opencode.env');
   const key = readFileSync(env, 'utf8');
   rmSync(env);
+  // The key was imported into the secret store (S-2114): no key means neither file.
+  rmSync(join(home, 'secrets.json'), { force: true });
   try {
     const text = 'Nobody can ask about this.';
     const h = hash(text);

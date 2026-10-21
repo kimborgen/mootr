@@ -117,6 +117,6 @@ test('an explicit base is fetched once, async, and recorded', async () => {
   git(other, ['push', '-q', 'origin', 'HEAD:refs/heads/stam/stk']);
   const w = await ws.createWorkspaceFetched({ kind: 'worktree', repo, base: 'origin/stam/stk' }, 'fresh-stk');
   assert.equal(head(w), fresh);
-  assert.deepEqual(w.baseUsed, { ref: 'origin/stam/stk', sha: fresh, fetch: 'ok' });
+  assert.deepEqual(w.baseUsed, { ref: 'origin/stam/stk', sha: fresh, fetch: 'ok', continued: 'stam/stk' });
   assert.equal(w.worktree.base, 'origin/stam/stk');
 });

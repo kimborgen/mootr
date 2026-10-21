@@ -6,13 +6,14 @@ import { openFile } from '../files/open'
 import { DeclPicker, isPhone, type DeclPickState } from '../decl/DeclPicker'
 import { DeclFail, hasDecl, lookupDecl, type DeclMatch } from '../decl/declApi'
 import type { DeclHit, DeclSide } from '../decl/declExt'
+import { clearDiffGoto, onDiffGoto, peekDiffGoto } from '../files/open'
 import { sourceForKey, type DiffSource } from './diffSource'
 import {
   chips, currentFile, reviewChip, isShown, readViewed, shownFiles, splitPath, startFilter, stepChange, stepFile, toggleClass, toggleFile, viewedKey, withViewed, writeViewed,
   type DiffFileItem, type DiffList, type Filter,
 } from './diffModel'
 import { FileDiff } from './FileDiff'
-import { PatchDiff } from './PatchDiff'
+import type { FileSides } from './fileSides'
 import type { DiffEditorViews, DiffMode } from './mergeEditor'
 
 // The diff view (S-1531, the web half of the PR diff viewer S-1019): one diff, read through a `DiffSource` — today a
@@ -77,6 +78,8 @@ export function DiffView({ viewKey, source, onEditor, apiRef }: DiffViewProps) {
   const [reviewOpen, setReviewOpen] = useState(false)
   const [textOpen, setTextOpen] = useState(false)
   const [active, setActive] = useState(0)
+  // The files that turned out to have two sides, so a patch tab shows the Split toggle only once one of them resolved.
+  const [sided, setSided] = useState<ReadonlySet<string>>(new Set())
   const root = useRef<HTMLDivElement>(null)
   const main = useRef<HTMLDivElement>(null)
   const prefs = useCodePrefs()
@@ -87,6 +90,7 @@ export function DiffView({ viewKey, source, onEditor, apiRef }: DiffViewProps) {
     setSt({ s: 'loading' })
     setReviewOpen(false)
     setFlt(startFilter())
+    setSided(new Set())
     src.loadList(ctl.signal).then(
       (list) => setSt({ s: 'ok', list }),
       (err) => { if (!ctl.signal.aborted) setSt({ s: 'error', err }) })
@@ -110,9 +114,13 @@ export function DiffView({ viewKey, source, onEditor, apiRef }: DiffViewProps) {
   const files = list?.files ?? []
   const shown = useMemo(() => shownFiles(files, flt), [files, flt])
   const scope = src?.scope ?? ''
-  const refs = list && src ? src.sideRef(list) : null
-  // A diff drawn from its own hunks (a pasted patch's file) has no sides to show beside each other: it is unified.
-  const mode: DiffMode = refs && splitOk && pref === 'split' ? 'split' : 'unified'
+  // Two sides only where the source has them (a PR's always, a patch's once a checkout matched a file), and only side
+  // by side when the pane is wide enough for both.
+  const twoSided = !!src?.twoSided(sided.size)
+  const mode: DiffMode = twoSided && splitOk && pref === 'split' ? 'split' : 'unified'
+  const onSides = (path: string) => (s: FileSides) => {
+    if (s.s === 'text') setSided((now) => (now.has(path) ? now : new Set(now).add(path)))
+  }
 
   const mark = (f: DiffFileItem, on: boolean) => {
     if (!list || !scope) return
@@ -210,6 +218,20 @@ export function DiffView({ viewKey, source, onEditor, apiRef }: DiffViewProps) {
     return () => apiRef(null)
   }, [apiRef])
 
+  // The file a mail block's Open asked this view to land on (S-2105): a jump like a declaration's, so a marked-Viewed
+  // file is still opened and its line marked. A landing set while this view is already open wakes it through `onDiffGoto`
+  // (shell.open alone would only bring the tab forward), and it is cleared once its list is in and the jump has been
+  // tried, so a landing for a file this view does not have never sits waiting to jump it later, on a retry.
+  const [landTick, setLandTick] = useState(0)
+  useEffect(() => onDiffGoto(() => setLandTick((n) => n + 1)), [])
+  useEffect(() => {
+    if (st.s !== 'ok' || !src) return
+    const path = peekDiffGoto(viewKey)
+    if (!path) return
+    goToRef.current(path, 1)
+    clearDiffGoto(viewKey)
+  }, [st.s, src, viewKey, landTick])
+
   // A declaration found: a file of the PR is jumped to; any other shows its lines from the same commit, with Open file.
   const land = (m: DeclMatch, side: DeclSide, ui: DeclUi) => {
     const f = side === 'head'
@@ -231,8 +253,7 @@ export function DiffView({ viewKey, source, onEditor, apiRef }: DiffViewProps) {
     declCtl.current = ctl
     const ui: DeclUi = { name: hit.name, side: hit.side, anchor: { x: hit.x, y: hit.y, top: hit.top }, phone: isPhone(), state: { s: 'loading' } }
     setDecl(ui)
-    const from = hit.side === 'base' ? f.oldPath ?? f.path : f.path
-    const q = src.declQuery(list, hit.side, hit.name, from)
+    const q = src.declQuery(list, f, hit.side, hit.name)
     // A source with no declaration lookup (an unresolved patch file) says so quietly.
     if (!q) { setDecl({ ...ui, state: { s: 'none' } }); return }
     lookupDecl(q, { signal: ctl.signal, onBuilding: () => setDecl((d) => (d === ui || d?.state.s === 'loading' ? { ...ui, state: { s: 'building' } } : d)) }).then((r) => {
@@ -249,8 +270,8 @@ export function DiffView({ viewKey, source, onEditor, apiRef }: DiffViewProps) {
       setDecl({ ...ui, state: { s: 'error', message: e instanceof DeclFail ? e.message : 'Could not look up the declaration.' } })
     })
   }
-  const hasName = (name: string, side: DeclSide) => {
-    const q = list && src ? src.declQuery(list, side, name) : null
+  const hasName = (f: DiffFileItem, name: string, side: DeclSide) => {
+    const q = list && src ? src.declQuery(list, f, side, name) : null
     return q ? hasDecl(q) : Promise.resolve(false)
   }
   const closeDecl = useCallback(() => { declCtl.current?.abort(); setDecl(null) }, [])
@@ -358,7 +379,7 @@ export function DiffView({ viewKey, source, onEditor, apiRef }: DiffViewProps) {
               </button>
             ))}
             <span className="dv-spacer" />
-            {refs && splitOk && (
+            {twoSided && splitOk && (
               <span className="seg dv-mode" role="group" aria-label="Diff layout">
                 <button type="button" className={mode === 'split' ? 'on' : ''} aria-pressed={mode === 'split'} onClick={() => pickMode('split')}>Split</button>
                 <button type="button" className={mode === 'unified' ? 'on' : ''} aria-pressed={mode === 'unified'} onClick={() => pickMode('unified')}>Unified</button>
@@ -380,15 +401,12 @@ export function DiffView({ viewKey, source, onEditor, apiRef }: DiffViewProps) {
           )}
           {list && total === 0 && <div className="dv-note muted">{list.empty}</div>}
           {list && total > 0 && shown.length === 0 && <div className="dv-note muted">All {total} files are hidden. Turn Meat off or show a class above.</div>}
-          {list && refs && shown.map((f) => (
+          {list && src && shown.map((f) => (
             <FileDiff
-              key={f.path} scroller={main} file={f} refs={refs} mode={mode} wrap={prefs.wrap} viewed={isViewed(f)} onViewed={(on) => mark(f, on)} onHide={() => setFlt((x) => toggleFile(f, x))} onEditor={onEditor}
-              onDecl={(hit) => onDecl(f, hit)} hasDecl={hasName} forceOpen={forced.has(f.path)} target={target?.path === f.path ? target : undefined} onTarget={(n) => { landed.current = n; pin.current?.() }}
-            />
-          ))}
-          {list && !refs && src && shown.map((f) => (
-            <PatchDiff
-              key={f.path} file={f} lines={src.hunks(list, f) ?? []} wrap={prefs.wrap} viewed={isViewed(f)} onViewed={(on) => mark(f, on)} onHide={() => setFlt((x) => toggleFile(f, x))} forceOpen={forced.has(f.path)}
+              key={f.path} scroller={main} file={f} loadKey={src.scope} load={(signal) => src.loadFile(list, f, signal)}
+              download={src.download ? () => src.download!(list, f) : undefined}
+              mode={mode} wrap={prefs.wrap} viewed={isViewed(f)} onViewed={(on) => mark(f, on)} onHide={() => setFlt((x) => toggleFile(f, x))} onEditor={onEditor} onSides={onSides(f.path)}
+              onDecl={(hit) => onDecl(f, hit)} hasDecl={(name, side) => hasName(f, name, side)} forceOpen={forced.has(f.path)} target={target?.path === f.path ? target : undefined} onTarget={(n) => { landed.current = n; pin.current?.() }}
             />
           ))}
         </div>

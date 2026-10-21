@@ -4,6 +4,7 @@
 // Run with `node --test test/workspace-prompt.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import './scrub-env.mjs';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

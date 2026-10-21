@@ -20,6 +20,15 @@
 # STAM_TEST_NO_SKIP=1 makes a missing tool a FAIL (same reason) instead: the merge gates
 # set it, so a machine missing a tool can't green a gate.
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+# No run inherits a MOOTR_ name from its caller (S-2889): a stam agent's environment carries them, and they would win over
+# the STAM_ overrides every test sets. test/lib.sh and test/tmphome.mjs drop them too, for a test run on its own.
+for v in $(env | sed -n 's/^\(MOOTR_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
+# With the slots on, scripts/test-slot.sh makes and removes the run's TMPDIR (S-2586); without, this run does.
+if [ -n "$STAM_TEST_NOSLOT" ]; then
+  . test/runtmp.sh
+  runtmp_make "$PWD"
+  [ -z "$RUNTMP_OWNED" ] || trap 'rm -rf "$RUNTMP_OWNED"' EXIT
+fi
 . test/tmpdir.sh
 if [ "$1" = --remote ]; then
   [ -n "$2" ] || { echo "usage: test/run.sh --remote SERVER [NAME...]"; exit 2; }
@@ -44,11 +53,13 @@ activity-warming
 agent-class
 agent-ips
 agent-load
+agent-public
 agent-rates
 agent-routes-unit
 agent-view-default
 agent-views-unit
 allocations
+api-gen
 attribution
 auto-archive-repair
 banner-stagger
@@ -64,20 +75,24 @@ compress-unit
 cost-display
 cost-notices
 db-synchronous
-db-user-version
 decision-fence
 decl-index
 default-read-stale
 delegate-peer-parent
 developer-cap-unit
 diff-api
+digest-unit
 doc-citations
 doc-shas
+dropped-scan
+dup-selectors
 embed-unit
 events-unit
 export-overrides
 feedback-unit
+fixtures-ts
 github-poller-unit
+go-catchup-unit
 inventory-block-unit
 issue-costs
 itsa-fields-prompt
@@ -87,6 +102,7 @@ itsa-permission-unit
 itsa-queue
 itsa-thread-unit
 itsa-unit
+key-destinations
 layout-unit
 light-list-unit
 limits
@@ -98,16 +114,23 @@ mail-about-unit
 mail-embed-unit
 mail-full-suite-sender
 mail-gate-strict-unit
+mail-opens
 mail-recipients-index
 mail-routing-uncertain
 mail-threading
 mail-visibility-creator
+main-guard-unit
 manager-merge-line
 mcp-import
 mcp-reconnect
 measured-effort
 merge-failures-unit
+mootr-env-unit
+network-probes-unit
 notices-unit
+onboarding-unit
+opencode-providers
+openrouter-credit
 peer-busy
 peer-remember
 peer-ui-writes-unit
@@ -127,7 +150,11 @@ process-proposal
 process-run
 process-stage
 prompt-default-mode
+provider-spend
+push-public
 readings
+repo-config-unit
+repo-merge-unit
 req-seed-unit
 req-tools-unit
 requirements-unit
@@ -138,15 +165,20 @@ retro-reminders-unit
 reviewer-types
 ring-create-rollback
 ring-split
+ring-takeover
 ring-verdict-line
+run-lists-unit
 samples
 search-meaning-unit
+secrets
 settings-ask-conflict
+settings-card-layouts
 settings-file-mode
 settings-memo
 settings-notice
 skill-import
 skills
+spawn-stale-window
 spawn-worktree-unit
 stall-labels-unit
 stall-unit
@@ -160,6 +192,7 @@ sw-close
 sw-group
 swallowed-wait
 template-blocks
+test-env-unit
 test-hooks
 thread-defer
 thread-resolved
@@ -168,6 +201,7 @@ ticket-unit
 tiny-models
 tmphome-unit
 tool-changes-unit
+transcript-gz
 tree
 tree-check-unit
 turn-harden-unit
@@ -183,6 +217,7 @@ watch-unit
 window-summary-calls
 withdraw
 withdraw-ask
+workspace-continue-pr
 workspace-prompt-unit
 workspace-reused-branch
 workspace-share-unit
@@ -207,6 +242,7 @@ activity-peers-unit
 activity-summary
 agent-class
 agent-load
+agent-public
 admission
 agent-identity
 agent-instructions
@@ -219,18 +255,21 @@ agent-views-unit
 agent-ips
 agents-route
 allocations
+api-gen
 archive-force
 archive-procs
 ask-block
 assistant
+assistant-autostart
 attribution
 banner-stagger
 banners-quiet
 block-summaries
 blocks
+digest
+digest-unit
 skills
 skill-import
-refresh-derived
 blocks-compose
 mail-full-suite-sender
 mail-routing-uncertain
@@ -242,11 +281,14 @@ blockers
 budgets
 busy
 check-playwright-unit
+hit-classify
+hit-sampler
 child-notices
 chromium-lock
 claude-dialog-unit
 claude-ghost-unit
 claude-permissions
+secret-files
 claude-view
 claude-view-unit
 client-dedup
@@ -280,6 +322,7 @@ cost-notices
 cost-pause
 cost-probes
 cost-switch
+daemon-lock-unit
 daemon-stub
 db-backup-lock
 decide
@@ -306,13 +349,16 @@ decl-index
 diff-api-route
 files
 deploy-canary
-deploy-bisect
+deploy-check-home
 release-lock
 deploy-prune-unit
+doctor-unit
+stamd-wrapper
 deploy-health-wait
 embed-unit
 event-waits
 events
+event-log-unit
 events-unit
 exit-context
 failed-notice
@@ -321,10 +367,17 @@ feedback
 feedback-unit
 first-prompt-ghost
 first-prompt-recover
+fixtures-ts
 forget
+go-parity-unit
+go-parity-nightly-unit
 story-check-unit
+repo-config-unit
+repo-gate-unit
+repo-merge-unit
 github-poller
 github-poller-unit
+go-catchup-unit
 guard
 guard-unit
 harness-dialog
@@ -344,10 +397,13 @@ itsa-fields-prompt
 itsa-fields-unit
 itsa-human
 itsa-human-unit
+itsa-incident
+itsa-incident-peer
 itsa-mcp
 itsa-owners
 itsa-owners-peers
 itsa-owners-unit
+itsa-rollback
 itsa-permission-unit
 itsa-post-gate
 itsa-post-gate-peers
@@ -357,6 +413,7 @@ itsa-thread
 itsa-thread-unit
 itsa-tools
 itsa-unit
+key-destinations
 human-owner
 human-relay
 local-human
@@ -378,7 +435,9 @@ light-list-unit
 limits
 linear-poller
 linear-poller-unit
+llm-bedrock
 llm-layer
+llm-providers
 m1
 m2
 m5
@@ -389,6 +448,8 @@ mail-about-unit
 mail-itsas-unit
 tool-changes-unit
 mail-archive
+mail-unread
+mail-unread-peers
 mail-check
 mail-gate
 mail-gate-peers
@@ -405,6 +466,8 @@ threads-with
 mail-title
 mail-title-peers
 mail-visibility-creator
+lock-held-unit
+main-guard-unit
 mcp-auth
 mcp-config
 mcp-follow
@@ -423,11 +486,19 @@ mcp-tools
 mcp-wait-for
 measured-effort
 merge-failures-unit
+mootr-env-unit
+mootr-isolation-unit
+mootr-env-guard-unit
 model-catalog
 notices-unit
+onboarding-unit
 opencode-token
 opencode-stop
+openapi-contract
+opencode-providers
+opencode-shell-env
 openrouter
+openrouter-credit
 org
 peer-control
 peer-identity
@@ -437,6 +508,8 @@ peer-permission
 peer-queue-start
 peer-remember
 peer-busy
+peer-readings
+peer-spend
 peer-start
 peer-ui-writes
 peer-ui-writes-unit
@@ -447,15 +520,18 @@ personal-workspace
 personal-workspace-unit
 standing-rest-unit
 rest-unit
+cache-panel-unit
+harness-settings-unit
 compact-epipe-unit
 standing-growth
+pr-merge-peers
 pr-open-scope
 pr-open-scope-peers
 pr-review-peers
-pr-open-unit
 cli-help-unit
 pr-sync-unit
 workspace-reused-branch
+workspace-continue-pr
 workspace-fresh-base
 process
 process-stage
@@ -464,14 +540,19 @@ process-counts
 process-edit
 process-proposal
 process-proposal-route
+mail-opens
 mcp-process-propose
 proctree-unit
 prompt-default-mode
+provider-spend
 push
+push-public
 read-mail
 readings
 reconcile-quiet
 registry-home
+type-templates-home
+type-templates-sync
 reply-archived-peers
 reply-local
 reply-peers
@@ -484,6 +565,7 @@ req-tools
 req-tools-unit
 requirements
 requirements-unit
+reboot-fake
 resolve-recipient
 resource-warn
 restart-mail
@@ -501,33 +583,41 @@ workspace-share-unit
 worktree-deps-unit
 reviewer-ring
 reviewer-spawn
-doc-shas
+dup-selectors
 swallowed-wait
 review-dir-cleanup
 reviewer-types
 ring
 ring-create-rollback
 ring-split
+ring-takeover
 ring-verdict-line
 ring-peer
 rules
+flap-stall-unit
 run-flags
+run-lists-unit
 run-skip
 run-timeout
+runtmp-unit
 samples
 search
 search-meaning
 search-meaning-unit
+secrets
+secrets-route
 sent-copy
 said
 session-end
 settings-ask-conflict
+settings-card-layouts
 settings-file-mode
 settings-memo
 settings-notice
 settings-sync
 settings-writes
 tiny-models
+tmux-crash
 tool-summaries
 tool-summaries-route
 tool-names
@@ -535,7 +625,10 @@ spawn-usage
 developer-cap-unit
 developer-cap
 developer-cap-peer
+spawn-cancel-peer
+spawn-stale-window
 spawn-worktree-unit
+spawn-base
 stale-working
 stall
 stall-unit
@@ -548,6 +641,8 @@ archive-cascade-peers
 archive-cascade-route
 archive-cascade
 idle-shutdown-archive
+auto-archive-queued
+archive-unpushed
 starting-dead
 suggest
 suggest-unit
@@ -566,18 +661,24 @@ suggest-input-unit
 sw-close
 sw-group
 sweep-test-homes
+tailscale-bin
 term-size
+test-env-unit
 test-hooks
 test-slot
 tmphome-unit
+network-probes-unit
 tmux-snapshot-unit
 tmux-snapshot-async-unit
 agent-reads-unit
 tmux-env-unit
+transcript-gz
+transcript-gz-resume
 token-scope
 tools
 ui
 ui-assistant
+ui-build
 ui-ownview
 ui-viewtoggle
 unread-counts
@@ -609,6 +710,7 @@ withdraw-ask-http
 withdraw-ask-peers
 withdraw-peers
 withdraw-peers-unit
+set-parent-remote
 worth
 "
 FREE=$(echo $FREE)
@@ -628,10 +730,10 @@ SMOKE=$(echo $SMOKE)
 # prints the reason a tool is absent (and nothing when it is there).
 needs() {
   case "$1" in
-    isolation | kill-hard) echo opencode ;;
+    isolation | kill-hard | opencode-shell-env) echo opencode ;;
     deploy | janitor | remote) echo systemd ;;
     mcp-servers) echo codex ;;
-    ui | ui-ownview | ui-assistant | ui-viewtoggle) echo chromium ;;
+    ui | ui-ownview | ui-assistant | ui-viewtoggle | hit-sampler) echo chromium ;;
   esac
 }
 missing() {
@@ -663,11 +765,12 @@ skip_reason() {
 money() { printf '%.2f' "$(echo "$1" | bc)"; }
 estimate() {
   case "$1" in
-    waits-harness | agent-view | suggest-input-live) echo 0.01 ;; restart-mail-codex) echo 0.02 ;; instructions-live | codex | reboot | argv) echo 0.05 ;; decide-live) echo 0.0001 ;; *) echo 0 ;;
+    waits-harness | agent-view | suggest-input-live) echo 0.01 ;; restart-mail-codex) echo 0.02 ;; instructions-live | codex | argv) echo 0.05 ;; reboot) echo 0.10 ;; decide-live) echo 0.0001 ;; *) echo 0 ;;
   esac
 }
 cmd() {
   case "$1" in
+    api-gen) echo "node --test test/api-gen.test.mjs" ;;
     mail-threading) echo "node --test test/mail-threading.test.mjs" ;;
     mail-tools-unit) echo "node --test test/mail-tools.test.mjs" ;;
     mail-reply-only-unit) echo "node --test test/mail-reply-only.test.mjs" ;;
@@ -676,6 +779,7 @@ cmd() {
     write-timeout-unit) echo "node --test test/write-timeout.test.mjs" ;;
     write-timeout-thread-unit) echo "node --test test/write-timeout-thread.test.mjs" ;;
     mail-recipients-index) echo "node --test test/mail-recipients-index.test.mjs" ;;
+    mail-opens) echo "node --test test/mail-opens.test.mjs" ;;
     default-read-stale) echo "node --test test/default-read-stale.test.mjs" ;;
     db-synchronous) echo "node --test test/db-synchronous.test.mjs" ;;
     db-user-version) echo "node --test test/db-user-version.test.mjs" ;;
@@ -683,6 +787,8 @@ cmd() {
     permission-requests-index) echo "node --test test/permission-requests-index.test.mjs" ;;
     tmux-clients) echo "node --test test/tmux-clients.test.mjs" ;;
     check-playwright-unit) echo "node --test test/check-playwright-unit.test.mjs" ;;
+    hit-classify) echo "node --test test/hit-classify.test.mjs" ;;
+    hit-sampler) echo "node web/check/hit-sample-fixture.mjs" ;;
     prompt-default-mode) echo "node --test test/prompt-default-mode.test.mjs" ;;
     busy) echo "node --test test/busy.test.mjs" ;;
     local-human-unit) echo "node --test test/local-human.test.mjs" ;;
@@ -694,6 +800,7 @@ cmd() {
     usage-agents-filter) echo "node --test test/usage-agents-filter.test.mjs" ;;
     usage-drill) echo "node --test test/usage-drill.test.mjs" ;;
     test-hooks) echo "node --test test/test-hooks.test.mjs" ;;
+    run-lists-unit) echo "node --test test/run-lists.test.mjs" ;;
     run-skip) echo "node --test test/run-skip.test.mjs" ;;
     stall-unit) echo "node --test test/stall.test.mjs" ;;
     stall-labels-unit) echo "node --test test/stall-labels.test.mjs" ;;
@@ -703,6 +810,9 @@ cmd() {
     round-skipped) echo "node --test test/round-skipped.test.mjs" ;;
     archive-cascade) echo "node --test test/archive-cascade.test.mjs" ;;
     idle-shutdown-archive) echo "node --test test/idle-shutdown-archive.test.mjs" ;;
+    auto-archive-queued) echo "node --test test/auto-archive-queued.test.mjs" ;;
+    push-public) echo "node --test test/push-public.test.mjs" ;;
+    archive-unpushed) echo "node --test test/archive-unpushed.test.mjs" ;;
     archive-cascade-peers) echo "node --test test/archive-cascade-peers.test.mjs" ;;
     archive-force) echo "node --test test/archive-force.test.mjs" ;;
     opencode-stop) echo "node --test test/opencode-stop.test.mjs" ;;
@@ -714,10 +824,14 @@ cmd() {
     agent-reads-unit) echo "node --test test/agent-reads.test.mjs" ;;
     tmux-env-unit) echo "node --test test/tmux-env.test.mjs" ;;
     janitor-sweep) echo "node --test test/janitor-sweep.test.mjs" ;;
+    transcript-gz) echo "node --test test/transcript-gz.test.mjs" ;;
+    transcript-gz-resume) echo "node --test test/transcript-gz-resume.test.mjs" ;;
     orphan-procs) echo "node --test test/orphan-procs.test.mjs" ;;
     account-readings) echo "node --test test/account-readings.test.mjs" ;;
     settings-ask-conflict) echo "node --test test/settings-ask-conflict.test.mjs" ;;
+    settings-card-layouts) echo "node --test test/settings-card-layouts.test.mjs" ;;
     settings-file-mode) echo "node --test test/settings-file-mode.test.mjs" ;;
+    agent-public) echo "node --test test/agent-public.test.mjs" ;;
     tiny-models) echo "node --test test/tiny-models.test.mjs" ;;
     tool-summaries) echo "node --test test/tool-summaries.test.mjs" ;;
     tool-names) echo "node --test test/tool-names.test.mjs" ;;
@@ -731,6 +845,7 @@ cmd() {
     banner-stagger) echo "node --test test/banner-stagger.test.mjs" ;;
     ledger-recon) echo "node --test test/ledger-recon.test.mjs" ;;
     openrouter) echo "node --test test/openrouter.test.mjs" ;;
+    openrouter-credit) echo "node --test test/openrouter-credit.test.mjs" ;;
     decide) echo "node --test test/decide.test.mjs" ;;
     decision-fence) echo "node --test test/decision-fence.test.mjs" ;;
     thread-resolved) echo "node --test test/thread-resolved.test.mjs" ;;
@@ -741,22 +856,24 @@ cmd() {
     withdraw) echo "node --test test/withdraw.test.mjs" ;;
     db-backup-lock) echo "node --test test/db-backup-lock.test.mjs" ;;
     withdraw-peers-unit) echo "node --test test/withdraw-peers.test.mjs" ;;
+    set-parent-remote) echo "node --test test/set-parent-remote.test.mjs" ;;
     files-unit) echo "node --test test/files.test.mjs" ;;
     default-repo-unit) echo "node --test test/default-repo.test.mjs" ;;
     diff-api) echo "node --test test/diff-api.test.mjs" ;;
     decl-index) echo "node --test test/decl-index.test.mjs" ;;
+    digest-unit) echo "node --test test/digest.test.mjs" ;;
     delegate-peer-parent) echo "node --test test/delegate-peer-parent.test.mjs" ;;
     withdraw-ask) echo "node --test test/withdraw-ask.test.mjs" ;;
     supersede) echo "node --test test/supersede.test.mjs" ;;
     sw-close) echo "node --test test/sw-close.test.mjs" ;;
     sweep-test-homes) echo "node --test test/sweep-test-homes.test.mjs" ;;
+    tailscale-bin) echo "node --test test/tailscale-bin.test.mjs" ;;
     sw-group) echo "node --test test/sw-group.test.mjs" ;;
     mail-title) echo "node --test test/mail-title.test.mjs" ;;
     block-summaries) echo "node --test test/block-summaries.test.mjs" ;;
     blocks) echo "node --test test/blocks.test.mjs" ;;
     skills) echo "node --test test/skills.test.mjs" ;;
     skill-import) echo "node --test test/skill-import.test.mjs" ;;
-    refresh-derived) echo "node --test test/refresh-derived.test.mjs" ;;
     blocks-compose) echo "node --test test/blocks-compose.test.mjs" ;;
     type-memory) echo "node --test test/type-memory.test.mjs" ;;
     type-skills) echo "node --test test/type-skills.test.mjs" ;;
@@ -767,6 +884,9 @@ cmd() {
     codex-reviewer-sandbox) echo "node --test test/codex-reviewer-sandbox.test.mjs" ;;
     mcp-servers) echo "node --test test/mcp-servers.test.mjs" ;;
     claude-permissions) echo "node --test test/claude-permissions.test.mjs" ;;
+    secret-files) echo "node --test test/secret-files.test.mjs" ;;
+    secrets) echo "node --test test/secrets.test.mjs" ;;
+    key-destinations) echo "node --test test/key-destinations.test.mjs" ;;
     mcp-config) echo "node --test test/mcp-config.test.mjs" ;;
     mcp-import) echo "node --test test/mcp-import.test.mjs" ;;
     inventory-block-unit) echo "node --test test/inventory-block.test.mjs" ;;
@@ -786,11 +906,14 @@ cmd() {
     itsa-fields-unit) echo "node --test test/itsa-fields.test.mjs" ;;
     itsa-fields-prompt) echo "node --test test/itsa-fields-prompt.test.mjs" ;;
     mail-visibility-creator) echo "node --test test/mail-visibility-creator.test.mjs" ;;
+    lock-held-unit) echo "node --test test/lock-held-unit.test.mjs" ;;
+    main-guard-unit) echo "node --test test/main-guard-unit.test.mjs" ;;
     mcp-itsa-create) echo "node --test test/mcp-itsa-create.test.mjs" ;;
     mcp-itsa-ref) echo "node --test test/mcp-itsa-ref.test.mjs" ;;
     mcp-send-mail) echo "node --test test/mcp-send-mail.test.mjs" ;;
     mcp-wait-for) echo "node --test test/mcp-wait-for.test.mjs" ;;
     feedback-unit) echo "node --test test/feedback.test.mjs" ;;
+    fixtures-ts) echo "node --test test/fixtures-ts.test.mjs" ;;
     retro-unit) echo "node --test test/retro.test.mjs" ;;
     retro-reminders-unit) echo "node --test test/retro-reminders.test.mjs" ;;
     retro-lessons-unit) echo "node --test test/retro-lessons.test.mjs" ;;
@@ -807,9 +930,12 @@ cmd() {
     readings) echo "node --test test/readings.test.mjs" ;;
     blockers) echo "node --test test/blockers.test.mjs" ;;
     rules) echo "node --test test/rules.test.mjs" ;;
+    flap-stall-unit) echo "node --test test/flap-stall.test.mjs" ;;
     budgets) echo "node --test test/budgets.test.mjs" ;;
     agent-ips) echo "node --test test/agent-ips.test.mjs" ;;
     cost-pause) echo "node --test test/cost-pause.test.mjs" ;;
+    peer-readings) echo "node --test test/peer-readings.test.mjs" ;;
+    peer-spend) echo "node --test test/peer-spend.test.mjs" ;;
     cost-switch) echo "node --test test/cost-switch.test.mjs" ;;
     cost-fallback) echo "node --test test/cost-fallback.test.mjs" ;;
     cost-probes) echo "node --test test/cost-probes.test.mjs" ;;
@@ -836,6 +962,11 @@ cmd() {
     activity-summary) echo "node --test test/activity-summary.test.mjs" ;;
     agent-class) echo "node --test test/agent-class.test.mjs" ;;
     activity-peers-unit) echo "node --test test/activity-peers.test.mjs" ;;
+    daemon-lock-unit) echo "node --test test/daemon-lock.test.mjs" ;;
+    test-env-unit) echo "node --test test/test-env.test.mjs" ;;
+    mootr-env-unit) echo "node --test test/mootr-env.test.mjs" ;;
+    mootr-isolation-unit) echo "node --test test/mootr-isolation.test.mjs" ;;
+    mootr-env-guard-unit) echo "node --test test/mootr-env-guard.test.mjs" ;;
     agent-load) echo "node --test test/agent-load.test.mjs" ;;
     measured-effort) echo "node --test test/measured-effort.test.mjs" ;;
     issue-costs) echo "node --test test/issue-costs.test.mjs" ;;
@@ -854,7 +985,10 @@ cmd() {
     itsa-permission-unit) echo "node --test test/itsa-permission.test.mjs" ;;
     watch-unit) echo "node --test test/watch.test.mjs" ;;
     notices-unit) echo "node --test test/notices.test.mjs" ;;
+    doctor-unit) echo "node --test test/doctor.test.mjs" ;;
+    onboarding-unit) echo "node --test test/onboarding.test.mjs" ;;
     events-unit) echo "node --test test/events.test.mjs" ;;
+    event-log-unit) echo "node --test test/event-log.test.mjs" ;;
     github-poller-unit) echo "node --test test/github-poller.test.mjs" ;;
     watch-pr-unit) echo "node --test test/mcp-watch-pr.test.mjs" ;;
     linear-poller-unit) echo "node --test test/linear-poller.test.mjs" ;;
@@ -864,22 +998,28 @@ cmd() {
     statusline-post-unit) echo "node --test test/statusline-post.test.mjs" ;;
     cache-cold-unit) echo "node --test test/cache-cold.test.mjs" ;;
     steps-unit) echo "node --test test/steps.test.mjs" ;;
+    runtmp-unit) echo "node --test test/runtmp.test.mjs" ;;
     tmphome-unit) echo "node --test test/tmphome.test.mjs" ;;
+    network-probes-unit) echo "node --test test/network-probes.test.mjs" ;;
     agent-view-unit) echo "node --test test/agent-view.test.mjs" ;;
     agent-view-default) echo "node --test test/agent-view-default.test.mjs" ;;
-    doc-shas) echo "node --test test/doc-shas.test.mjs" ;;
+    dup-selectors) echo "node --test test/dup-selectors.test.mjs" ;;
     swallowed-wait) echo "node --test test/swallowed-wait.test.mjs" ;;
     developer-cap-unit) echo "node --test test/developer-cap-unit.test.mjs" ;;
+    spawn-stale-window) echo "node --test test/spawn-stale-window.test.mjs" ;;
     spawn-worktree-unit) echo "node --test test/spawn-worktree-unit.test.mjs" ;;
     personal-workspace-unit) echo "node --test test/personal-workspace.test.mjs" ;;
     standing-rest-unit) echo "node --test test/standing-rest.test.mjs" ;;
     rest-unit) echo "node --test test/rest.test.mjs" ;;
+    cache-panel-unit) echo "node --test test/cache-panel.test.mjs" ;;
+    harness-settings-unit) echo "node --test test/harness-settings.test.mjs" ;;
     compact-epipe-unit) echo "node --test test/compact-epipe.test.mjs" ;;
     standing-growth) echo "node --test test/standing-growth.test.mjs" ;;
     review-dir-cleanup) echo "node --test test/review-dir-cleanup.test.mjs" ;;
     reviewer-types) echo "node --test test/reviewer-types.test.mjs" ;;
     ring-create-rollback) echo "node --test test/ring-create-rollback.test.mjs" ;;
     ring-split) echo "node --test test/ring-split.test.mjs" ;;
+    ring-takeover) echo "node --test test/ring-takeover.test.mjs" ;;
     ring-verdict-line) echo "node --test test/ring-verdict-line.test.mjs" ;;
     agent-views-unit) echo "node --test test/agent-views.test.mjs" ;;
     codex-view) echo "node --test test/codex-view.test.mjs" ;;
@@ -890,7 +1030,12 @@ cmd() {
     suggest-input-unit) echo "node --test test/claude-input.test.mjs" ;;
     layout-unit) echo "node --test test/layout-ops.test.mjs" ;;
     light-list-unit) echo "node --test test/light-list.test.mjs" ;;
+    llm-bedrock) echo "node --test test/llm-bedrock.test.mjs" ;;
     llm-layer) echo "node --test test/llm-layer.test.mjs" ;;
+    llm-providers) echo "node --test test/llm-providers.test.mjs" ;;
+    opencode-providers) echo "node --test test/opencode-providers.test.mjs" ;;
+    opencode-shell-env) echo "node --test test/opencode-shell-env.test.mjs" ;;
+    provider-spend) echo "node --test test/provider-spend.test.mjs" ;;
     guard-unit) echo "node --test test/guard.test.mjs" ;;
     proctree-unit) echo "node --test test/proctree.test.mjs" ;;
     process) echo "node --test test/process.test.mjs" ;;
@@ -902,24 +1047,32 @@ cmd() {
     mcp-process-propose) echo "node --test test/mcp-process-propose.test.mjs" ;;
 
     process-stage) echo "node --test test/process-stage.test.mjs" ;;
+    go-catchup-unit) echo "node --test test/go-catchup-unit.test.mjs" ;;
+    go-parity-unit) echo "node --test test/go-parity.test.mjs" ;;
+    go-parity-nightly-unit) echo "node --test test/go-parity-nightly.test.mjs" ;;
     mail-full-suite-sender) echo "node --test test/mail-full-suite-sender.test.mjs" ;;
     mail-routing-uncertain) echo "node --test test/mail-routing-uncertain.test.mjs" ;;
     thread-defer) echo "node --test test/thread-defer.test.mjs" ;;
     mail-note-display) echo "node --test test/mail-note-display.test.mjs" ;;
     story-check-unit) echo "node --test test/story-check.test.mjs" ;;
+    repo-config-unit) echo "node --test test/repo-config.test.mjs" ;;
+    repo-gate-unit) echo "node --test test/repo-gate.test.mjs" ;;
+    repo-merge-unit) echo "node --test test/repo-merge.test.mjs" ;;
     deploy-canary) echo "node --test test/deploy-canary.test.mjs" ;;
-    deploy-bisect) echo "node --test test/deploy-bisect.test.mjs" ;;
+    deploy-check-home) echo "node --test test/deploy-check-home.test.mjs" ;;
     release-lock) echo "node --test test/release-lock.test.mjs" ;;
     deploy-prune-unit) echo "node --test test/deploy-prune.test.mjs" ;;
+    stamd-wrapper) echo "node --test test/stamd-wrapper.test.mjs" ;;
     deploy-health-wait) echo "node --test test/deploy-health-wait.test.mjs" ;;
     merge-failures-unit) echo "node --test test/merge-failures.test.mjs" ;;
     pr-open-scope) echo "node --test test/pr-open-scope.test.mjs" ;;
-    pr-open-unit) echo "node --test test/pr-open-unit.test.mjs" ;;
     pr-sync-unit) echo "node --test test/pr-sync-unit.test.mjs" ;;
     workspace-reused-branch) echo "node --test test/workspace-reused-branch.test.mjs" ;;
+    workspace-continue-pr) echo "node --test test/workspace-continue-pr.test.mjs" ;;
     workspace-fresh-base) echo "node --test test/workspace-fresh-base.test.mjs" ;;
+    type-templates-sync) echo "node --test test/type-templates-sync.test.mjs" ;;
     cli-help-unit) echo "node --test test/cli-help.test.mjs" ;;
-    *) echo "sh test/e2e-$1.sh" ;;
+    *) [ -f "test/e2e-$1.sh" ] && echo "sh test/e2e-$1.sh" ;;
   esac
 }
 
@@ -936,6 +1089,8 @@ done
 [ -n "$tests" ] || tests="$FREE${smoke:+ $SMOKE}"
 for t in $tests; do
   case " $FREE $SMOKE " in *" $t "*) ;; *) echo "no test $t; tests: $FREE $SMOKE"; exit 2 ;; esac
+  # Listed but not dispatched: cmd() has no entry and there's no e2e script to fall back to (S-3013).
+  [ -n "$(cmd "$t")" ] || { echo "no command for test $t: it's in FREE or SMOKE, but cmd() in test/run.sh has no entry for it and test/e2e-$t.sh is missing"; exit 2; }
 done
 
 light=""
@@ -1032,9 +1187,17 @@ for t in $tests; do
   fi
   s=$(sed -n 's/^spend [^:]*: \$\([0-9.]*\)$/\1/p' "$LOGS/$t.log" | paste -sd+ - | sed 's/^$/0/' | bc)
   spent=$(echo "$spent + $s" | bc)
-  if [ "$code" = 0 ]; then r=PASS; elif [ "$code" = hung ]; then r=HUNG; failed=1; else r=FAIL; failed=1; fi
+  skipnote=
+  if [ "$code" = 0 ]; then
+    r=PASS
+    # A test that prints a line starting SKIP and exits 0 ran nothing (no Tailscale owner, no key): shown as SKIP, though it
+    # still passes (exit status unchanged, STAM_TEST_NO_SKIP too), so scripts/go-parity.mjs can tell it from a pass.
+    skipnote=$(grep -m1 '^SKIP' "$LOGS/$t.log" || true)
+    [ -n "$skipnote" ] && r=SKIP
+  elif [ "$code" = hung ]; then r=HUNG; failed=1; else r=FAIL; failed=1; fi
   printf '%-16s %-5s %5ss %9s %9s\n' "$t" "$r" "$secs" "\$$(money "$s")" "\$$(money "$(estimate "$t")")"
   [ "$r" = FAIL ] && grep -m1 '^FAIL' "$LOGS/$t.log" | sed 's/^/                 /'
+  [ "$r" = SKIP ] && echo "                 $skipnote"
   [ "$r" = HUNG ] && echo "                 stopped after ${secs}s with no result (STAM_TEST_TIMEOUT=$TIMEOUT)"
 done
 printf '%-16s %-5s %6s %9s %9s\n' total "" "" "\$$(money "$spent")" "\$$(money "$est")"

@@ -9,7 +9,7 @@ import { rearmToolSummaries } from './mail/tool-summaries'
 import { rearmToolNames } from './mail/tool-names'
 import { live } from './format'
 import { onLiveEvent } from './live'
-import type { Agent, DecisionMail, Itsa, ItsaAttention, ItsaQueueRow, ItsaStatus, Machine, Permission, PlainShell, Ring, Thread, Thresholds } from './types'
+import type { Agent, CostMode, DecisionMail, Itsa, ItsaAttention, ItsaQueueRow, ItsaStatus, Machine, Permission, PlainShell, Ring, Thread, Thresholds } from './types'
 
 export interface Data {
   agents: Agent[]
@@ -23,6 +23,9 @@ export interface Data {
   humanArchived: Thread[]
   // The human's threads set aside for later (S-976); a new mail in one brings it back to the inbox.
   humanDeferred: Thread[]
+  // The threads a thread view has loaded, most recent last (S-2286): a thread past the 60 above still
+  // counts as waiting on the human when its own mails say so.
+  openThreads: Thread[]
   // Per agent, its threads with the human from every box, newest first (S-1121): rapid-fire's pages, past the 60 above.
   rapidWith: Record<string, { threads: Thread[]; more: boolean }>
   unread: number
@@ -35,6 +38,10 @@ export interface Data {
   // Minutes a failed prompt-input message waits before the human is mailed about it; 0 is off (S-375).
   // The mode a prompt input starts in: Mail or Direct (settings.promptDefaultMode).
   promptDefaultMode: 'mail' | 'direct'
+  // Where Mail opens on the desktop: the Inbox page, or the sidebar's Mail tab (settings.mailOpens, S-2310).
+  mailOpens: 'inbox' | 'sidebar'
+  // The Settings cost unit (cost.display.mode), which every cost figure shows (S-333).
+  costMode: CostMode
   shells: PlainShell[]
   error: string | null
   // Bumps when mail may have changed, so open mail views reload.
@@ -62,8 +69,8 @@ export interface Data {
 // with each optimistic change (optimistic.ts) applied on top, so a poll never undoes one still
 // in flight.
 let polled: Data = {
-  agents: [], perms: [], delegateDialogs: [], rings: [], humanThreads: [], humanArchived: [], humanDeferred: [], rapidWith: {}, unread: 0, machine: '',
-  thresholds: { warnTokens: 300000, instructTokens: 400000, enforceTokens: 500000 }, agentView: 'conversation', assistantDefault: 'assistant', promptDefaultMode: 'mail',
+  agents: [], perms: [], delegateDialogs: [], rings: [], humanThreads: [], humanArchived: [], humanDeferred: [], openThreads: [], rapidWith: {}, unread: 0, machine: '',
+  thresholds: { warnTokens: 300000, instructTokens: 400000, enforceTokens: 500000 }, agentView: 'conversation', assistantDefault: 'assistant', promptDefaultMode: 'mail', mailOpens: 'inbox', costMode: 'api',
   shells: [], error: null, mailTick: 0, booted: false, loaded: { agents: false, mail: false, itsas: false }, itsas: [], itsaStatuses: [], attention: [], decisions: [], queue: [], itsaError: null, machines: [],
 }
 let data = polled
@@ -112,7 +119,7 @@ export const hasPendingPermission = (t: Thread) => t.mails.some((m) => m.permiss
 // A thread that can't be archived until the human answers: it holds a pending permission
 // request, it is the ask thread of an ITSA waiting on them (S-311), or an agent waits for their reply in it.
 export function threadWaitsOnHuman(tid: string, d: Data = data): boolean {
-  const t = [...d.humanThreads, ...d.humanArchived, ...d.humanDeferred].find((x) => x.thread_id === tid)
+  const t = [...d.humanThreads, ...d.humanArchived, ...d.humanDeferred, ...d.openThreads].find((x) => x.thread_id === tid)
   if (t && hasPendingPermission(t)) return true
   if (d.decisions.some((x) => x.thread_id === tid)) return true
   // An agent's wait for the human's reply in this thread (S-1881) is an open ask too.
@@ -381,6 +388,9 @@ async function fetchItsas() {
   }
 }
 
+// cost.display.mode from the settings, or the API default when it is missing or unknown.
+const costModeOf = (m: unknown): CostMode => (m === 'subscription' || m === 'five_hour' || m === 'seven_day' ? m : 'api')
+
 export async function loadThresholds() {
   // Called after a settings save: a tool-summary step turned back on is asked again (S-1843).
   rearmToolSummaries()
@@ -388,7 +398,7 @@ export async function loadThresholds() {
   rearmMailTitles()
   try {
     const s = JSON.parse((await api<{ text: string }>('GET', '/api/config/settings')).text)
-    setData({ thresholds: { ...polled.thresholds, ...s.context }, agentView: s.agentView?.default === 'terminal' ? 'terminal' : 'conversation', assistantDefault: typeof s.assistantDefault === 'string' ? s.assistantDefault : 'assistant', promptDefaultMode: s.promptDefaultMode === 'direct' ? 'direct' : 'mail' })
+    setData({ thresholds: { ...polled.thresholds, ...s.context }, agentView: s.agentView?.default === 'terminal' ? 'terminal' : 'conversation', assistantDefault: typeof s.assistantDefault === 'string' ? s.assistantDefault : 'assistant', promptDefaultMode: s.promptDefaultMode === 'direct' ? 'direct' : 'mail', mailOpens: s.mailOpens === 'sidebar' ? 'sidebar' : 'inbox', costMode: costModeOf(s.cost?.display?.mode) })
   } catch {}
 }
 

@@ -41,6 +41,8 @@ const ROUTES: Record<string, unknown> = {
   'POST /api/agents/human/read': { ok: true },
   // Tool-call summaries (S-1481) are off unless a state seeds them.
   'POST /api/tool-summaries': { enabled: false, summaries: {}, pending: [] },
+  // The secret store's listing (Settings › Model providers, S-2115): empty unless a state sets it.
+  'GET /api/secrets': { secrets: [] },
 }
 
 export interface StoriesDebug { apiCalls: string[] }

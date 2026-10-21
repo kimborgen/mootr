@@ -6,6 +6,7 @@
 // test/e2e-github-poller.sh.
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
+import { isMain } from '../../scripts/main-guard.mjs';
 
 const key = (o, r, n) => `${o}/${r}#${n}`;
 const repoKey = (o, r) => `${o}/${r}`;
@@ -130,7 +131,7 @@ function route(url, parts, data) {
 }
 
 // Run as a script: print the url, then serve until killed (the e2e kills it by PID).
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (isMain(import.meta.url)) {
   const port = Number(process.env.STAM_FAKE_GITHUB_PORT ?? 0);
   const fake = await startFakeGithub({ port });
   console.log(`URL=${fake.url}`);

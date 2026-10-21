@@ -20,8 +20,10 @@ kill_tree() { for _c in $(ps -o pid= --ppid "$1" 2>/dev/null); do kill_tree "$_c
 trap stop EXIT
 # A signal with no trap ends the shell without running the EXIT trap, and the daemon outlives it.
 trap 'exit 130' INT TERM HUP
-for _i in $(seq 1 120); do grep -q '^URL=' "$LOG" && break; kill -0 $DAEMON 2>/dev/null || { cat "$LOG"; echo "FAIL: the check daemon didn't start"; exit 1; }; sleep 1; done
-grep -q '^URL=' "$LOG" || { cat "$LOG"; echo "FAIL: the check daemon didn't start"; exit 1; }
+# A failed web build (daemon.sh's BUILD_FAILED=1) reads as a build failure, with its output last (S-2162).
+daemon_down() { sed '/^BUILD_FAILED=1$/d' "$LOG"; grep -q '^BUILD_FAILED=1$' "$LOG" && echo "FAIL: the web build failed (see the error above)" || echo "FAIL: the check daemon didn't start"; exit 1; }
+for _i in $(seq 1 120); do grep -q '^URL=' "$LOG" && break; kill -0 $DAEMON 2>/dev/null || daemon_down; sleep 1; done
+grep -q '^URL=' "$LOG" || daemon_down
 URL="$(sed -n 's/^URL=//p' "$LOG")"
 echo "screenshots: $OUT"
 rc=0

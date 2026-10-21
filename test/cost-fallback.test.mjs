@@ -495,3 +495,52 @@ test('a real preset named like a type target does not shadow it, and public inpu
   assert.equal(q.toType, 'rv-fallback');
   writeRegistry(baseTypes());
 });
+
+test('an explicit archive or shut-down cancels a pending fallback: no successor after its deadline (S-2458)', async () => {
+  for (const how of ['archive', 'shutdown']) {
+    const rv = agent(`cancel-${how}`, mgr.id, { harness: 'fake2', type: 'reviewer' });
+    const n = await block(rv, 'acct-b');
+    if (how === 'archive') await lifecycle.archive(get(rv), true);
+    else await lifecycle.explicitShutdown(get(rv), false);
+    assert.match(fallback.row(n.id).result, /^skipped: the agent was (archived|shut down)$/, `${how}: the pending row is cancelled`);
+    await fallback.evaluate(Date.now() + 16 * MIN);
+    assert.equal(byName(`cancel-${how}-t2`), undefined, `${how}: no successor`);
+    assert.equal(get(rv).forwarded_to, null);
+    assert.equal(fallbackMail(cos.id).length, 0, `${how}: the chief of staff hears no fallback`);
+  }
+});
+
+test('a fallback claim re-checks the agent in the same step: an archive that lands after the due scan stops that row (S-2458)', async () => {
+  const early = agent('early', mgr.id, { harness: 'fake2', type: 'developer' }); // no action on acct-b: it waits
+  const late = agent('late', mgr.id, { harness: 'fake2', type: 'reviewer' });
+  await block(early, 'acct-b');
+  await sleep(5); // the rows get different due times, so the scan orders early first
+  const n2 = await block(late, 'acct-b');
+  // early's run yields before it returns, so late's claim runs after this synchronous write: the archive lands between the scan and that claim.
+  const running = fallback.evaluate(Date.now() + 16 * MIN);
+  db.updateAgent(late.id, { pending_action: JSON.stringify({ type: 'archive', at: Date.now() + 1 }) });
+  await running;
+  assert.equal(fallback.row(n2.id).state, 'done');
+  assert.match(fallback.row(n2.id).result, /^skipped: the agent is archived, or its archive or shut-down is pending$/);
+  assert.equal(byName('late-t2'), undefined, 'no successor');
+  assert.equal(get(late).forwarded_to, null);
+});
+
+test('a graceful or an immediate shut-down during a take-over\'s quiesce cancels it before the stop, no successor (S-2458)', async () => {
+  for (const how of ['graceful', 'immediate']) {
+    const x = agent(`quit-${how}`, mgr.id, { harness: 'fake2', type: 'reviewer', session_id: `s-quit-${how}` });
+    const n = await block(x, 'acct-b');
+    db.updateAgent(x.id, { activity: 'working' }); // mid-turn, so the switch quiesces first
+    const running = fallback.evaluate(Date.now() + 16 * MIN);
+    await sleep(200);
+    assert.equal(fallback.row(n.id).state, 'running', `${how}: ${fallback.row(n.id).result}`);
+    await lifecycle.explicitShutdown(get(x), how === 'immediate');
+    db.updateAgent(x.id, { activity: 'idle' }); // the turn ends, so the quiesce can finish
+    await running;
+    const r = fallback.row(n.id);
+    assert.equal(r.state, 'done');
+    assert.match(r.result, /^cancelled: .*the agent was shut down/, `${how}: the take-over is cancelled`);
+    assert.equal(byName(`quit-${how}-t2`), undefined, `${how}: no successor`);
+    assert.equal(get(x).forwarded_to, null);
+  }
+});

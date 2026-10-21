@@ -37,10 +37,7 @@ wait
 [ "$(count concurrent)" = 1 ] || { echo "FAIL: $(count concurrent) copies of a mail sent at once with one client_id"; exit 1; }
 
 prompts() {
-  node --no-warnings -e '
-const { DatabaseSync } = require("node:sqlite");
-const row = new DatabaseSync(process.argv[1], { readOnly: true }).prepare("SELECT COUNT(*) AS n FROM events e JOIN agents a ON a.id = e.agent_id WHERE a.name = ? AND e.type = ?").get(process.argv[2], "human:prompt");
-console.log(row.n);' "$STAM_HOME/stam.db" "$NAME"
+  curl -s -H "authorization: Bearer $SHARED" "$STAM_URL/api/agents/$NAME/events" | python3 -c 'import json, sys; print(sum(1 for e in json.load(sys.stdin) if e["type"] == "human:prompt"))'
 }
 P='{"text":"hello again","client_id":"c-prompt-1"}'
 post "/api/agents/$NAME/prompt" "$P" >/dev/null

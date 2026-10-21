@@ -56,11 +56,14 @@ async function resetLayout() {
   await api('/api/config/settings', { method: 'PATCH', body: JSON.stringify({ patch: { sidebarPanes: { main: null } } }) });
 }
 // Shows a sidebar pane's tab on a desktop page (S-1421); a phone page and a tab already showing are left alone.
+// A tab with a page also opens that page (S-1428); these checks are about the sidebar, so main goes back to the world it showed.
 async function sideTab(p, id) {
   const tab = p.locator(`#side-panes [role=tab][data-tab="${id}"]`);
   if (!(await tab.count()) || (await tab.getAttribute('aria-selected')) === 'true') return;
+  const was = await p.evaluate(() => window.stamDebug.shell.currentWorld());
   await tab.click();
   await p.locator(`#pane-body-${id}`).waitFor({ state: 'visible' });
+  if ((await p.evaluate(() => window.stamDebug.shell.currentWorld())) !== was) await p.evaluate((w) => window.stamDebug.shell.showAgentWorld(w), was);
 }
 const layoutCurrent = async () => (await api('/api/layout')).current;
 
@@ -630,15 +633,17 @@ async function itsaChip() {
     const row = p.locator('.mrow[title*="Check: a mail about an ITSA"]').first();
     await row.waitFor();
     await row.click();
-    const chip = p.locator('.thread-head .ichip-mail');
+    // On a desktop the thread's tab carries the chip (S-1471 §2a): the key and glyph, with the title in its tooltip.
+    const chip = p.locator('.tab.active [data-itsa]:not([data-itsa="folded"])');
     await chip.waitFor();
     check(await chip.count() === 1, `${theme}: one chip for the ITSA the mail is about`);
-    check(/S-\d+/.test(await chip.innerText()) && /Issues section in the sidebar/.test(await chip.innerText()), `${theme}: the chip shows the key and the title`, await chip.innerText());
-    check(await chip.locator('.sglyph').count() === 1, `${theme}: the chip shows the status glyph`);
+    const tip = await chip.getAttribute('title');
+    check(/S-\d+/.test(await chip.innerText()) && /Issues section in the sidebar/.test(tip), `${theme}: the chip shows the key, and its tooltip the title`, { text: await chip.innerText(), tip });
+    check(await chip.locator('.sglyph').count() === 1, `${theme}: the chip shows its status glyph`);
     const plain = p.locator('.mrow[title*="Check: archive me"]').first();
     await plain.click();
     await p.waitForSelector('.thread-head h2:has-text("archive me")');
-    check(await p.locator('.thread-head .ichip-mail:visible').count() === 0, `${theme}: a mail about no ITSA has no chip`);
+    check(await p.locator('.tab.active [data-itsa]:not([data-itsa="folded"]):visible').count() === 0, `${theme}: a mail about no ITSA has no chip`);
     await row.click();
     await chip.waitFor();
     await shot(p, `itsa-chip-${theme}`);
@@ -702,7 +707,8 @@ async function itsaMail() {
 
 // An issue named in a mail opens beside the thread on the desktop (the thread's right split,
 // reused when there is one), and as a pushed view on the phone, where Back returns to the thread
-// (S-93). Entry points: the ITSA chip in the thread header, and the S-N key in a body.
+// (S-93). Entry points: the ITSA chip on the thread's tab, the ITSA chip in the thread header, and
+// the S-N key in a body (S-1872: the tab chip opens beside too, as the other two do).
 async function itsaBeside() {
   console.log('# itsabeside');
   const review = (await api('/api/itsas')).find((x) => x.title === 'Issues section in the sidebar');
@@ -710,25 +716,39 @@ async function itsaBeside() {
   const tid = rows.find((r) => r.subject.includes('a mail about an ITSA')).thread_id;
   const tidSecond = rows.find((r) => r.subject.includes('a second mail about that ITSA')).thread_id;
   for (const theme of ['light', 'dark']) {
+    // The tab chip: one page, fresh, so the split is the one the chip makes.
     const p = await page({ width: 1500, height: 900 }, null, theme);
     await p.evaluate((w) => window.stamDebug.shell.showAgentWorld(w), 't:' + tid);
-    await p.locator('.thread-head .ichip-mail').first().waitFor();
-    await p.locator('.thread-head .ichip-mail').first().click();
+    const tabChip = p.locator('.tab.active [data-itsa]:not([data-itsa="folded"])').first();
+    await tabChip.waitFor();
+    await tabChip.click();
     await p.locator(`.pane:has(.itsa-view[data-itsa="${review.id}"])`).waitFor();
-    const panes = await p.locator('.pane').count();
-    const thread = await p.locator('.pane:has(.thread-head)').first().boundingBox();
-    const issue = await p.locator('.pane:has(.itsa-view)').first().boundingBox();
+    const tabPanes = await p.locator('.pane').count();
+    const tabThread = await p.locator('.pane:has(.thread-head)').first().boundingBox();
+    const tabIssue = await p.locator('.pane:has(.itsa-view)').first().boundingBox();
+    check(tabPanes === 2, `${theme}: the tab chip opens its ITSA in a split beside the thread`, tabPanes);
+    check(tabThread && tabIssue && tabIssue.x > tabThread.x + tabThread.width / 2, `${theme}: the tab chip's issue is in the right split`, [tabThread, tabIssue]);
+    await p.context().close();
+    // A key in the body opens it beside the thread (openFromMail), so the split is checked from that key.
+    const q = await page({ width: 1500, height: 900 }, null, theme);
+    await q.evaluate((w) => window.stamDebug.shell.showAgentWorld(w), 't:' + tidSecond);
+    await q.locator('.msg .itsalink').first().waitFor();
+    await q.locator('.msg .itsalink').first().click();
+    await q.locator(`.pane:has(.itsa-view[data-itsa="${review.id}"])`).waitFor();
+    const panes = await q.locator('.pane').count();
+    const thread = await q.locator('.pane:has(.thread-head)').first().boundingBox();
+    const issue = await q.locator('.pane:has(.itsa-view)').first().boundingBox();
     check(panes === 2, `${theme}: the issue opens in a split beside the thread`, panes);
     check(thread && issue && issue.x > thread.x + thread.width / 2, `${theme}: the issue is in the right split`, [thread, issue]);
-    await shot(p, `beside-desktop-${theme}`);
+    await shot(q, `beside-desktop-${theme}`);
     // A key in the body: that ITSA is already in the split, so it's focused there, not split again.
-    await p.evaluate((w) => window.stamDebug.shell.showAgentWorld(w), 't:' + tidSecond);
-    await p.locator('.msg .itsalink').first().waitFor();
-    await p.locator('.msg .itsalink').first().click();
-    await p.waitForTimeout(300);
-    check(await p.locator('.pane').count() === 2, `${theme}: a body key reuses the split, no third pane`, await p.locator('.pane').count());
-    check(await p.locator(`.pane:has(.itsa-view[data-itsa="${review.id}"])`).count() === 1, `${theme}: the key opens the ITSA in the split`);
-    await p.context().close();
+    await q.evaluate((w) => window.stamDebug.shell.showAgentWorld(w), 't:' + tidSecond);
+    await q.locator('.msg .itsalink').first().waitFor();
+    await q.locator('.msg .itsalink').first().click();
+    await q.waitForTimeout(300);
+    check(await q.locator('.pane').count() === 2, `${theme}: a body key reuses the split, no third pane`, await q.locator('.pane').count());
+    check(await q.locator(`.pane:has(.itsa-view[data-itsa="${review.id}"])`).count() === 1, `${theme}: the key opens the ITSA in the split`);
+    await q.context().close();
   }
   // Phone: a pushed view, and Back returns to the thread.
   for (const theme of ['light', 'dark']) {
@@ -816,7 +836,7 @@ async function typesFlow() {
   const plus = p.locator('#new-agent');
   const reg = await api('/api/registry');
   const types = Object.keys(reg.types ?? {});
-  same(types, ['developer', 'reviewer', 'reviewer-opus', 'review-ring', 'manager', 'coordinator', 'retro-steward', 'advisor'], 'the shipped types');
+  same(types, ['developer', 'reviewer', 'reviewer-opus', 'review-ring', 'manager', 'coordinator', 'retro-steward', 'cos', 'advisor'], 'the shipped types');
 
   await plus.click();
   await p.waitForSelector('.menu');
@@ -1003,17 +1023,17 @@ async function archive() {
   await p.waitForTimeout(500);
   check(await row().count() === 1, 'the thread is back in the mail list');
 
-  // The header button archives the open thread and opens the next one, or nothing.
+  // The tab bar's Archive archives the open thread and opens the next one, or nothing, as the header button did.
   const all = await api('/api/agents/human/threads?limit=60');
   const pending = (x) => x.mails.some((m) => m.permission?.status === 'pending');
   const ordered = [...all.filter(pending), ...all.filter((x) => !pending(x))];
   const next = ordered[ordered.findIndex((x) => x.thread_id === tid) + 1];
   await row().click();
   await p.waitForSelector('.thread-view:visible .msg');
-  check(await p.locator('.thread-view:visible [data-archive]').isVisible(), 'the open thread has an Archive button in its header');
-  await p.locator('.thread-view:visible [data-archive]').click();
+  check(await p.locator('.tab-actions.desk [data-archive]').isVisible(), 'the open thread has an Archive icon in the tab bar');
+  await p.locator('.tab-actions.desk [data-archive]').click();
   await p.waitForTimeout(800);
-  check(await current() === (next ? 't:' + next.thread_id : null), 'the header button opens the next thread, or nothing when it was the last', await current());
+  check(await current() === (next ? 't:' + next.thread_id : null), 'the tab bar\'s Archive opens the next thread, or nothing when it was the last', await current());
   check(!(await inList()), 'the archived thread left the list');
 
   // From the Archived list, `e` unarchives the open thread without leaving it.
@@ -1021,7 +1041,7 @@ async function archive() {
   await p.waitForTimeout(500);
   await row().click();
   await p.waitForSelector('.thread-view:visible .msg');
-  check(/Unarchive/.test(await p.locator('.thread-view:visible [data-archive]').innerText()), 'an archived thread offers Unarchive');
+  check(/^Unarchive/.test(await p.locator('.tab-actions.desk [data-archive]').getAttribute('aria-label')), 'an archived thread offers Unarchive');
   await p.keyboard.press('e');
   await p.waitForTimeout(700);
   check(await current() === 't:' + tid && await inList(), '`e` unarchives the open thread without leaving it');
@@ -1045,6 +1065,16 @@ async function archive() {
   await p.waitForTimeout(700);
   check(await current() === 't:' + tid && await inList(), '`e` again unarchives it (thread restored)');
   await p.locator('.mail-toggle').nth(1).click();
+  await p.waitForTimeout(500);
+
+  // The tab bar's Defer defers the open thread and opens the next one, as the header did; the deferred thread is then undone from the API.
+  await row().click();
+  await p.waitForSelector('.thread-view:visible .msg');
+  await p.locator('.tab-actions.desk [data-defer]').click();
+  await p.waitForTimeout(800);
+  check((await api('/api/agents/human/threads?limit=60&deferred=1')).some((x) => x.thread_id === tid), 'the tab bar\'s Defer defers the open thread');
+  check(await current() !== 't:' + tid, 'the tab bar\'s Defer opens the next thread', await current());
+  await api(`/api/agents/human/threads/${tid}/undefer`, { method: 'POST' });
   await p.waitForTimeout(500);
 
   // A pending permission request can't be archived: no enabled button, and the API refuses.
@@ -1161,6 +1191,23 @@ async function cos() {
   }
   same((await api('/api/chief-of-staff', { method: 'POST', body: JSON.stringify({ agent: 'helper' }) })).chiefOfStaff, 'helper', 'helper is made chief of staff');
   check((await api('/api/agents')).find((a) => a.id === helper.id)?.chief_of_staff === true, 'the agent list marks the chief of staff');
+  // Settings › Chief of staff: the status card names helper with a Stop, the cos type's harness,
+  // model and effort are editable, and Edit instructions opens the chief of staff's instructions.
+  for (const [name, size] of [['desktop', undefined], ['phone', { width: 360, height: 780 }]]) {
+    const p = await page(size);
+    await p.evaluate(() => localStorage.setItem('stam/settings-section', 'chief'));
+    await p.locator('#open-config, [aria-label=Settings]').first().click();
+    await p.waitForSelector('.status-card[data-cos]');
+    same(await p.locator('.status-card[data-cos]').getAttribute('data-cos'), 'helper', `${name}: the Settings status card names the chief of staff`);
+    check(await p.locator('#cos-stop').count() === 1 && await p.locator('#cos-start').count() === 0, `${name}: a running chief of staff offers Stop, not Start`);
+    check(await p.locator('.settings-inner .seg button:has-text("Claude Code")').count() >= 1, `${name}: the cos type's harness is editable`);
+    check(await p.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), `${name}: the section has no sideways scroll`);
+    await shot(p, `cos-settings-${name}`);
+    await p.locator('#cos-instructions').click();
+    await p.waitForSelector('.tpl-list .item.sel', { state: 'attached' });
+    check(/Chief of staff/.test(await p.locator('.tpl-list .item.sel').textContent()), `${name}: Edit instructions opens the chief of staff's instructions`);
+    await p.context().close();
+  }
   for (const theme of ['light', 'dark']) {
     const p = await page(undefined, null, theme);
     await p.keyboard.press('Alt+c');
@@ -2283,7 +2330,10 @@ async function work() {
   check(await firstGroup() === 'needs' && await w().locator('.w-gtoggle').count() === 0, 'Group: Flat has no group headers, and the Needs-you group still leads');
   await w().locator('[data-mode="agents"]').click();
   const byAgent = await rowIds()
-  same(byAgent.slice().sort(), openNow.map((x) => x.id).sort(), 'Agents: every open ITSA once, under an agent tree');
+  // Once per agent tree, under its owner or a participant there (S-2735): no ITSA twice in one group, and every open ITSA shows.
+  const groupIds = await w().locator('.w-group:not(.w-needs)').evaluateAll((gs) => gs.map((g) => [...g.querySelectorAll('.w-row:not(.context)')].map((e) => e.dataset.itsa)))
+  check(groupIds.every((ids) => new Set(ids).size === ids.length), 'Agents: no ITSA twice in one group', groupIds);
+  same([...new Set(byAgent)].sort(), openNow.map((x) => x.id).sort(), 'Agents: every open ITSA under an agent tree or Unowned');
   const agentNames = (await api('/api/agents')).map((a) => a.name)
   const heads2 = await w().locator('.w-group:not(.w-needs) .w-gname').allInnerTexts()
   check(heads2.length > 0 && heads2.every((h) => agentNames.includes(h) || h === 'Unowned'), 'Agents: each group is headed by a root agent\'s name, or Unowned', heads2);
@@ -3100,7 +3150,7 @@ async function inputCard() {
   const openCard = async (p, r, phone = false) => {
     const tid = await threadOf(r.agent_name);
     if (phone) await p.locator('[data-nav="mail"]').click();
-    await p.locator(`#mail-side .mrow[data-thread="${tid}"]`).first().click();
+    await p.locator(`${phone ? '#inbox-view' : '#mail-side'} .mrow[data-thread="${tid}"]`).first().click();
     await p.waitForSelector(`[data-input-perm="${r.id}"]`);
     return p.locator(`[data-input-perm="${r.id}"]`);
   };
@@ -3164,8 +3214,8 @@ async function inputCard() {
   check(['held', 'approved'].includes((await api('/api/permissions')).find((r) => r.id === kReq.id)?.status), 'Approve moves the suggestion to held or approved');
   // The answered card, opened again from the Archived list: no buttons, no red error, who answered.
   await ap.locator('[data-nav="mail"]').click();
-  await ap.locator('.mail-toggle').nth(1).click();
-  await ap.locator(`#mail-side .mrow[data-thread="${kTid}"]`).first().click();
+  await ap.locator('[data-filter="archived"]').click();
+  await ap.locator(`#inbox-view .mrow[data-thread="${kTid}"]`).first().click();
   const answered = ap.locator(`[data-input-perm="${kReq.id}"]`);
   await answered.locator('[data-input-status]').waitFor();
   check(await answered.locator('[role="alert"]').count() === 0 && await answered.locator('[data-input-approve]').count() === 0, 'the answered card shows no error and no buttons');

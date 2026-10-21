@@ -1,7 +1,8 @@
 // An agent's tab links to the ITSAs it owns at the top (S-1452), on a desktop and at 360 px, against
 // a test daemon (daemon.sh): a project with an issue under it shows the project alone; two more at
 // the top show side by side, and fold into an `N ITSAs` pill in a narrow tab; the chip opens the ITSA
-// and never selects or closes the tab. No model runs. Screenshots: OUT_DIR/itsa-chips-*.png.
+// and never selects or closes the tab. A drag from a chip doesn't move its tab, and one from the name does,
+// on an agent's tab and a thread's at 1440 and 800 (S-1872). No model runs. Screenshots: OUT_DIR/itsa-chips-*.png.
 //   web/check/run.sh itsachips
 import './chromium-lock.mjs';
 import { chromiumLaunchOptions } from './chromium-launch.mjs';
@@ -121,8 +122,49 @@ async function tabs() {
   check('tabs', await p.locator('#w-main .tab').count() === 1, 'the page survives opening and closing a second tab');
   await ctx.close();
 }
+// A press on a chip doesn't drag its tab, and a press on the name still does (S-1872). A real drag, with the mouse:
+// the browser starts it on the draggable tab, so the dragstart is seen there, after the tab's handler has run.
+async function drags(width, which) {
+  const tag = `drag-${which}-${width}`;
+  const ctx = await browser.newContext({ colorScheme: 'light', viewport: { width, height: 900 } });
+  const p = await ctx.newPage();
+  p.setDefaultTimeout(10000);
+  p.on('pageerror', (e) => check(tag, false, 'no page error', e.message));
+  await p.goto(origin + '/#token=' + token);
+  await p.waitForSelector('#tree .node', { state: 'attached', timeout: 20000 });
+  // An agent's tab, or the thread tab of the seeded mail that names an ITSA: one tab per context, so each drag starts clean.
+  if (which === 'agent') await p.locator(`#tree .node[data-id="${agent.id}"] .name`).first().click();
+  else { await p.locator('.mrow[title*="Check: a mail about an ITSA"]').first().click(); }
+  const sel = which === 'agent' ? `#w-main .tab[data-key="agent:${agent.id}"]` : '#w-main .tab[data-key^="thread:"]';
+  await p.locator(sel).first().waitFor();
+  const chip = p.locator(`${sel} [data-itsa]`).first();
+  if (!await chip.waitFor({ timeout: 15000 }).then(() => true, () => false)) { check(tag, false, `the ${which} tab shows an ITSA chip to drag from`); await ctx.close(); return; }
+  await p.evaluate(() => { window.__drags = []; window.addEventListener('dragstart', (e) => window.__drags.push(e.defaultPrevented)); });
+  const order = () => p.locator('#w-main .tab').evaluateAll((ts) => ts.map((t) => t.dataset.key));
+  const before = await order();
+  const drag = async (loc) => {
+    const box = await loc.boundingBox();
+    const x = box.x + box.width / 2, y = box.y + box.height / 2;
+    await p.evaluate(() => { window.__drags = []; });
+    await p.mouse.move(x, y);
+    await p.mouse.down();
+    await p.mouse.move(x + 4, y, { steps: 2 });
+    await p.mouse.move(x + 24, y + 2, { steps: 6 });
+    await p.mouse.up();
+    await p.waitForTimeout(200);
+    return p.evaluate(() => window.__drags.slice());
+  };
+  const fromChip = await drag(chip);
+  check(tag, fromChip.length > 0 && fromChip.every(Boolean), `a drag from the ${which} tab's chip does not start the tab's drag`, fromChip);
+  check(tag, JSON.stringify(await order()) === JSON.stringify(before), `a drag from the ${which} tab's chip leaves the tab order alone`);
+  const fromName = await drag(p.locator(`${sel} .label`).first());
+  check(tag, fromName.length > 0 && fromName.some((prevented) => !prevented), `a drag from the ${which} tab's name still starts the tab's drag`, fromName);
+  await p.screenshot({ path: `${out}/itsa-chips-drag-${which}-${width}.png` });
+  await ctx.close();
+}
 await tabs();
 await run('desktop', false);
 await run('360-light', true);
+for (const width of [1440, 800]) for (const which of ['agent', 'thread']) await drags(width, which);
 await browser.close();
 process.exit(failures ? 1 : 0);

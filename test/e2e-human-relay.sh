@@ -24,7 +24,7 @@ for me, other in (("main", "twin"), ("twin", "main")):
     s["peers"] = [peer(other)]
     if me == "main":
         s["itsa"] = {**s.get("itsa", {}), "home": "twin"}
-        s["auth"] = {**s.get("auth", {}), "humanStrict": strict, "legacyPeerToken": False}
+        s["auth"] = {**s.get("auth", {}), "humanStrict": strict}
     json.dump(s, open(path, "w"), indent=2)
 PY
 }
@@ -65,6 +65,6 @@ on main "$STAM" daemon stop >/dev/null 2>&1 || true
 conf false
 daemon_up main
 [ "$(code -X POST -H "$M" -H "$KEY" -H "$J" -H 'x-stam-human: 1' -d '{"title":"relayed"}' "$MAIN_URL/api/itsas")" = 200 ] || fail "a relayed human ITSA create failed with strict off: $(cat "$TEST_TMP/body")"
-grep -q 'would refuse: relaying' "$TEST_TMP/main/daemon.log" || fail "no relay would-refuse line in main's log"
+grep -qF 'off (this was allowed; turning it on would refuse it): relaying' "$TEST_TMP/main/daemon.log" || fail "no relay would-refuse line in main's log"
 grep -q 'permission answer relayed after the direct attempt failed: TypeError: Failed to fetch (origin https://twin.example)' "$TEST_TMP/main/daemon.log" || fail "no direct-failure line in main's log"
 echo PASS

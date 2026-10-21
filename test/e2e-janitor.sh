@@ -69,7 +69,7 @@ wait "$DEADPID" 2>/dev/null || true
 printf 'agent=zzgone\npid=%s\nstarted=%s\n' "$DEADPID" "$(date -Is)" >"$FAKE/owner"
 
 echo "== a throwaway daemon and a tmux server under the fake home"
-( . "$FAKE/fake/test.env"; STAM_OPENCODE_BIN=/bin/false STAM_CODEX_BIN=/bin/false node --no-warnings "$ROOT/src/cli.ts" daemon start >/dev/null )
+( . "$FAKE/fake/test.env"; STAM_OPENCODE_BIN=/bin/false STAM_CODEX_BIN=/bin/false "$STAM" daemon start >/dev/null )
 for _i in $(seq 1 40); do curl -sf -m 1 -H "authorization: Bearer $FTOKEN" "http://127.0.0.1:$FPORT/api/health" >/dev/null && break; sleep 0.25; done
 curl -sf -m 1 -H "authorization: Bearer $FTOKEN" "http://127.0.0.1:$FPORT/api/health" >/dev/null || fail "the fake daemon didn't start"
 FPID=$(cat "$FAKE/fake/daemon.pid")
@@ -196,9 +196,7 @@ systemctl --user is-active --quiet "$SVC" && fail "the unit is still active"
 systemctl --user is-enabled --quiet "$SVC" && fail "the unit is still enabled"
 
 echo "== the sweep logged a janitor event on the daemon"
-node --no-warnings --input-type=module -e \
-  "import { DatabaseSync } from 'node:sqlite'; const d = new DatabaseSync(process.argv[1], { readOnly: true }); console.log(d.prepare(\"SELECT count(*) AS c FROM events WHERE type='janitor'\").get().c)" \
-  "$STAM_HOME/stam.db" | grep -qx '[1-9][0-9]*' || fail "no janitor event was logged"
+curl -sf -m 5 -H "authorization: Bearer $(cat "$STAM_HOME/token")" "$STAM_URL/api/test/events?type=janitor" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' | grep -qx '[1-9][0-9]*' || fail "no janitor event was logged"
 
 echo "== a test killed by SIGTERM leaves nothing behind"
 OUT="$TEST_TMP/child.out" # in the test folder, so the EXIT trap removes it on a failure too (S-668)

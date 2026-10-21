@@ -18,7 +18,8 @@ const mk = (id: string, key: string, title: string, status: string) => ({ id, ke
 let settings: Record<string, unknown>
 let defs: Field[]
 // A held-back endpoint: its answer waits for the promise.
-let hold: { settings?: Promise<void>; fields?: Promise<void> }
+let hold: { settings?: Promise<void>; fields?: Promise<void>; costs?: Promise<void> }
+let costs: unknown
 let patches: unknown[]
 let host: HTMLDivElement
 let root: Root
@@ -32,11 +33,13 @@ beforeEach(async () => {
   settings = {}
   defs = []
   hold = {}
+  costs = null
   patches = []
   localStorage.clear()
   apiMock.mockReset()
   apiMock.mockImplementation((method: string, path: string, body?: { patch: Record<string, Record<string, unknown>> }) => {
     if (path === '/api/itsas/fields') return (hold.fields ?? Promise.resolve()).then(() => defs)
+    if (path.startsWith('/api/usage/issues')) return (hold.costs ?? Promise.resolve()).then(() => costs)
     if (method === 'GET' && path === '/api/config/settings') return (hold.settings ?? Promise.resolve()).then(() => ({ text: JSON.stringify(settings) }))
     if (method === 'PATCH' && path === '/api/config/settings') {
       patches.push(body)
@@ -113,5 +116,61 @@ describe('the totals footer', () => {
     expect(document.querySelectorAll('.wg-totals')).toHaveLength(1)
     expect(q('.wg-totals')!.textContent).toBe('3 issues · 2 active · 1 review')
     expect(q('.wg-sec[data-sec=matches] > .wg-totals')).toBeTruthy()
+  })
+
+  it('shows the cost in the Settings unit, a percent for a window, and follows a switch of unit', async () => {
+    const part = (v: number) => ({ api: null, five_hour: v, seven_day: null, subscription: null, paid_usd: 0 })
+    const issue = (key: string, v: number) => ({ key, own: { cost_usd: 1 }, total: { cost_usd: 1 }, weekly_percent: null, cost: { mode: 'five_hour', own: part(v), total: part(v) } })
+    costs = { note: '', issues: [issue('S-1', 3.2), issue('S-2', 1.4)] }
+    const { setData } = await import('../store')
+    setData({ costMode: 'five_hour' })
+    seed()
+    await mount()
+    expect(totals().cost).toBe('5%')
+    expect([...document.querySelectorAll('.w-cost')].map((c) => c.textContent)).toEqual(expect.arrayContaining(['3%']))
+    // Switching the unit in Settings refetches the costs, with no reload.
+    costs = { note: '', issues: [{ ...issue('S-1', 0), cost: { mode: 'api', own: { api: 2.5, five_hour: null, seven_day: null, subscription: null, paid_usd: 0 }, total: { api: 2.5, five_hour: null, seven_day: null, subscription: null, paid_usd: 0 } } }] }
+    await act(async () => { setData({ costMode: 'api' }) })
+    await flush()
+    expect(totals().cost).toBe('$2.5')
+  })
+
+  it('shows a unit switched while Work was unmounted, on the next mount within a minute', async () => {
+    const part = (v: number) => ({ api: null, five_hour: v, seven_day: null, subscription: null, paid_usd: 0 })
+    const issue = (key: string, v: number) => ({ key, own: { cost_usd: 1 }, total: { cost_usd: 1 }, weekly_percent: null, cost: { mode: 'five_hour', own: part(v), total: part(v) } })
+    costs = { note: '', issues: [issue('S-1', 3.2), issue('S-2', 1.4)] }
+    const { setData } = await import('../store')
+    setData({ costMode: 'five_hour' })
+    seed()
+    await mount()
+    expect(totals().cost).toBe('5%')
+    await act(async () => root.unmount())
+    // Settings is open meanwhile: the unit changes, and the costs come back in it.
+    costs = { note: '', issues: [{ key: 'S-1', own: { cost_usd: 2.5 }, total: { cost_usd: 2.5 }, weekly_percent: null, cost: { mode: 'api', own: { api: 2.5, five_hour: null, seven_day: null, subscription: null, paid_usd: 0 }, total: { api: 2.5, five_hour: null, seven_day: null, subscription: null, paid_usd: 0 } } }] }
+    setData({ costMode: 'api' })
+    const { createRoot } = await import('react-dom/client')
+    root = createRoot(host)
+    await mount()
+    expect(totals().cost).toBe('$2.5')
+  })
+
+  it('reruns a cost fetch that a unit switch overtook, once, with the new unit', async () => {
+    const part = (v: number) => ({ api: null, five_hour: v, seven_day: null, subscription: null, paid_usd: 0 })
+    const usage = () => apiMock.mock.calls.filter((c) => String(c[1]).startsWith('/api/usage/issues')).length
+    costs = { note: '', issues: [{ key: 'S-1', own: { cost_usd: 1 }, total: { cost_usd: 1 }, weekly_percent: null, cost: { mode: 'five_hour', own: part(3.2), total: part(3.2) } }] }
+    const { setData } = await import('../store')
+    setData({ costMode: 'five_hour' })
+    // The first fetch waits here, so the unit can change while it is in flight.
+    let release!: () => void
+    hold.costs = new Promise<void>((r) => { release = r })
+    seed()
+    await mount()
+    expect(usage()).toBe(1)
+    costs = { note: '', issues: [{ key: 'S-1', own: { cost_usd: 2.5 }, total: { cost_usd: 2.5 }, weekly_percent: null, cost: { mode: 'api', own: { api: 2.5, five_hour: null, seven_day: null, subscription: null, paid_usd: 0 }, total: { api: 2.5, five_hour: null, seven_day: null, subscription: null, paid_usd: 0 } } }] }
+    await act(async () => { setData({ costMode: 'api' }) })
+    release()
+    await flush()
+    expect(usage()).toBe(2)
+    expect(totals().cost).toBe('$2.5')
   })
 })

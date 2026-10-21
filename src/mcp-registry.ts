@@ -5,6 +5,7 @@
 // response is cached for ten minutes.
 import { SSE_NOTE } from './mcp-config.ts';
 import type { McpServer } from './instructions.ts';
+import { envVar } from './env.ts';
 
 // One input a server needs before it can run: a remote header or a package env var.
 export interface RegistryField {
@@ -41,7 +42,7 @@ export interface RegistryPage {
   nextCursor?: string;
 }
 
-const base = () => process.env.STAM_MCP_REGISTRY_URL || 'https://registry.modelcontextprotocol.io/v0.1/servers';
+const base = () => envVar('MCP_REGISTRY_URL') || 'https://registry.modelcontextprotocol.io/v0.1/servers';
 const CACHE_MS = 600_000;
 const cache = new Map<string, { at: number; page: RegistryPage }>();
 

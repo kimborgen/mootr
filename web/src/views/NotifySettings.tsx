@@ -23,7 +23,7 @@ export function NotifySettings() {
     try {
       const [i, sub] = await Promise.all([api<n.PushInfo>('GET', '/api/push'), n.currentSubscription().catch(() => null)])
       setInfo(i)
-      setMine(sub?.endpoint ?? null)
+      setMine(sub ? await n.endpointHash(sub.endpoint) : null)
     } catch (e) { setMsg((e as Error).message); setInfo(null); setDenied(/only the human/.test((e as Error).message)) }
   }
   useEffect(() => { void load(); return n.onInstallChange(() => setTick((t) => t + 1)) }, [])
@@ -40,7 +40,7 @@ export function NotifySettings() {
     if (r[0]?.error) throw new Error(`The push service refused it: ${r[0].error}`)
   }, 'Sent. It should show within a few seconds.')
 
-  const me = info?.devices.find((d) => d.endpoint === mine)
+  const me = info?.devices.find((d) => d.endpoint_hash === mine)
   const supported = n.pushSupported()
   const blocked = supported && Notification.permission === 'denied'
   const iosTab = n.isIos() && !n.standalone()
@@ -76,7 +76,7 @@ export function NotifySettings() {
         {info?.devices.length ? info.devices.map((d) => (
           <div className="set-row device-row" key={d.id} data-device={d.id}>
             <div className="set-label">
-              <b><Icon name="smartphone" size="xs" />{d.label}{d.endpoint === mine ? <span className="muted"> · this device</span> : null}</b>
+              <b><Icon name="smartphone" size="xs" />{d.label}{d.endpoint_hash === mine ? <span className="muted"> · this device</span> : null}</b>
               <p>{d.last_error ? `Last push failed: ${d.last_error}` : d.last_ok_at ? `Last push ${ago(d.last_ok_at)}` : `Added ${ago(d.created_at)}`}</p>
             </div>
             <div className="set-ctl">
@@ -88,7 +88,7 @@ export function NotifySettings() {
               </div>
               <button className="icon-btn" title="Send a test" aria-label={`Send a test to ${d.label}`} disabled={busy} onClick={() => void test(d.id)}><Icon name="send" /></button>
               <button className="icon-btn" title="Remove" aria-label={`Remove ${d.label}`} disabled={busy}
-                onClick={() => { if (confirm(`Stop notifications on ${d.label}?`)) void run(() => d.endpoint === mine ? n.disablePush(d.id) : api('DELETE', `/api/push/devices/${d.id}`)) }}><Icon name="trash-2" /></button>
+                onClick={() => { if (confirm(`Stop notifications on ${d.label}?`)) void run(() => d.endpoint_hash === mine ? n.disablePush(d.id) : api('DELETE', `/api/push/devices/${d.id}`)) }}><Icon name="trash-2" /></button>
             </div>
           </div>
         )) : <p className="muted">No device has notifications on.</p>}

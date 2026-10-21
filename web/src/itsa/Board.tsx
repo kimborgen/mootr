@@ -9,19 +9,24 @@
 // On a phone (360-430 px) one column shows at a time, full width, chosen by the strip of column
 // chips with their counts or by a sideways swipe. A long press (or the card's menu) opens the
 // move sheet, and a tap opens the ITSA. The desktop is unchanged.
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { api } from '../api'
 import { Icon } from '../Icon'
 import { isPhone, refreshTabs, registerView } from '../shell/layout'
 import { getData, refreshItsas, useData } from '../store'
 import type { Itsa, ItsaCategory } from '../types'
-import { useLongPress } from '../ui/longpress'
 import { showMenu, toast, type MenuItem } from '../ui/menu'
-import { CATEGORIES, CATEGORY_LABEL, HEALTH, openItsa, PersonGlyph, personName, RollupBar, rollupOf, rollupTotal, StatusGlyph, statusInfo, statusLabel, toneVar, waitsOnHuman } from './itsa'
+import { CATEGORIES, CATEGORY_LABEL, openItsa, StatusGlyph, statusInfo, statusLabel, toneVar } from './itsa'
+import { IssueCard, cardItemMap } from './IssueCard'
 import { loadPrefs, prefsFor, saveView, type Mode, type Prefs, type Scope } from './board-views'
+import { useCardLayout, migrateCardLayouts } from '../card-layout'
+import { useWorkExtras } from '../work/data'
+import type { CellContext } from '../work/columns'
 
 // The closed column shows this many, most recently closed first, until asked for all.
 const CLOSED_SHOWN = 10
+// Set once this page has run the card layout's migration (see Board).
+let migrating = false
 
 // A column: what it holds, and the status a card dropped on it takes.
 interface Col { id: string; label: string; category: ItsaCategory; target: string; statuses: string[] }
@@ -57,52 +62,18 @@ function inScope(all: Itsa[], id: string | null, scope: Scope): Itsa[] {
 }
 
 const END = '\u0000end'
-const LINK_ICON: Record<string, string> = { github: 'git-branch' }
-
-function Card({ x, col, mode, parentKey, dragging, onOpen, onPointerDown, onKeyDown, onMenu }: {
-  x: Itsa; col: Col; mode: Mode; parentKey: string | null; dragging: boolean; onOpen: () => void
-  onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void
-  onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => void
-  onMenu: (el: HTMLElement, at?: { x: number; y: number }) => void
-}) {
-  const st = statusInfo(x.status)
-  const r = rollupOf(x.id, getData().itsas)
-  const h = x.health ? HEALTH[x.health] : null
-  const human = waitsOnHuman(x)
-  const chip = mode === 'category' || col.id !== x.status
-  const links = x.links ?? []
-  // The key (m, the context-menu key, Shift+F10) stays with the board's own key handler.
-  const { onKeyDown: _k, ...lp } = useLongPress((at) => onMenu(at.el, at.how === 'key' ? undefined : at))
-  return (
-    <div className={'bcard' + (dragging ? ' dragging' : '') + (st.category === 'closed' ? ' closed' : '')} data-card={x.id} data-status={x.status} role="button" tabIndex={0}
-      aria-roledescription="card" aria-label={`${x.key} ${x.title}, ${statusLabel(x.status)}${human ? ', waits on you' : ''}. Shift and arrows move it`}
-      onClick={onOpen} onKeyDown={onKeyDown} {...lp} onPointerDown={(e) => { lp.onPointerDown(e); onPointerDown(e) }}>
-      <div className="bc-top">
-        <span className="ikey">{x.key}</span>
-        {parentKey ? <span className="bc-parent" title="Parent"><Icon name="corner-left-up" size="xs" />{parentKey}</span> : null}
-        {x.kind ? <span className="chip kind">{x.kind}</span> : null}
-        <span className="spacer" />
-        {h ? <span className="hdot" style={{ color: h.tone }} title={`${h.label}, from the owner's latest update`} role="img" aria-label={h.label}><i /></span> : null}
-        {human ? <span className="badge warn" title={`${statusLabel(x.status)}: waits on you`}><Icon name="user" size="xs" /></span> : null}
-        <button type="button" className="icon-btn bc-menu" aria-label={`Move ${x.key}`} title="Move to…" tabIndex={-1}
-          onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); onMenu(e.currentTarget) }}><Icon name="ellipsis" size="xs" /></button>
-      </div>
-      <div className="bc-title">{x.title}</div>
-      {chip || rollupTotal(r) || links.length || x.owner ? <div className="bc-meta">
-        {chip ? <span className="bc-status" style={{ color: toneVar(x.status) }}><StatusGlyph status={x.status} />{statusLabel(x.status)}</span> : null}
-        <RollupBar r={r} />
-        {links.length ? <span className="bc-links">{links.map((l) => (
-          <a key={l.n} href={l.url} target="_blank" rel="noreferrer noopener" title={l.external_id ?? l.url} onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
-            <Icon name={LINK_ICON[l.system] ?? 'link'} size="xs" /></a>))}</span> : null}
-        <span className="spacer" />
-        {x.owner ? <span title={`Owner: ${personName(x.owner)}`}><PersonGlyph id={x.owner} /></span> : null}
-      </div> : null}
-    </div>
-  )
-}
-
 export function Board({ id, viewKey }: { id: string | null; viewKey: string }) {
   const { itsas } = useData()
+  // The card's layout and the field definitions it draws. The extras are read here too: a card's costs and activity.
+  const extras = useWorkExtras()
+  const fields = extras.fields
+  const layout = useCardLayout('issue', fields ?? [])
+  // The card items by id, built once for this render and shared by every card on the board.
+  const items = useMemo(() => cardItemMap(fields ?? []), [fields])
+  const cx: CellContext = { now: Date.now(), extras }
+  // The one-time migration of the card layout, once the fields are known (it fills only what settings lack).
+  // A write that fails (the daemon refused it) is tried again on the next board that mounts.
+  useEffect(() => { if (fields && !migrating) { migrating = true; void migrateCardLayouts(fields).catch(() => { migrating = false }) } }, [fields])
   const prefsKey = id ?? 'all'
   const [prefs, setPrefsState] = useState<Prefs>(() => prefsFor(prefsKey))
   useEffect(() => { loadPrefs(prefsKey).then(setPrefsState).catch(() => {}) }, [prefsKey])
@@ -341,8 +312,9 @@ export function Board({ id, viewKey }: { id: string | null; viewKey: string }) {
                 {xs.map((x) => (
                   <div key={x.id} className="bslot">
                     {line === x.id ? <div className="bdrop-line" /> : null}
-                    <Card x={x} col={c} mode={prefs.mode} parentKey={prefs.scope === 'subtree' && x.parent_id && x.parent_id !== id ? keyOf.get(x.parent_id) ?? null : null}
-                      dragging={drag?.id === x.id} onOpen={() => { if (!dragged.current) openItsa(x.id) }} onPointerDown={(e) => down(e, x)} onKeyDown={(e) => key(e, x)} onMenu={(el, at) => menuFor(x, el, at)} />
+                    <IssueCard itsa={x} layout={layout} size="board"
+                      state={{ column: c.id, mode: prefs.mode, parentKey: prefs.scope === 'subtree' && x.parent_id && x.parent_id !== id ? keyOf.get(x.parent_id) ?? null : null, dragging: drag?.id === x.id, items, fields: fields ?? [], cx }}
+                      actions={{ onOpen: () => { if (!dragged.current) openItsa(x.id) }, onPointerDown: (e) => down(e, x), onKeyDown: (e) => key(e, x), onMenu: (el, at) => menuFor(x, el, at) }} />
                   </div>))}
                 {line === END ? <div className="bdrop-line" /> : null}
                 {!xs.length ? <p className="bcol-empty muted">{target ? 'Drop here' : 'Nothing here'}</p> : null}

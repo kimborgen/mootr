@@ -84,8 +84,8 @@ test('a subscription matches, folds a burst, and notifies a working agent in its
   agent('a1', 'alice');
   db.updateAgent('a1', { activity: 'working' });
   watch.createSubscription({ subscriber_kind: 'agent', subscriber_id: 'a1', filter: { source: 'github', subjects: ['github:o/*'], types: ['pull_request.*'] }, by: 'a1' });
-  watch.ingest({ source: 'github', type: 'pull_request.opened', subjects: ['github:o/r#1'], actor: 'kim', url: 'https://x/1', summary: 'opened 1', dedupe_key: 'e1' });
-  watch.ingest({ source: 'github', type: 'pull_request.synchronize', subjects: ['github:o/r#1'], actor: 'kim', url: 'https://x/1b', summary: 'synced 1', dedupe_key: 'e2' });
+  watch.ingest({ source: 'github', type: 'pull_request.opened', subjects: ['github:o/r#1'], actor: 'octocat', url: 'https://x/1', summary: 'opened 1', dedupe_key: 'e1' });
+  watch.ingest({ source: 'github', type: 'pull_request.synchronize', subjects: ['github:o/r#1'], actor: 'octocat', url: 'https://x/1b', summary: 'synced 1', dedupe_key: 'e2' });
   watch.ingest({ source: 'github', type: 'push', subjects: ['github:o/r'], summary: 'a push', dedupe_key: 'e3' });
   assert.equal(mail.inTurnNotice('a1'), undefined, 'nothing arrives before the fold window closes');
   await watch.flush();
@@ -192,7 +192,7 @@ test('removeSubscription deletes it and refuses an unrelated agent', () => {
 test('subjectsForUrl maps a GitHub PR or issue and a Linear issue, and nothing else', () => {
   assert.equal(watch.subjectsForUrl('https://github.com/example/stam/pull/12'), 'github:example/stam#12');
   assert.equal(watch.subjectsForUrl('https://github.com/example/stam/issues/7'), 'github:example/stam#7');
-  assert.equal(watch.subjectsForUrl('https://linear.app/kim/issue/TEAM-123/a-title'), 'linear:TEAM-123');
+  assert.equal(watch.subjectsForUrl('https://linear.app/octocat/issue/TEAM-123/a-title'), 'linear:TEAM-123');
   assert.equal(watch.subjectsForUrl('https://github.com/example/stam'), null, 'a bare repo is not a PR or issue');
   assert.equal(watch.subjectsForUrl('https://example.com/x'), null);
   assert.equal(watch.subjectsForUrl(''), null);

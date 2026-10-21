@@ -19,7 +19,8 @@ export interface CompleteRequest {
   model: string;
   messages: ChatMessage[];
   maxTokens: number;
-  temperature: number;
+  // Left out of the request when absent (some reasoning models reject any temperature).
+  temperature?: number;
   jsonSchema?: JsonSchema;
   // Aborts the call; `timeoutMs` bounds it.
   signal?: AbortSignal;
@@ -57,6 +58,13 @@ export interface KeyLimit {
   remaining: number | null;
 }
 
+// Whether a provider accepts a key (S-2115). `detail` is fixed text: a status or a transport error's code.
+export interface KeyCheck {
+  ok: boolean;
+  status?: number;
+  detail: string;
+}
+
 // A call that answered non-2xx. `retryAfterMs` is the Retry-After header in ms, capped at 5 minutes.
 export class LlmHttpError extends Error {
   status: number;
@@ -74,6 +82,8 @@ export class LlmHttpError extends Error {
 export interface LlmAdapter {
   id: string;
   apiKey(): string | undefined;
+  // A provider that takes no key (a local Ollama): `hasKey` is true without one.
+  keyless?: boolean;
   complete(req: Omit<CompleteRequest, 'model'> & { model: string }): Promise<CompleteResult>;
   listModels?(): Promise<ModelInfo[]>;
   // The account's credit. Null when the call fails or answers non-2xx.
@@ -82,6 +92,10 @@ export interface LlmAdapter {
   // The key's own cap. Null when the call fails or answers non-2xx, which is also the key probe.
   keyLimit?(key?: string): Promise<KeyLimit | null>;
   // The decision-model endpoint (OpenRouter only): POSTs the body and returns the parsed answer
-  // (null when the body is not JSON). Throws like `complete`.
-  decisions?(body: Record<string, unknown>, opts: { timeoutMs: number }): Promise<any>;
+  // (null when the body is not JSON). Throws like `complete`. `key` is the caller's credential
+  // snapshot, used instead of rereading the key source.
+  decisions?(body: Record<string, unknown>, opts: { timeoutMs: number; key?: string }): Promise<any>;
+  // Whether the provider accepts `key` (S-2115): one authenticated read, never a billed call.
+  // Absent where a provider has no cheap way to check one.
+  checkKey?(key: string): Promise<KeyCheck>;
 }

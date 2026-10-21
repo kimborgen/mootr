@@ -64,26 +64,49 @@ test('a reviewer launch makes the writable scratch root (the sandbox cannot)', a
 
 test('a reviewer type gets network access and only the scratch root writable', () => {
   const r = codex.reviewerSandbox(agent('reviewer'));
-  assert.equal(r['sandbox_workspace_write.network_access'], true);
-  assert.deepEqual(r['sandbox_workspace_write.writable_roots'], [reviewRoot]);
-  assert.ok(!r['sandbox_workspace_write.writable_roots'].includes(join(repo, '.git')), 'the shared repo git dir must never be writable');
+  assert.equal(r.network, true);
+  assert.deepEqual(r.writable, [reviewRoot]);
+  assert.ok(!r.writable.includes(join(repo, '.git')), 'the shared repo git dir must never be writable');
 });
 
-test('a non-reviewer type gets no sandbox overrides', () => {
-  assert.deepEqual(codex.reviewerSandbox(agent('developer')), {});
-  assert.deepEqual(codex.reviewerSandbox(agent(null)), {}, 'an untyped agent keeps the plain policy');
+test('a non-reviewer type gets no extra grants', () => {
+  assert.deepEqual(codex.reviewerSandbox(agent('developer')), { network: false, writable: [] });
+  assert.deepEqual(codex.reviewerSandbox(agent(null)), { network: false, writable: [] }, 'an untyped agent keeps the plain policy');
 });
 
-test('the reviewer launch script carries the sandbox overrides, and another type does not', async () => {
+test('the reviewer launch script carries the profile grants, and another type does not', async () => {
   const r = agent('reviewer');
   await codex.codex.launch(r);
   const script = readFileSync(join(home, 'agents', r.id, 'codex-launch.sh'), 'utf8');
-  assert.ok(script.includes('sandbox_workspace_write.network_access=true'), script);
-  assert.ok(script.includes(`sandbox_workspace_write.writable_roots=["${reviewRoot}"]`), script);
+  assert.ok(script.includes('permissions.stam.network.enabled=true'), script);
+  assert.ok(script.includes(`permissions.stam.filesystem={"${reviewRoot}"="write"`), script);
   assert.ok(!script.includes('.git'), `the shared git dir is on a writable root: ${script}`);
 
   const d = agent('developer');
   await codex.codex.launch(d);
   const dev = readFileSync(join(home, 'agents', d.id, 'codex-launch.sh'), 'utf8');
-  assert.ok(!dev.includes('sandbox_workspace_write.'), dev);
+  assert.ok(!dev.includes('permissions.stam.network'), dev);
+  assert.ok(!dev.includes(reviewRoot), dev);
+});
+
+test('every default and auto Codex launch denies the secret files and names the profile (S-1888)', async () => {
+  const d = agent('developer');
+  await codex.codex.launch(d);
+  const dev = readFileSync(join(home, 'agents', d.id, 'codex-launch.sh'), 'utf8');
+  assert.ok(dev.includes('default_permissions="stam"'), dev);
+  assert.ok(dev.includes('permissions.stam.extends=":workspace"'), dev);
+  for (const f of ['token', 'peer-token', 'settings.json', 'opencode.env', 'voice.env', 'mcp-auth.json', 'secrets.json']) {
+    assert.ok(dev.includes(`"${join(home, f)}"="none"`), `${f} is denied: ${dev}`);
+  }
+  assert.ok(!dev.includes('sandbox_mode'), 'the profile replaces sandbox_mode');
+});
+
+test('a bypass Codex launch keeps its no-sandbox policy and names no profile', async () => {
+  const b = agent('developer');
+  db.updateAgent(b.id, { permission_mode: 'bypass' });
+  await codex.codex.launch(db.getAgent(b.id));
+  const script = readFileSync(join(home, 'agents', b.id, 'codex-launch.sh'), 'utf8');
+  assert.ok(script.includes('sandbox_mode="danger-full-access"'), script);
+  assert.ok(!script.includes('default_permissions'), script);
+  assert.ok(!script.includes('permissions.stam.'), script);
 });

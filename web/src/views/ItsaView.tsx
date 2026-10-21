@@ -19,6 +19,7 @@ import { ViewDiff } from '../diff/ViewDiff'
 import { LinkedMail } from '../mail/LinkedMail'
 import { MailTools } from '../mail/MailTools'
 import { Rendered } from '../mail/Rendered'
+import { takeOpenFocus } from '../mail/diffOpen'
 import { isPhone, refreshTabs, registerView } from '../shell/layout'
 import { bottomHandle, setBottomSlot } from '../bottom-slot'
 import { useData } from '../store'
@@ -294,6 +295,8 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
   // The last ID loaded. The shell shows every view after each layout render, so a show
   // reloads only when this view hasn't loaded its ITSA yet.
   const loaded = useRef<string | null>(null)
+  // The view's own element, so the focus return only takes the Open button clicked here (S-2105 review).
+  const root = useRef<HTMLDivElement>(null)
   const load = useCallback(async () => {
     // Taken before the fetch, so a show while it is in flight doesn't fetch again.
     loaded.current = id
@@ -309,7 +312,7 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
   useEffect(() => { load() }, [load, sig, mailTick])
   // The staged action ends when the ITSA no longer offers it (the owner moved it on).
   useEffect(() => { if (staged && v && !v.actions?.some((a) => a.id === staged)) setStaged(null) }, [v, staged])
-  useEffect(() => registerView(viewKey, { show: () => { if (loaded.current !== id) load() } }), [viewKey, id, load])
+  useEffect(() => registerView(viewKey, { show: () => { if (loaded.current !== id) load() }, focus: () => takeOpenFocus(root.current)?.focus() }), [viewKey, id, load])
   const { items: thread, reload: reloadThread } = useThread(v, mailTick)
   const mails = useMailThreads(id, [mailTick, v?.updated_at])
   const linkedMail = useLinkedMail(id, [mailTick, v?.updated_at])
@@ -347,8 +350,8 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
   })
   useEffect(() => () => setBottomSlot('itsa:' + id, null), [id])
 
-  if (error && !v) return <div className="itsa-view"><div className="empty-pane"><h3>Can't show this ITSA</h3><p>{error}</p></div></div>
-  if (!v) return <div className="itsa-view" />
+  if (error && !v) return <div className="itsa-view" ref={root}><div className="empty-pane"><h3>Can't show this ITSA</h3><p>{error}</p></div></div>
+  if (!v) return <div className="itsa-view" ref={root} />
   // A status or owner change in flight (setItsa) shows over the fetched ITSA at once.
   const row = itsas.find((x) => x.id === id)
   const cur = row?.pending ? { ...v, status: row.status, owner: row.owner } : v
@@ -364,7 +367,7 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
   // A child being added (createItsa) shows under the list until the daemon has it.
   const adds = unsavedKids(itsas.filter((x) => x.parent_id === id && x.pending), v.children)
   return (
-    <div className="itsa-view" data-itsa={v.id}>
+    <div className="itsa-view" data-itsa={v.id} ref={root}>
       <div className="itsa-inner">
         {v.parent_chain.length ? <nav className="crumbs" aria-label="Parents">{v.parent_chain.map((p) => (
           <span key={p.id} className="crumb"><button type="button" className="crumb-link" onClick={() => openItsa(p.id)} title={`${p.key} · ${p.title} · ${statusLabel(p.status)}`}>

@@ -86,6 +86,7 @@ function reset() {
   db.open().prepare('DELETE FROM account_holds').run();
   db.open().prepare('DELETE FROM subscriptions').run();
   db.open().prepare("UPDATE agents SET lifecycle = 'archived'").run();
+  rules.forgetWindowClears();
 }
 
 test('window: a fresh 100% reading on a paid: false account blocks every agent on it, is idempotent, and a fresh reading below 100% clears it', async () => {
@@ -144,12 +145,15 @@ test('window: a stale reading neither sets nor clears; past resets_at, within th
   // Past resets_at but within the margin, with no fresh reading: still set.
   await rules.evaluateAll(resets * 1000 + 30_000);
   assert.ok(of(a, 'window'), 'within the margin');
-  // A fresh reading after the reset that still carries the old 100% and resets_at confirms it.
+  // A fresh reading after the reset that still carries the old 100% does not clear it (S-2365).
   usage.reportSubscription('claude', { five_hour: { used_percentage: 100, resets_at: resets } }, resets * 1000 + 40_000);
   await rules.evaluateRules('claude-max', {}, resets * 1000 + 40_000);
+  assert.ok(of(a, 'window'), 'a 100% reading never clears');
+  // Past the margin, the timer clears it, marked unconfirmed: no reading confirmed it.
+  await rules.evaluateRules('claude-max', {}, resets * 1000 + 61_000);
   assert.equal(of(a, 'window'), undefined);
   const clear = events(a, 'cost:rule').find((e) => e.action === 'clear');
-  assert.equal(clear.unconfirmed, undefined, 'confirmed by a reading');
+  assert.equal(clear.unconfirmed, true, 'cleared by the timer');
 });
 
 test('window and paid-forbidden: with no fresh reading they clear on a timer at resets_at plus the margin, marked unconfirmed', async () => {
@@ -521,4 +525,150 @@ test('window: a usage-limit hold survives a restart, and a new agent gets the bl
   const b = agent('codex', 'gpt-6.1-sol');
   await rules.attachSpawn(b);
   assert.match(of(b, 'window')?.reason ?? '', /held 30 minutes/);
+});
+
+// S-2365: one `claude` row holds whichever source reported last, so a 100% reading with a stale
+// reset and one with the live reset can alternate. Neither may clear the window or flap the fleet.
+test('window: readings that alternate between a stale 100% reset and the live one do not flap the window', async () => {
+  reset();
+  const t0 = Date.now();
+  const a = agent('claude');
+  const b = agent('claude');
+  const future = Math.floor(t0 / 1000) + 3600;
+  const past = Math.floor(t0 / 1000) - 600;
+  await claude(t0, 100, future);
+  for (let i = 1; i <= 10; i++) {
+    await claude(t0 + i * 37_000, 100, past);
+    await claude(t0 + i * 37_000 + 1000, 100, future);
+  }
+  for (const x of [a, b]) {
+    assert.ok(of(x, 'window'), 'still blocked');
+    assert.equal(get(x).lifecycle, 'paused');
+  }
+  assert.equal(events(a, 'cost:rule').filter((e) => e.action === 'set').length, 1, 'set once');
+  assert.equal(events(a, 'cost:rule').filter((e) => e.action === 'clear').length, 0, 'never cleared');
+});
+
+// Two readings that arrive before the evaluation runs are both stored first, so the one
+// evaluation sees the second: a 3% reading then a 100% one flip nothing.
+test('window: two readings arriving in one evaluation see one consistent view and flip the blocker at most once', async () => {
+  reset();
+  const t0 = Date.now();
+  const a = agent('claude');
+  const future = Math.floor(t0 / 1000) + 3600;
+  await claude(t0, 100, future);
+  usage.reportSubscription('claude', { five_hour: { used_percentage: 3, resets_at: future } }, t0 + MIN);
+  usage.reportSubscription('claude', { five_hour: { used_percentage: 100, resets_at: future } }, t0 + MIN + 1);
+  await rules.evaluateRules('claude-max', {}, t0 + MIN + 1);
+  await settle();
+  assert.ok(of(a, 'window'), 'still blocked');
+  assert.equal(events(a, 'cost:rule').filter((e) => e.action === 'clear').length, 0);
+  assert.equal(events(a, 'cost:rule').filter((e) => e.action === 'set').length, 1);
+  assert.equal(get(a).lifecycle, 'paused');
+});
+
+// A window that re-sets within 10 minutes of its clear holds for 10 more: a reading below 100%
+// can't lift it until the hold has passed (rules.ts FLAP_MS).
+test('window: a re-set within 10 minutes of a clear holds the next clear for 10 more minutes', async () => {
+  reset();
+  const t0 = Date.now();
+  const a = agent('claude');
+  const future = Math.floor(t0 / 1000) + 5 * 3600;
+  await claude(t0, 100, future);
+  await claude(t0 + MIN, 3, future);
+  assert.equal(of(a, 'window'), undefined, 'cleared by a reading below 100%');
+  await claude(t0 + 2 * MIN, 100, future);
+  assert.ok(of(a, 'window'), 'set again');
+  await claude(t0 + 3 * MIN, 3, future);
+  assert.ok(of(a, 'window'), 'held: a reading below 100% does not clear it yet');
+  await claude(t0 + 13 * MIN, 3, future);
+  assert.equal(of(a, 'window'), undefined, 'the hold has passed');
+  assert.equal(events(a, 'cost:rule').filter((e) => e.action === 'clear').length, 2);
+});
+
+// The hold's end wakes the account: a low reading the hold rejected clears at the hold's end with
+// no reading injected after it (S-2365 review).
+test('window: a low reading that a hold rejects clears at the hold end, with no new reading', async () => {
+  reset();
+  const t0 = Date.now();
+  const a = agent('claude');
+  const future = Math.floor(t0 / 1000) + 5 * 3600;
+  await claude(t0, 100, future);
+  await claude(t0 + MIN, 3, future);
+  await claude(t0 + 2 * MIN, 100, future);
+  await claude(t0 + 3 * MIN, 3, future);
+  assert.ok(of(a, 'window'), 'held');
+  assert.equal(rules.pendingWake('claude-max'), t0 + 12 * MIN, 'wakes at the hold end');
+  await rules.evaluateRules('claude-max', {}, t0 + 12 * MIN + 1);
+  assert.equal(of(a, 'window'), undefined, 'cleared by the stored reading');
+});
+
+// A timed-out clear waits for the hold too, so a window whose reset passes again inside the hold
+// stays put (the repeated past reset of S-2365 review).
+test('window: a timed-out clear waits for the flap hold, so a re-set window stays blocked until it ends', async () => {
+  reset();
+  const t0 = Date.now();
+  const a = agent('claude');
+  const past = Math.floor(t0 / 1000) - 600;
+  await blockers.addBlocker(a, { kind: 'window', account: 'claude-max', reason: 'five_hour at 100%', clear: { windows: { five_hour: { pct: 100, resets_at: past, after: new Date(t0 - 3600_000).toISOString() } } } });
+  await rules.evaluateRules('claude-max', {}, t0);
+  assert.equal(of(a, 'window'), undefined, 'timed out at once');
+  // Re-set by a reading at 100% whose reset is two minutes out: its hold runs to t0+11min.
+  await claude(t0 + MIN, 100, Math.floor((t0 + 2 * MIN) / 1000));
+  assert.ok(of(a, 'window'), 'set again');
+  await rules.evaluateRules('claude-max', {}, t0 + 5 * MIN);
+  assert.ok(of(a, 'window'), 'its reset passed, but the hold holds it');
+  await rules.evaluateRules('claude-max', {}, t0 + 11 * MIN + 1);
+  assert.equal(of(a, 'window'), undefined, 'timed out after the hold');
+});
+
+// A window that clears while another stays blocked is recorded, and starts its own hold.
+test('window: a window that clears while another stays blocked starts its own flap hold', async () => {
+  reset();
+  const t0 = Date.now();
+  const a = agent('claude');
+  const future = Math.floor(t0 / 1000) + 5 * 3600;
+  usage.reportSubscription('claude', { five_hour: { used_percentage: 100, resets_at: future }, seven_day: { used_percentage: 100, resets_at: future } }, t0);
+  await rules.evaluateRules('claude-max', {}, t0);
+  assert.deepEqual(Object.keys(of(a, 'window').clear.windows).sort(), ['five_hour', 'seven_day']);
+  usage.reportSubscription('claude', { five_hour: { used_percentage: 100, resets_at: future }, seven_day: { used_percentage: 3, resets_at: future } }, t0 + MIN);
+  await rules.evaluateRules('claude-max', {}, t0 + MIN);
+  assert.deepEqual(Object.keys(of(a, 'window').clear.windows), ['five_hour']);
+  usage.reportSubscription('claude', { five_hour: { used_percentage: 100, resets_at: future }, seven_day: { used_percentage: 100, resets_at: future } }, t0 + 2 * MIN);
+  await rules.evaluateRules('claude-max', {}, t0 + 2 * MIN);
+  assert.equal(of(a, 'window').clear.windows.seven_day.hold, t0 + 12 * MIN);
+});
+
+// The evaluation runs at a time before the hold ends, and the wall clock has passed the end by the
+// time the wake is scheduled: the account still wakes at once (S-2365 review).
+test('window: an evaluation before a hold ends, scheduled after the wall clock passed it, wakes the account at once', async () => {
+  reset();
+  const t0 = Date.now() - 14 * MIN;
+  const a = agent('claude');
+  const future = Math.floor(Date.now() / 1000) + 5 * 3600;
+  await claude(t0, 100, future);
+  await claude(t0 + MIN, 3, future);
+  await claude(t0 + 2 * MIN, 100, future);
+  await claude(t0 + 3 * MIN, 3, future);
+  assert.ok(of(a, 'window'), 'refused by the hold, as planned at t0+3min');
+  await settle();
+  assert.equal(of(a, 'window'), undefined, 'the elapsed hold woke it');
+});
+
+// The clear is on disk, so a restart keeps the hold: read back over a fresh connection, then a
+// re-hit after it is held to the clear plus FLAP_MS.
+test('window: a flap hold survives a restart: the clear is on disk, and a re-hit after it still holds', async () => {
+  reset();
+  const t0 = Date.now();
+  const a = agent('claude');
+  const future = Math.floor(t0 / 1000) + 5 * 3600;
+  await claude(t0, 100, future);
+  await claude(t0 + MIN, 3, future);
+  const { DatabaseSync } = await import('node:sqlite');
+  const disk = new DatabaseSync(join(home, 'stam.db'));
+  const row = disk.prepare("SELECT at FROM window_clears WHERE account = 'claude-max' AND window = 'five_hour'").get();
+  disk.close();
+  assert.equal(row?.at, t0 + MIN, 'the clear reads back from disk');
+  await claude(t0 + 2 * MIN, 100, future);
+  assert.equal(of(a, 'window').clear.windows.five_hour.hold, t0 + 12 * MIN);
 });

@@ -50,8 +50,8 @@ async function act() {
   check('api', left.length === 0, 'no wait about the requests is left', left);
 }
 
-// The number in Mail's "N waiting on you", 0 without one.
-const waitingCount = async (p) => Number((await p.locator('#mail-side').innerText()).match(/(\d+) waiting on you/)?.[1] ?? 0);
+// The number in the Inbox page's "N to answer" (what waits on you), 0 without one.
+const waitingCount = async (p) => Number((await p.locator('#inbox-view').innerText()).match(/(\d+) to answer/)?.[1] ?? 0);
 let baseline = 0;
 const browser = await chromium.launch(chromiumLaunchOptions());
 for (const theme of ['light', 'dark']) {
@@ -66,21 +66,21 @@ for (const theme of ['light', 'dark']) {
   await p.waitForSelector('#tree .node', { timeout: 20000 });
   const nav = p.locator('[data-nav="mail"]');
   if (await nav.isVisible()) await nav.tap();
-  await p.waitForSelector('#mail-side');
+  await p.waitForSelector('#inbox-view');
   // The list has loaded its rows.
-  await p.waitForFunction(() => document.querySelectorAll('#mail-side .mrow').length > 0, null, { timeout: 15000 });
+  await p.waitForFunction(() => document.querySelectorAll('#inbox-view .mrow').length > 0, null, { timeout: 15000 });
   await p.waitForTimeout(1500);
   // The seed has its own asks: what waits on you before kid asks is what waits after the answers.
   if (theme === 'light') {
     baseline = await waitingCount(p);
     await act();
     // Both answered requests' threads show as rows, and the toast of the new request (3.5 s) is gone.
-    await p.waitForFunction(() => [...document.querySelectorAll('#mail-side .mrow')].filter((r) => /Permission: (Merge PR #129|Commit the allow)/.test(r.title ?? '')).length === 2, null, { timeout: 20000 });
+    await p.waitForFunction(() => [...document.querySelectorAll('#inbox-view .mrow')].filter((r) => /Permission: (Merge PR #129|Commit the allow)/.test(r.title ?? '')).length === 2, null, { timeout: 20000 });
     await p.waitForTimeout(4500);
   }
   // A row shows only its topic chip (S-1075): the full subject is on its title attribute.
-  const side = (await p.locator('#mail-side').innerText()) + '\n' + (await p.locator('#mail-side .mrow').evaluateAll((rs) => rs.map((r) => r.title).join('\n')));
-  check(tag, (await waitingCount(p)) === baseline, `Mail counts ${baseline} waiting on you, as before the asks`, side.split('\n').filter((l) => /waiting/.test(l)));
+  const side = (await p.locator('#inbox-view').innerText()) + '\n' + (await p.locator('#inbox-view .mrow').evaluateAll((rs) => rs.map((r) => r.title).join('\n')));
+  check(tag, (await waitingCount(p)) === baseline, `The Inbox counts ${baseline} to answer, as before the asks`, side.split('\n').filter((l) => /to answer|waiting/.test(l)));
   for (const note of ['auto-mode block on commit', 'answer to ', 'merge authorization']) check(tag, !side.includes(note), `no row for "${note}"`);
   const badge = await p.locator('[data-nav="mail"] .badge.warn').allInnerTexts();
   check(tag, Number(badge[0] ?? 0) === baseline, `the Mail tab's waiting badge is ${baseline}`, badge);

@@ -86,7 +86,7 @@ describe('built-in columns', () => {
   it('time, cost and window: ranges that are blank without a figure', () => {
     const c = cx({
       activity: { rows: [{ key: 'S-12', total: { working_s: 90, waiting_s: 10 } }] },
-      costs: { note: '', issues: [{ key: 'S-12', own: { cost_usd: 1 }, total: { cost_usd: 2.5 }, weekly_percent: 4.4 }] },
+      costs: { note: '', issues: [{ key: 'S-12', own: { cost_usd: 1 }, total: { cost_usd: 2.5 }, weekly_percent: 4.4, cost: { mode: 'api', own: { api: 1 }, total: { api: 2.5 } } }] },
     })
     expect([read('time', row(), 'range', c), read('cost', row(), 'range', c), read('window', row(), 'range', c)]).toEqual([90, 2.5, 4.4])
     // Loaded but without a figure is blank; not loaded (null report) is undefined, which a filter ignores.
@@ -94,7 +94,7 @@ describe('built-in columns', () => {
     expect([read('time', row(), 'range', loaded), read('cost', row(), 'range', loaded), read('window', row(), 'range', loaded)]).toEqual([null, null, null])
     expect([read('time', row(), 'range'), read('cost', row(), 'range'), read('window', row(), 'range')]).toEqual([undefined, undefined, undefined])
     expect(col('cost').sortValue!(row(), c)).toBe(2.5)
-    expect(col('cost').text!(row(), c)).toBe('$2.50')
+    expect(col('cost').text!(row(), c)).toBe('$2.5')
   })
 
   it('health, review, tests: values, blank when unrecorded', () => {

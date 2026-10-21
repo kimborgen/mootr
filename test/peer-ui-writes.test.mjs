@@ -43,7 +43,8 @@ test('only the shared writes are peer UI routes', () => {
   assert.ok(o.peerUiRoute('POST', '/api/config/instructions'));
   assert.ok(o.peerUiRoute('POST', '/api/types/tester'));
   assert.ok(o.peerUiRoute('DELETE', '/api/types/tester'));
-  for (const [m, p] of [['POST', '/api/config/settings'], ['POST', '/api/config/registry'], ['GET', '/api/config/settings'], ['PATCH', '/api/config/settings/x'], ['POST', '/api/agents'], ['POST', '/api/types/a/b'], ['POST', '/api/mail']])
+  assert.ok(o.peerUiRoute('POST', '/api/templates/type-tester'));
+  for (const [m, p] of [['POST', '/api/config/settings'], ['POST', '/api/config/registry'], ['GET', '/api/config/settings'], ['PATCH', '/api/config/settings/x'], ['POST', '/api/agents'], ['POST', '/api/types/a/b'], ['POST', '/api/mail'], ['POST', '/api/templates/mail-to-human'], ['POST', '/api/templates/type-a/b']])
     assert.ok(!o.peerUiRoute(m, p), `${m} ${p}`);
 });
 

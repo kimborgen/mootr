@@ -17,28 +17,25 @@ cat >"$TEST_TMP/rec.json" <<'EOF'
     { "reply": "DONE" } ] } ] }
 EOF
 fake_claude "$TEST_TMP/rec.json"
-SEED="$TEST_TMP/seed-first-prompt.mjs"
-cat >"$SEED" <<'EOF'
-const db = await import(process.env.ROOT + '/src/db.ts');
-db.open();
+# Seeded before the daemon starts (test-seed.json, read once at startup by a test daemon).
+WORK="$WORK" node -e '
 const work = process.env.WORK;
-const ws = JSON.stringify({ spec: { kind: 'dir', path: work }, cwd: work });
-const seed = (id, events) => {
-  db.createAgent({ id, name: id, role: 'dev', machine: 'rec', harness: 'claude', model: null, effort: null, cwd: work, parent_id: id === 'sup' ? null : 'sup', session_id: '11111111-1111-4111-8111-111111111111' });
-  db.updateAgent(id, { lifecycle: 'active', activity: 'starting', activity_detail: 'with prompt', workspace: ws, first_prompt: 'recover the lost prompt' });
-  for (const e of events) db.addEvent(id, e);
+const ws = { spec: { kind: "dir", path: work }, cwd: work };
+const agents = [], events = [];
+const seed = (id, evs) => {
+  agents.push({ agent: id, create: { machine: "rec", cwd: work, session_id: "11111111-1111-4111-8111-111111111111" }, ...(id === "sup" ? {} : { parent: "sup" }), lifecycle: "active", activity: "starting", activity_detail: "with prompt", workspace: ws, first_prompt: "recover the lost prompt" });
+  for (const type of evs) events.push({ agent: id, type });
 };
-seed('sup', []);
+seed("sup", []);
 // The daemon restarted mid-spawn: the prompt is stored and pending, nothing delivered it.
-seed('lost', ['first-prompt:pending']);
+seed("lost", ["first-prompt:pending"]);
 // The launch got its prompt in before the restart: marked delivered, so it is left alone.
-seed('delivered', ['first-prompt:pending', 'first-prompt:delivered']);
+seed("delivered", ["first-prompt:pending", "first-prompt:delivered"]);
 // Spawned before the markers existed: no pending marker, so it is left to the starting timeout.
-seed('unmarked', []);
-EOF
+seed("unmarked", []);
+console.log(JSON.stringify({ agents, events }));' >"$TEST_TMP/rec/test-seed.json"
 # A timeout long enough that the starting-dead path can never be what recovers 'lost'.
 printf '{ "peers": [], "startingTimeoutMinutes": 600 }\n' >"$TEST_TMP/rec/settings.json"
-ROOT="$ROOT" WORK="$WORK" STAM_HOME="$TEST_TMP/rec" node "$SEED"
 use rec
 daemon_up rec
 fail() { echo "FAIL: $1"; exit 1; }
@@ -48,7 +45,11 @@ events_has() { "$STAM" events "$1" | grep -q "$2"; }
 recovered() { [ -f "$WORK/recovered.txt" ]; }
 wait_until recovered
 events_has lost 'first-prompt:recover' || fail "lost was not recovered"
-events_has lost 'first-prompt:delivered' || fail "the re-delivered prompt was not recorded as delivered"
+# The delivery marker is written once the launch's afterLaunch settles, which lands after the
+# turn's first step has run (about 190 ms after the file here). Wait for it like the file: a
+# loaded box reads it too early otherwise (S-2148).
+delivered_marked() { events_has lost 'first-prompt:delivered'; }
+wait_until delivered_marked || fail "the re-delivered prompt was not recorded as delivered"
 [ "$(field lost activity)" != starting ] || fail "lost is still starting after the recovery"
 # The agent that already got its prompt, and one from before the markers, are left alone.
 if events_has delivered 'first-prompt:recover'; then fail "delivered was recovered again"; fi

@@ -61,29 +61,37 @@ for (const size of sizes) {
   await p.goto(origin + '/#token=' + token);
   await p.waitForSelector('#tree .node', { timeout: 20000 });
   const nav = p.locator('[data-nav="mail"]');
-  if (await nav.isVisible()) await press(nav);
-  const list = p.locator('#mail-side .mail-side-list');
+  // The phone's Inbox page: its chips are the toggles (To answer is one of them), its rows the same.
+  const onPhone = await nav.isVisible();
+  if (onPhone) await press(nav);
+  const list = p.locator(onPhone ? '#inbox-view [data-inbox-list]' : '#mail-side .mail-side-list');
   await list.waitFor();
   check(tag, (await list.locator('[data-waiting]').count()) === 0, 'the inbox list holds no plain "agent waits for your reply" row');
   // The four view toggles sit on their own row and never clip or overlap: on a desktop each lies inside
   // #mail-side; on a phone the row scrolls, so each must lie inside the row's scrollable width.
-  const geo = await p.evaluate(() => {
+  const geo = await p.evaluate((phone) => {
+    if (phone) {
+      const row = document.querySelector('#inbox-view .inbox-chips');
+      const rr = row.getBoundingClientRect();
+      const boxes = [...row.querySelectorAll('[data-filter]')].map((b) => { const r = b.getBoundingClientRect(); return { t: b.textContent.trim(), l: r.left, r: r.right, top: r.top, b: r.bottom }; });
+      return { side: { l: rr.left, r: rr.right }, row: { l: rr.left, r: rr.right, top: rr.top, scrollW: row.scrollWidth, clientW: row.clientWidth }, boxes, titleBottom: rr.top };
+    }
     const side = document.querySelector('#mail-side').getBoundingClientRect();
     const row = document.querySelector('#mail-side .mail-views');
     const rr = row.getBoundingClientRect();
     const boxes = [...row.querySelectorAll('.mail-toggle')].map((b) => { const r = b.getBoundingClientRect(); return { t: b.textContent.trim(), l: r.left, r: r.right, top: r.top, b: r.bottom }; });
     const title = document.querySelector('#mail-side .section').getBoundingClientRect();
     return { side: { l: side.left, r: side.right }, row: { l: rr.left, r: rr.right, top: rr.top, scrollW: row.scrollWidth, clientW: row.clientWidth }, boxes, titleBottom: title.bottom };
-  });
-  check(tag, geo.boxes.length === 4, 'four view toggles', geo.boxes.map((b) => b.t));
+  }, onPhone);
+  check(tag, geo.boxes.length === (onPhone ? 6 : 4), 'four view toggles', geo.boxes.map((b) => b.t));
   check(tag, geo.boxes.every((b, i) => i === 0 || b.l >= geo.boxes[i - 1].r - 0.5 || b.top >= geo.boxes[i - 1].b - 0.5), 'the toggles do not overlap', geo.boxes);
   check(tag, geo.row.top >= geo.titleBottom - 0.5, 'the toggles sit below the title row', geo);
   if (size.tap) check(tag, geo.row.scrollW >= geo.boxes.at(-1).r - geo.row.l && geo.row.scrollW >= geo.row.clientW, 'the phone toggle row scrolls to its last toggle', geo.row);
   else check(tag, geo.boxes.every((b) => b.l >= geo.side.l && b.r <= geo.side.r), 'every toggle lies inside the mail side', geo);
   await p.waitForTimeout(300);
   await p.screenshot({ path: `${out}/toanswer-inbox-${tag}.png` });
-  const toggle = p.locator('#mail-side [data-to-answer]');
-  check(tag, /^To answer \(\d+\)$/.test((await toggle.innerText()).trim()), 'the To answer button shows its count', await toggle.innerText());
+  const toggle = p.locator(onPhone ? '#inbox-view [data-filter="toanswer"]' : '#mail-side [data-to-answer]');
+  check(tag, (onPhone ? /^To answer/ : /^To answer \(\d+\)$/).test((await toggle.innerText()).trim()), 'the To answer button shows its count', await toggle.innerText());
   await press(toggle);
   const row = list.locator(`.mrow[data-thread="${sent.thread_id}"]`);
   await row.waitFor();

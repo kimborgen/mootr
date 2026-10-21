@@ -66,6 +66,17 @@ export function sanitizeTabBar(x: unknown): TabBar {
   return TAB_BARS.find((b) => b === t) ?? 'compact'
 }
 
+// The layout as this page holds it, for code outside React and for tests.
+export const currentPanes = (): PaneLayout[] => state.panes
+
+// Shows tab `id` in the sidebar pane that holds it, as a click on its tab does; false when no pane holds it.
+export function showTab(id: string): boolean {
+  const i = state.panes.findIndex((p) => p.tabs.includes(id))
+  if (i < 0) return false
+  setSidebarPanes(activate(state.panes, i, id))
+  return true
+}
+
 // The layout after the human picks a tab in pane `i`; an id that isn't a tab of that pane changes nothing.
 export function activate(panes: PaneLayout[], i: number, id: string): PaneLayout[] {
   if (!panes[i]?.tabs.includes(id) || panes[i].active === id) return panes

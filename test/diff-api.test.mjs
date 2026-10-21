@@ -319,12 +319,13 @@ test('the served repos name their GitHub repo, or null when the origin is not on
   assert.equal(d.githubSlug('ssh://git@github.com/o/r'), 'o/r');
   assert.equal(d.githubSlug('https://gitlab.com/o/r.git'), null);
   assert.equal(d.githubSlug('/tmp/origin.git'), null);
+  const head = git(checkout, 'rev-parse', 'HEAD').trim();
   const app = async () => (await call('repos', true, {})).out.repos.find((r) => r.name === 'app');
-  assert.deepEqual(await app(), { name: 'app', github: null });
+  assert.deepEqual(await app(), { name: 'app', github: null, path: checkout, sha: head });
   assert.equal((await err('repos', false, {})).status, 403);
   git(checkout, 'remote', 'set-url', 'origin', 'git@github.com:acme/app.git');
   try {
-    assert.deepEqual(await app(), { name: 'app', github: 'acme/app' });
+    assert.deepEqual(await app(), { name: 'app', github: 'acme/app', path: checkout, sha: head });
   } finally {
     git(checkout, 'remote', 'set-url', 'origin', origin);
   }

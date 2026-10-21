@@ -3,9 +3,11 @@
 // and for the stam system prompt to add to each model request.
 // @ts-expect-error OpenCode provides @opencode/plugin when it loads this file; it is not a stam dependency
 import { Plugin } from "@opencode/plugin"
+// The plugin is copied alone into OpenCode's config folder, so it reads the names itself: MOOTR_ first, then STAM_.
+const envVar = (name: string) => process.env[`MOOTR_${name}`] ?? process.env[`STAM_${name}`];
 
-const URL = process.env.STAM_URL
-const TOKEN = process.env.STAM_TOKEN
+const URL = envVar('URL')
+const TOKEN = envVar('TOKEN')
 
 async function get(path: string): Promise<any> {
   try {
@@ -29,6 +31,11 @@ export default Plugin.define({
       const r = await get(`/api/by-session/${event.sessionID}/compact-instructions`)
       if (r?.text && Array.isArray(event.messages))
         event.messages.push({ role: "user", content: [{ type: "text", text: `Extra instructions for the summary you are about to write: ${r.text}` }] })
+    })
+    // Provider keys (S-2118) are in the server's env for OpenCode alone: a tool shell gets a copy of
+    // that env, so drop them there, and an agent's `printenv` shows none.
+    await ctx.shell.hook("create.before", (event: any) => {
+      for (const k of Object.keys(event.env ?? {})) if (/^(?:MOOTR|STAM)_PROVIDER_.+_KEY$/.test(k)) delete event.env[k]
     })
     await ctx.session.hook("context", async (event: any) => {
       const r = await get(`/api/by-session/${event.sessionID}/system`)

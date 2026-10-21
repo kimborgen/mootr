@@ -20,9 +20,9 @@ import { openStagedImage } from './image-tab'
 import { startRecording, type Recording } from './voice'
 
 const MAX_FILE = 20 * 1024 * 1024
-// How long after a send the button stays Send: the --duration-hold token (a press's length, the same
-// as the double-click window it stands in for), so a second click on the emptied box doesn't Stop the turn.
-const sendGuardMs = () => durationMs(getComputedStyle(document.documentElement).getPropertyValue('--duration-hold')) || 400
+// How long after a send the button stays Send: the --duration-double-click token (the OS double-click
+// interval), so a second click on the emptied box doesn't Stop the turn.
+const sendGuardMs = () => durationMs(getComputedStyle(document.documentElement).getPropertyValue('--duration-double-click')) || 500
 // Where the box sends: into the agent's terminal, or as mail from the human. A box starts in
 // settings.promptDefaultMode and its toggle switches that box only.
 type PromptMode = 'direct' | 'mail'

@@ -92,10 +92,7 @@ REG_ID=$(echo "$REG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["
 [ "$(status "$REG_TOKEN" POST /api/mail -H "$JSON" -d '{"from":"'$REG_ID'","to":"'$PEER'","subject":"identity","body":"registered"}')" = 200 ] || { echo "FAIL: a registered agent can't mail as itself with its token"; exit 1; }
 [ "$(status "$SHARED" POST /api/mail -H "$JSON" -d '{"from":"'$REG_ID'","to":"'$PEER'","subject":"identity","body":"shared"}')" = 403 ] || { echo "FAIL: the shared token named an agent with its own token"; exit 1; }
 # An agent without a token (one from before per-agent tokens) can still be named.
-python3 - "$STAM_HOME/stam.db" "$REG_ID" <<'EOF3'
-import sqlite3, sys
-c = sqlite3.connect(sys.argv[1]); c.execute("UPDATE agents SET token_hash = NULL WHERE id = ?", (sys.argv[2],)); c.commit()
-EOF3
+curl -sf -X POST -H "authorization: Bearer $SHARED" -H "$JSON" -d "{\"agent\":\"$REG_ID\",\"token\":null}" "$STAM_URL/api/test/agent" >/dev/null
 [ "$(status "$SHARED" POST /api/mail -H "$JSON" -d '{"from":"'$REG_ID'","to":"'$PEER'","subject":"identity","body":"legacy"}')" = 200 ] || { echo "FAIL: the shared token can't name an agent without its own token"; exit 1; }
 # With sharedTokenClaims off, the shared token can't name an agent, but the human still can: the
 # CLI in a plain shell sends no claim, or claims the human.

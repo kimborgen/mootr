@@ -11,6 +11,7 @@ import { ago, baseSubject } from '../format'
 import { Glyph, PlainGlyph } from '../Glyph'
 import { Icon } from '../Icon'
 import { byId, getData, useData } from '../store'
+import { usePhone } from '../ui/phone'
 import { AskBlockLine } from '../itsa/AskBlockLine'
 import { InputSuggestion } from '../perm/InputSuggestion'
 import { ItsaActions } from '../itsa/ItsaActions'
@@ -20,6 +21,7 @@ import { fileHref } from '../files/fileKey'
 import { openFile } from '../files/open'
 import { fileLinkClick, linkFilePaths } from '../files/pathLinks'
 import { useDiffRepos } from '../diff/diffRepos'
+import { wireDiffOpen } from './diffOpen'
 import { linkPrUrls } from './prLinks'
 import { ItsaChips } from './ItsaChips'
 import { useWatchMailTitle } from './mail-titles'
@@ -97,7 +99,7 @@ export function resolveMailMedia(el: HTMLElement, m: Mail) {
 }
 
 // A body: the mail components' HTML, then everything that finishes it in place.
-function MailBody({ m, thread, canAnswer }: { m: Mail; thread: Mail[]; canAnswer: boolean }) {
+export function MailBody({ m, thread, canAnswer }: { m: Mail; thread: Mail[]; canAnswer: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
   const html = useMemo(() => mb.renderMail(m.body), [m.body])
   const fb = useFileBase(agentBase(m.from_id))
@@ -111,8 +113,9 @@ function MailBody({ m, thread, canAnswer }: { m: Mail; thread: Mail[]; canAnswer
     mb.renderCharts(el)
     mb.resolveThreadLinks(el, (id) => api<mb.ThreadRef[]>('GET', `/api/mail/${id}/thread`).then((r) => r[0] ?? null))
     linkFilePaths(el, fb)
+    wireDiffOpen(el, fb, repos)
   }, [html, m, fb.host, fb.cwd])
-  useLayoutEffect(() => { linkPrUrls(ref.current!, repos) }, [html, repos])
+  useLayoutEffect(() => { linkPrUrls(ref.current!, repos); wireDiffOpen(ref.current!, fb, repos) }, [html, repos, fb.host, fb.cwd])
   const sig = thread.map((x) => x.id).join()
   useLayoutEffect(() => { mb.markDecisions(ref.current!, m, thread, canAnswer) }, [sig, html, canAnswer])
   return <div className="md" ref={ref} dangerouslySetInnerHTML={{ __html: html }} />
@@ -183,6 +186,9 @@ interface Props {
   ask?: ItsaAsk | null
   // The reader is the human's mailbox (S-1458): mail between other parties folds to a labelled row. An agent's inbox shows it all.
   humanView?: boolean
+  // The host's tab carries the thread's ITSAs and agents (ThreadView, S-1471 §2a). Without it, a desktop's
+  // head keeps them, as an agent's inbox has no tab.
+  tabChips?: boolean
 }
 
 // The comments an ask in the thread repeats: the ask replies to the comment, so the thread shows it once.
@@ -202,8 +208,12 @@ export function repeatedIds(mails: Mail[]): Set<string> {
   return ids
 }
 
-export function ThreadPanel({ className, mails, threadKey, unread = [], head, onStage, afterRender, scrollRef, ask, humanView }: Props) {
+export function ThreadPanel({ className, mails, threadKey, unread = [], head, onStage, afterRender, scrollRef, ask, humanView, tabChips }: Props) {
   const { itsas } = useData() // names and glyphs follow the agents; the ITSAs fill the About chips
+  // A desktop's tab carries the thread's ITSAs and agents (S-1471 §2a), so its header leaves them out; the phone's
+  // header keeps them, and so does a host without a tab (an agent's inbox).
+  const phone = usePhone()
+  const headChips = phone || !tabChips
   const own = useRef<HTMLDivElement>(null)
   const el = scrollRef ?? own
   const [opened, setOpened] = useState<Set<string>>(new Set())
@@ -356,8 +366,8 @@ export function ThreadPanel({ className, mails, threadKey, unread = [], head, on
         <div className="th-title"><h2 dangerouslySetInnerHTML={{ __html: mb.linkItsaKeys(mdInline(baseSubject(mails[0].subject))) }} />
           <button className="th-people" type="button" aria-expanded={peopleOpen} title="Who's in this thread"
             onClick={() => setPeopleOpen(!peopleOpen)}><Icon name="users" size="xs" />{people.length}<Icon name="chevron-down" size="xs" /></button></div>
-        <ItsaChips items={about} className="th-itsas" label="Linked ITSAs" />
-        {attached.length ? <div className="th-itsas th-agents" aria-label="Attached agents">{attached.map((id) => (
+        {headChips ? <ItsaChips items={about} className="th-itsas" label="Linked ITSAs" /> : null}
+        {headChips && attached.length ? <div className="th-itsas th-agents" aria-label="Attached agents">{attached.map((id) => (
           <a key={id} href="#" className="ichip-mail" data-open-agent={id} title={`${nameFor(id)}: open the agent`}><Avatar id={id} /><span className="k">{nameFor(id)}</span></a>))}</div> : null}
         <div className="people">{people.map((p) => <span key={p} className="person"><Avatar id={p} />{nameFor(p)}</span>)}<span className="muted">{mails.length} message{mails.length > 1 ? 's' : ''}</span></div>
       </div>
@@ -458,6 +468,9 @@ export function MailAttachments({ m }: { m: Mail }) {
 
 export function Card({ m, threadKey, humanView, first, thread, canAnswer, ask, flash, onFlashEnd, onFold, onMoreItsas }: { m: Mail; threadKey?: string; humanView?: boolean; first: boolean; thread: Mail[]; canAnswer: boolean; ask: ItsaAsk | null; flash: boolean; onFlashEnd: () => void; onFold: () => void; onMoreItsas: () => void }) {
   const { itsas } = useData()
+  const phone = usePhone()
+  // On a desktop the "+N" opens the message's ITSAs in place; a phone's scrolls to the header's row (S-986).
+  const [itsasOpen, setItsasOpen] = useState(false)
   // A title or summary made with another model or prompt is asked again while this mail shows (S-1843).
   const mailRef = useRef<HTMLElement>(null)
   useWatchMailTitle(m.id, mailRef)
@@ -480,7 +493,8 @@ export function Card({ m, threadKey, humanView, first, thread, canAnswer, ask, f
         {m.auto_threaded ? <span className="chip auto" title="The daemon joined this to a thread because it looked like a reply">auto-threaded</span> : null}
         {m.override || m.verdict ? <VerdictMark v={m.verdict} override={m.override} /> : null}
         {m.pending ? <span className="chip">Sending</span> : null}
-        <ItsaChips items={named} compact max={2} onMore={onMoreItsas} className="msg-itsas" label="Linked ITSAs" />
+        <ItsaChips items={named} compact max={2} expanded={!phone && itsasOpen} moreTitle={phone ? undefined : `Show all ${named.length} ITSAs`}
+          onMore={phone ? onMoreItsas : () => setItsasOpen(!itsasOpen)} className="msg-itsas" label="Linked ITSAs" />
         <time title={new Date(m.created_at).toLocaleString()}>{ago(m.created_at)}</time>
       </header>
       {humanView && between(m) ? <div className="msg-between-note"><Icon name="users" size="xs" />Between agents, not addressed to you</div> : null}

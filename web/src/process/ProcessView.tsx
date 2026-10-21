@@ -45,11 +45,11 @@ function ProcNode({ data }: NodeProps) {
   const circle = kind === 'start' || kind === 'end' || kind === 'wait'
   const diamond = kind === 'exclusive' || kind === 'parallel'
   const markers = node.boundary?.length
-    ? <span className="proc-boundary" title={node.boundary.map((b) => (b.action ? `${b.on} → ${b.action}` : b.on)).join(', ')} />
+    ? <span className="proc-boundary" title={boundaryDetail(node)} />
     : null
   return (
     <div className={`proc-node k-${kind}` + (row ? ' row' : '') + (selected ? ' selected' : '') + (bad ? ' bad' : '')} data-node={id} data-kind={kind}>
-      <button type="button" className="proc-hit" onClick={() => onOpen(id)} aria-label={`${label}, ${kind}`}>
+      <button type="button" className="proc-hit" onClick={() => onOpen(id)} aria-label={`${label}, ${kind}` + (node.boundary?.length ? `, on ${boundaryDetail(node)}` : '')}>
         {diamond
           ? <span className="proc-diamond"><i><b>{kind === 'parallel' ? '+' : '×'}</b></i></span>
           : circle
@@ -94,6 +94,11 @@ const NODE_TYPES = { proc: ProcNode, lane: LaneNode }
 // A trigger's chip detail: its type, its subject, its actor, or a timer's cron — whichever it has.
 function triggerDetail(t: ProcessTrigger): string {
   return t.types?.[0] ?? t.subjects?.[0] ?? t.actors?.[0] ?? (t.source === 'timer' ? t.cron ?? '' : '')
+}
+
+// A node's boundary events as text: each `on`, with its action when it has one, e.g. `cost → pause`.
+function boundaryDetail(node: ProcessNode): string {
+  return (node.boundary ?? []).map((b) => (b.action ? `${b.on} → ${b.action}` : b.on)).join(', ')
 }
 
 // The geometry the layout needs, read from the token-derived CSS vars (process.css), as the
@@ -428,6 +433,7 @@ export function Sheet({ nid, self, node, narrow, onClose }: { nid: string; self:
         <button type="button" className="icon-btn proc-close" onClick={onClose} title="Close (Esc)" aria-label="Close"><Icon name="x" /></button>
       </div>
       <p className="proc-sub">{node.kind} · {laneLabel(node.lane, self)}{node.statuses?.length ? ' · ' + node.statuses.join(', ') : ''}{node.doneWhen ? ` · done when ${node.doneWhen}` : ''}</p>
+      {node.boundary?.length ? <p className="proc-sub proc-bounds">on {boundaryDetail(node)}</p> : null}
       <div className="eyebrow">ITSAs{itsas.length ? ` · ${itsas.length}` : ''}</div>
       {rows}
     </aside>

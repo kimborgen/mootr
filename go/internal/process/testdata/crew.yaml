@@ -1,0 +1,29 @@
+process: crew
+title: Crew
+applies_to: { kind: [work] }
+lanes:
+  human: { type: human }
+  boss: { type: cos }
+  dev: { type: developer, machine: box-2 }
+  rev: { type: reviewer, fallback: reviewer-lite }
+  newer: { type: ghost, fallback: manager }
+  plain: { type: scout }
+nodes:
+  begin: { kind: start, lane: human, triggers: [{ source: manual }] }
+  plan: { kind: agent, lane: boss, brief: Plan the change. }
+  code: { kind: agent, lane: dev, brief: "Write the change; report to {{parent}}. Ünï 😀" }
+  look: { kind: agent, lane: rev, brief: Review it. }
+  fresh: { kind: agent, lane: newer }
+  scout: { kind: agent, lane: plain, brief: Look around. }
+  hint: { kind: human, lane: human, ask: answer, tell: { lanes: [dev, plain], text: Mind the tests. } }
+  hint2: { kind: human, lane: human, ask: answer, tell: { lanes: [dev], text: Keep it small. } }
+  done: { kind: end, lane: human, status: done }
+edges:
+  - [begin, plan]
+  - [plan, code]
+  - [code, look]
+  - [look, fresh]
+  - [fresh, scout]
+  - [scout, hint]
+  - [hint, hint2, { when: answered }]
+  - [hint2, done, { when: answered }]

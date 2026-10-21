@@ -1,0 +1,15 @@
+[
+  {"op": "create", "by": "child", "input": {"title": "Say it plainly", "text": "Write plainly.", "rationale": "Readers skim.", "source": "Alex", "verification": [{"method": "decision", "detail": "a model reads it"}, {"method": "test"}], "scope": {"subjects": ["mail"]}, "severity": "major", "mode": "inform"}},
+  {"op": "create", "by": "child", "input": {"title": "No text yet"}},
+  {"op": "set", "ref": "#0", "by": "child", "input": {"text": "Write plainly and briefly."}},
+  {"op": "set", "ref": "#0", "input": {"title": "Say it plainly, edited by the human"}},
+  {"op": "set", "ref": "#0", "by": "child", "input": {"title": "Say it plainly, again"}},
+  {"op": "batch", "by": "child", "input": {"requirements": [{"title": "Root", "text": "The root."}, {"title": "Part 1", "parent": "Root"}, {"title": "Part 2", "text": "Second.", "rationale": "Because."}]}},
+  {"op": "list", "query": {}},
+  {"op": "set", "ref": "R-5", "by": "child", "input": {"text": "Changed in the batch."}},
+  {"op": "set", "ref": "#1", "input": {"status": "in_force"}},
+  {"op": "create", "by": "boss", "input": {"title": "Boss draft", "text": "From the chief."}},
+  {"op": "batch", "by": "boss", "input": {"requirements": [{"title": "B1"}, {"title": "B2"}]}},
+  {"op": "create", "by": "child", "input": {"title": "Agent live", "status": "in_force"}},
+  {"op": "create", "input": {"title": "Human draft"}}
+]

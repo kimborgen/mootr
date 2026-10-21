@@ -11,7 +11,7 @@ export const stories: Story[] = [{
   name: 'ITSA chips',
   group: 'Mail',
   what: 'The ITSAs a mail or thread is linked to (S-986): a sender named one, a key such as `S-12` sits in the text outside code, or the mail is in the ITSA\'s own thread. Each header chip is the ITSA\'s status glyph, key and title; on a message it is a small inline key, shown only for an ITSA that message names; a tap opens the ITSA. A link is not mail: it adds no message and no unread count.',
-  when: 'In the thread header (`.th-itsas`, key and title) and on a message\'s sender line (`.msg-itsas`, key only) in the thread panel.',
+  when: 'In the thread header (`.th-itsas`, key and title) on a phone only: a desktop\'s tab carries the thread\'s ITSAs (S-1471 §2a). On a message\'s sender line (`.msg-itsas`, key only) on both: its "+N" opens every ITSA of the message in place on a desktop, and scrolls to the header on a phone.',
   code: ['web/src/mail/ItsaChips.tsx#ItsaChips'],
   rules: [
     'Colour is the status glyph, always beside the key and a title attribute, never alone (' + ds('Status') + ').',
@@ -22,7 +22,8 @@ export const stories: Story[] = [{
   states: [
     { name: 'Thread header, with titles', render: () => <ItsaChips items={[A, B, C]} className="th-itsas" label="Linked ITSAs" /> },
     { name: 'On a sender line, key only', render: () => <div className="msg"><header><span className="who">fixture-dev</span><ItsaChips items={[A, B]} compact className="msg-itsas" label="Linked ITSAs" /><time>3 h ago</time></header></div> },
-    { name: 'Folded to +N', render: () => <div className="msg"><header><span className="who">fixture-dev</span><span className="to">to you</span><ItsaChips items={[A, B, C]} compact max={2} className="msg-itsas" label="Linked ITSAs" /><time>3 h ago</time></header></div> },
+    { name: 'Folded to +N', render: () => <div className="msg"><header><span className="who">fixture-dev</span><span className="to">to you</span><ItsaChips items={[A, B, C]} compact max={2} moreTitle="Show all 3 ITSAs" className="msg-itsas" label="Linked ITSAs" /><time>3 h ago</time></header></div> },
+    { name: 'Expanded in place, with Fewer', render: () => <div className="msg"><header><span className="who">fixture-dev</span><span className="to">to you</span><ItsaChips items={[A, B, C]} compact max={2} expanded onMore={() => {}} className="msg-itsas" label="Linked ITSAs" /><time>3 h ago</time></header></div> },
     { name: 'Thread header, 60 ITSAs', render: () => <ItsaChips items={MANY} className="th-itsas" label="Linked ITSAs" /> },
     { name: 'One ITSA', render: () => <ItsaChips items={[A]} className="th-itsas" label="Linked ITSAs" /> },
     { name: 'None', render: () => <div><ItsaChips items={[]} className="th-itsas" label="Linked ITSAs" /><p className="muted">Nothing renders.</p></div> },

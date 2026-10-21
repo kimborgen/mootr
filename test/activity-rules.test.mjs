@@ -42,7 +42,7 @@ const TABLE = [
   [tool('mcp__stam__usage_info', null), 'self.budget'],
   [tool('mcp__stam__cost_pause', null), 'self.budget'],
   [tool('ToolSearch', null), 'self.tools'],
-  [tool('Skill', 'kim-style'), 'self.tools'],
+  [tool('Skill', 'house-style'), 'self.tools'],
   [tool('mcp__stam__whoami', null), 'self.identity'],
   [tool('mcp__stam__register', null), 'self.identity'],
   [tool('mcp__stam__retro', null), 'self.retro'],

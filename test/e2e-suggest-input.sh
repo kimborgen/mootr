@@ -33,15 +33,14 @@ mkdir -p "$BARRIER"
 STAM_TEST_INPUT_BARRIER=$BARRIER
 export STAM_TEST_INPUT_BARRIER
 isolate
-# The test writes stam.db directly (sqlite3) to move expiry back. A first start's migration copies
-# stam.db while the daemon holds it, which drops the daemon's SQLite locks (they are per process),
-# and an outside write then forks the WAL; a second start has nothing to migrate.
-daemon_stop main
-daemon_up main
 fail() { echo "FAIL: $1"; exit 1; }
 TOKEN=$(cat "$STAM_HOME/token")
 DIR="$(mktemp -d "$TEST_TMP/work.XXXX")"
 field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const v=process.argv[1].split(".").reduce((o,k)=>o?.[k],JSON.parse(s));console.log(v??"")})' "$1"; }
+# expire ID: a suggestion's expiry moved back (a test route, -f: a gate 404 fails here).
+expire() { curl -sf -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d "{\"id\":\"$1\",\"expires_at\":\"2000-01-01T00:00:00.000Z\"}" "$STAM_URL/api/test/permission" >/dev/null; }
+# test_agent AGENT FIELD VALUE: a test-route write of one agent field (-f: a gate 404 fails here).
+test_agent() { curl -sf -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d "{\"agent\":\"$1\",\"$2\":\"$3\"}" "$STAM_URL/api/test/agent" >/dev/null; }
 human() { curl -s -X "$1" -H "authorization: Bearer $TOKEN" -H 'x-stam-human: 1' -H 'content-type: application/json' "$STAM_URL$2" ${3:+-d "$3"}; }
 spawn() { human POST /api/agents "{\"name\":\"$1\",\"harness\":\"claude\",\"model\":\"claude-haiku-5-5\",\"cwd\":\"$DIR\",\"role\":\"test\"$2}" | field id; }
 token_of() { tmux -L "$STAM_TMUX_SOCKET" show-environment -t "$1" STAM_TOKEN 2>/dev/null | cut -d= -f2-; }
@@ -148,7 +147,7 @@ P4=$(field id <"$TEST_TMP/body")
 [ "$(approve "$P3" "$(sha 'echo old')")" = 409 ] || fail "a withdrawn suggestion was approved"
 
 echo "-- an expired suggestion is refused"
-python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("UPDATE permission_requests SET expires_at=? WHERE id=?", ("2000-01-01T00:00:00.000Z", sys.argv[2])); c.commit()' "$STAM_HOME/stam.db" "$P4"
+expire "$P4"
 [ "$(approve "$P4" "$(sha 'echo new')")" = 409 ] || fail "an expired suggestion was approved"
 [ "$(req "$P4" status)" = expired ] || fail "$P4 is $(req "$P4" status)"
 "$STAM" wait kid --until idle --timeout 60 >/dev/null
@@ -191,7 +190,7 @@ tmux -L "$STAM_TMUX_SOCKET" send-keys -t "=$KID:" -l 'late draft'
 has_late() { input_line "$KID" | grep -q 'late draft'; }
 wait_until has_late
 # The agent counts as working when the approval comes, and a Stop hook then says it is idle: the box holds the human's draft by then.
-python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("UPDATE agents SET activity=? WHERE id=?", ("working", sys.argv[2])); c.commit()' "$STAM_HOME/stam.db" "$KID"
+test_agent "$KID" activity working
 T6B='echo busy then draft'
 suggest "$KT" "$T6B" >/dev/null
 P6B=$(field id <"$TEST_TMP/body")
@@ -218,7 +217,7 @@ P7=$(field id <"$TEST_TMP/body")
 approve "$P7" "$(sha "$T7")" >/dev/null
 [ "$(req "$P7" status)" = held ] || fail "$P7 is $(req "$P7" status)"
 N=$(typed "$KID")
-python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("UPDATE permission_requests SET expires_at=? WHERE id=?", ("2000-01-01T00:00:00.000Z", sys.argv[2])); c.commit()' "$STAM_HOME/stam.db" "$P7"
+expire "$P7"
 [ "$(approve "$P7" "$(sha "$T7")")" = 409 ] || fail "a repeat tap on an expired held approval: $(cat "$TEST_TMP/body")"
 expired() { [ "$(req "$P7" status)" = expired ]; }
 wait_until expired
@@ -284,7 +283,7 @@ touch "$BARRIER/hold"
 rm -f "$BARRIER/at"
 approve_bg "$P12" "$(sha 'echo replacement')"
 wait_until at_barrier
-python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("UPDATE permission_requests SET expires_at=? WHERE id=?", ("2000-01-01T00:00:00.000Z", sys.argv[2])); c.commit()' "$STAM_HOME/stam.db" "$P12"
+expire "$P12"
 rm "$BARRIER/hold"
 wait "$BG"
 field outcome <"$TEST_TMP/body" | grep -qx cancelled || fail "expired mid-typing: $(cat "$TEST_TMP/body")"
@@ -346,7 +345,7 @@ leave_ech() {
 N=$(typed "$KID")
 leave_ech 'echo replaced two' 'echo after leftover'
 # Busy, then idle: the box holds stam's own 'ech', which is cleared; then the text is typed.
-python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("UPDATE agents SET activity=? WHERE id=?", ("working", sys.argv[2])); c.commit()' "$STAM_HOME/stam.db" "$KID"
+test_agent "$KID" activity working
 approve "$PNEW" "$(sha 'echo after leftover')" >/dev/null
 [ "$(req "$PNEW" status)" = held ] || fail "$PNEW is $(req "$PNEW" status) while busy"
 [ "$(input_line "$KID")" = '❯ ech' ] || fail "the leftover changed while busy: '$(input_line "$KID")'"
@@ -375,10 +374,10 @@ CX=$(spawn cx)
 "$STAM" wait cx --until idle --timeout 60 >/dev/null
 CT=$(token_of "$CX")
 for h in codex opencode; do
-  python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("UPDATE agents SET harness=? WHERE id=?", (sys.argv[3], sys.argv[2])); c.commit()' "$STAM_HOME/stam.db" "$CX" "$h"
+  test_agent "$CX" harness "$h"
   [ "$(suggest "$CT" 'echo hi')" = 403 ] || fail "$h suggested input: $(cat "$TEST_TMP/body")"
   grep -q "Claude Code" "$TEST_TMP/body" && grep -q "$h" "$TEST_TMP/body" || fail "the $h refusal doesn't say why: $(cat "$TEST_TMP/body")"
 done
-python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("UPDATE agents SET harness=? WHERE id=?", ("claude", sys.argv[2])); c.commit()' "$STAM_HOME/stam.db" "$CX"
+test_agent "$CX" harness claude
 
 echo "PASS e2e-suggest-input"

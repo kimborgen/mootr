@@ -1,0 +1,10 @@
+#!/bin/sh
+# The daemon's entry point for the stamd unit (S-2278): the unit runs releases/current/bin/stamd, so
+# which daemon runs (this TypeScript one, or a later Go one) is a link swap plus a restart.
+# It resolves its own release, so the process names the release's real path (a deploy's pinned-release
+# check finds it there). STAM_NODE is the node the unit was installed with (the nvm one on storage).
+here=$(dirname "$(readlink -f "$0")")
+node=${MOOTR_NODE:-${STAM_NODE:-node}}
+# Not for the daemon's children (the agents it starts).
+unset MOOTR_NODE STAM_NODE
+exec "$node" --no-warnings "$here/../src/cli.ts" daemon run

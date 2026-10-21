@@ -4,7 +4,7 @@
 // typed text, so this reads the pane captured with its styles (tmux capture-pane -e). Faint is
 // SGR 2 (dim) or bright black (90); the cursor may sit, drawn inverse, on the first character.
 // Pure, so it tests without a pane.
-import { boxRows } from './claude-input.ts';
+import { promptBoxRows } from './claude-input.ts';
 
 const SGR = /\x1b\[([0-9;:]*)m/y;
 const OTHER = /\x1b(\[[0-9;?]*[ -\/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|.)/y;
@@ -59,7 +59,7 @@ const visible = (c: Cell) => !!c.ch.trim() && c.ch !== ' ';
 // The box's text cells, every row of it: the first row after its mark, the rows it wraps onto as
 // they are. Undefined with no box.
 function boxCells(ansi: string[]): Cell[][] | undefined {
-  const rows = boxRows(ansi.map(plain));
+  const rows = promptBoxRows(ansi.map(plain));
   if (!rows) return undefined;
   return ansi.slice(rows.at, rows.end).map((r, i) => {
     const c = cells(r);

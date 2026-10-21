@@ -51,18 +51,20 @@ api() {
   _url=$MAIN_URL; _tok=$MAIN_TOKEN; [ "$1" = home ] && { _url=$HOME_URL; _tok=$HOME_TOKEN; }
   curl -s -X "$2" -H "authorization: Bearer $_tok" -H 'content-type: application/json' -H 'x-stam-human: 1' ${4:+-d "$4"} "$_url$3"
 }
+# tapi: api for /api/test/* routes; -f fails at the call when the gate answers 404.
+tapi() {
+  _url=$MAIN_URL; _tok=$MAIN_TOKEN; [ "$1" = home ] && { _url=$HOME_URL; _tok=$HOME_TOKEN; }
+  curl -sf -X "$2" -H "authorization: Bearer $_tok" -H 'content-type: application/json' -H 'x-stam-human: 1' ${4:+-d "$4"} "$_url$3"
+}
 # reg DAEMON NAME BRANCH PARENT: a registered agent with a known token (tok-NAME) and a worktree on BRANCH.
 reg() {
   _id=$(api "$1" POST /api/register "{\"name\":\"$2\",\"role\":\"developer\",\"harness\":\"${5:-claude}\"${4:+,\"parent\":\"$4\"}}" | jget "d['id']")
-  python3 - "$TEST_TMP/$1" "$_id" "$2" "$3" "$4" <<'PY'
-import hashlib, json, sqlite3, sys
-home, id, name, branch, parent = sys.argv[1:6]
-import glob
-db = sqlite3.connect(glob.glob(f"{home}/*.db")[0], timeout=10)
-db.execute("UPDATE agents SET token_hash = ?, workspace = ? WHERE id = ?", (hashlib.sha256(f"tok-{name}".encode()).hexdigest(), json.dumps({"worktree": {"branch": branch, "path": "/tmp/x"}}) if branch else None, id))
-if parent: db.execute("UPDATE agents SET parent_id = ? WHERE id = ?", (parent, id))
-db.commit()
-PY
+  tapi "$1" POST /api/test/agent "$(python3 -c '
+import json, sys
+id, name, branch, parent = sys.argv[1:5]
+b = {"agent": id, "token": f"tok-{name}", "workspace": json.dumps({"worktree": {"branch": branch, "path": "/tmp/x"}}) if branch else None}
+if parent: b["parent"] = parent
+print(json.dumps(b))' "$_id" "$2" "$3" "$4")" >/dev/null
   echo "$_id"
 }
 printf '%s' "$(printf '%s' oc-test-token | sha256sum | cut -d' ' -f1)" >"$TEST_TMP/main/opencode-token"

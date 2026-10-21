@@ -93,7 +93,7 @@ function latestTtl(agentId: string): CacheTtl | undefined {
 // For usage_info: cold turns and tokens per day since `since` (a YYYY-MM-DD day), their total, and the
 // live agents whose latest detected window is 5 min. `agentSql`/`agentArg` narrow to kept agents.
 export const COLD_BY_DAY_SQL = "SELECT substr(ts, 1, 10) AS day, COUNT(*) AS turns, SUM(json_extract(data, '$.tokens')) AS tokens FROM events WHERE type = 'cache:cold' AND ts >= ?";
-export const TTL_AGENTS_SQL = "SELECT agent_id, json_extract(data, '$.ttl') AS ttl FROM events WHERE id IN (SELECT MAX(id) FROM events WHERE type = 'cache:ttl'";
+export const TTL_AGENTS_SQL = "SELECT agent_id, json_extract(data, '$.ttl') AS ttl, ts FROM events WHERE id IN (SELECT MAX(id) FROM events WHERE type = 'cache:ttl'";
 
 export function summary(since: string, agentSql = '', agentArg: string[] = []): unknown {
   const d = db.open();

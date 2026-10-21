@@ -54,7 +54,7 @@ echo "-- stranger can't post, is told who may, and doesn't join"
 R=$(as_body stranger "/api/itsas/$KEY/post" '{"body":"let me in"}')
 printf "%s" "$R" | grep -q "stranger can't post to $KEY" || fail "stranger's post wasn't refused (got: $R)"
 printf "%s" "$R" | grep -q "owner" || fail "the refusal doesn't name the owner (got: $R)"
-printf "%s" "$R" | grep -q "add you as a participant" || fail "the refusal doesn't say how to join (got: $R)"
+printf "%s" "$R" | grep -q "add you with itsa_set participants" || fail "the refusal doesn't say how to join (got: $R)"
 [ "$(participant "$STRANGER")" = False ] || fail "stranger's refused post made it a participant"
 
 echo "-- stranger can't add itself as a participant, nor change the ITSA otherwise"

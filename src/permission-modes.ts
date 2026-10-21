@@ -34,9 +34,10 @@ export const HARNESS_MODES: Record<string, { mode: PermissionMode; label: string
   ],
 };
 
-// OpenCode sets a session's permission rules when the session is made, and a resume keeps them, so
-// a restart in place can't change a running OpenCode agent's mode: it changes at its next new
-// session. The other harnesses take the mode again on resume.
+// OpenCode sets a session's permission rules when the session is made. A resume re-applies the
+// agent's current mode's rules (session.update, S-1891), so the rules follow the mode at each launch;
+// but applying a mode change to a running OpenCode agent is not done in place (apply skips it), so
+// the change takes effect at its next launch. The other harnesses take the mode again on resume.
 export const switchesInPlace = (harness: string) => harness !== 'opencode';
 
 // The mode a new agent of this harness and type starts in: the type's override, then the
@@ -63,7 +64,7 @@ export interface StaleAgent {
   type: string | null;
   mode: string;
   want: PermissionMode;
-  // false: an OpenCode agent, which takes the new mode only in a new session (see switchesInPlace).
+  // false: an OpenCode agent, which takes the new mode at its next launch (see switchesInPlace).
   inPlace: boolean;
   // Why its last switch failed: its restart quit the harness and the launch failed, so it is shut
   // down on its old mode, and apply retries by resuming it on the new one. Null otherwise.

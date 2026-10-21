@@ -11,27 +11,14 @@ set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 ARCHIVED=200
 daemon_home quiet
-SEED="$TEST_TMP/seed-quiet.mjs"
-cat >"$SEED" <<'EOF'
-const db = await import(process.env.ROOT + '/src/db.ts');
-db.open();
-const agent = (id, lifecycle) => {
-  db.createAgent({ id, name: id, role: 'dev', machine: 'quiet', harness: 'claude', model: null, effort: null, cwd: '/tmp', parent_id: null, session_id: null });
-  db.updateAgent(id, { lifecycle, activity: 'idle', workspace: '/tmp' });
-};
-if (process.env.LIVE) {
-  // Working, so no other loop (banners, stale turns) looks at their terminals.
-  for (let i = 0; i < Number(process.env.LIVE); i++) {
-    agent(`live-${i}`, 'active');
-    db.updateAgent(`live-${i}`, { activity: 'working' });
-  }
-  agent('gone-1', 'active');
-} else {
-  for (let i = 0; i < Number(process.env.ARCHIVED); i++) agent(`arch-${i}`, 'archived');
-  agent('marker-1', 'active');
-}
-EOF
-ROOT="$ROOT" ARCHIVED=$ARCHIVED STAM_HOME="$TEST_TMP/quiet" node "$SEED"
+# The archived agents and the marker are seeded before the daemon starts (test-seed.json, read once at startup by a
+# test daemon), so the first tick finds them.
+node -e '
+const agent = (id, lifecycle) => ({ agent: id, create: { machine: "quiet" }, lifecycle, activity: "idle", workspace: "/tmp" });
+const agents = [];
+for (let i = 0; i < Number(process.argv[1]); i++) agents.push(agent(`arch-${i}`, "archived"));
+agents.push(agent("marker-1", "active"));
+console.log(JSON.stringify({ agents }));' $ARCHIVED >"$TEST_TMP/quiet/test-seed.json"
 # The wrapper logs each tmux call's arguments, then runs the real tmux. While the flag file exists, the next
 # list-panes -a fails with an error that isn't "no server", and takes the flag away; the same for the empty flag,
 # except that the call succeeds with no output.
@@ -62,7 +49,15 @@ LIVE=30
 on quiet tmux -L "$STAM_TMUX_SOCKET" set-option -g remain-on-exit on
 i=0; while [ $i -lt $LIVE ]; do on quiet tmux -L "$STAM_TMUX_SOCKET" new-session -d -s "live-$i" 'sleep 600'; i=$((i + 1)); done
 on quiet tmux -L "$STAM_TMUX_SOCKET" new-session -d -s gone-1 'true'
-ROOT="$ROOT" LIVE=$LIVE STAM_HOME="$TEST_TMP/quiet" node "$SEED"
+# Working, so no other loop (banners, stale turns) looks at their terminals.
+node -e '
+const agent = (id, activity) => ({ agent: id, create: { machine: "quiet" }, lifecycle: "active", activity, workspace: "/tmp" });
+const bodies = [];
+for (let i = 0; i < Number(process.argv[1]); i++) bodies.push(agent(`live-${i}`, "working"));
+bodies.push(agent("gone-1", "idle"));
+for (const b of bodies) console.log(JSON.stringify(b));' $LIVE | while read -r body; do
+  curl -sf -X POST -H "authorization: Bearer $(cat "$STAM_HOME/token")" -H 'content-type: application/json' -d "$body" "$STAM_URL/api/test/agent" >/dev/null
+done
 wait_until events_has gone-1 ' exited'
 # One more whole tick after that: two more batched calls (each tick makes one).
 ticks() { grep -c 'list-panes -a' "$LOG" || true; }

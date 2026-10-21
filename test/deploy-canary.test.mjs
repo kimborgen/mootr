@@ -4,13 +4,13 @@
 // fails against a clean baseline, the same release passes, a baseline that won't start or a missing db is an error, a
 // SIGTERM stops the daemons and removes the run folder, and a run killed outright is swept by the next. With the real
 // daemon of this checkout as both releases: the canary never reaches the live port, the live tmux socket, tmux, or a
-// harness, runs at nice 10, and leaves no backup or copy behind.
+// harness, runs at nice 10 above the test's own, and leaves no backup or copy behind.
 // Run with `node --test test/deploy-canary.test.mjs`.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { getPriority, tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
@@ -22,6 +22,9 @@ const ROOT = resolve(fileURLToPath(import.meta.url), '../..');
 const CANARY = join(ROOT, 'scripts/canary.mjs');
 const { canary, canaryConfig, canaryWorst, copyDb, judge, sweepStale } = await import(CANARY);
 
+// `nice -n 10` is relative: under a niced gate (S-2107) the scratch daemon lands at the gate's niceness plus 10, at most 19.
+const NICE = Math.min(19, getPriority() + 10);
+
 const work = tempDir('stam-canary-test-');
 after(() => rmSync(work, { recursive: true, force: true }));
 
@@ -29,7 +32,11 @@ after(() => rmSync(work, { recursive: true, force: true }));
 // In mode `stall` each POST blocks the loop 200 ms and reports it as a stall, as aa181742's children waits did (S-1725).
 // In mode `dead` it exits at once; `reject` answers every POST 500, `partial` every other one; `slowstart` blocks the
 // loop 500 ms three times, reported as stalls, before it writes its token, and never after; `flaky` stalls on its first
-// run only.
+// run only. A release with an `overload` file (S-2076) shares a counter of /api/health/db requests with every release
+// that names the same counter, and answers requests FROM to TO of that shared count 300 ms late, without blocking its
+// loop: a burst of machine load that lands on whichever daemons are being probed then. `drift` is good on its first run
+// and stalls like 'stall' on every run after (the load rose after the first baseline); `fade` is good on its first run
+// and exits at once on every run after (S-2151).
 const FAKE_DAEMON = `import { createServer } from 'node:http';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,7 +46,24 @@ if (mode === 'flaky') {
   const ran = join(import.meta.dirname, '..', 'ran');
   try { readFileSync(ran); mode = 'good'; } catch { writeFileSync(ran, '1'); mode = 'stall'; }
 }
+// drift and fade count their runs in a file beside the release (S-2151).
+if (mode === 'drift' || mode === 'fade') {
+  const runs = join(import.meta.dirname, '..', 'runs');
+  let count = 0;
+  try { count = Number(readFileSync(runs, 'utf8')); } catch {}
+  writeFileSync(runs, String(count + 1));
+  mode = count === 0 ? 'good' : mode === 'drift' ? 'stall' : 'dead';
+}
 if (mode === 'dead') process.exit(1);
+let overload;
+try { overload = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'overload'), 'utf8')); } catch {}
+const overloaded = () => {
+  if (!overload) return false;
+  let n = 0;
+  try { n = Number(readFileSync(overload.counter, 'utf8')) || 0; } catch {}
+  writeFileSync(overload.counter, String(++n));
+  return n >= overload.from && n <= overload.to;
+};
 const stalls = [];
 let n = 0;
 if (mode === 'slowstart') {
@@ -57,7 +81,7 @@ createServer((req, res) => {
     const send = (code, data) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
     if (req.headers.authorization !== 'Bearer tok') return send(401, {});
     if (req.url === '/api/health') return send(200, { ok: true, release: process.env.STAM_RELEASE_ID, stalls: stalls.slice(-20) });
-    if (req.url === '/api/health/db') return send(200, { ok: true });
+    if (req.url === '/api/health/db') return overloaded() ? setTimeout(() => send(200, { ok: true }), 300) : send(200, { ok: true });
     if (req.method === 'POST' && /^\\/api\\/(hook|statusline)\\/claude\\//.test(req.url)) {
       posts++;
       if (mode === 'reject' || (mode === 'partial' && posts % 2 === 0)) return send(500, { error: 'broken' });
@@ -73,11 +97,12 @@ createServer((req, res) => {
 }).listen(Number(process.env.STAM_PORT), '127.0.0.1');
 `;
 
-function fakeRelease(name, mode) {
+function fakeRelease(name, mode, overload) {
   const dir = join(work, 'releases-src', name);
   mkdirSync(join(dir, 'src'), { recursive: true });
   writeFileSync(join(dir, 'src', 'cli.ts'), FAKE_DAEMON);
   writeFileSync(join(dir, 'mode'), `${mode}\n`);
+  if (overload) writeFileSync(join(dir, 'overload'), JSON.stringify(overload));
   return dir;
 }
 
@@ -131,11 +156,62 @@ test('a release that fails once and runs clean on its rerun passes; with the rer
   const r = await canary(c, 'abcdef1234', (l) => lines.push(l));
   assert.equal(r.verdict, 'pass', JSON.stringify(r.reasons));
   assert.match(r.first.join('\n'), /event-loop stalls under load/);
-  assert.ok(lines.some((l) => /the new release failed .*running it once more/.test(l)));
+  assert.ok(lines.some((l) => /the new release failed .*running it and the baseline once more/.test(l)));
+  assert.equal(r.base.name, 'baseline-rerun', 'the rerun is judged against the baseline rerun beside it (S-2076)');
   const off = setup('flaky-off', { baseline: good, next: fakeRelease('flaky-b', 'flaky'), env: { STAM_CANARY_RERUN: '0' } });
   const r2 = await canary(off.c, 'abcdef1234', quiet);
   assert.equal(r2.verdict, 'fail');
   assert.equal(r2.next.name, 'new');
+});
+
+test('a release slow when the load rose after the first baseline passes its rerun, judged against a fresh baseline (S-2151)', async () => {
+  const { c } = setup('drift', { baseline: fakeRelease('drift-base', 'drift'), next: fakeRelease('drift-a', 'stall') });
+  const lines = [];
+  const r = await canary(c, 'abcdef1234', (l) => lines.push(l));
+  assert.equal(r.verdict, 'pass', JSON.stringify(r.reasons));
+  assert.match(r.first.join('\n'), /event-loop stalls under load/, 'the first run was slow');
+  assert.equal(r.base.name, 'baseline-rerun', 'the verdict is judged against the fresh baseline');
+  assert.equal(r.next.name, 'rerun');
+  assert.ok(lines.some((l) => /the rerun is judged against the fresh baseline .*, not the first one/.test(l)));
+  assert.ok(empty(c.tmp), 'the copies are gone');
+});
+
+test('a release slow against both the first and the fresh baseline fails, judged against the fresh one (S-2151)', async () => {
+  const { c } = setup('slow-both', { baseline: fakeRelease('good-e', 'good'), next: fakeRelease('stall-e', 'stall') });
+  const r = await canary(c, 'abcdef1234', quiet);
+  assert.equal(r.verdict, 'fail', JSON.stringify(r.reasons));
+  assert.equal(r.base.name, 'baseline-rerun');
+  assert.ok(r.base.load.ok > 0, 'the fresh baseline took the load');
+  assert.match(r.reasons.join('\n'), /event-loop stalls under load added up to \d+ ms \(baseline 0 ms/);
+  assert.match(r.reasons.join('\n'), /the first run failed too: event-loop stalls/);
+});
+
+test('a fresh baseline that never answers is an error, never a pass (S-2151)', async () => {
+  const { c } = setup('fresh-dead', { baseline: fakeRelease('fade-base', 'fade'), next: fakeRelease('fade-a', 'stall') });
+  const r = await canary(c, 'abcdef1234', quiet);
+  assert.equal(r.verdict, 'error', JSON.stringify(r.reasons));
+  assert.match(r.reasons[0], /the fresh baseline .* never answered \/api\/health/);
+  assert.equal(r.next.name, 'rerun', 'the rerun is kept as next, with the first run\'s reasons in first');
+  assert.match(r.first.join('\n'), /event-loop stalls under load/);
+  assert.ok(empty(c.tmp));
+});
+
+// 66cf0a33 (#677, S-2076): the baseline ran first and the new release later, while the machine was overloaded, and the
+// canary held a web-only change on "8 of 29 health probes over 0.1 s (baseline 0)". Side by side and probed in turn,
+// both daemons take the same burst, so it can't fail the new one.
+test('66cf0a33: a burst of machine load mid-canary lands on the baseline and the new release alike, and passes (S-2076)', async () => {
+  const overload = { counter: join(work, 'overload-66cf-count'), from: 5, to: 10 };
+  const { c } = setup('overload-66cf', {
+    baseline: fakeRelease('good-66cf', 'good', overload),
+    next: fakeRelease('new-66cf', 'good', overload),
+    env: { STAM_DEPLOY_SLOW_S: '0.2', STAM_CANARY_LOAD_S: '4' },
+  });
+  const r = await canary(c, 'abcdef1234', quiet);
+  assert.equal(r.verdict, 'pass', JSON.stringify(r.reasons));
+  assert.equal(r.first, undefined, 'no rerun was needed');
+  assert.equal(r.base.db.slow, 3, `baseline: ${JSON.stringify(r.base.db)}`);
+  assert.equal(r.next.db.slow, 3, `new: ${JSON.stringify(r.next.db)}`);
+  assert.ok(empty(c.tmp));
 });
 
 // One release's numbers as judge reads them: probes of n samples, stalls under load, and the load.
@@ -176,7 +252,7 @@ test('real regressions still fail the judge: rebuild stalls, a slow release, all
 test("the canary's worst case counts the rerun (S-1862)", () => {
   const c = canaryConfig({});
   const once = canaryWorst({ ...c, rerun: false });
-  assert.equal(canaryWorst(c) - once, c.startMs + c.loadMs + 15_000 + 5 * 5000);
+  assert.equal(canaryWorst(c) - once, c.startMs + c.loadMs + 15_000 + 7 * 5000);
 });
 
 test('the same release against itself passes, and leaves nothing behind', async () => {
@@ -185,7 +261,7 @@ test('the same release against itself passes, and leaves nothing behind', async 
   const r = await canary(c, 'abcdef1234', quiet);
   assert.equal(r.verdict, 'pass', JSON.stringify(r.reasons));
   assert.equal(r.next.stalls.count, 0);
-  assert.equal(r.next.nice, 10, 'the scratch daemon runs at nice 10');
+  assert.equal(r.next.nice, NICE, `the scratch daemon runs at nice ${NICE}`);
   assert.ok(empty(c.tmp));
 });
 
@@ -498,7 +574,7 @@ test('with the real daemon: no live port, live socket, tmux, or harness is touch
   const lines = out.split('\n').filter((l) => /^canary: (baseline|new) /.test(l));
   assert.equal(lines.length, 2, out);
   for (const line of lines) {
-    assert.match(line, /at nice 10 /);
+    assert.match(line, new RegExp(`at nice ${NICE} `));
     const ok = Number(/load (\d+) ok/.exec(line)?.[1]);
     assert.ok(ok > 0, `the load reached the daemon: ${line}`);
     const stubs = /stub calls: (.*)$/.exec(line)?.[1] ?? '';

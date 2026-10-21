@@ -254,6 +254,19 @@ function gitTopOf(file: string): string | null {
   }
 }
 
+// A checkout's or worktree's real git common dir, asked once per folder: it does not change while the folder
+// exists, so a lookup does not spawn git for it again. A failed ask is not kept, so the next lookup retries.
+const commonDirs = new Map<string, Promise<string>>();
+function commonDirOf(dir: string): Promise<string> {
+  let common = commonDirs.get(dir);
+  if (!common) {
+    common = git_(['rev-parse', '--path-format=absolute', '--git-common-dir'], dir).then((c) => realpathSync(c));
+    common.catch(() => commonDirs.delete(dir));
+    commonDirs.set(dir, common);
+  }
+  return common;
+}
+
 // The linked worktree of `root`'s repo that holds an absolute path, or null. The path's nearest `.git` root is
 // asked for its common dir: it is a linked worktree of that repo only when the common dir is the checkout's own,
 // which also stops a separate clone or another repo's worktree (the same folder name) from matching.
@@ -262,11 +275,11 @@ async function worktreeHit(root: string, real: string): Promise<{ checkout: stri
   if (!top) return null;
   try {
     const [repoCommon, common, toplevel] = await Promise.all([
-      git_(['rev-parse', '--path-format=absolute', '--git-common-dir'], root),
-      git_(['rev-parse', '--path-format=absolute', '--git-common-dir'], top),
+      commonDirOf(root),
+      commonDirOf(top),
       git_(['rev-parse', '--show-toplevel'], top),
     ]);
-    if (realpathSync(common) !== realpathSync(repoCommon)) return null;
+    if (common !== repoCommon) return null;
     const tl = realpathSync(toplevel);
     if (!(real === tl || real.startsWith(tl + sep))) return null;
     return { checkout: tl, rel: real.slice(tl.length + 1).split(sep).join('/') };
@@ -283,7 +296,9 @@ async function repoOfFile(file: string): Promise<{ repo: string; checkout: strin
   for (const [repo, path] of Object.entries(settings().itsa.repos)) {
     let root: string;
     try { root = realpathSync(path); } catch { continue; }
-    if (real.startsWith(root + sep)) return { repo, checkout: root, rel: real.slice(root.length + 1).split(sep).join('/') };
+    // A path under the root is the checkout's own only when no nearer `.git` holds it: a worktree nested in the
+    // checkout (a `.claude/worktrees` folder, a TMPDIR inside the repo) is its own checkout, asked below.
+    if (real.startsWith(root + sep) && gitTopOf(real) === root) return { repo, checkout: root, rel: real.slice(root.length + 1).split(sep).join('/') };
     const wt = await worktreeHit(root, real);
     if (wt) return { repo, checkout: wt.checkout, rel: wt.rel };
   }

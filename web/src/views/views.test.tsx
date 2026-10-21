@@ -699,6 +699,43 @@ describe('ConfigView', () => {
     expect((calls.filter((c) => c.method === 'PATCH').at(-1)!.body as { patch: Record<string, any> }).patch.cost.openrouterSystemReserveUsd).toBe(2)
     localStorage.removeItem('stam/settings-section')
   })
+  it('Settings › Spending: a provider budget goes on the provider\'s own account, created under a key that may hold a dot (S-2119)', async () => {
+    const providers = {
+      'azure.eu': { kind: 'azure', endpoint: 'https://r.openai.azure.com', apiVersion: 'v1' },
+      oa: { kind: 'openai-compatible', baseUrl: 'https://api.openai.com/v1' },
+      mine: { kind: 'openai-compatible', baseUrl: 'https://x.example/v1' },
+      br: { kind: 'bedrock', region: 'eu-west-1' },
+    }
+    // `oa` is also an unrelated Claude account's name; `mine` already has an account matching its models.
+    const accounts = { oa: { match: { harness: 'claude' } }, 'mine-acct': { match: { harness: 'opencode', model: 'mine/m' } } }
+    stubFetch({ '/api/config/settings': { text: JSON.stringify({ ...SETTINGS, providers, cost: { ...SETTINGS.cost, accounts } }) } })
+    localStorage.setItem('stam/settings-section', 'spend')
+    await mount(<ConfigView />)
+    const row = (label: string) => [...host.querySelectorAll('.set-row')].find((r) => r.querySelector('.set-label b')?.textContent === label)!
+    const change = async (el: Element, value: string) => { (el as HTMLInputElement).value = value; await act(async () => { el.dispatchEvent(new Event('change', { bubbles: true })) }); await flush() }
+    const sent = () => (calls.filter((c) => c.method === 'PATCH').at(-1)!.body as { patch: Record<string, any> }).patch.cost.accounts
+    await change(row('azure.eu').querySelector('input[type=number]')!, '5')
+    expect(sent()['azure.eu']).toEqual({ match: { harness: 'opencode', model: 'azure.eu/' }, provider: 'azure.eu', budget: { usd: 5, per: 'month' } })
+    expect(sent().azure).toBeUndefined()
+    await change(row('oa').querySelector('input[type=number]')!, '7')
+    expect(sent()['oa-provider']).toEqual({ match: { harness: 'opencode', model: 'oa/' }, provider: 'oa', budget: { usd: 7, per: 'month' } })
+    expect(sent().oa).toEqual({ match: { harness: 'claude' } })
+    await change(row('mine').querySelector('input[type=number]')!, '9')
+    expect(sent()['mine-acct']).toEqual({ match: { harness: 'opencode', model: 'mine/m' }, budget: { usd: 9, per: 'month' } })
+    expect(sent().mine).toBeUndefined()
+    localStorage.removeItem('stam/settings-section')
+  })
+  it('Settings › Spending: a harness-only OpenCode account covers a provider\'s models, so its row names that account and adds none', async () => {
+    const providers = { br: { kind: 'bedrock', region: 'eu-west-1' } }
+    const accounts = { opencode: { match: { harness: 'opencode' } } }
+    stubFetch({ '/api/config/settings': { text: JSON.stringify({ ...SETTINGS, providers, cost: { ...SETTINGS.cost, accounts } }) } })
+    localStorage.setItem('stam/settings-section', 'spend')
+    await mount(<ConfigView />)
+    const row = [...host.querySelectorAll('.set-row')].find((r) => r.querySelector('.set-label b')?.textContent === 'br')!
+    expect(row.querySelector('input')).toBeNull()
+    expect(row.textContent).toContain('Billed to the account opencode')
+    localStorage.removeItem('stam/settings-section')
+  })
   it('Settings › Requirements: defaults shown, turning on saves and notes observe, a percentage saves as a fraction, Import waits for on', async () => {
     localStorage.setItem('stam/settings-section', 'requirements')
     await mount(<ConfigView />)

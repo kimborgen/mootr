@@ -52,11 +52,7 @@ notice() { api "$1" POST "/api/hook/claude/$2" '{"hook_event_name":"PostToolUse"
 # unread D ID: how many unread mails the agent has.
 unread() { api "$1" GET "/api/agents/$2/inbox?unread=1" | jget "len([m for m in d if not m.get('read_at')])"; }
 # clear: marks every mail read on both daemons, so each step counts only its own.
-clear() { for d in main home; do python3 - "$TEST_TMP/$d/stam.db" <<'PY'
-import sqlite3, sys
-c = sqlite3.connect(sys.argv[1], timeout=10); c.execute("UPDATE mail_recipients SET read_at = datetime('now') WHERE read_at IS NULL"); c.commit()
-PY
-done; }
+clear() { for d in main home; do api "$d" POST /api/test/mail '{"action":"read-all"}' >/dev/null; done; }
 
 ALICE=$(register home alice); BOB=$(register home bob)
 CAROL=$(register main carol); DAVE=$(register main dave)
@@ -165,5 +161,23 @@ for d in home main; do
   api "$d" GET "/api/threads/$TID" | jget "sorted(r['id'] for r in d[-1]['recipients'])" | grep -q "$CAROL" || fail "the merged copy through $d lost carol"
 done
 [ "$(api home GET "/api/itsas/$KEY/thread" | jget "len([i for i in d['items'] if i['type']=='mail' and i['mail']['body']=='same words'])")" = 2 ] || fail "identical comments folded into one"
+
+# 10. The mails about an ITSA in other threads (S-1819, the merge gate's chip asks) are for the merge gate's shared token, never an agent: eve is no participant, chips her own reply, and still can't read alice's ask to the human.
+api home POST /api/mail "{\"from\":\"$ALICE\",\"to\":[\"human\"],\"itsa\":\"$KEY\",\"subject\":\"chip ask\",\"body\":\"PR #1?\\n\\n\`\`\`yesno\\nOk?\\n\`\`\`\"}" >/dev/null || fail "alice's chip ask failed"
+EVE=$(api home POST /api/register '{"name":"eve","role":"test","harness":"claude","token":true}')
+EVE_ID=$(echo "$EVE" | jget "d['id']"); EVE_TOKEN=$(echo "$EVE" | jget "d['token']")
+api home GET "/api/itsas/$KEY/about-mails" | jget "[m['subject'] for m in d]" | grep -q "chip ask" || fail "the shared token can't read the chip ask through about-mails"
+api home GET "/api/itsas/$KEY/about-mails" | jget "[m['to'] for m in d if m['subject']=='chip ask'][0]" | grep -q human || fail "about-mails doesn't list the ask's recipients"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $EVE_TOKEN" "$HOME_URL/api/itsas/$KEY/about-mails")" = 403 ] || fail "an agent read the mails about an ITSA it takes no part in"
+api home POST /api/mail "{\"from\":\"$ALICE\",\"to\":[\"$EVE_ID\"],\"subject\":\"private\",\"body\":\"secret\"}" >/dev/null
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $EVE_TOKEN" "$HOME_URL/api/itsas/$KEY/about-mails")" = 403 ] || fail "an agent with mail of its own read about-mails"
+# A participant agent gets 403 too: frank joins the ITSA as a participant, and the 403 holds for frank's own token, with no mail body in the output.
+FRANK_REG=$(api home POST /api/register '{"name":"frank","role":"test","harness":"claude","token":true}')
+FRANK=$(echo "$FRANK_REG" | jget "d['id']"); FRANK_TOKEN=$(echo "$FRANK_REG" | jget "d['token']")
+on home "$STAM" itsa set "$KEY" --participant "$BOB" --participant "$CAROL" --participant "$FRANK" >/dev/null
+api home GET "/api/itsas/$KEY" | jget "sorted(d['participants'])" | grep -q "$FRANK" || fail "frank isn't a participant of the ITSA"
+FRANK_ABOUT=$(curl -s -w '\n%{http_code}' -H "authorization: Bearer $FRANK_TOKEN" "$HOME_URL/api/itsas/$KEY/about-mails")
+[ "$(echo "$FRANK_ABOUT" | tail -n 1)" = 403 ] || fail "a participant agent read the mails about the ITSA"
+echo "$FRANK_ABOUT" | grep -q -F "PR #1?" && fail "the mails about the ITSA reached a participant agent's 403 response"
 
 echo "PASS e2e-itsa-thread"

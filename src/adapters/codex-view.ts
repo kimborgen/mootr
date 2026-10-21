@@ -9,6 +9,7 @@ import type { Agent } from '../db.ts';
 import * as db from '../db.ts';
 import { ViewError } from '../agent-view.ts';
 import type { LiveSink, ViewMessage, ViewPart, ViewPermission, ViewSource, ToolStatus, PermissionDecision, ViewStore } from '../agent-view.ts';
+import { restoreTranscript } from '../transcript-gz.ts';
 import { codex, listen, appServer, answerRequest, openRequests, steerPrompt } from './codex.ts';
 
 const toolStatus = (s: string | undefined): ToolStatus => (s === 'completed' ? 'done' : s === 'failed' || s === 'declined' ? 'error' : s === 'inProgress' ? 'running' : 'pending');
@@ -197,6 +198,7 @@ export const codexView: ViewSource = {
   // The thread's turns flattened to messages, oldest first; `before` names the oldest message
   // the caller has, and the page is the `limit` messages before it.
   async page(a, { limit, before }) {
+    await restoreTranscript(a.id, (db.getAgent(a.id) ?? a).transcript_path);
     const r = await appServer(a.id, 'thread/read', { threadId: a.session_id, includeTurns: true });
     const all: ViewMessage[] = [];
     const times = itemTimes(r.thread?.path);

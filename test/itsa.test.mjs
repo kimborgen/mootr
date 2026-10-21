@@ -222,3 +222,28 @@ test('a system sender (the deploy watcher, S-474) acts as system:NAME, never as 
   assert.equal(ev.actor, 'system:deploy-watch', 'the event is the watcher\'s, not the human\'s');
   assert.equal(r.itsa.owner, owner, 'a system sender changes no owner');
 });
+
+test('the incident mark is set on an ITSA and cleared when it closes (S-2406)', async () => {
+  const marked = await itsa.set(mid.id, { incident: true }, 'alice');
+  assert.equal(marked.itsa.incident, 1);
+  assert.deepEqual(marked.changes.incident, { from: 0, to: 1 });
+  // Closing clears it, in the same change as the status.
+  const closed = await itsa.set(mid.id, { status: 'done' }, 'alice');
+  assert.equal(closed.itsa.incident, 0);
+  assert.deepEqual(closed.changes.incident, { from: 1, to: 0 });
+  // Reopened, it is not marked again.
+  const reopened = await itsa.set(mid.id, { status: 'todo' }, 'alice');
+  assert.equal(reopened.itsa.incident, 0);
+});
+
+test('provenChain walks to a root, and proves nothing about a chain with a missing parent or a cycle (S-2406)', async () => {
+  const a = await itsa.create({ title: 'Chain A', by: 'human' });
+  const b = await itsa.create({ title: 'Chain B', parent: a.key, by: 'human' });
+  assert.deepEqual(itsa.provenChain(itsa.find(b.id)).map((x) => x.id), [b.id, a.id]);
+  // A parent that isn't there: the chain is unproven, though ancestorsOf stops quietly with a partial one.
+  db.open().prepare('UPDATE itsas SET parent_id = ? WHERE id = ?').run('inope', a.id);
+  assert.equal(itsa.provenChain(itsa.find(b.id)), null);
+  // A cycle, A -> B -> A: unproven too.
+  db.open().prepare('UPDATE itsas SET parent_id = ? WHERE id = ?').run(b.id, a.id);
+  assert.equal(itsa.provenChain(itsa.find(b.id)), null);
+});

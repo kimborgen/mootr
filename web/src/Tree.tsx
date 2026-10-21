@@ -25,8 +25,9 @@ import { isClosed, openItsa, StatusGlyph, statusLabel, toneVar, waitsOnHuman } f
 import { FieldValue } from './work/field-columns'
 import { useWorkExtras } from './work/data'
 import { liveCols, pickable, rowValues, setSidebarCols, toggleCol, useSidebarCols, MAX_SIDEBAR_COLS } from './sidebar-cols'
+import type { Field } from './itsa/fields'
 import type { Badge } from './system/model'
-import type { Agent } from './types'
+import type { Agent, AgentCost, CostMode } from './types'
 
 // One picked column's value in a row, or a dash so the columns line up down the tree. A built-in
 // column is a glyph (Tests, a failure count) and a field a few characters; the full value is the tooltip.
@@ -38,7 +39,45 @@ function ColCell({ b, label }: { b: Badge | null; label: string }) {
   return <span className="wcol g" role="cell" title={b.title} aria-label={b.title}><span className={('badge ' + b.tone).trim()}>{fails ?? <Icon name={mark} size="xs" />}</span></span>
 }
 
-export function Tree() {
+// An agent's context bar: its tokens against the limit where the daemon compacts it. The sidebar's row and the Agents table share it.
+export function CtxBar({ a, enforce }: { a: Agent; enforce: number }) {
+  const pct = Math.min(100, ((a.context_tokens ?? 0) / enforce) * 100)
+  return <span className={`ctxbar l${a.context_level ?? 0}`} title={`Context ${k(a.context_tokens)} of ${k(enforce)} before forced compaction`}><i style={{ width: pct + '%' }} /></span>
+}
+
+// An agent's cost: its own, and its tree's when it has children, with the spend hairline scaled to `max`.
+// The sidebar's row and the Agents table share it.
+export function CostCell({ id, cost, parent, max, costMode }: { id: string; cost: AgentCost; parent: boolean; max: number; costMode: CostMode }) {
+  const text = costTitle(cost, parent)
+  return <span className="cost" data-cost={id} title={text} aria-label={text}>
+    <span className="cost-row"><span className="cost-own">{costCell(cost.own, cost.mode)}</span>{parent ? <span className="cost-tree">/{costCell(cost.tree, cost.mode)}</span> : null}</span>
+    <SpendBar value={cost.own[costMode]} max={max} />
+  </span>
+}
+
+// The columns menu of a row's Work columns, from the sidebar's header button and the Agents page's (S-1428).
+function colsItems(fields: Field[], picked: string[]): MenuItem[] {
+  return [{ section: 'Work columns on each row' }, ...pickable(fields).map((c) => {
+    const at = picked.indexOf(c.id)
+    return { label: c.label, checked: at >= 0, checkbox: true, glyph: <span className="colnum">{at >= 0 ? at + 1 : ''}</span>,
+      disabled: at < 0 && picked.length >= MAX_SIDEBAR_COLS, action: () => setSidebarCols(toggleCol(picked, c.id)) }
+  }), 'sep', { label: 'None: show the role', checked: picked.length === 0, action: () => setSidebarCols([]) }]
+}
+
+// The tree's two header buttons: the columns on each row, and what the marks mean. The sidebar's tree header and the
+// Agents page's header both show them.
+export function TreeTools() {
+  const extras = useWorkExtras()
+  const picked = liveCols(useSidebarCols(), extras.fields)
+  const fields = extras.fields ?? []
+  return <>
+    <button className="icon-btn help" data-cols-open title="Work columns on each row" aria-label="Work columns on each row" aria-haspopup="menu"
+      onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); showMenu(r.left, r.bottom + 4, colsItems(fields, picked), e.currentTarget) }}><Icon name="columns-2" size="xs" /></button>
+    <button className="icon-btn" data-legend-open title="What the marks mean" aria-label="What the marks mean" aria-haspopup="dialog" onClick={(e) => showLegend(e.currentTarget)}><Icon name="circle-help" size="xs" /></button>
+  </>
+}
+
+export function Tree({ page }: { page?: boolean }) {
   const d = useData()
   const ui = useUi()
   useShell()
@@ -90,7 +129,6 @@ export function Tree() {
     // is stronger while one of them waits on the human.
     const ownSig = owns.map((x) => `${x.id}:${x.status}`).sort().join(',')
     const fk = a.id + (dup ? ':dup' : '')
-    const pct = Math.min(100, ((a.context_tokens ?? 0) / thresholds.enforceTokens) * 100)
     rows.push(
       <TreeRow key={path + '/' + a.id} event={ownSig} waiting={owns.some(waitsOnHuman)}
         className={`node ${a.id === cw ? 'sel' : ''} ${live(a) ? '' : 'off'} ${dup ? 'dup' : ''} ${ui.treeFocus === fk ? 'focus' : ''}`} data-id={a.id} data-dup={dup ? 1 : ''} data-parent={path && path !== 'stopped' ? path.slice(path.lastIndexOf('/') + 1) : undefined} data-sec={path === 'stopped' ? 'stopped' : undefined}
@@ -115,11 +153,8 @@ export function Tree() {
           {a.permission_mode === 'bypass' ? <span style={{ color: 'var(--st-errored)' }} title="Bypass permissions"><Icon name="zap" size="xs" /></span> : null}
           {a.machine !== machine ? <span className="muted" title={`Runs on ${a.machine}`}><Icon name="server" size="xs" /></span> : null}
           {a.in_itsa === false ? <span className="muted" title="Not in any ITSA"><Icon name="list-checks" size="xs" /></span> : null}
-          {live(a) ? <span className={`ctxbar l${a.context_level ?? 0}`} title={`Context ${k(a.context_tokens)} of ${k(thresholds.enforceTokens)} before forced compaction`}><i style={{ width: pct + '%' }} /></span> : null}
-          {a.cost ? <span className="cost" data-cost={a.id} title={costText} aria-label={costText}>
-            <span className="cost-row"><span className="cost-own">{costCell(a.cost.own, a.cost.mode)}</span>{kids.length ? <span className="cost-tree">/{costCell(a.cost.tree, a.cost.mode)}</span> : null}</span>
-            <SpendBar value={a.cost.own[costMode]} max={maxOwn} />
-          </span> : null}
+          {live(a) ? <CtxBar a={a} enforce={thresholds.enforceTokens} /> : null}
+          {a.cost ? <CostCell id={a.id} cost={a.cost} parent={kids.length > 0} max={maxOwn} costMode={costMode} /> : null}
           <span className="chip mcode" style={{ '--mc': m.color } as CSSProperties}>{modelCode(a.model)}</span>
         </span>
         <span className="hover-actions">
@@ -137,18 +172,6 @@ export function Tree() {
   const byIdIn = (id: string) => agents.find((a) => a.id === id)
   const click = (e: React.MouseEvent) => {
     const t = e.target as HTMLElement
-    const help = t.closest<HTMLElement>('[data-legend-open]')
-    if (help) return showLegend(help)
-    const colsBtn = t.closest<HTMLElement>('[data-cols-open]')
-    if (colsBtn) {
-      const r = colsBtn.getBoundingClientRect()
-      const items: MenuItem[] = [{ section: 'Work columns on each row' }, ...pickable(fields).map((c) => {
-        const at = picked.indexOf(c.id)
-        return { label: c.label, checked: at >= 0, checkbox: true, glyph: <span className="colnum">{at >= 0 ? at + 1 : ''}</span>,
-          disabled: at < 0 && picked.length >= MAX_SIDEBAR_COLS, action: () => setSidebarCols(toggleCol(picked, c.id)) }
-      }), 'sep', { label: 'None: show the role', checked: picked.length === 0, action: () => setSidebarCols([]) }]
-      return showMenu(r.left, r.bottom + 4, items, colsBtn)
-    }
     if (t.closest('[data-section="stopped"]')) return setUi({ stoppedOpen: !getUi().stoppedOpen })
     const add = t.closest<HTMLElement>('[data-add]')
     if (add) { const r = add.getBoundingClientRect(); return spawnMenu(r.left, r.bottom + 4, { parent: add.dataset.add }, add) }
@@ -187,12 +210,10 @@ export function Tree() {
     else if (cur && e.key === 'ArrowLeft' && cur.querySelector('[data-chev="1"]') && !ui.collapsed[cur.dataset.id!]) fold(cur.dataset.id!, true)
   }
   return (
-    <div className="tree" id="tree" data-cols={picked.length || undefined} ref={el} tabIndex={0} role="tree" onClick={click} {...lp} onKeyDown={(e) => { lp.onKeyDown(e); if (!e.defaultPrevented) key(e) }}
+    <div className="tree" id={page ? undefined : 'tree'} data-cols={picked.length || undefined} ref={el} tabIndex={0} role="tree" onClick={click} {...lp} onKeyDown={(e) => { lp.onKeyDown(e); if (!e.defaultPrevented) key(e) }}
       onDragStart={(e) => { const node = (e.target as Element).closest<HTMLElement>('.node[data-id]'); if (!node) return; e.dataTransfer.setData('text/stam-agent', node.dataset.id!); e.dataTransfer.effectAllowed = 'copy' }}>
       {d.error && !agents.length ? <div className="pad muted">{d.error}{location.protocol === 'https:' ? '' : <>. Open the link that <code>stam web</code> prints.</>}</div> : <>
-        <div className="section eyebrow" data-section="running">Agents <span className="count">{running.length}</span>
-          <button className="icon-btn help" data-cols-open title="Work columns on each row" aria-label="Work columns on each row" aria-haspopup="menu"><Icon name="columns-2" size="xs" /></button>
-          <button className="icon-btn" data-legend-open title="What the marks mean" aria-label="What the marks mean" aria-haspopup="dialog"><Icon name="circle-help" size="xs" /></button></div>
+        {page ? null : <div className="section eyebrow" data-section="running">Agents <span className="count">{running.length}</span><TreeTools /></div>}
         {runningRows}
         {!running.length ? (d.loaded.agents ? <div className="pad muted">No agents running. Press <Icon name="plus" size="xs" /> to add one.</div> : <Loading />) : null}
         {rings.length ? <>

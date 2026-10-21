@@ -10,9 +10,10 @@ import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { startFakeCodex } from './fake-codex/server.mjs';
-import { tempHome } from './tmphome.mjs';
+import { tempHome, tempDirOutside } from './tmphome.mjs';
 
-process.env.STAM_HOME = tempHome('stam-nr-');process.env.STAM_TMUX_SOCKET = `codex-no-rollout-${process.pid}`;
+// The fake app-server listens on a socket under this home: a short folder, outside a deep TMPDIR (test/run.sh's).
+process.env.STAM_HOME = tempHome('stam-nr-', tempDirOutside);process.env.STAM_TMUX_SOCKET = `codex-no-rollout-${process.pid}`;
 for (const k of ['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT']) delete process.env[k];
 
 let db, codex, config, fake;

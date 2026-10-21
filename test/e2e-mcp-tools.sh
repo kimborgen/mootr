@@ -4,7 +4,7 @@
 # `current` moves to B and the daemon restarts from it, as a deploy does. Without restarting
 # the agent, its `stam mcp` (still running from A) loads B's tools and sends
 # tools/list_changed, the fake lists again, and the agent gets one notice naming the tool,
-# on which it calls it. Releases are copies of this checkout under the test's home.
+# on which it calls it. Releases are copies of this checkout under the test's home; B's probe tool comes from the test-home fault switch.
 set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 cat >"$TEST_TMP/script.json" <<'EOF'
@@ -27,8 +27,10 @@ mkdir -p "$R/A"
 (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard | xargs -0 tar -cf - 2>/dev/null) | tar -xf - -C "$R/A"
 cp -a "$ROOT/node_modules" "$R/A/"
 cp -a "$R/A" "$R/B"
-sed -i "s|^export const tools: Tool\[\] = \[|&\n  { name: 'release_b_probe', group: 'agents', description: 'Added in release B.', inputSchema: { type: 'object', properties: {} }, run: async () => text('probe ok') },|" "$R/B/src/mcp.ts"
-grep -q release_b_probe "$R/B/src/mcp.ts" || fail "release B has no probe tool"
+# Release B lists a probe tool, A does not: the test-home fault switch (src/test-faults.ts), keyed by release id, not a patch of B's source.
+cat >"$STAM_HOME/test-faults.json" <<'JSON'
+{ "extra_tools": { "B": [ { "name": "release_b_probe", "group": "agents", "description": "Added in release B.", "text": "probe ok" } ] } }
+JSON
 ln -s A "$R/current"
 STAM="$R/current/bin/stam"
 daemon_up main

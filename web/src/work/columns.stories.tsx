@@ -55,6 +55,8 @@ export const stories: Story[] = [{
   ],
   states: [
     { name: 'Every column, one ITSA', render: () => list(WORK_COLUMNS.map((c) => [c.label + (c.hideBelow ? ` (from ${c.hideBelow} px)` : ''), c.render(row(FULL), cx)])) },
+    // The same column's card form, inline, on an issue card (card-items.tsx, S-2777): the status line is `.bc-status`, the health a dot, and each link kind an icon, as the board draws them.
+    { name: 'Card form of each column, inline', render: () => list(WORK_COLUMNS.map((c) => [c.label, c.card.inline({ it: FULL, agent: null, cx }) ?? <span className="muted">(empty)</span>])) },
     { name: 'Agents: none, one, two, and four', render: () => (
       <Row items={[
         { label: 'none', node: <Agents row={row(FULL)} list={[]} /> },

@@ -193,12 +193,14 @@ export function AccountCard({ a, allocations, split = false }: { a: Account; all
   const hasBudget = a.budget != null
   const none = !windows.length && a.balance == null && !hasBudget && paidMonth == null
   const spent = a.budget?.spent ?? paidMonth
+  // A pay-per-token provider other than OpenRouter: no balance to read, its spend is priced from tokens.
+  const perToken = a.provider && a.provider !== AGENTS_ACCOUNT ? a.provider : null
   const bpct = a.budget && spent != null && a.budget.usd > 0 ? Math.min(100, (spent / a.budget.usd) * 100) : null
   return (
     <div className="lim-card">
       <div className="lim-head">
         <b>{a.account}</b>
-        <span className="muted">{HARNESS[a.match.harness] ?? a.match.harness}{!windows.length && (a.balance != null || hasBudget) ? ' · paid' : ''}</span>
+        <span className="muted">{HARNESS[a.match.harness] ?? a.match.harness}{perToken ? ` · ${perToken}, per token` : !windows.length && (a.balance != null || hasBudget) ? ' · paid' : ''}</span>
         <span className="spacer" />
         {a.stale ? <span className="badge warn" title="The last reading is old; treat it as unknown">stale, {minutes(a)} old</span> : a.age_ms != null ? <span className="muted lim-age">read {minutes(a)} ago</span> : null}
       </div>
@@ -212,7 +214,7 @@ export function AccountCard({ a, allocations, split = false }: { a: Account; all
       {a.balance == null && paidMonth != null ? (
         <div className="lim-win">
           <div className="lim-row"><span className="lim-name">Paid</span><span className="lim-pct">{paidText(a.paid.month, paidMonth)}</span><span className="lim-note">this month</span></div>
-          {!windows.length ? <div className="lim-sub">No limit or credit reading for this account.</div> : null}
+          {perToken ? <div className="lim-sub">Priced from its tokens at the registry's prices.</div> : !windows.length ? <div className="lim-sub">No limit or credit reading for this account.</div> : null}
         </div>
       ) : null}
       {a.budget && !split ? (

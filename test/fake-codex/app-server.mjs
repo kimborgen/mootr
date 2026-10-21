@@ -41,7 +41,8 @@ if (listen === 'stdio://') {
       'thread/name/set': () => ({}),
       'thread/loaded/list': () => ({ data: thread ? [thread] : [] }),
       'thread/read': (p) => ({ thread: { id: p.threadId, turns: turns ?? seeded() } }),
-      'thread/resume': (p) => ({ thread: { id: p.threadId, status: { type: 'idle' } }, model: 'gpt-6.1-sol', approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' } }),
+      // A resumed thread is loaded, as in the real app-server, so a restarted fake finds it.
+      'thread/resume': (p) => { thread = p.threadId; return { thread: { id: p.threadId, status: { type: 'idle' } }, model: 'gpt-6.1-sol', approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' } }; },
       'turn/start': (p) => {
         const id = `turn-fake-${++n}`;
         const text = (p.input ?? []).map((x) => x.text ?? '').join('');
@@ -51,9 +52,11 @@ if (listen === 'stdio://') {
         ];
         (turns ??= seeded()).push({ id, status: 'completed', startedAt: Date.now(), items });
         setTimeout(() => {
+          fake.notify('thread/status/changed', { threadId: p.threadId, status: { type: 'active', activeFlags: [] } });
           fake.notify('turn/started', { threadId: p.threadId, turn: { id, items: [], status: 'inProgress' } });
           for (const item of items) fake.notify('item/completed', { threadId: p.threadId, turnId: id, item });
           fake.notify('turn/completed', { threadId: p.threadId, turn: { id, items: [], status: 'completed' } });
+          fake.notify('thread/status/changed', { threadId: p.threadId, status: { type: 'idle' } });
         }, 50);
         return { turn: { id, items: [], status: 'inProgress' } };
       },

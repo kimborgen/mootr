@@ -102,7 +102,9 @@ function Cells({ row, cols, cx, onMenu, fold }: { row: WorkRow; cols: WorkColumn
           : <span className="w-rowtoggle spacer" aria-hidden="true" />}
         <div className="w-foldbody">{c.render(row, cx)}</div>
         {fold.hidden ? <span className="count w-hidden" data-hidden title={`${fold.hidden} hidden`} aria-label={`${fold.hidden} hidden`}>{fold.hidden}</span> : null}
-      </div> : c.render(row, cx)}</div>))}</>
+      </div> : c.render(row, cx)}
+      {/* In the agent grouping a participant row says so; an owner row is the default and says nothing (S-2735). */}
+      {c.id === 'work' && row.role === 'participant' ? <span className="w-role" data-role={row.role}>{row.role}</span> : null}</div>))}</>
 }
 
 // The pinned group: its head carries a warning mark and, when it has rows, the count; its rows
@@ -133,7 +135,7 @@ function TotalsRow({ cols, totals }: { cols: WorkColumn[]; totals: ReturnType<ty
 }
 
 export function WorkView({ viewKey }: { viewKey: string }) {
-  const { itsas, itsaStatuses, itsaError, queue, agents, loaded: storeLoaded } = useData()
+  const { itsas, itsaStatuses, itsaError, queue, agents, loaded: storeLoaded, costMode } = useData()
   useShell()
   const waiting = useWaiting()
   const phone = isPhone()
@@ -482,7 +484,7 @@ export function WorkView({ viewKey }: { viewKey: string }) {
         const dir = rank >= 0 ? layout.sort![rank].dir : undefined
         return <div key={c.id} role="columnheader" data-col={c.id} tabIndex={movable || menu ? 0 : undefined}
           aria-sort={dir === 'asc' ? 'ascending' : dir === 'desc' ? 'descending' : undefined}
-          className={`w-cell wc-${c.id}` + (c.align === 'end' ? ' end' : '') + (movable ? ' movable' : '') + (sortable ? ' sortable' : '')} title={c.hint}
+          className={`w-cell wc-${c.id}` + (c.align === 'end' ? ' end' : '') + (movable ? ' movable' : '') + (sortable ? ' sortable' : '')} title={typeof c.hint === 'function' ? c.hint(costMode) : c.hint}
           onPointerDown={(e) => { moved.current = false; reorderStart(e, c.id) }}
           onClick={(e) => { if (moved.current) { moved.current = false; return } if (sortable) sortBy(c.id, e.shiftKey) }}
           onKeyDown={(e) => {

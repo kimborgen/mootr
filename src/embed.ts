@@ -1,5 +1,5 @@
 // Text embeddings for search by meaning (S-141). Two providers, picked by `search.embedder`
-// in settings (STAM_EMBEDDER=stub overrides it, for tests): `stub`, a deterministic hashed
+// in settings (STAM_EMBEDDER=stub or off overrides it, for tests and the deploy check): `stub`, a deterministic hashed
 // bag of stems with no model, and `local`, a small transformers.js model that runs in a worker
 // thread. The model is not a repo dependency: it is installed once under STAM_HOME/embedder
 // (`stam embedder install`, or the daemon in the background on first need), and loaded lazily.
@@ -13,6 +13,7 @@ import { STAM_HOME } from './config.ts';
 import * as db from './db.ts';
 import { plainText } from './search.ts';
 import { settings } from './settings.ts';
+import { envVar } from './env.ts';
 
 export const LOCAL_MODEL = 'Xenova/all-MiniLM-L6-v2';
 export const LOCAL_VERSION = '4.3.1';
@@ -23,7 +24,7 @@ const STUB_DIM = 256;
 const DIR = join(STAM_HOME, 'embedder');
 // The worker is terminated after this long without a request, so the model's memory is freed.
 // STAM_EMBED_IDLE_MS shortens it, for measuring the unload.
-const IDLE_MS = Number(process.env.STAM_EMBED_IDLE_MS) || 10 * 60_000;
+const IDLE_MS = Number(envVar('EMBED_IDLE_MS')) || 10 * 60_000;
 export const BATCH = 16;
 // Texts sent to the worker per model run. onnxruntime keeps the largest activation buffers it
 // has needed for the life of the worker (a CPU memory arena), so a run of 16 padded texts holds
@@ -36,7 +37,8 @@ export const CHARS = 2000;
 export type Provider = 'local' | 'stub' | 'off';
 
 export function provider(): Provider {
-  if (process.env.STAM_EMBEDDER === 'stub') return 'stub';
+  if (envVar('EMBEDDER') === 'stub') return 'stub';
+  if (envVar('EMBEDDER') === 'off') return 'off';
   return settings().search.embedder === 'off' ? 'off' : 'local';
 }
 
@@ -224,7 +226,7 @@ function ensureInstallTimer(): void {
 function getWorker(): Worker {
   if (worker) return worker;
   // STAM_EMBED_WORKER replaces the worker file, for a test that must not load the model.
-  worker = new Worker(process.env.STAM_EMBED_WORKER ?? new URL('./embed-worker.ts', import.meta.url), { workerData: { entry: entryPath() } });
+  worker = new Worker(envVar('EMBED_WORKER') ?? new URL('./embed-worker.ts', import.meta.url), { workerData: { entry: entryPath() } });
   worker.on('message', ({ id, vecs, error }: { id: number; vecs?: Float32Array[]; error?: string }) => {
     const p = pending.get(id);
     if (!p) return;

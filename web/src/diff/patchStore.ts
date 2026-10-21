@@ -7,6 +7,12 @@ export const PATCH_MAX = 20
 export const PATCH_MAX_BYTES = 256 * 1024
 const INDEX = 'stam/diff-patches'
 const textKey = (hash: string) => `stam/diff-patch/${hash}`
+const baseKey = (hash: string) => `stam/diff-base/${hash}`
+
+// Where a patch's paths sit on the writer's machine (S-2104): their host and cwd, so the viewer can read their checkout
+// and match the patch against it. Optional by design — a patch stored before this existed has none, and the repo
+// checkouts answer for it instead — and kept beside the text, under the same hash, so the LRU drops the two together.
+export interface PatchBase { host: string; cwd: string }
 
 // FNV-1a, 64-bit, over the text's code units: 16 hex digits, so the same content is always the same key, and two
 // different patches sharing one — one silently shown under the other's tab — takes a 64-bit collision rather than the
@@ -37,7 +43,10 @@ const writeIndex = (hashes: string[]): boolean => {
 const writeText = (hash: string, text: string): boolean => {
   try { localStorage.setItem(textKey(hash), text); return true } catch { return false }
 }
-const removeText = (hash: string): void => { try { localStorage.removeItem(textKey(hash)) } catch { /* private window */ } }
+// Both keys of an entry: its text and its writer's base (S-2104).
+const removeEntry = (hash: string): void => {
+  try { localStorage.removeItem(textKey(hash)); localStorage.removeItem(baseKey(hash)) } catch { /* private window */ }
+}
 
 // The index gains one name (16 hex digits and its JSON punctuation) when a patch is stored; freeing more than that and
 // still failing to write the index means the size of the index is not what is in the way.
@@ -55,7 +64,7 @@ const NAME_BYTES = 24
 // new name may outrun its text by a moment, which costs nothing — a name with no text is a tab that has gone — and
 // every exit path leaves the index naming what is really stored. An entry already in the index whose text has gone (a
 // failed write, another tab clearing this storage) is swept here too.
-export function storePatch(text: string): string | null {
+export function storePatch(text: string, base?: PatchBase | null): string | null {
   const size = patchBytes(text)
   if (size > PATCH_MAX_BYTES) return null
   const hash = patchHash(text)
@@ -73,7 +82,7 @@ export function storePatch(text: string): string | null {
     const h = drop.length ? drop.shift() : keep.pop()
     if (h === undefined) return false
     freed += patchBytes(readPatch(h) ?? '')
-    removeText(h)
+    removeEntry(h)
     return true
   }
   // Name exactly what is still stored, so an eviction never leaves the index pointing at a text that has gone. Best
@@ -92,12 +101,27 @@ export function storePatch(text: string): string | null {
     }
     if (writeText(hash, text)) {
       // The count's own victims go whether or not the text needed room: the index above no longer names them.
-      for (const h of drop) removeText(h)
+      for (const h of drop) removeEntry(h)
+      // The writer's base (S-2104) goes in after the text, best effort: a patch that loses it is still matched against a
+      // repo checkout, so a refusal here costs a read, never the patch.
+      if (base) writeBase(hash, base)
       return hash
     }
     // The text did not fit: drop our own oldest while what they freed is still less than this patch.
     if (freed >= size || !evict()) return giveUp()
   }
+}
+
+const writeBase = (hash: string, base: PatchBase): void => {
+  try { localStorage.setItem(baseKey(hash), JSON.stringify(base)) } catch { /* private window, or no room */ }
+}
+
+// The writer's base kept for `hash`, or null when the entry has none.
+export function readBase(hash: string): PatchBase | null {
+  try {
+    const v = JSON.parse(localStorage.getItem(baseKey(hash)) || 'null') as Partial<PatchBase> | null
+    return v && typeof v.host === 'string' && typeof v.cwd === 'string' ? { host: v.host, cwd: v.cwd } : null
+  } catch { return null }
 }
 
 // The text stored under `hash`, or null when the entry is gone (evicted, or another browser). Passive: it never changes

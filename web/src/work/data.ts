@@ -6,6 +6,7 @@ import { useEffect, useSyncExternalStore } from 'react'
 import { api } from '../api'
 import { fetchFields, type Field } from '../itsa/fields'
 import { getData, useData } from '../store'
+import type { CostMode } from '../types'
 import { githubSubject, type IssueCosts, type ItsaActivityReport, type WatchState } from './links'
 
 export interface WorkExtras { costs: IssueCosts | null; activity: ItsaActivityReport | null; watch: Record<string, WatchState>
@@ -26,6 +27,8 @@ const listeners = new Set<() => void>()
 const notify = () => { for (const fn of listeners) fn() }
 let last = 0
 let inFlight = false
+// The cost unit the costs were fetched in: a unit changed in Settings (even while Work is unmounted) makes them stale.
+let costsFor: CostMode | null = null
 
 export const getWorkExtras = () => extras
 
@@ -70,16 +73,19 @@ export async function refreshFields(): Promise<void> {
   }
 }
 
-// Fetches the endpoints now, unless a fetch ran within the last minute. The watch answers
-// per subject; one that fails is left out.
+// Fetches the endpoints now, unless a fetch ran within the last minute and the costs are in the
+// Settings unit. The watch answers per subject; one that fails is left out.
 export async function refreshWorkExtras(force = false) {
-  if (inFlight || (!force && Date.now() - last < REFRESH_MS)) return
+  const stale = costsFor !== getData().costMode
+  if (inFlight || (!force && !stale && Date.now() - last < REFRESH_MS)) return
   // A hidden tab reads nothing (S-2094); it catches up when it shows again.
   if (!force && typeof document !== 'undefined' && document.hidden) return
   inFlight = true
   last = Date.now()
   try {
+    const unit = getData().costMode
     const costs = await api<IssueCosts>('GET', '/api/usage/issues?days=7').catch(() => null)
+    costsFor = unit
     const due = force || Date.now() - lastActivity >= ACTIVITY_MS
     if (due) lastActivity = Date.now()
     const activity = due ? await api<ItsaActivityReport>('GET', '/api/activity?by=itsa').catch(() => extras.activity) : extras.activity
@@ -94,14 +100,18 @@ export async function refreshWorkExtras(force = false) {
     notify()
   } finally {
     inFlight = false
+    // A unit switched while this fetch ran was missed by it: fetch again.
+    if (costsFor !== getData().costMode) void refreshWorkExtras(true)
   }
 }
 
 // The extras, and a refresh started when the page mounts and whenever the ITSAs change.
 export function useWorkExtras(): WorkExtras {
-  const { itsas } = useData()
+  const { itsas, costMode } = useData()
   const snap = useSyncExternalStore((fn) => { listeners.add(fn); return () => listeners.delete(fn) }, getWorkExtras)
   useEffect(() => { void refreshWorkExtras(); void refreshFields() }, [itsas])
+  // A new cost unit in Settings refetches the costs now, so the Work page shows it without a reload (S-333).
+  useEffect(() => { void refreshWorkExtras() }, [costMode])
   useEffect(() => {
     const t = setInterval(() => { void refreshWorkExtras(); void refreshFields() }, REFRESH_MS)
     const shown = () => { if (!document.hidden) void refreshWorkExtras() }

@@ -5,17 +5,19 @@
 // activity change, which only showed after the live restart, and rolled back.
 //   node scripts/canary.mjs SHA     exit 0 pass, 1 regression, 2 the canary couldn't run (never a pass)
 // The steps: build SHA's release without switching to it (`stam deploy --build-only`), copy stam.db in one step
-// (VACUUM INTO, which a busy live daemon can't restart), then for the baseline (releases/current) and the new release in
-// turn: copy that into a fresh STAM_HOME, start `daemon run` from the release at nice priority on a fresh port and tmux
-// socket, wait for its health, and for STAM_CANARY_LOAD_S replay hook and statusline POSTs (activity changes) on the
-// db's newest agents while /api/health and /api/health/db are timed and the event-loop stalls the daemon reports
-// (src/stall.ts) are collected. Stalls before the load starts are the daemon's startup, reported apart, not judged.
+// (VACUUM INTO, which a busy live daemon can't restart), then for the baseline (releases/current) and the new release
+// side by side (S-2076): copy that into a fresh STAM_HOME each, start `daemon run` from each release at nice priority on
+// a fresh port and tmux socket, wait for both healths, and for STAM_CANARY_LOAD_S replay hook and statusline POSTs
+// (activity changes) on the db's newest agents to each while /api/health and /api/health/db are timed, the two daemons
+// probed in turn, and the event-loop stalls each daemon reports (src/stall.ts) are collected. Both run at once so a change
+// in the machine's load can't fail the release that ran later (66cf0a33). Stalls before the load starts are the daemon's
+// startup, reported apart, not judged.
 // The new release regresses when a probe fails, a probe is slow more often than the baseline's (capped) plus a margin
 // (the larger of STAM_CANARY_SLOW_MARGIN and STAM_CANARY_SLOW_FRACTION of the samples, S-1862), its stalls under load
 // add up to more than STAM_CANARY_STALL_FACTOR times the baseline's plus STAM_CANARY_STALL_MARGIN_MS, or more load
 // requests fail. A run with no load (no agents, or a baseline that took none) can't judge, so it is an error. A release
-// that started and fails is run once more on the same build and db copy, against the same baseline, and fails only when
-// the rerun fails too (STAM_CANARY_RERUN=0 turns that off): one noisy run under machine load doesn't hold a deploy.
+// that started and fails is run once more on the same build and db copy, beside a rerun of the baseline, and fails only
+// when the rerun fails too (STAM_CANARY_RERUN=0 turns that off): one noisy run under machine load doesn't hold a deploy.
 // Isolation of the canary's daemons: each gets its own HOME and STAM_HOME, a stub folder first on PATH whose tmux,
 // harnesses, gh, ssh, systemctl, sudo, tailscale and pkill only record the call and fail, the same stubs as its harness
 // binaries, no peers, no model or GitHub endpoints, and no push devices or peer outbox in its db copy. The build step is
@@ -25,9 +27,11 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { getPriority, homedir, hostname, tmpdir } from 'node:os';
+import { getPriority, homedir, hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { checkRoots, real } from './check-homes.mjs';
+import { envVar } from '../src/env.ts';
+import { isMain } from './main-guard.mjs';
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 // A URL nothing listens on: the daemon's model, GitHub, voice and registry calls fail at once.
@@ -40,48 +44,49 @@ const STRIPPED = ['push_devices', 'peer_outbox'];
 
 // Everything the canary reads from the environment. Durations are milliseconds unless the name says seconds.
 export function canaryConfig(env = process.env) {
-  const home = env.STAM_HOME || join(homedir(), '.local/share/stam');
+  const home = envVar('HOME', env) || join(homedir(), '.local/share/stam');
   return {
     home,
     db: join(home, 'stam.db'),
     releases: join(home, 'releases'),
-    repo: env.STAM_DEPLOY_REPO || join(homedir(), 'projects/stam2'),
+    repo: envVar('DEPLOY_REPO', env) || join(homedir(), 'projects/stam2'),
     // The run folders, on disk: /tmp may be RAM (tmpfs), and the db is copied into it.
-    tmp: env.STAM_CANARY_TMP || join(homedir(), '.cache', 'stam-canary'),
+    tmp: envVar('CANARY_TMP', env) || join(homedir(), '.cache', 'stam-canary'),
     // The machine the scratch daemon calls itself: the db's own, so its agents are local to it as they are live.
-    machine: env.STAM_CANARY_MACHINE || hostname(),
+    machine: envVar('CANARY_MACHINE', env) || hostname(),
     // Prints the new release's folder on its last line.
-    build: env.STAM_CANARY_BUILD_CMD ?? 'bin/stam deploy --build-only "$CANARY_SHA"',
-    buildMs: Number(env.STAM_CANARY_BUILD_TIMEOUT_S ?? 360) * 1000,
-    backupMs: Number(env.STAM_CANARY_BACKUP_TIMEOUT_S ?? 120) * 1000,
+    build: envVar('CANARY_BUILD_CMD', env) ?? 'bin/stam deploy --build-only "$CANARY_SHA"',
+    buildMs: Number(envVar('CANARY_BUILD_TIMEOUT_S', env) ?? 360) * 1000,
+    backupMs: Number(envVar('CANARY_BACKUP_TIMEOUT_S', env) ?? 120) * 1000,
     // The baseline's release folder; releases/current when unset.
-    baseline: env.STAM_CANARY_BASELINE || undefined,
+    baseline: envVar('CANARY_BASELINE', env) || undefined,
     // The build and the daemons run at this nice; the caller's own priority is left alone.
-    nice: Number(env.STAM_CANARY_NICE ?? 10),
-    startMs: Number(env.STAM_CANARY_START_S ?? 90) * 1000,
-    loadMs: Number(env.STAM_CANARY_LOAD_S ?? 60) * 1000,
-    sampleMs: Number(env.STAM_CANARY_SAMPLE_MS ?? 2000),
+    nice: Number(envVar('CANARY_NICE', env) ?? 10),
+    startMs: Number(envVar('CANARY_START_S', env) ?? 90) * 1000,
+    loadMs: Number(envVar('CANARY_LOAD_S', env) ?? 60) * 1000,
+    sampleMs: Number(envVar('CANARY_SAMPLE_MS', env) ?? 2000),
     // The pause between two load requests.
-    paceMs: Number(env.STAM_CANARY_PACE_MS ?? 25),
-    agents: Number(env.STAM_CANARY_AGENTS ?? 24),
-    slowS: Number(env.STAM_DEPLOY_SLOW_S ?? 0.1),
-    stallMarginMs: Number(env.STAM_CANARY_STALL_MARGIN_MS ?? 1000),
-    stallFactor: Number(env.STAM_CANARY_STALL_FACTOR ?? 2),
+    paceMs: Number(envVar('CANARY_PACE_MS', env) ?? 25),
+    agents: Number(envVar('CANARY_AGENTS', env) ?? 24),
+    slowS: Number(envVar('DEPLOY_SLOW_S', env) ?? 0.1),
+    stallMarginMs: Number(envVar('CANARY_STALL_MARGIN_MS', env) ?? 1000),
+    stallFactor: Number(envVar('CANARY_STALL_FACTOR', env) ?? 2),
     // How many slow samples a probe may have beyond the baseline's (S-1862): at least slowMargin (the watcher's 2), and
     // slowFraction of the samples when that is more, so 3 of 30 over 0.1 s on a busy machine isn't a regression.
-    slowMargin: Number(env.STAM_CANARY_SLOW_MARGIN ?? 2),
-    slowFraction: Number(env.STAM_CANARY_SLOW_FRACTION ?? 0.15),
+    slowMargin: Number(envVar('CANARY_SLOW_MARGIN', env) ?? 2),
+    slowFraction: Number(envVar('CANARY_SLOW_FRACTION', env) ?? 0.15),
     // A failing release runs once more before the canary says fail (S-1862).
-    rerun: env.STAM_CANARY_RERUN !== '0',
+    rerun: envVar('CANARY_RERUN', env) !== '0',
   };
 }
 
 // The longest one request to the scratch daemon waits (call's fetch timeout).
 const CALL_MS = 5000;
-// The longest a canary runs: the build, the db copy, then the daemons (the baseline, the new release, and its rerun,
-// S-1862), each with its start, its load, and its stop (15 s), plus the requests that can start just before a deadline
-// and run their whole timeout: the last start check, the last load request, the last two probes, and the final stall read.
-export const canaryWorst = (c) => c.buildMs + c.backupMs + (c.rerun ? 3 : 2) * (c.startMs + c.loadMs + 15_000 + 5 * CALL_MS);
+// The longest a canary runs: the build, the db copy, then the daemons, the baseline beside the new release, and the pair
+// again for its rerun (S-1862, S-2076). Each pair has its start, its load, and its stop (15 s), plus the requests that
+// can start just before a deadline and run their whole timeout: the last start check, the last load request, the last
+// round's four probes, and the final stall read.
+export const canaryWorst = (c) => c.buildMs + c.backupMs + (c.rerun ? 2 : 1) * (c.startMs + c.loadMs + 15_000 + 7 * CALL_MS);
 
 // What a SIGTERM must clean up: the process groups still running (daemons, builds, copies) and the run folders.
 const live = { groups: new Set(), dirs: new Set() };
@@ -115,9 +120,9 @@ function checkLeftovers(pgid) {
       // After the command name: state, ppid, pgrp.
       if (Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[2]) !== pgid) continue;
       const env = Object.fromEntries(readFileSync(`/proc/${name}/environ`, 'utf8').split('\0').map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]));
-      if (/^stam-check-[\w-]+$/.test(env.STAM_TMUX_SOCKET ?? '')) sockets.add(env.STAM_TMUX_SOCKET);
-      const home = env.STAM_HOME ?? '';
-      if (dirname(home) === tmpdir() && basename(home).startsWith('stam-check-')) homes.add(home);
+      if (/^stam-check-[\w-]+$/.test(envVar('TMUX_SOCKET', env) ?? '')) sockets.add(envVar('TMUX_SOCKET', env));
+      const home = envVar('HOME', env) ?? '';
+      if (checkRoots().includes(real(dirname(home))) && basename(home).startsWith('stam-check-')) homes.add(home);
     } catch {}
   }
   return { sockets, homes };
@@ -297,9 +302,10 @@ const TURN = [
 
 const stallStats = () => ({ count: 0, totalMs: 0, maxMs: 0, labels: {} });
 
-// Runs one release on its own copy of the db, under the load, and returns what it measured. `started` is false
-// when it never answered its health; `log` then holds the end of its daemon log.
-export async function runRelease(c, release, name, run, dbFile, agents, signal) {
+// Starts one release on its own copy of the db and waits for its health. Returns the run: `res`, what it measured
+// (`started` is false when it never answered its health; `log` then holds the end of its daemon log), and what
+// measure() and stopRelease() need.
+async function startRelease(c, release, name, run, dbFile, signal) {
   const home = join(run, name);
   mkdirSync(home, { recursive: true });
   copyFileSync(dbFile, join(home, 'stam.db'));
@@ -338,85 +344,110 @@ export async function runRelease(c, release, name, run, dbFile, agents, signal) 
   closeSync(fd);
   live.groups.add(child.pid);
   writeFileSync(join(home, 'daemon.pid'), String(child.pid));
-  let exited = false;
-  child.on('exit', () => (exited = true));
-  const res = { name, release: basename(release), started: false, startMs: 0, nice: undefined, health: probeStats(), db: probeStats(), load: { ok: 0, failed: 0 }, startup: stallStats(), stalls: stallStats(), stubCalls: [], log: '' };
-  // Stalls the daemon logged before the load started are its startup's; the rest are the load's.
-  let loadFrom = Infinity;
-  const seen = new Set();
-  const noteStalls = (body) => {
-    for (const s of Array.isArray(body.stalls) ? body.stalls : []) {
-      const key = `${s.at}|${s.ms}|${s.label}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const into = Date.parse(s.at) >= loadFrom ? res.stalls : res.startup;
-      into.count++;
-      into.totalMs += s.ms;
-      into.maxMs = Math.max(into.maxMs, s.ms);
-      into.labels[s.label] = (into.labels[s.label] ?? 0) + s.ms;
+  const r = { res: { name, release: basename(release), started: false, startMs: 0, nice: undefined, health: probeStats(), db: probeStats(), load: { ok: 0, failed: 0 }, startup: stallStats(), stalls: stallStats(), stubCalls: [], log: '' }, home, port, token: undefined, child, logFile, stubLog, exited: false, loadFrom: Infinity, seen: new Set() };
+  child.on('exit', () => (r.exited = true));
+  r.stopped = () => r.exited || signal?.aborted;
+  r.tail = () => (existsSync(logFile) ? readFileSync(logFile, 'utf8').split('\n').slice(-15).join('\n') : '');
+  const until = Date.now() + c.startMs;
+  while (!r.stopped() && Date.now() < until) {
+    try {
+      r.token ??= readFileSync(join(home, 'token'), 'utf8').trim();
+    } catch {}
+    if (r.token) {
+      const h = await call(port, r.token, 'GET', '/api/health');
+      if (h.ok && h.body.ok === true) {
+        r.res.started = true;
+        noteStalls(r, h.body);
+        break;
+      }
+    }
+    await sleep(250);
+  }
+  r.res.startMs = Math.round(performance.now() - t0);
+  try {
+    r.res.nice = getPriority(child.pid);
+  } catch {}
+  if (!r.res.started) r.res.log = r.tail();
+  return r;
+}
+
+// Stalls the daemon logged before the load started are its startup's; the rest are the load's.
+function noteStalls(r, body) {
+  for (const s of Array.isArray(body.stalls) ? body.stalls : []) {
+    const key = `${s.at}|${s.ms}|${s.label}`;
+    if (r.seen.has(key)) continue;
+    r.seen.add(key);
+    const into = Date.parse(s.at) >= r.loadFrom ? r.res.stalls : r.res.startup;
+    into.count++;
+    into.totalMs += s.ms;
+    into.maxMs = Math.max(into.maxMs, s.ms);
+    into.labels[s.label] = (into.labels[s.label] ?? 0) + s.ms;
+  }
+}
+
+// Puts the load on every started run at once for loadMs, each on its own agents loop, and probes them in turn (S-2076):
+// each round probes every run once, the first run of a round rotating, so a change in the machine's load lands on the
+// baseline and the new release alike, not on whichever ran later.
+async function measure(c, runs, agents) {
+  const loadFrom = Date.now();
+  const end = loadFrom + c.loadMs;
+  for (const r of runs) r.loadFrom = loadFrom;
+  const load = async (r) => {
+    for (let i = 0; Date.now() < end && !r.stopped(); i++) {
+      if (!agents.length) return;
+      const agent = agents[Math.floor(i / TURN.length) % agents.length];
+      const [kind, body] = TURN[i % TURN.length];
+      const res = await call(r.port, r.token, 'POST', `/api/${kind}/claude/${encodeURIComponent(agent)}`, body);
+      r.res.load[res.ok ? 'ok' : 'failed']++;
+      if (c.paceMs > 0) await sleep(c.paceMs);
     }
   };
-  const stopped = () => exited || signal?.aborted;
+  const probe = async () => {
+    for (let round = 0; Date.now() < end && runs.some((r) => !r.stopped()); round++) {
+      for (let k = 0; k < runs.length && Date.now() < end; k++) {
+        const r = runs[(round + k) % runs.length];
+        if (r.stopped()) continue;
+        const h = await call(r.port, r.token, 'GET', '/api/health');
+        noteProbe(r.res.health, h, c, (b) => b.ok === true);
+        noteStalls(r, h.body);
+        noteProbe(r.res.db, await call(r.port, r.token, 'GET', '/api/health/db'), c, (b) => b.ok === true);
+      }
+      await sleep(Math.max(0, Math.min(c.sampleMs, end - Date.now())));
+    }
+  };
+  await Promise.all([...runs.map(load), probe()]);
+  // The stalls of the load's last moments.
+  await Promise.all(runs.map(async (r) => r.stopped() || noteStalls(r, (await call(r.port, r.token, 'GET', '/api/health')).body)));
+  for (const r of runs) {
+    if (r.exited) r.res.log = r.tail();
+    r.res.exited = r.exited;
+  }
+}
+
+async function stopRelease(r) {
+  killGroup(r.child.pid, 'SIGTERM');
+  for (let i = 0; i < 50 && !r.exited; i++) await sleep(100);
+  killGroup(r.child.pid, 'SIGKILL');
+  live.groups.delete(r.child.pid);
+  r.res.stubCalls = existsSync(r.stubLog) ? readFileSync(r.stubLog, 'utf8').split('\n').filter(Boolean) : [];
+  // Each copy goes as soon as its run ends, so the disk holds at most the db copy and two daemons' copies.
+  rmSync(r.home, { recursive: true, force: true });
+}
+
+// Runs releases side by side, each on its own copy of the db and under its own load, and returns what each measured,
+// in order: `list` is [release, name] pairs. They start together; the load runs only when all of them answered.
+export async function runReleases(c, list, run, dbFile, agents, signal) {
+  const runs = [];
   try {
-    let token;
-    const until = Date.now() + c.startMs;
-    while (!stopped() && Date.now() < until) {
-      try {
-        token ??= readFileSync(join(home, 'token'), 'utf8').trim();
-      } catch {}
-      if (token) {
-        const h = await call(port, token, 'GET', '/api/health');
-        if (h.ok && h.body.ok === true) {
-          res.started = true;
-          noteStalls(h.body);
-          break;
-        }
-      }
-      await sleep(250);
-    }
-    res.startMs = Math.round(performance.now() - t0);
-    try {
-      res.nice = getPriority(child.pid);
-    } catch {}
-    if (!res.started) {
-      res.log = existsSync(logFile) ? readFileSync(logFile, 'utf8').split('\n').slice(-15).join('\n') : '';
-      return res;
-    }
-    loadFrom = Date.now();
-    const end = loadFrom + c.loadMs;
-    const load = async () => {
-      for (let i = 0; Date.now() < end && !stopped(); i++) {
-        if (!agents.length) return;
-        const agent = agents[Math.floor(i / TURN.length) % agents.length];
-        const [kind, body] = TURN[i % TURN.length];
-        const r = await call(port, token, 'POST', `/api/${kind}/claude/${encodeURIComponent(agent)}`, body);
-        res.load[r.ok ? 'ok' : 'failed']++;
-        if (c.paceMs > 0) await sleep(c.paceMs);
-      }
-    };
-    const probe = async () => {
-      while (Date.now() < end && !stopped()) {
-        const h = await call(port, token, 'GET', '/api/health');
-        noteProbe(res.health, h, c, (b) => b.ok === true);
-        noteStalls(h.body);
-        noteProbe(res.db, await call(port, token, 'GET', '/api/health/db'), c, (b) => b.ok === true);
-        await sleep(Math.max(0, Math.min(c.sampleMs, end - Date.now())));
-      }
-    };
-    await Promise.all([load(), probe()]);
-    // The stalls of the load's last moments.
-    if (!stopped()) noteStalls((await call(port, token, 'GET', '/api/health')).body);
-    if (exited) res.log = existsSync(logFile) ? readFileSync(logFile, 'utf8').split('\n').slice(-15).join('\n') : '';
-    res.exited = exited;
-    return res;
+    // Both starts settle before anything is judged, so a start that throws still leaves the other to be stopped.
+    const started = await Promise.allSettled(list.map(([release, name]) => startRelease(c, release, name, run, dbFile, signal)));
+    for (const s of started) if (s.status === 'fulfilled') runs.push(s.value);
+    const failed = started.find((s) => s.status === 'rejected');
+    if (failed) throw failed.reason;
+    if (runs.every((r) => r.res.started && !r.stopped())) await measure(c, runs, agents);
+    return runs.map((r) => r.res);
   } finally {
-    killGroup(child.pid, 'SIGTERM');
-    for (let i = 0; i < 50 && !exited; i++) await sleep(100);
-    killGroup(child.pid, 'SIGKILL');
-    live.groups.delete(child.pid);
-    res.stubCalls = existsSync(stubLog) ? readFileSync(stubLog, 'utf8').split('\n').filter(Boolean) : [];
-    // Each copy goes as soon as its run ends, so the disk holds at most the db copy and one daemon's copy.
-    rmSync(home, { recursive: true, force: true });
+    await Promise.all(runs.map(stopRelease));
   }
 }
 
@@ -427,6 +458,13 @@ function noteProbe(stats, r, c, up) {
   if (!r.ok || !up(r.body)) return void stats.failed++;
   if (r.secs > c.slowS) stats.slow++;
   stats.maxS = Math.max(stats.maxS, r.secs);
+}
+
+// Why a baseline can't be compared with, as reasons; undefined when it can (S-2151: a fresh baseline meets the same bar).
+function unfitBaseline(r, what) {
+  if (!r.started) return [`${what} ${r.release} never answered /api/health`, r.log];
+  if (r.exited) return [`${what} ${r.release} exited during the load, so nothing can be compared`, r.log];
+  if (r.load.ok === 0) return [`${what} ${r.release} took no load (${r.load.failed} requests failed), so nothing can be compared`];
 }
 
 // Why the new release regresses against the baseline, one reason each; empty when it doesn't.
@@ -485,9 +523,9 @@ async function canaryRun(c, sha, log, signal, box) {
   const canceled = () => ({ verdict: 'error', reasons: ['canceled'] });
   try {
     if (signal?.aborted) return canceled();
-    const need = 3 * dbBytes(c);
+    const need = 4 * dbBytes(c);
     const { bavail, bsize } = statfsSync(c.tmp);
-    if (bavail * bsize < need) return { verdict: 'error', reasons: [`${c.tmp} has ${Math.round((bavail * bsize) / 1e6)} MB free; the db copy and a daemon's copy need ${Math.round(need / 1e6)} MB`] };
+    if (bavail * bsize < need) return { verdict: 'error', reasons: [`${c.tmp} has ${Math.round((bavail * bsize) / 1e6)} MB free; the db copy and two daemons' copies need ${Math.round(need / 1e6)} MB`] };
     let baseline;
     try {
       baseline = c.baseline ?? realpathSync(join(c.releases, 'current'));
@@ -513,25 +551,35 @@ async function canaryRun(c, sha, log, signal, box) {
     if (!agents.length) return { verdict: 'error', reasons: ['the db has no Claude Code agents to put load on'] };
     log(`canary: ${agents.length} agents under load, ${Math.round(c.loadMs / 1000)} s per release`);
     if (signal?.aborted) return canceled();
-    const base = await runRelease(c, baseline, 'baseline', run, dbFile, agents, signal);
+    // The baseline and the new release run side by side, probed in turn (S-2076), so both see the same machine load.
+    let [base, fresh] = await runReleases(c, [[baseline, 'baseline'], [next, 'new']], run, dbFile, agents, signal);
     if (signal?.aborted) return canceled();
     log(`canary: ${describeRun(base)}`);
-    if (!base.started) return { verdict: 'error', reasons: [`the baseline ${base.release} never answered /api/health`, base.log], base };
-    if (base.exited) return { verdict: 'error', reasons: [`the baseline ${base.release} exited during the load, so nothing can be compared`, base.log], base };
-    if (base.load.ok === 0) return { verdict: 'error', reasons: [`the baseline ${base.release} took no load (${base.load.failed} requests failed), so nothing can be compared`], base };
-    let fresh = await runRelease(c, next, 'new', run, dbFile, agents, signal);
-    if (signal?.aborted) return canceled();
     log(`canary: ${describeRun(fresh)}`);
+    if (!base.started) return { verdict: 'error', reasons: [`the baseline ${base.release} never answered /api/health`, base.log], base };
+    // A new release that never answered got no load, nor did the baseline beside it: judge fails it as it is.
+    if (fresh.started) {
+      if (base.exited) return { verdict: 'error', reasons: [`the baseline ${base.release} exited during the load, so nothing can be compared`, base.log], base };
+      if (base.load.ok === 0) return { verdict: 'error', reasons: [`the baseline ${base.release} took no load (${base.load.failed} requests failed), so nothing can be compared`], base };
+    }
     let reasons = judge(c, base, fresh);
-    // A release that ran and failed runs again on the same build and copy, against the same baseline (S-1862): it fails
-    // only when the rerun does too. One that never started or exited fails at once.
+    // A release that ran and failed runs again on the same build and copy (S-1862), and so does the baseline, side by
+    // side again (S-2076): it fails only when the rerun does too. The rerun is judged against the baseline sampled beside
+    // it, not the first one, so load that rose since the first run doesn't read as a regression (S-2151). A rerun
+    // baseline that can't be compared with is an error, never a pass. One that never started or exited fails at once.
     let first;
     if (reasons.length && c.rerun && fresh.started && !fresh.exited) {
       first = reasons;
-      log(`canary: the new release failed (${reasons.join('; ')}); running it once more`);
-      fresh = await runRelease(c, next, 'rerun', run, dbFile, agents, signal);
+      log(`canary: the new release failed (${reasons.join('; ')}); running it and the baseline once more`);
+      const [base2, rerun] = await runReleases(c, [[baseline, 'baseline-rerun'], [next, 'rerun']], run, dbFile, agents, signal);
       if (signal?.aborted) return canceled();
-      log(`canary: ${describeRun(fresh)}`);
+      log(`canary: ${describeRun(base2)}`);
+      log(`canary: ${describeRun(rerun)}`);
+      const freshUnfit = unfitBaseline(base2, 'the fresh baseline');
+      if (freshUnfit) return { verdict: 'error', reasons: freshUnfit, base: base2, next: rerun, first };
+      log(`canary: the rerun is judged against the fresh baseline ${base2.release}, not the first one ${base.release}`);
+      base = base2;
+      fresh = rerun;
       reasons = judge(c, base, fresh);
       if (reasons.length) reasons = [...reasons, `the first run failed too: ${first.join('; ')}`];
     }
@@ -580,4 +628,4 @@ async function cli(args) {
   process.exit(EXIT[r.verdict]);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) cli(process.argv.slice(2));
+if (isMain(import.meta.url)) cli(process.argv.slice(2));

@@ -12,10 +12,11 @@ import * as db from './db.ts';
 import * as itsa from './itsa.ts';
 import { STAM_HOME } from './config.ts';
 import { threadResolved } from './thread-resolved.ts';
+import { envVar } from './env.ts';
 
 const HUMAN = 'human';
 // Tests set STAM_AUTO_ARCHIVE_QUIET_MS, so they wait on state, not on minutes.
-export const QUIET_MS = Number(process.env.STAM_AUTO_ARCHIVE_QUIET_MS ?? 3 * 60_000);
+export const QUIET_MS = Number(envVar('AUTO_ARCHIVE_QUIET_MS') ?? 3 * 60_000);
 export const EVERY_MS = 10 * 60_000;
 
 export interface Sources {
@@ -140,7 +141,7 @@ function genericWaitHolds(t: WaitThread, agent: string): boolean {
 // The repair (#185) is done once `REPAIR_KEY` is set; the full pass is done once `FULL_KEY` is (S-637).
 const REPAIR_KEY = 'autoArchive.fullPassDone2';
 const FULL_KEY = 'autoArchive.fullPassDone3';
-export const FULL_DELAY_MS = Number(process.env.STAM_AUTO_ARCHIVE_FULL_DELAY_MS ?? 60_000);
+export const FULL_DELAY_MS = Number(envVar('AUTO_ARCHIVE_FULL_DELAY_MS') ?? 60_000);
 function kvSet(key: string): boolean {
   return !!db.open().prepare('SELECT 1 AS n FROM kv WHERE key = ?').get(key);
 }

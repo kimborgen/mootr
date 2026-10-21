@@ -8,7 +8,7 @@ import { openAssistant, openType, openWorld, setDefaultView } from '../actions'
 import { Glyph } from '../Glyph'
 import { settingShown } from '../nav-history'
 import { NotifySettings } from './NotifySettings'
-import { isLocalSession, logout } from '../local-login'
+import { isLocalSession, loginOffered, logout, startLogin } from '../local-login'
 import { ClassifySince } from './ClassifySince'
 import { openUsageActivity } from './UsageView'
 import { SkillsSettings } from './SkillsSettings'
@@ -17,6 +17,8 @@ import { RetroSettings, type Retro } from './RetroSettings'
 import { TreeCheckSettings, type TreeCheck } from './TreeCheckSettings'
 import { StepsSettings } from './StepsSettings'
 import { TinyModelsSettings } from './TinyModelsSettings'
+import { CacheSettings } from './CacheSettings'
+import { ProvidersSettings } from './ProvidersSettings'
 import { Icon } from '../Icon'
 import { readOnly, scopeOf, staleNote, writesToHome, type SettingsReply, type SettingsScope } from '../settings-scope'
 import { buildPatch, revertKeys, saveNote, savePeer, settleSave, type PatchReply, type SaveOutcome } from '../settings-save'
@@ -29,6 +31,7 @@ import { TypesSettings, type AgentType } from './TypesSettings'
 import { PermissionModesSettings } from './PermissionModesSettings'
 import { McpSettings, type Servers } from './McpSettings'
 import { ModelPicker } from './ModelPicker'
+import { CosSettings } from './CosSettings'
 import { WorkColumnsSettings } from './WorkColumnsSettings'
 import { MotionSettings } from './MotionSettings'
 import { SidebarSettings } from './SidebarSettings'
@@ -48,15 +51,31 @@ interface Template { name: string; text: string; overridden?: boolean }
 interface Assistant { agent?: Agent | null }
 interface Loaded { s: Obj; reg: Registry; asst: Assistant; templates: Template[]; scope: SettingsScope }
 
-const getPath = (o: unknown, path: string): Json | undefined => path.split('.').reduce<unknown>((x, key) => (x as Record<string, unknown> | undefined)?.[key], o) as Json | undefined
-function setPath(o: Obj, path: string, v: Json) {
-  const ks = path.split('.')
+// A path is dotted, or a key array when a key may hold a dot (a provider id such as `azure.eu`).
+type Path = string | string[]
+const keysOf = (path: Path) => (typeof path === 'string' ? path.split('.') : [...path])
+const getPath = (o: unknown, path: Path): Json | undefined => keysOf(path).reduce<unknown>((x, key) => (x as Record<string, unknown> | undefined)?.[key], o) as Json | undefined
+function setPath(o: Obj, path: Path, v: Json) {
+  const ks = keysOf(path)
   const last = ks.pop()!
   let x = o as Record<string, Json>
   for (const key of ks) x = (x[key] ??= {}) as Record<string, Json>
   x[last] = v
 }
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+
+// The cost account a provider's budget sits on (S-2119): one that names the provider or matches only its
+// OpenCode models, else `covered` by an account whose match takes in every `ID/` model, else a new name.
+type Accounts = Record<string, { provider?: string; match?: { harness?: string; model?: string } } | undefined>
+function providerAccount(accounts: Accounts, id: string): { name: string; covered?: boolean } {
+  const own = Object.keys(accounts).find((n) => accounts[n]?.provider === id || (accounts[n]?.match?.harness === 'opencode' && (accounts[n]?.match?.model ?? '').startsWith(`${id}/`)))
+  if (own) return { name: own }
+  const cover = Object.keys(accounts).find((n) => accounts[n]?.match?.harness === 'opencode' && `${id}/`.startsWith(accounts[n]?.match?.model ?? ''))
+  if (cover) return { name: cover, covered: true }
+  let name = id
+  for (let i = 1; Object.hasOwn(accounts, name); i++) name = i === 1 ? `${id}-provider` : `${id}-provider-${i}`
+  return { name }
+}
 
 // The models that may not mail the human by default: the same as DEFAULTS.humanMail.models in src/settings.ts.
 const MAIL_MODEL_DEFAULTS: Record<string, boolean> = { 'claude-haiku-5-5': false }
@@ -280,6 +299,8 @@ export function ConfigView() {
   const { s, reg, asst, scope } = loaded
   const ro = (path: string) => readOnly(path, scope)
   const why = `Shared by all machines; change it on ${scope.home}.`
+  // An agent type's instructions live on the home (S-417): a peer with no home page can't change them here.
+  const tplLocked = !!curTpl?.name.startsWith('type-') && scope.peer && !scope.homeWeb
   const update = (patch: Partial<Loaded>) => setLoaded({ ...loaded, ...patch })
   // A shared write (agent types, the instructions for all agents): on a peer that knows the home's page
   // it goes there (S-414), then this daemon fetches the home's new copy so what it shows next is current.
@@ -353,7 +374,7 @@ export function ConfigView() {
     rerender()
     return outcome
   }
-  function set(path: string, v: Json) {
+  function set(path: Path, v: Json) {
     setPath(s, path, v)
     // A harness change keeps the model and effort valid for it.
     if (path === 'assistant.harness') {
@@ -384,12 +405,13 @@ export function ConfigView() {
     )
   }
   // `pct` shows a 0-1 setting as a percentage; `dflt` is what an unset setting shows.
-  const num = (path: string, { k = false, pct = false, unit = '', min = 0, max, step = 1, nullable = false, dflt }: { k?: boolean; pct?: boolean; unit?: string; min?: number; max?: number; step?: number; nullable?: boolean; dflt?: number } = {}) => {
+  // `empty` is what a nullable setting's empty field says it means.
+  const num = (path: string, { k = false, pct = false, unit = '', min = 0, max, step = 1, nullable = false, dflt, empty = 'Off' }: { k?: boolean; pct?: boolean; unit?: string; min?: number; max?: number; step?: number; nullable?: boolean; dflt?: number; empty?: string } = {}) => {
     const v = getPath(s, path) ?? dflt
     const shown = v == null ? '' : k ? (v as number) / 1000 : pct ? Math.round((v as number) * 100) : (v as number)
     return (
       <span className="num">
-        <ChangeInput type="number" min={min} max={max} step={step} disabled={ro(path)} title={ro(path) ? why : undefined} data-kind={k ? 'k' : pct ? 'pct' : 'num'} data-null={nullable ? '1' : undefined} defaultValue={shown} placeholder={nullable ? 'Off' : undefined} onValue={onInput(path)} />
+        <ChangeInput type="number" min={min} max={max} step={step} disabled={ro(path)} title={ro(path) ? why : undefined} data-kind={k ? 'k' : pct ? 'pct' : 'num'} data-null={nullable ? '1' : undefined} defaultValue={shown} placeholder={nullable ? empty : undefined} onValue={onInput(path)} />
         {unit ? <span className="unit">{unit}</span> : null}
       </span>
     )
@@ -454,14 +476,18 @@ export function ConfigView() {
     if (!curTpl) return
     if (reset && !confirm(`Reset ${curTpl.name} to the shipped default?`)) return
     try {
-      const t = await api<Template>('POST', '/api/templates/' + curTpl.name, reset ? { reset: true } : { text: drafts.tpl ?? '' })
+      const body = reset ? { reset: true } : { text: drafts.tpl ?? '' }
+      // A type's instructions are the home's: on a peer that knows the home's page, the write goes there (S-417).
+      const t = curTpl.name.startsWith('type-')
+        ? await sharedWrite<Template>('POST', '/api/templates/' + curTpl.name, body)
+        : await api<Template>('POST', '/api/templates/' + curTpl.name, body)
       update({ templates: loaded!.templates.map((x) => (x.name === t.name ? t : x)) })
       rerender()
       msg('tpl', reset ? 'Reset.' : 'Saved.')
     } catch (err) { msg('tpl', (err as Error).message) }
   }
-  const draft = (key: string, cls?: string) => (
-    <textarea className={cls} spellCheck={false} value={drafts[key] ?? ''} onChange={(e) => setDrafts((x) => ({ ...x, [key]: e.target.value }))} />
+  const draft = (key: string, cls?: string, locked = false) => (
+    <textarea className={cls} spellCheck={false} readOnly={locked} value={drafts[key] ?? ''} onChange={(e) => setDrafts((x) => ({ ...x, [key]: e.target.value }))} />
   )
   const textCard = (key: string, cls?: string) => (
     <div className="set-card text-card">{draft(key, cls)}<div className="row"><button className="btn primary" onClick={() => void saveFile(key)}>Save</button><span className="muted msg">{msgs[key]}</span></div></div>
@@ -609,6 +635,14 @@ export function ConfigView() {
             { v: 'everything', label: 'Everything', icon: <Icon name="mail" />, desc: 'Follow all work: starts, key decisions, problems, and finishes, each in its own thread.' },
           ], undefined, 'When to mail you')}</div>
           <div className="set-card">
+            <h3>Mail opens in</h3>
+            <p className="muted">Where Mail opens on the desktop. The phone's Mail view is the same either way.</p>
+            {cards('mailOpens', [
+              { v: 'inbox', label: 'Inbox page', icon: <Icon name="inbox" />, desc: 'A page of its own: the list, and the thread you open beside it.' },
+              { v: 'sidebar', label: 'Sidebar', icon: <Icon name="mail" />, desc: "The sidebar's Mail tab. A thread opens in the main area, as it did before the Inbox page." },
+            ], 'inbox', 'Mail opens in')}
+          </div>
+          <div className="set-card">
             <h3>Who may mail you</h3>
             <p className="muted">Which models' agents may mail you or move an ITSA to a status that waits on you. An agent that may not hands it to its parent, which decides what reaches you.</p>
             {Object.keys(reg.models).sort().map((m) => {
@@ -651,13 +685,34 @@ export function ConfigView() {
       )
     },
     notifications: () => <Ro off={ro('notify')} why={why}><NotifySettings /></Ro>,
-    chief: () => <TreeCheckSettings treeCheck={(s.treeCheck ?? {}) as TreeCheck} disabled={ro('treeCheck')} why={why} set={set} onEdit={() => setSec('messages')} />,
+    chief() {
+      const cos = agents.find((a) => a.chief_of_staff && (a.lifecycle === 'active' || a.lifecycle === 'paused')) ?? agents.find((a) => a.chief_of_staff)
+      const changed = async () => {
+        await refresh()
+        update({ reg: await api<Registry>('GET', '/api/registry') })
+      }
+      const openInstructions = () => {
+        setSec('instructions')
+        try { localStorage.setItem(SECTION_KEY, 'instructions') } catch {}
+        setTpl('chief-of-staff')
+        setEdit(true)
+        rerender()
+      }
+      return (
+        <>
+          <CosSettings cos={cos} type={reg.types?.cos} reg={reg} write={sharedWrite} readOnly={ro('agentTypes')} why={why} onChanged={changed} openInstructions={openInstructions} />
+          <h3 className="type-group">Tree check</h3>
+          <TreeCheckSettings treeCheck={(s.treeCheck ?? {}) as TreeCheck} disabled={ro('treeCheck')} why={why} set={set} onEdit={() => setSec('messages')} />
+        </>
+      )
+    },
     retros: () => <RetroSettings retro={(s.retro ?? {}) as Retro} lastDigest={(base.current.retro as Obj | undefined)?.lastDigest as string | null | undefined} disabled={ro('retro')} why={why} set={set} />,
     skills: () => <SkillsSettings />,
     motion: () => <Ro off={ro('motion')} why={why}><MotionSettings /></Ro>,
     sidebar: () => <SidebarSettings />,
     tools: () => <ToolsSettings onAddStep={(t) => { setStepTool(t); setSec('steps') }} />,
     tiny: () => <TinyModelsSettings s={s} disabled={ro('tiny')} why={why} set={set} />,
+    providers: () => <ProvidersSettings s={s} disabled={ro('providers')} why={why} set={set} />,
     steps: () => <Ro off={ro('decisions')} why={why}><StepsSettings key={stepTool ?? ''} addTool={stepTool} /></Ro>,
     context() {
       const c = (s.context ?? {}) as Record<string, number>
@@ -683,11 +738,12 @@ export function ConfigView() {
         </>
       )
     },
+    cache: () => <CacheSettings s={s} edit={{ choice: (path, options) => seg(path, options), num: (path, o) => num(path, { ...o, empty: 'Default' }) }} />,
     spend() {
       const pcts = ((getPath(s, 'cost.subscriptionWarnPercent') ?? []) as number[])
       const mode = getPath(s, 'cost.display.mode') ?? 'api'
       const prices = (getPath(s, 'cost.display.prices') ?? {}) as Record<string, number>
-      const accounts = (getPath(s, 'cost.accounts') ?? {}) as Record<string, { subscription?: boolean }>
+      const accounts = (getPath(s, 'cost.accounts') ?? {}) as Record<string, { subscription?: boolean; provider?: string; match?: { harness?: string; model?: string } }>
       const subAccounts = Object.keys(accounts).filter((name) => accounts[name]?.subscription !== false && name !== 'openrouter-system')
       // An empty price removes the account's price; a finite positive number sets it. Anything else
       // resets the field to the stored price and saves nothing.
@@ -719,8 +775,10 @@ export function ConfigView() {
       // One OpenRouter budget (cost.accounts.<name>.budget): an amount and a period. The system account is
       // created on first use with a match no agent has (docs/cost-policy.md); clearing the amount removes
       // only the budget.
-      const budgetRow = (name: string, label: string, help: string) => {
-        const path = `cost.accounts.${name}.budget`
+      // `fresh` is a new account's fields. Paths are key arrays: an account name may hold a dot.
+      const budgetRow = (name: string, label: string, help: string, fresh?: Obj) => {
+        const acct = ['cost', 'accounts', name]
+        const path = [...acct, 'budget']
         const b = getPath(s, path) as { usd?: number; per?: string } | null | undefined
         const per = b?.per ?? 'month'
         const setAmount = (el: HTMLInputElement) => {
@@ -728,7 +786,8 @@ export function ConfigView() {
           if (el.value === '' || n === 0) { set(path, null); return }
           if (!(Number.isFinite(n) && n > 0)) { el.value = b?.usd == null ? '' : String(b.usd); return }
           // The daemon refuses an account with no match: the agents account matches OpenRouter models on OpenCode.
-          if (getPath(s, `cost.accounts.${name}.match`) == null) setPath(s, `cost.accounts.${name}.match`, name === 'openrouter-system' ? { harness: 'stam' } : { harness: 'opencode', model: 'openrouter/' })
+          if (getPath(s, [...acct, 'match']) == null)
+            for (const [k, v] of Object.entries(fresh ?? { match: name === 'openrouter-system' ? { harness: 'stam' } : { harness: 'opencode', model: 'openrouter/' } })) setPath(s, [...acct, k], v)
           set(path, { ...b, usd: n, per } as Json)
         }
         return (
@@ -745,6 +804,18 @@ export function ConfigView() {
           </Row>
         )
       }
+      // Each configured provider but OpenRouter (S-2119) is billed per token: its budget sits on the account
+      // that names it, or that matches only its OpenCode models (`ID/...`). With none, an account of its own
+      // is created on first use, named `ID` (or `ID-provider`, `ID-provider-2`, ... when that name is taken),
+      // with that match. An account whose match already covers every `ID/` model (a harness-only `opencode`
+      // one) bills those agents, and the daemon refuses a second match over them: the row names it instead.
+      const providerIds = Object.keys((getPath(s, 'providers') ?? {}) as Obj).filter((id) => id !== 'openrouter')
+      const providerBudget = (id: string) => {
+        const help = `What agents on ${id}'s models may spend. ${id} has no balance to read, so spend is their tokens at the registry's prices. Empty: no cap.`
+        const own = providerAccount(accounts, id)
+        if (own.covered) return <Row label={id} help={help}><span className="muted">Billed to the account {own.name}, whose OpenCode match covers {id}'s models.</span></Row>
+        return budgetRow(own.name, id, help, { match: { harness: 'opencode', model: `${id}/` }, provider: id })
+      }
       return (
         <>
           <p className="lede">mootr mails you when spending crosses these lines, and gives your cost instructions to the agents who manage cost.</p>
@@ -754,6 +825,16 @@ export function ConfigView() {
             {budgetRow('openrouter-system', 'System', 'What mootr\'s own model calls may spend: the mail gate, summaries, titles and decisions. Spent: those calls pause. Empty: no cap.')}
             <Row label="System reserve" help="Credit kept for mootr's own calls when there is no system budget: new OpenRouter agents are held while the credit is at or below it.">{num('cost.openrouterSystemReserveUsd', { unit: 'USD', dflt: 1, step: 0.5 })}</Row>
           </div>
+          {providerIds.length ? (
+            <>
+              <h3>Provider budgets</h3>
+              <div className="set-card">
+                {providerIds.map((id) => (
+                  <Fragment key={id}>{providerBudget(id)}</Fragment>
+                ))}
+              </div>
+            </>
+          ) : null}
           <div className="set-card">
             <div className="set-field">
               <b>Cost instructions</b>
@@ -863,11 +944,11 @@ export function ConfigView() {
             <div className="set-card text-card tpl-editor">
               <button className="btn tpl-back" onClick={() => setEdit(false)}><Icon name="arrow-left" size="xs" />Instructions</button>
               <div className="tpl-head"><b>{group.label} · {item.name}.md</b><span className="muted">Applies to {who}. Edits apply at the agent's next start.</span></div>
-              {draft(key)}
+              {draft(key, undefined, !item.file && tplLocked)}
               <div className="row">
-                <button className="btn primary" onClick={() => void (item.file ? saveFile('instructions') : saveTpl(false))}>Save</button>
-                {!item.file ? <button className="btn" hidden={!curTpl?.overridden} onClick={() => void saveTpl(true)}>Reset to default</button> : null}
-                <span className="muted msg">{msgs[key]}</span>
+                <button className="btn primary" disabled={!item.file && tplLocked} onClick={() => void (item.file ? saveFile('instructions') : saveTpl(false))}>Save</button>
+                {!item.file ? <button className="btn" hidden={!curTpl?.overridden} disabled={tplLocked} onClick={() => void saveTpl(true)}>Reset to default</button> : null}
+                <span className="muted msg">{msgs[key] || (!item.file && tplLocked ? why : '')}</span>
               </div>
             </div>
           </div>
@@ -917,6 +998,7 @@ export function ConfigView() {
         {/* The stories page: every component with its states and rules (docs/stories.md). */}
         <a className="item" href="/stories" target="_blank" rel="noreferrer"><Icon name="layout-list" /><span>Component stories</span></a>
         {isLocalSession() && <button className="item" id="local-logout" onClick={() => void logout(token)}><Icon name="log-out" /><span>Log out</span></button>}
+        {!isLocalSession() && loginOffered() && <button className="item" id="local-login-start" onClick={startLogin}><Icon name="lock" /><span>Log in</span></button>}
         <div className="saved muted" aria-live="polite">{status}</div>
       </nav>
       <div className="settings-body">

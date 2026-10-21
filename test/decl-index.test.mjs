@@ -5,9 +5,9 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tempHome, tempDir } from './tmphome.mjs';
+import { tempHome, tempDir, tempDirOutside } from './tmphome.mjs';
 
 const stamHome = tempHome('stam-decl-');
 const root = tempDir('stam-decl-repos-');
@@ -192,7 +192,10 @@ test('a file in a checkout: its HEAD is indexed; a file outside every checkout i
   assert.equal(r.body.sha, sha2);
   assert.equal(r.body.from, 'src/app.ts');
   assert.equal(r.body.matches[0].path, 'src/app.ts');
-  const out = tempDir('stam-decl-out-');
+  // decl.ts takes the first folder above a file that holds a `.git`, and a file under test/run.sh's TMPDIR finds this
+  // worktree's own checkout. The no-repo file goes in /tmp instead. On storage /tmp/.git exists as an empty folder, so
+  // there the answer is no-repo because git rev-parse fails in it, not because no `.git` exists above.
+  const out = tempDirOutside('stam-decl-out-');
   writeFileSync(join(out, 'x.ts'), 'const a = 1\n');
   assert.deepEqual((await ask({ host: 'decl-test-box', file: join(out, 'x.ts'), name: 'a' })).body, { state: 'no-repo' });
   assert.deepEqual((await ask({ host: 'other-box', file: join(checkout, 'src/app.ts'), name: 'a' })).body, { state: 'no-repo' }, 'another host');
@@ -248,4 +251,40 @@ test("a file in a linked worktree is indexed at the worktree's HEAD; another rep
   assert.equal(main.body.sha, sha2);
   // A worktree of a repo that is not in itsa.repos matches nothing.
   assert.deepEqual((await ask({ host: 'decl-test-box', file: join(otherWt, 'src/o.ts'), name: 'OTHER' })).body, { state: 'no-repo' });
+});
+
+test('a symlink into a worktree is looked up at the file it points to, in the worktree', async () => {
+  // A link in the main checkout to a worktree file, and a link in the worktree to a checkout file: each resolves
+  // to the real file, so its HEAD and its root are the ones of the file's own checkout.
+  const intoWt = join(checkout, 'src', 'into-wt.ts');
+  const outOfWt = join(wt, 'src', 'out-of-wt.ts');
+  symlinkSync(join(wt, 'src', 'wt.ts'), intoWt);
+  symlinkSync(join(checkout, 'src', 'app.ts'), outOfWt);
+  const into = await ask({ host: 'decl-test-box', file: intoWt, name: 'fromWorktree' });
+  assert.equal(into.body.state, 'ready');
+  assert.equal(into.body.sha, wtSha, 'the link resolves into the worktree, so the worktree HEAD');
+  assert.equal(into.body.from, 'src/wt.ts');
+  assert.equal(into.body.root.path, realpathSync(wt));
+  const out = await ask({ host: 'decl-test-box', file: outOfWt, name: 'added' });
+  assert.equal(out.body.state, 'ready');
+  assert.equal(out.body.sha, sha2, 'the link resolves into the checkout, so the checkout HEAD');
+  assert.equal(out.body.from, 'src/app.ts');
+  assert.equal(out.body.root.path, realpathSync(checkout));
+});
+
+test("a worktree nested inside the checkout is indexed at its own HEAD, not the checkout's", async () => {
+  // A linked worktree under the checkout's folder (as a `.claude/worktrees` one is): its path is under the
+  // checkout's root, but its nearest `.git` is its own, so its declarations come from its own HEAD.
+  const nested = join(checkout, 'nested-wt');
+  git(checkout, 'worktree', 'add', '-q', '-b', 'nested', nested);
+  writeFileSync(join(nested, 'src', 'nested.ts'), 'export function nestedOnly() { return 3 }\n');
+  git(nested, 'add', '-A');
+  git(nested, 'commit', '-q', '-m', 'nested');
+  const nestedSha = git(nested, 'rev-parse', 'HEAD').trim();
+  const r = await ask({ host: 'decl-test-box', file: join(nested, 'src/nested.ts'), name: 'nestedOnly' });
+  assert.equal(r.body.state, 'ready');
+  assert.equal(r.body.sha, nestedSha, "the nested worktree's own HEAD, not the checkout's");
+  assert.equal(r.body.from, 'src/nested.ts');
+  assert.equal(r.body.root.path, realpathSync(nested));
+  assert.deepEqual(names(r.body), ['src/nested.ts:1:function']);
 });

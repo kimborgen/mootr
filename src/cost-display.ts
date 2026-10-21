@@ -13,7 +13,7 @@
 // Values add up, so a tree is the sum of its members' values, null if any part is null.
 // Agents are summed raw per account (Raw) and converted with the serving daemon's prices.
 import { settings } from './settings.ts';
-import { openRouterAccounts } from './accounts.ts';
+import { openRouterAccounts, payPerTokenProvider } from './accounts.ts';
 
 export type CostMode = 'api' | 'five_hour' | 'seven_day' | 'subscription';
 export const COST_MODES: CostMode[] = ['api', 'five_hour', 'seven_day', 'subscription'];
@@ -69,7 +69,7 @@ export function roundModes(m: Modes): Modes {
 
 // How accounts are billed and what a window is worth, injected so tests need no usage data.
 export interface Ctx {
-  // 'subscription' (configured, not paid), 'paid' (OpenRouter or paid: true), else 'none'.
+  // 'subscription' (configured, not paid), 'paid' (pay-per-token, as OpenRouter, or paid: true; an explicit paid: false wins), else 'none'.
   kind(account: string): 'subscription' | 'paid' | 'none';
   // A full window's worth in API-equivalent $ (mid), null when not calibrated.
   worth(account: string, window: 'five_hour' | 'seven_day'): number | null;
@@ -83,9 +83,11 @@ export function accountKind(account: string): 'subscription' | 'paid' | 'none' {
 // Reads the settings once; the resolver then answers per account without touching them.
 export function kindResolver(): (account: string) => 'subscription' | 'paid' | 'none' {
   const accounts = settings().cost.accounts ?? {};
+  const providers = settings().providers;
   const openrouter = new Set(openRouterAccounts());
   return (account) => {
-    if (openrouter.has(account) || accounts[account]?.paid === true) return 'paid';
+    const acct = accounts[account];
+    if (acct?.paid !== false && (openrouter.has(account) || acct?.paid === true || (acct?.match && payPerTokenProvider(acct, account, providers)))) return 'paid';
     return accounts[account] ? 'subscription' : 'none';
   };
 }

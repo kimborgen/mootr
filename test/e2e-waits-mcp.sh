@@ -138,16 +138,9 @@ wait_for empty "$C" || fail "the wake_me MCP timer not cleared"
 
 echo "-- a timer due while the daemon was down fires once on start"
 daemon_stop main
-python3 - "$STAM_HOME/stam.db" "$C" <<'PY'
-import sqlite3, sys
-db, agent = sys.argv[1], sys.argv[2]
-c = sqlite3.connect(db)
-c.execute(
-  'INSERT INTO waits (id, agent_id, kind, target, detail, since, until, source, data) VALUES (?,?,?,?,?,?,?,?,?)',
-  ('wrestarttest', agent, 'timer', None, 'restart timer', '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z', 'stam', '{"every_minutes":60}'),
-)
-c.commit()
-c.close()
+python3 - "$STAM_HOME/test-seed.json" "$C" <<'PY'
+import json, sys
+json.dump({"waits": [{"id": "wrestarttest", "agent": sys.argv[2], "kind": "timer", "detail": "restart timer", "since": "2000-01-01T00:00:00Z", "until": "2000-01-01T00:00:00Z", "source": "stam", "data": {"every_minutes": 60}}]}, open(sys.argv[1], "w"))
 PY
 daemon_up main
 wait_for has_notice "$C" "restart timer" || fail "a timer due while the daemon was down didn't fire at start"

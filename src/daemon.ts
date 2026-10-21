@@ -12,7 +12,7 @@ import { encodeBody, sendCompressed } from './compress.ts';
 import { dedupByClientId } from './client-dedup.ts';
 import pty from 'node-pty';
 import { takeDaemonLock } from './daemon-lock.ts';
-import { LIVE_HOME, MACHINE, PORT, RELEASE, ROOT, STAM_HOME, TMUX_SOCKET, agentDir, ensureToken, ensurePeerToken } from './config.ts';
+import { LIVE_HOME, MACHINE, PORT, RELEASE, ROOT, STAM_BIN, STAM_HOME, TMUX_SOCKET, agentDir, ensureToken, ensurePeerToken } from './config.ts';
 import * as db from './db.ts';
 import { hashToken, mintAgentToken, serverTokenHash } from './agent-token.ts';
 import * as tmux from './tmux.ts';
@@ -29,18 +29,21 @@ import { grantCitedThreads, isAssistant, mayReadWholeThread } from './mail-visib
 import { normalizeMailInput } from './mail-input.ts';
 import { addStream, hasStream } from './push.ts';
 import * as events from './events.ts';
-import { render, humanMailPrompt, listTemplates, saveTemplate, resetTemplate } from './templates.ts';
+import { render, humanMailPrompt, listTemplates, saveTemplate, resetTemplate, SHARED_TEMPLATE } from './templates.ts';
 import * as lifecycle from './lifecycle.ts';
 import * as permissionModes from './permission-modes.ts';
-import { admit, admitSpawn, accountHeld } from './admission.ts';
-import { developerCapRefusal, isDeveloperSpawn, reserveSlot, releaseSlot, slotHolders, enqueueWaiter, dropWaiter, saveQueueFile, loadQueueFile, grantSlots, queuedWaiters, restoreQueue, roomRefusal, hostReadingFrom, cancelState, mayCancelWaiter, findDuplicate, spawnerKey, URGENT_REASONS, type HostReading, type UrgentReason, type Waiter } from './developer-cap.ts';
+import { admit, admitSpawn, heldForFallback } from './admission.ts';
+import { developerCapRefusal, isDeveloperSpawn, reserveSlot, releaseSlot, slotHolders, enqueueWaiter, dropWaiter, saveQueueFile, loadQueueFile, grantSlots, queuedWaiters, restoreQueue, roomRefusal, hostReadingFrom, cancelState, deliverWaiterNotice, mayCancelWaiter, findDuplicate, spawnerKey, URGENT_REASONS, incidentRefusal, mayMarkIncident, demoteRevoked, type HostReading, type UrgentReason, type Waiter } from './developer-cap.ts';
 import * as blockers from './blockers.ts';
 import * as context from './context.ts';
 import * as cacheCold from './cache-cold.ts';
 import * as permissions from './permissions.ts';
 import * as webpush from './webpush.ts';
+import { publicPushDevice, redactPushError } from './push-public.ts';
 import * as withdraw from './withdraw.ts';
 import * as org from './org.ts';
+import { onboardingStatus } from './onboarding.ts';
+import { derivedRepos } from './default-repo.ts';
 import * as ring from './ring.ts';
 import * as itsa from './itsa.ts';
 import * as itsaQueue from './itsa-queue.ts';
@@ -63,6 +66,7 @@ import * as autoArchive from './auto-archive.ts';
 import type { HumanWait } from './auto-archive.ts';
 import * as notices from './notices.ts';
 import * as prOpen from './pr-open.ts';
+import * as prMerge from './pr-merge.ts';
 import * as prReview from './pr-review.ts';
 import * as prSync from './pr-sync.ts';
 import * as branchScope from './branch-scope.ts';
@@ -74,9 +78,14 @@ import * as linearSource from './sources/linear.ts';
 import * as waits from './waits.ts';
 import * as workspaceShare from './workspace-share.ts';
 import * as janitor from './janitor.ts';
+import { envVar } from './env.ts';
+import { ignoredTestOnlyEnv, testHome, testOnlyEnv } from './test-env.ts';
+import { archiveTimes, gzipTranscripts, sweepGzTemps, capCompileCache } from './transcript-gz.ts';
 import { orphanSweepAllowed, sweepOrphanDaemons, sweepOrphanProcs } from './orphan-procs.ts';
 import * as machines from './machines.ts';
+import * as cachePanel from './cache-panel.ts';
 import * as peerSpend from './peer-spend.ts';
+import * as peerReadings from './peer-readings.ts';
 import * as usage from './usage.ts';
 import * as usageDrill from './usage-drill.ts';
 import { issueCosts, itsaCost } from './issue-costs.ts';
@@ -86,6 +95,8 @@ import { activityStatsCached, measuredEffort, type By } from './activity-stats.t
 import * as activitySummaryMod from './activity-summary.ts';
 import * as credits from './credits.ts';
 import * as voice from './voice.ts';
+import * as secrets from './secrets.ts';
+import * as llm from './llm/index.ts';
 import * as costNotices from './cost-notices.ts';
 import * as allocations from './allocations.ts';
 import * as costPause from './cost-pause.ts';
@@ -95,8 +106,8 @@ import * as costProbes from './cost-probes.ts';
 import * as mcpAuth from './mcp-auth.ts';
 import * as localHuman from './local-human.ts';
 import { issueTicket, redeemTicket, TICKET_KINDS, type TicketKind } from './ticket.ts';
-import { countStatements, failLaunch, itsaGate, testHooksAllowed } from './test-hooks.ts';
-import { ignoredTestOnlyEnv, testHome, testOnlyEnv } from './test-env.ts';
+import { applyTestAgent, applyTestMailTime, applyTestPermission, applyTestSeed, applyTestUsage, applyTestWait, testReads, countStatements, failLaunch, itsaGate, testHooksAllowed } from './test-hooks.ts';
+import { bootFails } from './test-faults.ts';
 import { pickLooks } from './banner-stagger.ts';
 import { parseMcpConfig, testServer } from './mcp-config.ts';
 import { scanHarnesses } from './mcp-import.ts';
@@ -111,7 +122,7 @@ import { matchActing, opencodeNamesAgent } from './agent-routes.ts';
 import { agentInventory, typeInventory, withSummaries, composerCatalog } from './inventory.ts';
 import { cleanTitle, cleanSummary, mailTitlesShown } from './mail-title.ts';
 import { defaultGithubRepo } from './github-repo.ts';
-import { ensureSettings, settings, setSetting, costProblem, patchSettings, redactSettingsText, writeSettingsText, isSettingsHome, effectiveSettingsText, LOCAL_KEYS, splitSettingsPatch, patchLocalKeys, patchSharedSettings, peerShared } from './settings.ts';
+import { ensureSettings, settings, setSetting, fileProblem, patchSettings, redactSettingsText, writeSettingsText, isSettingsHome, effectiveSettingsText, LOCAL_KEYS, splitSettingsPatch, patchLocalKeys, patchSharedSettings, peerShared } from './settings.ts';
 import { peerUiOrigins, peerUiRoute, peerUiHumanRoute, peerServeOrigin } from './web-origins.ts';
 import { agentIpCache } from './agent-ips.ts';
 import { sharedPayload, homeChanged, syncState, syncShared, watchHomeChanges, startSettingsSync, sharedFilesChanged } from './settings-sync.ts';
@@ -130,8 +141,9 @@ import { toolCatalog } from './mcp.ts';
 import { announceToolChanges } from './tool-changes.ts';
 import * as files from './files.ts';
 import * as diff from './diff.ts';
+import * as digest from './digest.ts';
 import * as decl from './decl.ts';
-import { peers, peersReachable, peerByName, peerCall, peerRaw, peerStream, findAgentPeer, fanOut, ensureUp, ensureCurrent, AmbiguousAgentError, ambiguousRefusal, refuseAmbiguousId, type Via, type Peer } from './peers.ts';
+import { peers, peersReachable, peerByName, peerCall, peerRaw, peerStream, peerMachineOf, findAgentPeer, fanOut, ensureUp, ensureCurrent, AmbiguousAgentError, ambiguousRefusal, refuseAmbiguousId, type Via, type Peer } from './peers.ts';
 import { searchMail } from './mail-search.ts';
 import { backfill } from './vectors.ts';
 import './itsa-vectors.ts';
@@ -143,10 +155,12 @@ import { searchItsas } from './itsa-search.ts';
 import { whenInstalled } from './embed.ts';
 import WebSocket from 'ws';
 import * as agentView from './agent-view.ts';
+import { publicAgent, scrubAgents } from './agent-public.ts';
 import * as viewPrompt from './view-prompt.ts';
 import { timed, startStallWatch, stalls } from './stall.ts';
 import * as activity from './activity.ts';
 import * as activityClassify from './activity-classify.ts';
+import { hasTailscale } from './tailscale.ts';
 
 // Returned by a route that has written its own response, such as an event stream.
 const HANDLED = Symbol('handled');
@@ -166,7 +180,13 @@ async function readJson(req: IncomingMessage): Promise<any> {
   const chunks: Buffer[] = [];
   for await (const c of req) chunks.push(c as Buffer);
   const text = Buffer.concat(chunks).toString('utf8');
-  return text ? JSON.parse(text) : {};
+  if (!text) return {};
+  // A fixed message: V8's parse error quotes the input, which may hold a secret (S-2114).
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new HttpError(400, 'the request body is not valid JSON');
+  }
 }
 
 // Saves files from the web UI's prompt input under STAM_HOME/uploads/OWNER/ and names
@@ -195,10 +215,26 @@ function boxRef(ref: string): string {
   return ref === mail.HUMAN ? mail.HUMAN : (db.getAgent(ref)?.id ?? ref);
 }
 
+// The agent a test read's ?agent= names, as an id; null when it is absent.
+function testAgentId(url: URL): string | null {
+  const r = url.searchParams.get('agent');
+  return r === null ? null : mustAgent(r).id;
+}
+
 function mustAgent(ref: string): db.Agent {
   const a = db.getAgent(ref);
   if (!a) throw new HttpError(404, `no agent ${ref}`);
   return a;
+}
+
+// The id of a parent set-parent names. A parent on another machine can't hold children here (S-2157),
+// so one a peer knows is refused with the way out (S-2453); a name no machine knows is 'no agent'.
+async function localParentId(ref: string): Promise<string> {
+  const a = db.getAgent(ref);
+  if (a) return a.id;
+  const machine = await peerMachineOf(ref);
+  if (!machine) throw new HttpError(404, `no agent ${ref}`);
+  throw new HttpError(409, `${ref} runs on ${machine}; cross-machine parents are unsupported. Name a parent on ${MACHINE}, such as the chief of staff, or respawn the child on ${machine} under ${ref}`);
 }
 
 // The agent view's errors as HTTP errors.
@@ -238,6 +274,13 @@ function mayActAs(caller: Caller, id: string, selfOnly = false): void {
 // Reads and actions that are the human's and the daemon's, not an agent's (S-587): the agent's own token, or
 // the OpenCode server's, is refused. The shared token, the owner and peers pass; a peer's forwarded agent
 // request arrives as an agent, so the ITSA home refuses it too.
+// Refuses the fields only stam sets (S-466) from an agent's or the OpenCode server's token: from them they would place
+// mail in any thread, or skip the checks on its sender. `fields` is the list the route forbids, `what` the thing sent.
+function refuseStamFields(body: any, caller: Caller, local: boolean, fields: readonly string[], what: string): void {
+  const own = (caller.kind === 'agent' || caller.kind === 'opencode') && !local ? fields.filter((f) => body?.[f] !== undefined) : [];
+  if (own.length) throw new HttpError(403, `${own.join(', ')} ${own.length > 1 ? 'are' : 'is'} set only by stam, not in an agent's ${what}`);
+}
+
 function notAgentToken(caller: Caller, what: string): void {
   if (caller.kind === 'agent' || caller.kind === 'opencode') throw new HttpError(403, `an agent's token can't ${what}`);
 }
@@ -313,8 +356,9 @@ function mayManageWaits(a: db.Agent, by: unknown, human = true, local = false): 
 // given; itsa.person resolves it, locally or on a peer, so an agent on another machine acts.
 // Only a human request (x-stam-human) may name the human as `by` (itsa.requestActor).
 // The local scripts that may send as a system sender with the shared token under auth.humanStrict:
-// the deploy watcher (scripts/deploy-on-merge.mjs, S-474) and the full suite's failure triage (scripts/triage-failures.mjs, S-1074).
-const SYSTEM_SENDERS = ['deploy-watch', 'full-suite'];
+// the deploy watcher (scripts/deploy-on-merge.mjs, S-474), the full suite's failure triage (scripts/triage-failures.mjs, S-1074)
+// and the nightly Go parity run (scripts/go-parity-nightly.mjs, S-2297).
+const SYSTEM_SENDERS = ['deploy-watch', 'full-suite', 'go-parity'];
 // Bodies of requests the shared token sends as an allowed system sender (set in the handler).
 const systemBodies = new WeakSet<object>();
 function itsaActor(body: any, human: boolean): string {
@@ -484,10 +528,45 @@ function cancelQueuedSpawn(name: string, caller: Caller): Record<string, unknown
   const owner = w.by ? db.getAgent(w.by) : undefined;
   const me = caller.kind === 'agent' ? caller.agent : undefined;
   const boss = caller.kind !== 'agent' && caller.kind !== 'opencode' ? true : caller.boss === true || org.chiefOfStaff()?.id === me || (me !== undefined && isAssistant(me));
-  if (!mayCancelWaiter(owner?.id, me, boss, owner ? org.ancestors(owner) : new Set())) throw new HttpError(403, `${me ? db.getAgent(me)?.name ?? me : 'this caller'} can't cancel ${name}: only its caller, the caller's parents, and the chief of staff may`);
+  if (!mayCancelWaiter(w.by, me, boss, owner ? org.ancestors(owner) : new Set())) throw new HttpError(403, `${me ? db.getAgent(me)?.name ?? me : 'this caller'} can't cancel ${name}: only its caller, the caller's parents, and the chief of staff may`);
   removeQueued(w);
   if (w.by && w.by !== me) tellWaiter(w, `Your queued spawn ${name} was cancelled.`);
   return { cancelled: true, name, machine: MACHINE };
+}
+
+// Cancels a queued spawn wherever it waits (S-2579). This machine's queue first; a name it doesn't hold goes to each
+// peer with the caller's identity (the `via` pr_merge forwards), and the peer runs the same check as a local cancel in
+// one synchronous step, so a grant racing it gives one outcome. A forwarded request (`local`) never forwards again.
+// A peer that can't be reached or can't tell is named: its silence isn't "not queued".
+// The OpenCode server acts as the agent its request names (`by`, checked by resolveActors); with none, it is refused,
+// never the shared token's boss. Any other caller is as it is.
+function cancelCaller(caller: Caller, by: unknown): Caller {
+  if (caller.kind !== 'opencode') return caller;
+  const id = by ? db.getAgent(String(by))?.id : undefined;
+  if (!id) throw new HttpError(403, "the OpenCode server's cancel must name its agent (by)");
+  return { kind: 'agent', agent: id, boss: false };
+}
+
+async function cancelSpawn(name: string, caller: Caller, local: boolean): Promise<Record<string, unknown>> {
+  if (local || cancelState(name, queuedWaiters(), [...launching].map((w) => w.name)) !== 'unknown') return cancelQueuedSpawn(name, caller);
+  const via = viaOf(caller);
+  if (caller.kind === 'agent' && !via) throw new HttpError(403, "can't forward a cancel with no caller");
+  const unsure: string[] = [];
+  for (const p of peers()) {
+    let r: { status: number; data: any };
+    try {
+      r = await peerCall(p, 'POST', `/api/slot-queue/${encodeURIComponent(name)}/cancel`, {}, 15_000, false, via);
+    } catch (e) {
+      unsure.push(`${p.name} is unreachable (${e instanceof Error ? e.message : e})`);
+      continue;
+    }
+    if (r.status === 200) return r.data;
+    if (r.status === 404 && /^no queued spawn named /.test(String(r.data?.error ?? ''))) continue;
+    if (r.status === 403 || r.status === 409) throw new HttpError(r.status, r.data?.error ?? `${p.name}: HTTP ${r.status}`);
+    unsure.push(`${p.name} answered HTTP ${r.status}${r.data?.error ? `: ${r.data.error}` : ''}, so it may run an older release`);
+  }
+  if (unsure.length) throw new HttpError(502, `can't tell whether ${name} is queued on another machine: ${unsure.join('; ')}`);
+  return cancelQueuedSpawn(name, caller);
 }
 
 // Takes a waiter out of the queue: the saved file goes first, so a failed save leaves it queued and refuses the change.
@@ -554,8 +633,18 @@ const waiterAlive = (w: Waiter): boolean => {
   return !caller || caller.lifecycle !== 'archived';
 };
 // The caller here or on a peer; an archived caller hears nothing.
+// A notice no daemon could deliver goes to the chief of staff, and every start, drop and failure is logged (S-2720).
 const tellWaiter = (w: Waiter, text: string): void => {
-  if (w.by) void tellAnywhere(w.by, text, (a) => a.lifecycle !== 'archived').catch(() => {});
+  console.log(`slot queue: ${w.name}: ${text}`);
+  const cos = (): string | undefined => org.chiefOfStaff()?.id;
+  const toCos = (why: string): Promise<unknown> => {
+    const id = cos();
+    if (!id || id === w.by) return Promise.resolve();
+    return tellAnywhere(id, `[stam] ${text} (it couldn't reach ${w.by ?? 'a caller'}: ${why})`);
+  };
+  if (!w.by) return void toCos('the spawn named no caller');
+  const by = w.by;
+  void deliverWaiterNotice(() => tellAnywhere(by, text, (a) => a.lifecycle !== 'archived'), toCos, 6, Number(envVar('WAITER_NOTICE_MS')) || 10_000);
 };
 
 async function launchWaiter(w: Waiter): Promise<void> {
@@ -583,11 +672,16 @@ function hostReading(): HostReading {
 // Each launch runs on its own, so a slow workspace never holds the next sweep for dead waiters.
 function pumpSlotQueue(): void {
   const before = queuedWaiters().length;
+  // An incident whose mark went since it queued (cleared, or its marked ITSA closed) waits as a normal spawn (S-2406).
+  // Off the ITSA home the mark is asked of the home, which this sync sweep can't wait for: such a waiter keeps its
+  // priority here, and its launch checks the mark again and refuses it then (S-2421).
+  const demoted = demoteRevoked((w) => (settings().itsa.home ?? MACHINE) !== MACHINE || itsaOwners.incidentMarkedHere((w.body as { itsa?: unknown }).itsa));
+  for (const w of demoted) tellWaiter(w, `Your queued spawn ${w.name} lost its incident mark, so it waits as a normal spawn.`);
   const { granted, dropped } = grantSlots(db.listAgents(), agentTypes(), settings().developerCap, MACHINE, waiterAlive, hostReading());
   for (const w of dropped) tellWaiter(w, `Your queued spawn ${w.name} was dropped from the developer slot queue because its caller was archived.`);
   // The whole batch is in the saved snapshot before the first launch starts.
   for (const w of granted) launching.add(w);
-  if (granted.length || queuedWaiters().length !== before) saveSlotQueueLogged();
+  if (granted.length || demoted.length || queuedWaiters().length !== before) saveSlotQueueLogged();
   for (const w of granted) void launchWaiter(w);
 }
 
@@ -610,6 +704,18 @@ class QueuedSpawn extends Error {
     super('queued');
     this.reply = reply;
   }
+}
+
+// Undoes the participant rows a spawn added before it failed (S-2441): each ITSA it joined or owned, and the
+// parent's ITSA it joined in the background (its key, once that join has settled, so the undo lands after it).
+// A queued spawn is a fresh spawnAgent when its slot frees, so it lands here too. Each undo goes through the
+// same route as its join. A failed undo is logged, never thrown over the spawn's own error.
+async function undoJoins(agentId: string, refs: string[], parentJoin: Promise<string | null> | undefined, by: string, via: Via | undefined): Promise<void> {
+  const undo = (ref: string, v: Via | undefined) => itsaOwners.leaveItsa(ref, agentId, by, v).catch((err) => console.error(`ITSA ${ref}: couldn't undo the join of ${agentId}: ${err instanceof Error ? err.message : err}`));
+  for (const ref of refs) await undo(ref, via);
+  // The parent's join has no `via` (it is made on the home, not as the asking agent), so its undo has none either.
+  const parentKey = parentJoin ? await parentJoin.catch(() => null) : null;
+  if (parentKey) await undo(parentKey, undefined);
 }
 
 async function spawnAgent(body: any, human = false, onCreated?: (id: string) => void, opts: { queue?: boolean; granted?: boolean; by?: string } = {}): Promise<db.Agent> {
@@ -643,6 +749,13 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
   if (!body.cwd && d.cwd) body = { ...body, cwd: d.cwd.replace(/^~(?=$|\/)/, homedir()) };
   const name = String(body.name ?? '').trim() || freeName();
   if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(name)) throw new HttpError(400, 'name must be lowercase letters, digits, and dashes');
+  // An incident spawn (S-2406) needs a marked ITSA, slot free or not, and is refused before any workspace exists. A
+  // queued one is checked again when it launches, so a mark cleared while it waited refuses it there too. Off the
+  // ITSA home the mark is asked of the home (S-2421).
+  if (body.urgent === 'incident') {
+    const refusal = incidentRefusal('incident', await itsaOwners.incidentMarked(body.itsa));
+    if (refusal) throw new HttpError(403, refusal);
+  }
   if (db.getAgent(name)) throw new HttpError(409, `name ${name} is taken`);
   // A reviewer type asked for alone runs on its own target, or on the first free type of its
   // fallback chain when its account is held (S-412). The agent then becomes that fallback type.
@@ -650,7 +763,7 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
   // Even an explicit harness, model, or preset doesn't make a ring type spawnable.
   if (type?.review?.ring) throw new HttpError(400, 'a ring reviewer type takes no harness, model, or preset, and is spawned as a ring through POST /api/agents');
   if (type?.review && !body.preset && !body.harness && !body.model) {
-    const held = accountHeld(type);
+    const held = heldForFallback(type);
     if (held) {
       const fb = freeFallback(String(body.type), held.account);
       if (fb.type) {
@@ -707,7 +820,8 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
   let owned: Awaited<ReturnType<typeof itsaOwners.ownerBlock>> | undefined;
   // The agent asking (its `by`, or the parent a ring names), which may give the new agent only an ITSA
   // it may change (S-480); the human and a daemon's own spawn may give any.
-  const askerRef = human ? undefined : body.by ? String(body.by) : parentId ?? undefined;
+  // An agent caller (slot.by) asks as itself when it names no `by`, so a top-level spawn is checked too (S-2424).
+  const askerRef = human ? undefined : body.by ? String(body.by) : slot.by ?? parentId ?? undefined;
   const asker = askerRef ? (db.getAgent(askerRef)?.id ?? askerRef) : undefined;
   const ownerVia: Via | undefined = asker ? { agent: asker, boss: org.chiefOfStaff()?.id === asker || isAssistant(asker) } : undefined;
   if (body.itsa) {
@@ -715,6 +829,18 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
       await itsaGate.pass();
       owned = await itsaOwners.ownerBlock(String(body.itsa), reviewerSpawn);
       itsaOwners.mayAssign(owned.id, ownerVia);
+    } catch (e) {
+      throw new HttpError(e instanceof itsa.ForbiddenError ? 403 : 400, e instanceof Error ? e.message : String(e));
+    }
+  }
+  // `participate`: ITSAs the new agent joins as a participant, the owner unchanged (S-2424). Checked here, before any
+  // agent, worktree or harness exists, so a refused spawn leaves nothing behind.
+  if (body.participate !== undefined && body.participate !== null && (!Array.isArray(body.participate) || body.participate.some((r: unknown) => typeof r !== 'string' || !r))) throw new HttpError(400, 'participate is a list of ITSA ids or keys');
+  const participate: string[] = [...new Set<string>(body.participate ?? [])];
+  if (participate.length) {
+    try {
+      await itsaGate.pass();
+      await itsaOwners.mayParticipate(participate, ownerVia);
     } catch (e) {
       throw new HttpError(e instanceof itsa.ForbiddenError ? 403 : 400, e instanceof Error ? e.message : String(e));
     }
@@ -772,7 +898,7 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
   // too (S-627). Nothing is left behind: the kinds that can be refused own no worktree yet.
   const refused = spawnWorkspaceRefusal(type, ws);
   if (refused) {
-    cleanupWorkspace(ws, true);
+    cleanupWorkspace(ws, true, true);
     throw new HttpError(400, refused);
   }
   // The personal workspace folder, made 0700 when it is missing and kept when it exists: a
@@ -782,7 +908,7 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
     try {
       personalWorkspace = createPersonalWorkspace(personalName);
     } catch (e) {
-      cleanupWorkspace(ws, true);
+      cleanupWorkspace(ws, true, true);
       throw new HttpError(400, `workspace: ${e instanceof Error ? e.message : e}`);
     }
   }
@@ -791,7 +917,8 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
     const vars = Object.fromEntries(Object.entries(body.brief_vars && typeof body.brief_vars === 'object' ? body.brief_vars : {}).map(([k, v]) => [k, String(v)]));
     prompt = renderBrief(type, { ...vars, task: prompt ?? '', name, type: String(body.type), parent: parent?.name ?? mail.HUMAN, cwd: ws.cwd, branch: ws.worktree?.branch ?? '' });
   }
-  if (ws.worktree?.base && prompt) prompt = `Your branch is cut from ${ws.worktree.base}, so your PR stacks on it.\n\n${prompt}`;
+  if (ws.worktree?.continues && prompt) prompt = `Your worktree is on ${ws.worktree.branch}, the branch of the PR you continue, at ${ws.baseUsed?.sha.slice(0, 8)} (${ws.worktree.base}): commit here, then pr_open ${ws.worktree.branch} updates that PR. Do not create another branch.\n\n${prompt}`;
+  else if (ws.worktree?.base && prompt) prompt = `Your branch is cut from ${ws.worktree.base}, so your PR stacks on it.\n\n${prompt}`;
   if (ws.baseUsed?.defaulted && ws.baseUsed.fetch === 'failed' && prompt) prompt = `Your branch is cut from ${ws.baseUsed.ref} at ${ws.baseUsed.sha.slice(0, 8)} because fetching origin failed (${ws.baseUsed.error ?? 'unknown error'}), so it may be stale: run \`git fetch origin\` and rebase on origin/main before you start.\n\n${prompt}`;
   if (reviewerFallback && prompt) prompt = `Note: you are the fallback for the reviewer type ${reviewerFallback.from}, because its account is held (${reviewerFallback.reason}), so you run as ${reviewerFallback.target}.\n\n${prompt}`;
   if (prompt && ws.deps?.length) prompt = `${depsReport(ws.deps)}\n\n${prompt}`;
@@ -845,6 +972,10 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
   }
   const actor = body.by ? String(body.by) : human ? mail.HUMAN : agent.id;
   let assigned = false;
+  // The ITSAs this spawn gives the agent a row in (its owned ITSA, `participate`), and the parent's ITSA it joins in
+  // the background: a failed spawn undoes each of them (S-2441).
+  const joins: string[] = [];
+  let parentJoin: Promise<string | null> | undefined;
   try {
     if (reviewerFallback) db.addEvent(agent.id, 'reviewer:fallback', reviewerFallback);
     if (override) {
@@ -869,6 +1000,8 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
     }
     if (owned) {
       // As the agent asking, when there is one: the home checks the assignment's `by` against its via.
+      // The owner assignment, or a reviewer's join, adds the agent's row on the ITSA: undone if the spawn fails.
+      joins.push(owned.id);
       owned.owner = await itsaOwners.attachSpawned(owned.id, agent.id, reviewerSpawn, owned.owner, ownerVia?.agent ?? actor, ownerVia);
       assigned = !reviewerSpawn;
     } else if (parentId && settings().itsa.required) {
@@ -876,15 +1009,22 @@ async function spawnAgentIn(body: any, human: boolean, onCreated: ((id: string) 
       // it off without awaiting, so a slow or unreachable home never holds the spawn (the CLI
       // has a 10 s deadline; a home call waits up to 8 s). A failure is logged only. The
       // prompt may miss the participation line on this first start and show it on the next.
-      void itsaOwners
-        .joinParentItsa(agent.id, parentId, actor)
-        .catch((e) => console.error(`ITSA: ${name} couldn't join its parent's ITSA: ${e instanceof Error ? e.message : e}`));
+      // A failed spawn waits for this join and undoes its row (S-2441).
+      parentJoin = itsaOwners.joinParentItsa(agent.id, parentId, actor);
+      void parentJoin.catch((e) => console.error(`ITSA: ${name} couldn't join its parent's ITSA: ${e instanceof Error ? e.message : e}`));
+    }
+    // The `participate` ITSAs: the new agent joins each as a participant, the owner unchanged (S-2424).
+    for (const ref of participate) {
+      joins.push(ref);
+      await itsaOwners.joinItsa(ref, agent.id, ownerVia?.agent ?? actor, ownerVia);
     }
     await lifecycle.startHarness(db.getAgent(agent.id)!, prompt, false, 'spawn');
   } catch (e) {
     db.updateAgent(agent.id, { lifecycle: 'shut_down', activity: 'errored', activity_detail: `launch failed: ${e instanceof Error ? e.message : e}` });
     // The agent never ran: give the ITSA back to its previous owner, if it is still the agent's.
     if (owned && assigned && !reviewerSpawn) await itsaOwners.restoreOwner(owned.id, agent.id, owned.owner, actor).catch((err) => console.error(`ITSA ${owned!.key}: couldn't restore its owner: ${err.message}`));
+    // Not awaited: a slow or dead home must not hold the spawn's own error (the CLI's deadline is 10 s). undoJoins never rejects.
+    void undoJoins(agent.id, joins, parentJoin, actor, ownerVia);
     throw e instanceof itsa.ForbiddenError ? new HttpError(403, e.message) : e;
   }
   // A new agent is busy (starting), so its parents now wait on children.
@@ -1050,6 +1190,20 @@ async function startCosOnce(): Promise<db.Agent> {
   return spawnAgent({ name, type: 'cos', cwd, role: 'Chief of staff' }, true);
 }
 
+// At boot: starts the assistant when none exists at all, not even an archived or stopped one (S-2144).
+// Only on the settings home: the assistant is one per deployment, and a peer's database doesn't hold the home's.
+// STAM_ASSISTANT_AUTOSTART=0 (test home only) turns it off: test/lib.sh sets it for every test daemon.
+async function autostartAssistant(): Promise<void> {
+  if (!isSettingsHome() || !settings().assistant.autostart || testOnlyEnv('STAM_ASSISTANT_AUTOSTART') === '0') return;
+  if (db.listAgents().some((a) => a.kind === 'assistant')) return;
+  try {
+    const a = await startAssistant();
+    console.log(`assistant autostart: started ${a.name}`);
+  } catch (e) {
+    console.error(`assistant autostart failed: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 // Makes sure the assistant runs, and gives it `prompt` as the human's message.
 async function messageAssistant(prompt?: string): Promise<db.Agent> {
   const a = assistantAgent();
@@ -1098,7 +1252,7 @@ export async function control(a: db.Agent, action: string, body: any): Promise<s
         return await lifecycle.unpause(a, { by, force: Boolean(body.force) });
       }
       case 'shutdown':
-        return await lifecycle.shutdown(a, Boolean(body.now));
+        return await lifecycle.explicitShutdown(a, Boolean(body.now));
       case 'archive': {
         // An omitted discard keeps force's implication; an explicit false forbids it (S-1043 review).
         const discard = body.discard === undefined ? undefined : Boolean(body.discard);
@@ -1110,7 +1264,7 @@ export async function control(a: db.Agent, action: string, body: any): Promise<s
             } catch (e) {
               return { machine: p.name, error: e instanceof Error ? e.message : String(e) };
             }
-          })));
+          })), Boolean(body.force_unpushed));
       }
       case 'resume':
         return await lifecycle.resume(a, String(body.note ?? ''));
@@ -1159,7 +1313,9 @@ export async function control(a: db.Agent, action: string, body: any): Promise<s
         return await lifecycle.restart(a, 'reconnect MCP servers');
       // The rest are for the human and the assistant.
       case 'set-parent': {
-        const parents = [body.parent ?? []].flat().filter((p: unknown) => p && p !== 'none').map((p: unknown) => mustAgent(String(p)).id);
+        // Every parent is resolved before anything is written, so a refused name leaves the registry as it was.
+        const parents: string[] = [];
+        for (const p of [body.parent ?? []].flat().filter((p: unknown) => p && p !== 'none')) parents.push(await localParentId(String(p)));
         if (parents.includes(a.id)) throw new Error(`${a.name} can't be its own parent`);
         const before = db.parentsOf(a);
         db.setParents(a.id, parents);
@@ -1184,7 +1340,7 @@ export async function control(a: db.Agent, action: string, body: any): Promise<s
         setSetting('chiefOfStaff', a.name);
         return `${a.name} is the chief of staff; it takes the role in its prompt at its next restart`;
       case 'kill':
-        await lifecycle.shutdown(a, true);
+        await lifecycle.explicitShutdown(a, true);
         return 'stopped';
       case 'forget':
         return forget(a);
@@ -1444,7 +1600,7 @@ const readHolds = new Map<string, { gate: Promise<void>; release: () => void }>(
 
 // S-384: an agent whose harness ended its session (SessionEnd) and that, after
 // STAM_SESSION_END_MS (a minute), still has no new session and no MCP stream to push to.
-const SESSION_END_MS = Number(process.env.STAM_SESSION_END_MS) || 60_000;
+const SESSION_END_MS = Number(envVar('SESSION_END_MS')) || 60_000;
 function sessionEndedLong(a: db.Agent): boolean {
   if (a.activity !== 'unknown' || a.activity_detail !== db.SESSION_ENDED || hasStream(a.id)) return false;
   return Date.now() - Date.parse(db.lastHookAt(a.id) ?? a.updated_at) >= SESSION_END_MS;
@@ -1567,6 +1723,8 @@ export function reconcile(snap: tmux.Snapshot | null = tmux.snapshot()): void {
   }
   // A switch whose soft stop a restart cut short goes on at its deadline.
   if (first) costSwitch.resumeSwitches();
+  // Queued ring turns die with the restart: each open ring seat is prompted again (S-2490).
+  if (first) ring.promptOpenSeats();
 }
 
 // The loops' ticks: the shared async snapshot (S-2125), then the synchronous work under its label.
@@ -1580,10 +1738,12 @@ export async function bannersTick(): Promise<void> {
 }
 
 // Addresses to listen on: localhost, plus this machine's Tailscale address so the
-// web UI works from a phone. STAM_BIND (comma-separated) overrides.
+// web UI works from a phone. STAM_BIND (comma-separated) overrides. No tailscale binary: localhost only.
 export function bindAddresses(): string[] {
-  if (process.env.STAM_BIND) return process.env.STAM_BIND.split(',');
+  const bind = envVar('BIND');
+  if (bind) return bind.split(',');
   const addrs = ['127.0.0.1'];
+  if (!hasTailscale()) return addrs;
   try {
     const ts = execFileSync('tailscale', ['ip', '-4'], { encoding: 'utf8', timeout: 2000 }).trim().split('\n')[0];
     if (ts) addrs.push(ts);
@@ -1674,6 +1834,7 @@ function attachTerminal(ws: import('ws').WebSocket, agentId: string, cols: numbe
 // token there. Local processes could set that header too, but they can read the token
 // anyway, so it grants nothing new.
 function tailscaleOwner(): string | undefined {
+  if (!hasTailscale()) return undefined;
   try {
     const s = JSON.parse(execFileSync('tailscale', ['status', '--json'], { encoding: 'utf8', timeout: 3000 }));
     return s.User?.[String(s.Self?.UserID)]?.LoginName;
@@ -1709,7 +1870,8 @@ function socketUid(req: IncomingMessage): number | undefined {
 }
 
 const agentIps = agentIpCache(
-  async () => (await execFileAsync('tailscale', ['status', '--json'], { encoding: 'utf8', timeout: 3000 })).stdout,
+  // No tailscale binary: no tailnet, so no agent machine has a tailnet address (S-2121).
+  async () => (hasTailscale() ? (await execFileAsync('tailscale', ['status', '--json'], { encoding: 'utf8', timeout: 3000 })).stdout : '{}'),
   () => peers().flatMap((p) => [p.name.toLowerCase(), new URL(p.url).hostname.toLowerCase().split('.')[0]]),
 );
 const agentMachineIps = agentIps.get;
@@ -1718,8 +1880,7 @@ const agentMachineIps = agentIps.get;
 // Tailscale login, or no credential (a media link or the OAuth callback, which carry their own proof).
 // `opencode` is the OpenCode server's token (S-240): it names an OpenCode agent on this daemon, never
 // the human, and nothing defaults.
-type Caller = { kind: 'shared' | 'peer' | 'agent' | 'opencode' | 'owner' | 'none'; agent?: string; boss?: boolean; assistant?: boolean; scope?: 'tree' | 'foreign' | 'none'; // legacy: the forwarded agent came with the shared token (legacyPeerToken), not a peer's token (S-1061)
-  legacy?: boolean };
+type Caller = { kind: 'shared' | 'peer' | 'agent' | 'opencode' | 'owner' | 'none'; agent?: string; boss?: boolean; assistant?: boolean; scope?: 'tree' | 'foreign' | 'none'; forwarded?: boolean; reviewRole?: 'reviewer' | 'manager' | 'other'; ownBranches?: string[] | null };
 
 // The identity a request acts as (S-238), for every route that takes one: body by, from, self,
 // and the as and by query params. An agent's own token acts as that agent: no claim is the agent,
@@ -1973,14 +2134,25 @@ function localDirect(req: IncomingMessage): boolean {
   return uid !== undefined && uid !== 0;
 }
 
-// How the human proves themselves, for a refusal: tailscale serve, and local login when it is on (S-613).
-function humanWays(on = "stam's Tailscale address"): string {
-  return `through ${on} (tailscale serve)${settings().auth.localHuman ? ` or stam's login page at http://127.0.0.1:${PORT}/` : ''}`;
+// How the human proves themselves, for a refusal: only the ways this machine has (S-2121). Its page through
+// tailscale serve, once discovery found one, and stam's login page when local login is on (S-613); with
+// neither, how to turn local login on.
+function humanWays(machine = 'stam'): string {
+  const ways: string[] = [];
+  if (webServed) ways.push(`through ${machine}'s page at ${canonicalWebOrigin()} (tailscale serve)`);
+  if (settings().auth.localHuman) ways.push(`through stam's login page at http://127.0.0.1:${PORT}/`);
+  return ways.length ? ways.join(' or ') : "through stam's login page, once local login is on (auth.localHuman in settings.json), or through tailscale serve";
 }
 
-// auth.humanStrict (S-543). auth.legacyPeerToken no longer gates it: the shared token never passes as a peer (S-1064).
+// auth.humanStrict (S-543). The shared token never passes as a peer (S-1064).
 function strictOn(): boolean {
   return settings().auth.humanStrict;
+}
+// The `auth.humanStrict` log prefix (S-2159). With strict in effect the line says what it refused; with it
+// off the same line says the request was allowed and that strict would refuse it, so a fresh install that
+// never turned strict on doesn't read a refusal it didn't get.
+function strictPrefix(): string {
+  return strictOn() ? 'refuses' : 'off (this was allowed; turning it on would refuse it)';
 }
 // A refusal that only strict makes (S-543). Whether or not strict is on, it is logged once a minute per
 // `what`; it returns true, to refuse, only with strict in effect.
@@ -1989,7 +2161,7 @@ function strictRefuses(what: string, cond: boolean): boolean {
   const now = Date.now();
   if (now - (wouldRefuseLogged.get(what) ?? 0) >= 60_000) {
     wouldRefuseLogged.set(what, now);
-    console.log(`auth.humanStrict ${strictOn() ? 'refuses' : 'would refuse'}: ${what}`);
+    console.log(`auth.humanStrict ${strictPrefix()}: ${what}`);
   }
   return strictOn();
 }
@@ -2006,7 +2178,7 @@ function logWouldRefuse(req: IncomingMessage, pathname: string, kind: string): v
   const now = Date.now();
   if (now - (wouldRefuseLogged.get(key) ?? 0) < 60_000) return;
   wouldRefuseLogged.set(key, now);
-  console.log(`auth.humanStrict ${strictOn() ? 'refuses' : 'would refuse'}: ${key} as human from a ${kind} caller (not trustedHuman)`);
+  console.log(`auth.humanStrict ${strictPrefix()}: ${key} as human from a ${kind} caller (not trustedHuman)`);
 }
 
 // A peer's 409 naming a machine and origin is the peer's own refusal; only this daemon names an origin (S-544),
@@ -2036,7 +2208,7 @@ function logRelay(peer: string, what: string): void {
   const now = Date.now();
   if (now - (wouldRefuseLogged.get(key) ?? 0) < 60_000) return;
   wouldRefuseLogged.set(key, now);
-  console.log(`auth.humanStrict would refuse: relaying ${what} to ${peer} as the human`);
+  console.log(`auth.humanStrict ${strictPrefix()}: relaying ${what} to ${peer} as the human`);
 }
 
 // One janitor pass: sweep test leftovers whose owner is gone and log what it did. Runs on
@@ -2066,7 +2238,31 @@ function janitorSweep(dryRun = false, only?: string[]) {
       console.log(`janitor: stopped ${leaked.length} leaked test daemon(s): ${leaked.map((l) => l.pid).join(' ')}`);
       db.addEvent('human', 'janitor', { orphan_daemons: leaked });
     }
-    return { ...r, orphans: [...orphans, ...leaked] };
+    // Disk pruning (S-2359): old transcripts gzipped in place, stale gzip temps swept, node's compile cache capped.
+    const archivedAt = archiveTimes(db.open().prepare("SELECT agent_id, ts FROM events WHERE type = 'archive' ORDER BY id").all() as unknown as { agent_id: string; ts: string }[]);
+    // A transcript is gzipped only after a final ingest of the archived agent (nothing runs in it, so every turn counts as ended). A dry run only checks the cursor.
+    const cursorAtEnd = (a: { id: string; transcript_path: string | null }, size: number) => {
+      const c = db.open().prepare('SELECT source, offset FROM activity_cursors WHERE agent_id = ?').get(a.id) as { source: string; offset: number } | undefined;
+      return Boolean(c) && c!.source === a.transcript_path && c!.offset === size;
+    };
+    const complete = async (g: { id: string; transcript_path: string | null }, size: number) => {
+      if (dryRun) return cursorAtEnd(g, size);
+      const a = db.getAgent(g.id);
+      return a ? activity.ingestComplete(a) : false;
+    };
+    const disk = only?.length
+      ? { gzipped: [], temps: [] as string[], compile_cache: { removed: [], bytes: 0 } }
+      : {
+          gzipped: await gzipTranscripts({ agents, archivedAt, current: (id) => db.getAgent(id), complete, dryRun }).catch(() => []),
+          temps: await sweepGzTemps({ agents: agents.filter((a) => a.lifecycle === 'archived'), dryRun }).catch(() => [] as string[]),
+          compile_cache: capCompileCache({ dryRun }),
+        };
+    const freed = disk.gzipped.reduce((n, g) => n + g.bytes - (g.gz_bytes ?? 0), 0);
+    if (!dryRun && (disk.gzipped.length || disk.temps.length || disk.compile_cache.removed.length)) {
+      console.log(`janitor: gzipped ${disk.gzipped.length} transcript(s) (${freed} bytes freed), dropped ${disk.compile_cache.removed.length} compile cache folder(s)`);
+      db.addEvent('human', 'janitor', { gzipped: disk.gzipped, temps: disk.temps, compile_cache: disk.compile_cache });
+    }
+    return { ...r, orphans: [...orphans, ...leaked], disk: { ...disk, freed_bytes: freed + disk.compile_cache.bytes } };
   };
   const run = janitorQueue.then(sweep);
   janitorQueue = run.catch(() => {});
@@ -2080,20 +2276,21 @@ function janitorSweep(dryRun = false, only?: string[]) {
 let webBase: string | undefined;
 let webServed = false;
 let webDiscovering: Promise<void> | undefined;
-const WEB_RETRY_MS = Number(process.env.STAM_WEB_RETRY_MS) || 60_000;
+const WEB_RETRY_MS = Number(envVar('WEB_RETRY_MS')) || 60_000;
 const execFileAsync = promisify(execFile);
 // Asks for the canonical origin and stores the answer. Runs once at boot and again every WEB_RETRY_MS
 // until a serve is found; a run that is still going is joined, never started twice.
 function discoverWebOrigin(): Promise<void> {
   webDiscovering ??= (async () => {
-    const env = process.env.STAM_WEB_ORIGIN;
+    const env = envVar('WEB_ORIGIN');
     if (env && /^https?:\/\/[^/]+$/.test(env)) {
       webServed = true;
       webBase = trimSlash(env);
       return;
     }
     let found = '';
-    try {
+    // No tailscale binary: no serve to find, and nothing spawned on each retry (S-2121).
+    if (hasTailscale()) try {
       const { stdout } = await execFileAsync('tailscale', ['serve', 'status', '--json'], { encoding: 'utf8', timeout: 3000 });
       const s = JSON.parse(stdout);
       for (const h of Object.keys(s.Web ?? {}))
@@ -2174,6 +2371,8 @@ function layoutRoute(res: ServerResponse, change: () => unknown): typeof HANDLED
 }
 
 export async function runDaemon(): Promise<void> {
+  // Test-only (S-2596): a release the test home's test-faults.json lists dies at once, as a deploy that fails under the service.
+  if (bootFails()) process.exit(1);
   // Before anything touches the home (S-346): a second daemon on it would boot against the live state.
   const holder = await takeDaemonLock(STAM_HOME);
   if (holder !== undefined) {
@@ -2192,6 +2391,16 @@ export async function runDaemon(): Promise<void> {
   const humanOnly = (req: IncomingMessage, what: string) => {
     if (!trustedHuman(req, owner)) throw new HttpError(403, `only the human can ${what}, ${humanWays()}`);
   };
+  // A secret store call (S-2114): a broken secrets.json is a 409 that says so, a bad request a 400.
+  const secretsCall = <T>(fn: () => T): T => {
+    try {
+      return fn();
+    } catch (e) {
+      if (e instanceof secrets.SecretFileError) throw new HttpError(409, `${e.message}; fix or remove it`);
+      if (e instanceof secrets.SecretError) throw new HttpError(400, e.message);
+      throw e;
+    }
+  };
   // Local human login and logout (S-613), before any credential check: the page has none yet. A code works
   // only from stam's own page on this machine (loopback, own host, same origin, JSON), so a page on another
   // port or site can't spend one. The page posts its secret; root vouched for the secret's name. Every
@@ -2199,7 +2408,9 @@ export async function runDaemon(): Promise<void> {
   const localHumanRoute = async (req: IncomingMessage, path: string): Promise<unknown> => {
     const on = settings().auth.localHuman;
     // The folder the page names in its command (the daemon's user's), so the page needs no other lookup.
-    if (req.method === 'GET' && path === '/api/human/login') return on ? { enabled: true, dir: localHuman.userDir() } : { enabled: false };
+    // It also says whether this user has passwordless sudo, where the login keeps no agent out (S-2121): only
+    // to a direct loopback request, the one page that can log in, so a tailnet caller neither learns it nor runs sudo.
+    if (req.method === 'GET' && path === '/api/human/login') return on ? { enabled: true, dir: localHuman.userDir(), passwordlessSudo: localDirect(req) && await localHuman.passwordlessSudo() } : { enabled: false };
     if (req.method !== 'POST') throw new HttpError(405, `no route ${req.method} ${path}`);
     if (!on) throw new HttpError(404, 'local human login is off (settings auth.localHuman)');
     const origin = typeof req.headers.origin === 'string' ? req.headers.origin.toLowerCase() : '';
@@ -2274,6 +2485,8 @@ export async function runDaemon(): Promise<void> {
     return { kind: trustedHuman(req, owner) ? 'owner' : 'none' };
   };
   db.open();
+  // A test's startup seed (S-2542): in place before the first reconcile.
+  if (testHooksAllowed(process.env, STAM_HOME, TMUX_SOCKET) && testHome(STAM_HOME, LIVE_HOME)) applyTestSeed(STAM_HOME, (r) => db.getAgent(r)?.id ?? r, hashToken);
   // The system view's stream (S-456): `agent.changed` is coalesced in events.ts and flushed
   // on a timer, so the current state, cost, and unread count are read here, once per flush.
   events.setAgentSnapshot((id) => {
@@ -2500,6 +2713,11 @@ export async function runDaemon(): Promise<void> {
   // Suggested input past its expiry, and held approvals to type (S-422).
   if (ignoredTestOnlyEnv('STAM_TEST_HUMAN_KEY')) console.warn('STAM_TEST_HUMAN_KEY is set outside a test home and is ignored: only tailscale serve proves the human here');
   setInterval(() => void permissions.retryHeldInputs().catch((e) => console.error(`suggested input: ${e instanceof Error ? e.message : e}`)), 5000);
+  if (ignoredTestOnlyEnv('STAM_PR_MERGE_SCRIPT')) console.warn('STAM_PR_MERGE_SCRIPT is set outside a test home and is ignored: pr_merge runs the deploy checkout\'s merge-pr.mjs');
+  // Merge runs that ended (S-2279): their callers get the outcome. Only the ITSA home starts them; STAM_PR_MERGE_POLL_MS is for tests.
+  setInterval(() => {
+    if (prMerge.isHome()) void prMerge.tick().catch((e) => console.error(`pr_merge: ${e instanceof Error ? e.message : e}`));
+  }, Number(envVar('PR_MERGE_POLL_MS')) || 5000);
   // Harness dialogs nobody answered in time go to the human (S-589).
   setInterval(() => void permissions.escalateStaleDialogs().catch((e) => console.error(`dialog timeout: ${e instanceof Error ? e.message : e}`)), 5000);
   // The model classifier for activity items the rules leave NULL (S-214); off unless settings say so.
@@ -2574,6 +2792,10 @@ export async function runDaemon(): Promise<void> {
   machines.startSampler();
   // Mail queued for a peer that didn't answer is redelivered (S-235).
   mail.startOutbox();
+  // The secret store (S-2114): read into memory, and opencode.env imported once.
+  secrets.init();
+  // The MCP client secrets move into the store, once (S-2736).
+  mcpAuth.migrateClientSecrets();
   credits.startCreditPolling();
   // The GitHub source (S-55): polls the subjects agents and ITSAs watch, every
   // settings.watch.githubSeconds. See src/sources/github.ts.
@@ -2586,6 +2808,11 @@ export async function runDaemon(): Promise<void> {
   void budgets.evaluateAll();
   // The peers' paid spend joins every budget (S-395); a change re-evaluates them.
   peerSpend.start(() => void budgets.evaluateAll());
+  // The peers' subscription windows (S-2367): a fresh reading on any machine can clear a window or a pause here.
+  peerReadings.start(() => {
+    void rules.evaluateAll();
+    void costPause.evaluatePauses();
+  });
   // Cost pauses: clear the ones whose time or window reset has passed, and reschedule timers.
   void costPause.evaluatePauses();
   // Error probes (and Claude's credits-out): probe every blocked account from the first step.
@@ -2632,6 +2859,9 @@ export async function runDaemon(): Promise<void> {
         return origin ? { ...r, origin, ...(r.name !== MACHINE && strictOn() ? { terminalOrigin: origin } : {}) } : r;
       });
     }],
+    // Settings › Prompt caching (S-2239): each live agent's detected cache window and account, this
+    // machine's plus each peer's (src/cache-panel.ts). Read only.
+    ['GET', /^\/api\/cache\/agents$/, (_m, _b, _u, _r, local) => cachePanel.cacheAgents(local)],
     // Starts a stopped peer (the start a spawn on it uses, ensureUp), so the Files world's Start button has
     // something to call (S-1526). A machine that is already up answers at once.
     [
@@ -2652,8 +2882,11 @@ export async function runDaemon(): Promise<void> {
       /^\/api\/templates\/([\w-]+)$/,
       (m, body, _u, _r, _l, _h, req) => {
         humanOnly(req, "change stam's templates");
+        // An agent type's instructions live on the settings home (S-417).
+        if (SHARED_TEMPLATE.test(m[1])) homeOnly('agent type instructions');
         if (body.reset) resetTemplate(m[1]);
         else saveTemplate(m[1], String(body.text ?? ''));
+        if (SHARED_TEMPLATE.test(m[1])) sharedFilesChanged();
         return listTemplates().find((t) => t.name === m[1]);
       },
     ],
@@ -2793,12 +3026,12 @@ export async function runDaemon(): Promise<void> {
         } catch (e) {
           throw new HttpError(400, `not valid JSON: ${e instanceof Error ? e.message : e}`);
         }
-        // An invalid cost config is rejected, so the file keeps the last valid one.
+        // An invalid cost config or harness section is rejected, so the file keeps the last valid one.
         if (m[1] === 'settings') {
-          const problem = costProblem(parsed);
-          if (problem) {
-            noteInvalid(problem);
-            throw new HttpError(400, `cost config rejected: ${problem}`);
+          const r = fileProblem(parsed);
+          if (r) {
+            if (r.field === 'cost') noteInvalid(r.problem);
+            throw new HttpError(400, `${r.field} config rejected: ${r.problem}`);
           }
         }
         if (m[1] === 'settings') {
@@ -2847,6 +3080,50 @@ export async function runDaemon(): Promise<void> {
         permissionModes.noteSettingsChange(before, mail.HUMAN);
         void budgets.evaluateAll();
         return { text: r.text };
+      },
+    ],
+    // The secret store (S-2114): only the human lists, sets or deletes a secret, behind the same
+    // check as a settings change; agents, the OpenCode server and peers get 403. No route returns a value.
+    ['GET', /^\/api\/secrets$/, (_m, _b, _u, _r, _l, _h, req) => {
+      humanOnly(req, "see stam's secrets");
+      return { secrets: secretsCall(() => secrets.list()) };
+    }],
+    [
+      'PUT',
+      /^\/api\/secrets\/([^/]+)$/,
+      (m, body, _u, _r, _l, _h, req) => {
+        humanOnly(req, "change stam's secrets");
+        const info = secretsCall(() => secrets.set(decodeURIComponent(m[1]), body ?? {}));
+        console.log(`secret set: ${info.name}`);
+        return info;
+      },
+    ],
+    // Test (S-2115): one authenticated read against the named provider, or the one whose config
+    // names the secret. The stored value is tested; the answer and the record hold fixed text only.
+    [
+      'POST',
+      /^\/api\/secrets\/([^/]+)\/test$/,
+      async (m, body, _u, _r, _l, _h, req) => {
+        humanOnly(req, "test stam's secrets");
+        const name = decodeURIComponent(m[1]);
+        const named = typeof body?.provider === 'string' && body.provider ? body.provider : undefined;
+        try {
+          return await llm.testSecret(name, named);
+        } catch (e) {
+          if (e instanceof llm.KeyTestError) throw new HttpError(e.status, e.message);
+          return secretsCall(() => { throw e; });
+        }
+      },
+    ],
+    [
+      'DELETE',
+      /^\/api\/secrets\/([^/]+)$/,
+      (m, _b, _u, _r, _l, _h, req) => {
+        humanOnly(req, "change stam's secrets");
+        const name = decodeURIComponent(m[1]);
+        if (!secretsCall(() => secrets.remove(name))) throw new HttpError(404, `no secret ${name}`);
+        console.log(`secret deleted: ${name}`);
+        return { removed: name };
       },
     ],
     // Shared settings across machines (S-390): the home serves the shared part of its settings to
@@ -3013,6 +3290,22 @@ export async function runDaemon(): Promise<void> {
         return r;
       },
     ],
+    // What a fresh install still lacks (S-2145, src/onboarding.ts). Providers stay 'unknown' until GET /api/secrets exists (S-2114).
+    [
+      'GET',
+      /^\/api\/onboarding$/,
+      () => {
+        const versions: Record<string, string | null> = {};
+        for (const [name, a] of Object.entries(adapters)) {
+          try {
+            versions[name] = a.version();
+          } catch {
+            versions[name] = null;
+          }
+        }
+        return onboardingStatus({ versions, providers: 'unknown', localHuman: settings().auth.localHuman, repos: settings().itsa.repos, derivedRepos: derivedRepos(), cos: org.chiefOfStaff()?.name ?? null });
+      },
+    ],
     // The models a Settings model field can pick (S-379): OpenRouter's catalogue, or a harness's.
     [
       'GET',
@@ -3048,7 +3341,7 @@ export async function runDaemon(): Promise<void> {
         const waitsOf = timed('agents: waits', () => waits.webWaitsByAgent());
         const here = timed('agents: per-agent state', () =>
           listed.map((a) => ({
-            ...a,
+            ...publicAgent(a),
             parents: parents.get(a.id) ?? [],
             unread: unread.get(a.id) ?? 0,
             cost_usd: cost.get(a.id) ?? 0,
@@ -3069,7 +3362,7 @@ export async function runDaemon(): Promise<void> {
         // A peer's agents carry the cost its daemon computed; the mode shown is this daemon's.
         const fetched = local
           ? here
-          : [...here, ...(await fanOut<db.Agent>(url.pathname + url.search)).map((a: any) => timed('agents: peer cost', () => withOwnCost(a, display) as db.Agent))];
+          : [...here, ...(await fanOut<db.Agent>(url.pathname + url.search)).map((a: any) => timed('agents: peer cost', () => withOwnCost(publicAgent(a), display) as db.Agent))];
         // Peers' agents seen here are remembered, so mail to one can wait while its peer is down (S-235).
         if (!local) timed('agents: remember peers', () => { for (const a of fetched) if (a.machine !== MACHINE) db.rememberPeerAgent(a); });
         // The human's default view of each agent is this daemon's, for peers' agents too.
@@ -3244,7 +3537,7 @@ export async function runDaemon(): Promise<void> {
         humanOnly(req, 'import MCP servers');
         const cwds = [...new Set(db.listAgents().map((a) => a.cwd).filter((c): c is string => Boolean(c)))];
         // STAM_HARNESS_HOME points the scan at fixture files in a test; otherwise the user's home.
-        return { servers: scanHarnesses({ home: process.env.STAM_HARNESS_HOME || homedir(), cwds, existing: settings().mcpServers ?? {} }) };
+        return { servers: scanHarnesses({ home: envVar('HARNESS_HOME') || homedir(), cwds, existing: settings().mcpServers ?? {} }) };
       },
     ],
     // The public MCP registry, proxied for the human (S-53). Read-only and cached.
@@ -3274,8 +3567,7 @@ export async function runDaemon(): Promise<void> {
         // The fields only stam sets (S-466): a peer forwarding mail, or the daemon itself, which
         // calls sendMail directly. From an agent's or the OpenCode server's token they would place
         // mail in any thread, or skip the checks on its sender, so they are refused.
-        const own = (caller.kind === 'agent' || caller.kind === 'opencode') && !local ? mail.DAEMON_FIELDS.filter((f) => body?.[f] !== undefined) : [];
-        if (own.length) throw new HttpError(403, `${own.join(', ')} ${own.length > 1 ? 'are' : 'is'} set only by stam, not in an agent's mail`);
+        refuseStamFields(body, caller, local, mail.DAEMON_FIELDS, 'mail');
         // from_stam marks stam's own notice, so it lands as one in any thread, even an ITSA's (S-2033). Only a peer's
         // daemon forwarding its own mail may set it, as the ITSA post route allows.
         if (body?.from_stam !== undefined && !(local && caller.kind === 'shared')) throw new HttpError(403, 'from_stam is set only by stam');
@@ -3392,6 +3684,36 @@ export async function runDaemon(): Promise<void> {
           }
         }
         return m[3] === 'defer' || m[3] === 'undefer' ? { deferred: m[3] === 'defer' } : { archived: m[3] === 'archive' };
+      },
+    ],
+    [
+      // The human marks its own copies of a thread's mail unread again (S-2246), the inverse of the read route.
+      // The ids name the mail; each daemon marks the ones it holds, and a request from the web fans the rest to the peers.
+      'POST',
+      /^\/api\/agents\/([\w-]+)\/threads\/([\w-]+)\/unread$/,
+      async (m, body, _u, _r, local, human) => {
+        // A verified peer may ask too: `local` is set only with the peer's token and x-stam-local, never by an agent's token.
+        if (mailboxId(m[1]!) !== mail.HUMAN || !(human || local)) throw new HttpError(403, 'only the human marks its mail unread');
+        const ids: string[] = Array.isArray(body.ids) ? body.ids.map(String) : [];
+        if (!ids.length) throw new HttpError(400, 'name the mail to mark unread');
+        const held = new Set(db.threadMail(m[2]!).map((x) => x.id));
+        const here = db.markUnread(mail.HUMAN, ids.filter((id) => held.has(id)));
+        if (local) return { marked: here };
+        const missing = ids.filter((id) => !held.has(id));
+        const rest = await Promise.all(
+          peers().map((p) =>
+            missing.length
+              ? peerCall(p, 'POST', `/api/agents/human/threads/${m[2]}/unread`, { ids: missing }).then((r) => {
+                if (r.status >= 300) console.error(`mark unread: ${p.name} answered ${r.status} for ${missing.length} mail`);
+                return Array.isArray(r.data?.marked) ? r.data.marked : [];
+              }, (e) => {
+                console.error(`mark unread: ${p.name} unreachable: ${e instanceof Error ? e.message : e}`);
+                return [];
+              })
+              : [],
+          ),
+        );
+        return { marked: [...here, ...rest.flat()] };
       },
     ],
     [
@@ -3652,6 +3974,9 @@ export async function runDaemon(): Promise<void> {
       /^\/api\/agents$/,
       (_m, body, _u, _r, local, human, _q, caller) => {
         if (!body?.by && strictRefuses('spawn with no by', unattributed(human, local, caller))) throw new HttpError(403, 'only the human, or an agent naming itself (by), spawns an agent');
+        // An agent's `by` is the asker the spawn's permissions read (S-2424). resolveActors already refuses a foreign
+        // `by` for every agent caller; this checks it again through actor(), as defence in depth.
+        if (caller.kind === 'agent' && body?.by) body = { ...body, by: actor(caller, body.by) };
         // A ring reviewer type with no harness, model, or preset is spawned as a ring.
         if (body.type && agentTypes()[String(body.type)]?.review?.ring && !body.preset && !body.harness && !body.model) return spawnRingType(body, human);
         // An agent's queued spawn is keyed by the agent itself, whatever `by` it names (S-2134).
@@ -3673,7 +3998,7 @@ export async function runDaemon(): Promise<void> {
     [
       'POST',
       /^\/api\/slot-queue\/([\w-]+)\/cancel$/,
-      (m, _b, _u, _r, _l, _h, _q, caller) => cancelQueuedSpawn(m[1]!, caller),
+      (m, body, _u, _r, local, _h, _q, caller) => cancelSpawn(m[1]!, cancelCaller(caller, body?.by), local),
     ],
     // A peer's spawn of a queued name from the same caller drops this machine's queued one (S-2134).
     [
@@ -3739,19 +4064,24 @@ export async function runDaemon(): Promise<void> {
     // so a test needn't wait for the five-minute timers or the fallback minutes. `error` records a
     // provider error signal on an agent as its adapter would (`agent`, `class`, `source`), and
     // `probe-due` runs an account's error probe now (src/cost-probes.ts). `spend` reports an agent's
-    // cumulative cost (`agent`, `cost`) as its adapter would, which books it on the agent's account.
+    // cumulative cost (`agent`, `cost`) as its adapter would, which books it on the agent's account. `forget-clears`
+    // drops the remembered window clears. `stale-reading` stores a reading taken at `at` without evaluating it (S-905).
     // An agent's token is refused (S-1287), as the other human-only routes refuse it.
     [
       'POST',
       /^\/api\/test\/cost$/,
       async (_m, body) => {
         if (body?.action === 'reading') usage.reportSubscription(String(body.name), body.windows ?? {});
+        // A reading stored as taken at `at` (ISO time) and not evaluated, so it is stale as of now (S-905).
+        else if (body?.action === 'stale-reading') db.open().prepare('INSERT INTO subscriptions (name, data, updated_at) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at').run(String(body.name), JSON.stringify(body.windows ?? {}), String(body.at));
         else if (body?.action === 'poll-credits') await credits.pollCredits();
         else if (body?.action === 'fallback-due') await costFallback.evaluate(Number(body.now));
         else if (body?.action === 'error') rules.signal(mustAgent(String(body.agent)).id, { source: String(body.source ?? 'test'), class: String(body.class) });
         else if (body?.action === 'probe-due') await costProbes.runProbe(String(body.account));
         else if (body?.action === 'spend') usage.report(mustAgent(String(body.agent)), { cost: Number(body.cost) });
-        else throw new HttpError(400, 'action must be reading, poll-credits, fallback-due, error, probe-due or spend');
+        // `forget-clears` drops every remembered window clear, so a window that re-sets isn't held as a flap (S-2365).
+        else if (body?.action === 'forget-clears') db.open().exec('DELETE FROM window_clears');
+        else throw new HttpError(400, 'action must be reading, poll-credits, fallback-due, error, probe-due, spend or forget-clears');
         return { ok: true };
       },
     ],
@@ -3823,6 +4153,205 @@ export async function runDaemon(): Promise<void> {
         return { waiting: itsaGate.waiting };
       },
     ],
+    // Test-only (S-2387): set the agent fields a test can't reach through a route, so no e2e script opens
+    // stam.db. `agent` names it; the rest are optional and written raw (see applyTestAgent in src/test-hooks.ts):
+    // type, forwarded_to, parent, workspace, token, lifecycle, activity, activity_detail, harness, first_prompt,
+    // pending_action, created_at. With `create` the agent is made first (S-2542).
+    [
+      'POST',
+      /^\/api\/test\/agent$/,
+      (_m, body) => {
+        applyTestAgent({ ...body, agent: String(body?.agent) }, (r) => mustAgent(r).id, hashToken);
+        return { ok: true };
+      },
+    ],
+    // Test-only (S-2523): the daemon's event rows, for a test that checks what was logged. GET ?agent=&type=
+    // (type matches as a SQL LIKE pattern) answers [{agent_id, type, data}] oldest first; both are optional.
+    [
+      'GET',
+      /^\/api\/test\/events$/,
+      (_m, _b, url) => {
+        const agent = url.searchParams.get('agent');
+        const type = url.searchParams.get('type');
+        return db
+          .open()
+          .prepare(`SELECT agent_id, type, data FROM events WHERE (? IS NULL OR agent_id = ?) AND (? IS NULL OR type LIKE ?) ORDER BY id`)
+          .all(agent, agent, type, type);
+      },
+    ],
+    // Test-only (S-2542, test/e2e-itsa-owners-peers.sh): how many archived agents' failed unowns are kept for a retry.
+    [
+      'GET',
+      /^\/api\/test\/pending-unown$/,
+      () => ({ count: (db.open().prepare('SELECT COUNT(*) AS n FROM itsa_pending_unown').get() as { n: number }).n }),
+    ],
+    // Test-only (S-2542): a permission request's created_at, status, decided_by, decided_at or expires_at.
+    // `id` names it (src/test-hooks.ts, applyTestPermission).
+    [
+      'POST',
+      /^\/api\/test\/permission$/,
+      (_m, body) => {
+        try {
+          applyTestPermission(body ?? {});
+        } catch (e) {
+          throw new HttpError(404, e instanceof Error ? e.message : String(e));
+        }
+        return { ok: true };
+      },
+    ],
+    // Test-only (S-2542): insert a wait row as given (applyTestWait: agent, kind, id, target, detail, since, until, source, data).
+    [
+      'POST',
+      /^\/api\/test\/wait$/,
+      (_m, body) => {
+        applyTestWait(body ?? {}, (r) => mustAgent(r).id);
+        return { ok: true };
+      },
+    ],
+    // Test-only (S-2542): insert usage rows, {table: usage | usage_samples, rows: [{agent, ...}]} (applyTestUsage).
+    [
+      'POST',
+      /^\/api\/test\/usage$/,
+      (_m, body) => {
+        try {
+          applyTestUsage(body ?? {}, (r) => mustAgent(r).id);
+        } catch (e) {
+          throw new HttpError(400, e instanceof Error ? e.message : String(e));
+        }
+        return { ok: true };
+      },
+    ],
+    // Test-only (S-2544): purpose-named reads of what the API doesn't show (testReads in src/test-hooks.ts).
+    // ?agent= is an agent ref where a route takes one.
+    ...(
+      [
+        ['blockers', (u: URL) => testReads.blockers(testAgentId(u))],
+        ['cost-notices', (u: URL) => testReads.costNotices(testAgentId(u))],
+        ['cost-fallbacks', (u: URL) => testReads.costFallbacks(testAgentId(u))],
+        ['mail-pushed', (u: URL) => testReads.mailPushed(testAgentId(u) ?? '', u.searchParams.get('subject') ?? '')],
+        ['usage-total', (u: URL) => testReads.usageTotal(u.searchParams.get('account') ?? '')],
+        ['peer-agents', () => testReads.peerAgents()],
+        ['req-waivers', () => testReads.reqWaivers()],
+        ['counts', () => testReads.counts()],
+        ['stam-bin', () => ({ bin: STAM_BIN })],
+      ] as [string, (u: URL) => unknown][]
+    ).map(([name, read]): [string, RegExp, (m: RegExpMatchArray, body: any, url: URL) => unknown] => ['GET', new RegExp(`^/api/test/${name}$`), (_m, _b, url) => read(url)]),
+    // Test-only (S-2592): the daemon's effective settings, as settings() reads them.
+    ['GET', /^\/api\/test\/settings$/, () => settings()],
+    // Test-only (S-2592, test/e2e-settings-writes.sh): setSetting(key, value) as the daemon's own code calls it, which a
+    // non-home daemon limits to its local part. With `merge`, an object value is spread over the current one first
+    // (as a bookkeeping caller does). Answers the warnings it logged: {warnings: [...]}.
+    [
+      'POST',
+      /^\/api\/test\/set-setting$/,
+      (_m, body) => {
+        const key = String(body?.key) as keyof ReturnType<typeof settings>;
+        const value = body?.merge ? { ...(settings()[key] as object), ...body.value } : body?.value;
+        const warnings: string[] = [];
+        const warn = console.warn;
+        console.warn = (...a: unknown[]) => warnings.push(a.join(' '));
+        try {
+          setSetting(key, value);
+        } finally {
+          console.warn = warn;
+        }
+        return { ok: true, warnings };
+      },
+    ],
+    // Test-only (S-2523, test/e2e-agent-tokens.sh): how an agent token is stored. GET ?token= answers
+    // {plain, hashed}: whether any *.db* file of the home (db, -wal, -shm) holds the token's bytes, so a leak into
+    // any column, a WAL frame or a free page counts, and whether some agent row holds its hash.
+    [
+      'GET',
+      /^\/api\/test\/token-at-rest$/,
+      (_m, _b, url) => {
+        const token = url.searchParams.get('token') ?? '';
+        const has = (v: string) => Boolean(db.open().prepare('SELECT 1 FROM agents WHERE token_hash = ?').get(v));
+        const needle = Buffer.from(token);
+        const plain = token !== '' && readdirSync(STAM_HOME).some((f) => /\.db/.test(f) && readFileSync(join(STAM_HOME, f)).includes(needle));
+        return { plain, hashed: has(hashToken(token)) };
+      },
+    ],
+    // Test-only (S-2523, test/e2e-agents-route.sh): seed `count` agents in chains of four with unread and read
+    // mail, waits that point at mail threads, blockers and extra parent links, so one GET /api/agents has every
+    // per-agent read to do (S-344). The agents are id-N, named ag-N.
+    [
+      'POST',
+      /^\/api\/test\/seed-agents$/,
+      (_m, body) => {
+        const n = Number(body?.count ?? 300);
+        const d = db.open();
+        for (let i = 0; i < n; i++) {
+          db.createAgent({ id: `id-${i}`, name: `ag-${i}`, role: '', machine: envVar('MACHINE') ?? 'test', harness: 'claude', model: null, effort: null, cwd: '', parent_id: i % 4 ? `id-${i - 1}` : null, session_id: null });
+        }
+        for (let i = 8; i < n; i += 8) db.addParent(`id-${i}`, `id-${i - 2}`);
+        for (let i = 0; i < n; i++) {
+          for (let m = 0; m < i % 4; m++) {
+            db.createMail({ id: `mail-${i}-${m}`, from_id: 'id-0', from_name: 'ag-0', subject: `s ${i} ${m}`, body: 'b', thread_id: `thread-${i}-${m}`, reply_to: null }, [`id-${i}`]);
+          }
+          if (i % 3 === 0) db.addWait({ agent_id: `id-${i}`, kind: 'event', source: 'stam', detail: 'a thread', data: JSON.stringify({ thread: `mail-${i}-0` }) });
+          if (i % 5 === 0) db.addWait({ agent_id: `id-${i}`, kind: 'timer', source: 'stam', detail: 'a timer' });
+          if (i % 7 === 0) d.prepare('INSERT INTO blockers (agent_id, kind, account, reason, since, clear) VALUES (?, ?, ?, ?, ?, ?)').run(`id-${i}`, 'usage', 'claude', 'test', new Date().toISOString(), null);
+        }
+        return { ok: true, seeded: n };
+      },
+    ],
+    // Test-only (S-2523, test/e2e-mail-archive.sh): shape the mail the API can't. `action` is `agent` ({id, name}:
+    // a shut-down agent row, a mailbox with no running harness), `set-time` ({mail, at}: a message's created_at)
+    // `archive` ({mailbox, thread}: a forced archive, over a pending request too) or `read-all` (every mail read).
+    [
+      'POST',
+      /^\/api\/test\/mail$/,
+      (_m, body) => {
+        const d = db.open();
+        if (body?.action === 'agent') {
+          db.createAgent({ id: String(body.id), name: String(body.name), role: 'mail-archive test helper', machine: 'test', harness: 'claude', model: null, effort: null, cwd: '/tmp', parent_id: null, session_id: null });
+          // Written raw, as the row a daemon left behind: no lifecycle observer runs.
+          d.prepare("UPDATE agents SET lifecycle = 'shut_down' WHERE id = ?").run(String(body.id));
+        } else if (body?.action === 'set-time') {
+          applyTestMailTime(String(body.mail), String(body.at));
+        } else if (body?.action === 'archive') {
+          const ids = (d.prepare('SELECT id FROM mail WHERE thread_id = ?').all(String(body.thread)) as { id: string }[]).map((r) => r.id);
+          // archiveThread hides a thread by the ids it held at that moment.
+          db.archiveThread(String(body.mailbox), String(body.thread), ids);
+        } else if (body?.action === 'read-all') {
+          d.prepare("UPDATE mail_recipients SET read_at = datetime('now') WHERE read_at IS NULL").run();
+        } else throw new HttpError(400, 'action must be agent, set-time, archive or read-all');
+        return { ok: true };
+      },
+    ],
+    // Test-only (S-2523, test/e2e-read-mail.sh): make every mail delivery insert fail (`fail: true`) or work
+    // again (`fail: false`), so a read fails part-way through, after its read state was written.
+    [
+      'POST',
+      /^\/api\/test\/delivery-fail$/,
+      (_m, body) => {
+        const d = db.open();
+        d.exec('DROP TRIGGER IF EXISTS fail_delivery');
+        if (body?.fail) d.exec("CREATE TRIGGER fail_delivery BEFORE INSERT ON mail_deliveries BEGIN SELECT RAISE(ABORT, 'injected'); END");
+        return { ok: true };
+      },
+    ],
+    // Test-only (S-2387): read or write a kv row. GET ?key= answers {value} (null when absent); POST {key, value}
+    // sets it, and a null value deletes it.
+    [
+      'GET',
+      /^\/api\/test\/kv$/,
+      (_m, _b, url) => {
+        const r = db.open().prepare('SELECT value FROM kv WHERE key = ?').get(url.searchParams.get('key') ?? '') as { value: string } | undefined;
+        return { value: r ? r.value : null };
+      },
+    ],
+    [
+      'POST',
+      /^\/api\/test\/kv$/,
+      (_m, body) => {
+        const key = String(body?.key);
+        if (body?.value === null || body?.value === undefined) db.open().prepare('DELETE FROM kv WHERE key = ?').run(key);
+        else db.open().prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, String(body.value));
+        return { ok: true };
+      },
+    ],
     // Test-only (test/e2e-stall.sh): a request that awaits, so it is in flight while another request
     // blocks the loop. It writes stall-awaiting, then holds until stall-release exists.
     [
@@ -3866,6 +4395,16 @@ export async function runDaemon(): Promise<void> {
         const s = peerSpend.serve(local);
         if (!s) throw new HttpError(403, 'only a peer can read spend');
         return s;
+      },
+    ],
+    // This machine's own subscription windows per configured account, which a peer reads to clear its
+    // blockers (src/peer-readings.ts, S-2367).
+    [
+      'GET',
+      /^\/api\/usage\/readings$/,
+      (_m, _b, _u, _r, local) => {
+        if (!local) throw new HttpError(403, 'only a peer can read readings');
+        return rules.servedReadings();
       },
     ],
     // Spend per ITSA, averages by configuration, and what no ITSA worked on (src/issue-costs.ts).
@@ -4360,7 +4899,7 @@ export async function runDaemon(): Promise<void> {
       (m, body) => {
         const by = mustAgent(String(body.by)).id;
         try {
-          return { result: m[2] === 'submit' ? ring.submit(m[1], by, String(body.text ?? ''), Boolean(body.agree), body.verdict == null ? undefined : String(body.verdict)) : ring.decide(m[1], by, Boolean(body.continue), String(body.text ?? '')) };
+          return { result: m[2] === 'submit' ? ring.submit(m[1], by, String(body.text ?? ''), Boolean(body.agree), body.verdict == null ? undefined : String(body.verdict), body.round == null ? undefined : Number(body.round), body.seat == null ? undefined : String(body.seat)) : ring.decide(m[1], by, Boolean(body.continue), String(body.text ?? '')) };
         } catch (e) {
           throw new HttpError(409, e instanceof Error ? e.message : String(e));
         }
@@ -4521,6 +5060,45 @@ export async function runDaemon(): Promise<void> {
         });
       },
     ],
+    // From a peer whose spawn failed after joining the agent: undoes that join (S-2441), checked as the join was.
+    [
+      'POST',
+      /^\/api\/itsas\/leave$/,
+      (_m, body, _u, _r, local, _h, _q, caller) => {
+        if (!local) throw new HttpError(403, 'only a peer can remove an agent from an ITSA');
+        const ref = String(body?.itsa ?? '');
+        const agent = String(body?.agent ?? '');
+        if (!ref || !agent) throw new HttpError(400, 'leave needs itsa and agent');
+        return itsaRoute(async () => {
+          itsaOwners.mayAssign(ref, viaOf(caller));
+          await itsa.removeParticipant(ref, agent, String(body?.by ?? ''));
+          return { ok: true };
+        });
+      },
+    ],
+    // From a peer spawning an agent with `participate`: may the asking agent add it to this ITSA (S-2424)? The same check as the owner's.
+    [
+      'POST',
+      /^\/api\/itsas\/may-participate$/,
+      (_m, body, _u, _r, local, _h, _q, caller) => {
+        if (!local) throw new HttpError(403, 'only a peer can check a spawn\'s participants');
+        const ref = String(body?.itsa ?? '');
+        if (!ref) throw new HttpError(400, 'may-participate needs itsa');
+        return itsaRoute(() => {
+          itsa.must(ref);
+          itsaOwners.mayAssign(ref, viaOf(caller));
+          return { ok: true };
+        });
+      },
+    ],
+    // The away digest (S-2821): the human's presence opens an away window when it comes after a long gap; GET reads the latest one.
+    ['POST', /^\/api\/presence$/, (_m, _b, _u, _r, _l, _h, req) => (humanOnly(req, "report the human's presence"), digest.presence())],
+    ['GET', /^\/api\/digest$/, (_m, _b, _u, _r, _l, _h, req) => (humanOnly(req, 'read the away digest'), digest.digest())],
+    ['POST', /^\/api\/digest\/dismiss$/, (_m, body, _u, _r, _l, _h, req) => {
+      humanOnly(req, 'dismiss the away digest');
+      if (typeof body?.until !== 'string') throw new HttpError(400, 'dismiss needs the window\'s until');
+      return digest.dismiss(body.until);
+    }],
     // The ITSAs waiting on the human, oldest first, with their actions.
     // What the human is asked to decide: not an agent's to read (S-587).
     ['GET', /^\/api\/itsas\/attention$/, (_m, _b, _u, _r, _l, _h, _q, caller) => { notAgentToken(caller, 'read what waits on the human'); return itsaRoute(() => itsaHuman.attention()); }],
@@ -4553,7 +5131,17 @@ export async function runDaemon(): Promise<void> {
       /^\/api\/itsas\/unown-agent$/,
       async (_m, body, _u, _r, local) => {
         const how = body?.how === 'forgotten' ? 'forgotten' : 'archived';
-        return holderRoute(() => itsaOwners.guardPeerReport(local, String(body?.id), how === 'forgotten' ? ['shut_down', 'archived'] : ['archived'], 'that archived agent can unown its ITSAs', () => itsaOwners.unownLocal({ id: String(body.id), name: String(body.name), parent: typeof body.parent === 'string' ? body.parent : null }, how)));
+        return holderRoute(() => itsaOwners.guardPeerReport(local, String(body?.id), how === 'forgotten' ? ['shut_down', 'archived'] : ['archived'], 'that archived agent can unown its ITSAs', () => itsaOwners.unownLocal({ id: String(body.id), name: String(body.name), parent: typeof body.parent === 'string' ? body.parent : null, type: typeof body.type === 'string' ? body.type : null }, how)));
+      },
+    ],
+    // Whether an ITSA, or an ancestor of one, is marked an incident (S-2421): a peer's incident spawn asks the home, and gets
+    // a yes or no only. Read-only, and peer-only; before the ITSA route below, which would take this path as an id.
+    [
+      'GET',
+      /^\/api\/itsas\/incident-marked$/,
+      (_m, _body, u, _r, local) => {
+        if (!local) throw new HttpError(403, 'only a peer can ask the incident mark');
+        return { marked: itsaOwners.incidentMarkedHere(u.searchParams.get('itsa')) };
       },
     ],
     ['GET', /^\/api\/itsas\/([\w-]+)$/, (m) => itsaRoute(() => itsa.get(m[1]))],
@@ -4569,6 +5157,7 @@ export async function runDaemon(): Promise<void> {
           // An agent changes only an ITSA it belongs to, so it can't add itself as a participant (S-480);
           // and only the chief of staff or the assistant opens an ITSA to every agent, or closes one, by its kind.
           mayActOnItsa(caller, by, m[1]!, 'edit');
+          if (fields.incident !== undefined && !mayMarkIncident(by, human, org.chiefOfStaff()?.id)) throw new HttpError(403, 'only the chief of staff or the human marks an ITSA as an incident (S-2406)');
           if ((caller.kind === 'agent' || caller.kind === 'opencode') && fields.kind !== undefined && visibility.isOpenBoard(fields.kind) !== visibility.isOpenBoard(itsa.must(m[1]).kind) && !caller.boss && org.chiefOfStaff()?.id !== by && !isAssistant(by))
             throw new HttpError(403, `only the chief of staff or the assistant makes an ITSA a retro item or feedback report, or turns one into another kind`);
           const r = await itsa.set(m[1], fields, by);
@@ -4593,6 +5182,8 @@ export async function runDaemon(): Promise<void> {
         itsaRoute(() => {
           // Only stam posts as stam: the daemon itself, or a peer's daemon forwarding its post (S-480).
           if (body?.from_stam !== undefined && !(local && caller.kind === 'shared')) throw new HttpError(403, 'from_stam is set only by stam');
+          // The same fields as mail (S-945), but kind and health are a post's own: a comment or an update.
+          refuseStamFields(body, caller, local, mail.DAEMON_FIELDS.filter((f) => f !== 'kind' && f !== 'health'), 'post');
           const by = itsaActor(body, human);
           mayActOnItsa(caller, by, m[1]!, 'post');
           return itsa.post(m[1], { ...body, by });
@@ -4627,6 +5218,21 @@ export async function runDaemon(): Promise<void> {
         }),
     ],
     [
+      // The mails about an ITSA in other threads (its chip asks), this daemon's copy only: the merge gate (S-1819) asks the ITSA home, like the thread read above. Not for agents. Own-thread mail is left out; `to` is the recipient ids.
+      'GET',
+      /^\/api\/itsas\/([\w-]+)\/about-mails$/,
+      (m, _b, _u, _r, _l, _h, _q, caller) =>
+        itsaRoute(() => {
+          const x = itsa.must(m[1]);
+          // Whole threads, not per-mail visibility: about_itsa grants no thread (mail-visibility.ts), so only the merge path's caller (the shared token, the owner, a peer) reads it, never an agent.
+          if (caller.kind === 'agent' || caller.kind === 'opencode') throw new HttpError(403, 'only the merge gate reads the mails about an ITSA, not an agent');
+          return db.aboutItsaThreads(x.id)
+            .filter((t) => t.thread_id !== x.thread_id)
+            .flatMap((t) => t.mails)
+            .map((k) => ({ id: k.id, thread_id: k.thread_id, from_id: k.from_id, kind: k.kind ?? null, created_at: k.created_at, reply_to: k.reply_to ?? null, subject: k.subject, body: k.body, about_itsa: k.about_itsa ?? null, superseded_by: k.superseded_by ?? null, to: k.recipients.filter((r) => !r.withdrawn_at).map((r) => r.id) }));
+        }),
+    ],
+    [
       // The +1 count alone (S-796): a +1 on a retro item or feedback report must never make the
       // caller read its thread, which the OpenCode server must name an agent for and only a
       // participant of the item may read. On the open board any agent reads the count, as any may
@@ -4652,8 +5258,10 @@ export async function runDaemon(): Promise<void> {
           const via = viaBox(caller, caller.kind === 'opencode' ? by : undefined);
           // On a machine that isn't the ITSA home, the home fetches the branch from this machine's origin: push it first (S-667).
           const me = by ? db.getAgent(by) : undefined;
-          if (me?.machine === MACHINE) await prOpen.pushOwnBranch(me.cwd, String(body?.branch ?? ''), via);
-          const pr = await prOpen.openPrRouted({ branch: body?.branch, title: body?.title, body: body?.body, itsa: body?.itsa, by }, via);
+          // body_file is read here, on the caller's machine, before any push or peer call (S-2677).
+          const input = prOpen.resolveBody({ branch: body?.branch, title: body?.title, body: body?.body, body_file: body?.body_file, itsa: body?.itsa, by }, me);
+          if (me?.machine === MACHINE) await prOpen.pushOwnBranch(me.cwd, String(body?.branch ?? ''), via, body?.itsa ?? null);
+          const pr = await prOpen.openPrRouted(input, via);
           // A note, not a refusal (S-1662, S-1706): the PR is fine, but the agent's tests ran against stale deps, so they are relinked here. Only the caller's own worktree is touched.
           const warning = me?.machine === MACHINE && me.cwd ? await prOpenDepsRelink(me.cwd) : '';
           return warning ? { ...pr, warning } : pr;
@@ -4671,14 +5279,55 @@ export async function runDaemon(): Promise<void> {
         }),
     ],
     [
+      // The merge relay (S-2279): the ITSA home runs merge-pr.mjs detached for a PR the caller's tree owns, and mails it the outcome.
+      'POST',
+      /^\/api\/pr\/merge$/,
+      (_m, body, _u, _r, _l, human, _q, caller) =>
+        itsaRoute(() => {
+          const by = itsaActor(body, human);
+          const via = viaBox(caller, caller.kind === 'opencode' ? by : undefined);
+          return prMerge.mergeRouted({ pr: body?.pr, by }, via);
+        }),
+    ],
+    [
+      // Takes a PR out of the merge queue (S-2709), on pr_merge's terms.
+      'POST',
+      /^\/api\/pr\/merge-cancel$/,
+      (_m, body, _u, _r, _l, human, _q, caller) =>
+        itsaRoute(() => {
+          const by = itsaActor(body, human);
+          const via = viaBox(caller, caller.kind === 'opencode' ? by : undefined);
+          return prMerge.cancelRouted({ pr: body?.pr, by }, via);
+        }),
+    ],
+    [
+      // Closes a PR on pr_merge's terms (S-2279), such as one a later PR superseded.
+      'POST',
+      /^\/api\/pr\/close$/,
+      (_m, body, _u, _r, _l, human, _q, caller) =>
+        itsaRoute(() => {
+          const by = itsaActor(body, human);
+          const via = viaBox(caller, caller.kind === 'opencode' ? by : undefined);
+          return prMerge.closeRouted({ pr: body?.pr, comment: body?.comment, by }, via);
+        }),
+    ],
+    [
+      // A merge run's state and queue place (S-2279): read-only.
+      'POST',
+      /^\/api\/pr\/merge-status$/,
+      (_m, body, _u, _r, _l, human) => itsaRoute(() => prMerge.statusRouted({ pr: body?.pr, by: itsaActor(body, human) })),
+    ],
+    [
       // The verdict relay (S-1061): a reviewer without gh posts its stam/review verdict; the ITSA home runs pr-review.mjs as that reviewer.
       'POST',
       /^\/api\/pr\/review$/,
       (_m, body, _u, _r, _l, _h, _q, caller) =>
         reviewRoute(() => {
-          prReview.assertPeerCaller(caller);
           // The reviewer is the caller's agent, as pr_open's (viaBox); a body's name is never the reviewer.
           const via = viaBox(caller, caller.kind === 'opencode' ? String(body?.by ?? '') || undefined : undefined);
+          // A peer's forward carries its own proof of boss and assistant (the peer token verified them); viaBox recomputes both from
+          // this daemon's agents, which don't include the peer's, so they're taken back from the authenticated caller.
+          if (via && caller.forwarded) Object.assign(via, { boss: Boolean(caller.boss), assistant: Boolean(caller.assistant), reviewRole: caller.reviewRole, ownBranches: caller.ownBranches });
           return prReview.reviewPrRouted({ pr: body?.pr, verdict: body?.verdict, summary: body?.summary, head: body?.head }, via);
         }),
     ],
@@ -4690,7 +5339,7 @@ export async function runDaemon(): Promise<void> {
         itsaRoute(async () => {
           const by = itsaActor(body, human);
           const via = viaBox(caller, caller.kind === 'opencode' ? by : undefined);
-          if (via && !via.boss) await prOpen.pushCheckHere(String(body?.branch ?? ''), via);
+          if (via && !via.boss) await prOpen.pushCheckHere(String(body?.branch ?? ''), via, body?.itsa ?? null);
           return { ok: true };
         }),
     ],
@@ -4802,7 +5451,7 @@ export async function runDaemon(): Promise<void> {
     // rev shown (if_rev). Only the human as trustedHuman proves it: a shared token with x-stam-human
     // proves nothing, and a peer's request doesn't come from the human's loopback, so it's refused.
     ['POST', /^\/api\/requirements\/asks\/([\w-]+)\/drop$/, (m, body, _u, _r, _l, _h, req) => reqRoute(async () => {
-      if (!trustedHuman(req as IncomingMessage, owner)) throw new HttpError(403, `only the human drops a draft from an approval, ${humanWays(`${MACHINE}'s Tailscale address`)}`);
+      if (!trustedHuman(req as IncomingMessage, owner)) throw new HttpError(403, `only the human drops a draft from an approval, ${humanWays(MACHINE)}`);
       const ifRev = (body ?? {}).if_rev;
       if (!Number.isInteger(ifRev)) throw new HttpError(400, 'if_rev is the rev of the draft shown, a whole number');
       await reqApproval.dropFromBatch(m[1], String((body ?? {}).key ?? ''), (body ?? {}).obsolete === true, ifRev);
@@ -4999,7 +5648,7 @@ export async function runDaemon(): Promise<void> {
       (_m, _b, _u, _r, _l, _h, req) => (humanOnly(req, 'see notification devices'), {
         publicKey: webpush.vapidKeys().publicKey,
         kinds: webpush.KINDS,
-        devices: db.listPushDevices().map(({ p256dh: _k, auth: _a, ...d }) => d),
+        devices: db.listPushDevices().map(publicPushDevice),
       }),
     ],
     [
@@ -5010,8 +5659,7 @@ export async function runDaemon(): Promise<void> {
         const sub = body.subscription ?? {};
         if (!/^https?:\/\//.test(String(sub.endpoint ?? '')) || !sub.keys?.p256dh || !sub.keys?.auth) throw new HttpError(400, 'a push subscription needs endpoint, keys.p256dh, and keys.auth');
         const kinds = Array.isArray(body.kinds) ? body.kinds.filter((k: string) => (webpush.KINDS as readonly string[]).includes(k)) : [...webpush.KINDS];
-        const { p256dh: _k, auth: _a, ...d } = db.savePushDevice({ endpoint: String(sub.endpoint), p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth), label: String(body.label ?? '').slice(0, 80) || 'A device', origin: body.origin ? String(body.origin) : null, kinds, replaces: body.replaces ? String(body.replaces) : undefined });
-        return d;
+        return publicPushDevice(db.savePushDevice({ endpoint: String(sub.endpoint), p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth), label: String(body.label ?? '').slice(0, 80) || 'A device', origin: body.origin ? String(body.origin) : null, kinds, replaces: body.replaces ? String(body.replaces) : undefined }));
       },
     ],
     [
@@ -5022,8 +5670,7 @@ export async function runDaemon(): Promise<void> {
         if (!db.getPushDevice(m[1])) throw new HttpError(404, `no device ${m[1]}`);
         const kinds = Array.isArray(body.kinds) ? body.kinds.filter((k: string) => (webpush.KINDS as readonly string[]).includes(k)) : undefined;
         db.updatePushDevice(m[1], { label: body.label ? String(body.label).slice(0, 80) : undefined, kinds });
-        const { p256dh: _k, auth: _a, ...d } = db.getPushDevice(m[1])!;
-        return d;
+        return publicPushDevice(db.getPushDevice(m[1])!);
       },
     ],
     [
@@ -5042,7 +5689,14 @@ export async function runDaemon(): Promise<void> {
         humanOnly(req, 'send a test notification');
         const ids = body.device ? [String(body.device)] : db.listPushDevices().map((d) => d.id);
         if (!ids.length) throw new HttpError(404, 'no device has notifications on');
-        return webpush.pushLocal({ kind: 'test', title: 'stam', body: 'Notifications work on this device.', tag: 'test', machine: MACHINE }, ids);
+        // Read the rows first: a 404 or 410 deletes the row while pushing, and the redaction needs its secrets.
+        const rows = new Map(db.listPushDevices().filter((d) => ids.includes(d.id)).map((d) => [d.id, d]));
+        const sent = await webpush.pushLocal({ kind: 'test', title: 'stam', body: 'Notifications work on this device.', tag: 'test', machine: MACHINE }, ids);
+        // The push service's error text can echo the endpoint: redact it as last_error is. A device whose secrets aren't known gets a fixed message.
+        return sent.map((r) => {
+          const row = rows.get(r.device);
+          return r.error ? { ...r, error: row ? redactPushError(r.error, row) : 'the push service refused it' } : r;
+        });
       },
     ],
     // A peer stored mail to the human: it names the mail, and this daemon checks it with
@@ -5149,7 +5803,7 @@ export async function runDaemon(): Promise<void> {
         if (local && !db.getPermissionRequest(m[1])) throw new HttpError(404, `no permission request ${m[1]}`);
         const peerAgent = local && caller.kind === 'agent' && body.by === caller.agent && !db.getAgent(String(body.by));
         const by = peerAgent ? String(body.by) : body.by ? mustAgent(String(body.by)).id : human ? mail.HUMAN : undefined;
-        if (!by) throw new HttpError(403, 'an answer must come from the human or a reviewing agent');
+        if (!by) throw new HttpError(403, `an answer must come from the human or a reviewing agent; the human answers ${humanWays()}`);
         try {
           if (body.decision === 'escalate') return await permissions.escalatePermission(m[1], by, String(body.note ?? ''), peerAgent ? { boss: Boolean(caller.boss) } : undefined);
           if (body.decision && body.decision !== 'approve' && body.decision !== 'deny') throw new Error(`decision must be approve, deny or escalate`);
@@ -5188,7 +5842,7 @@ export async function runDaemon(): Promise<void> {
       (m) => {
         const a = mustAgent(m[1]);
         const ws = waits.webWaits(a.id);
-        return { ...a, blockers: blockers.blockers(a), waits: ws, resting: lifecycle.restingOf(a, ws), view: agentView.capabilities(a) };
+        return { ...publicAgent(a), blockers: blockers.blockers(a), waits: ws, resting: lifecycle.restingOf(a, ws), view: agentView.capabilities(a) };
       },
     ],
     // The view the human's web UI opens an agent in (S-82): terminal or conversation, or
@@ -5204,7 +5858,11 @@ export async function runDaemon(): Promise<void> {
         return { agent_id: m[1], default_view: v };
       },
     ],
-    ['GET', /^\/api\/agents\/([\w-]+)\/events$/, (m) => db.listEvents(mustAgent(m[1]).id)],
+    // `?type=GLOB` and `?limit=N` (S-2451): the latest N events of that type, up to 1000; the default is the latest 50.
+    ['GET', /^\/api\/agents\/([\w-]+)\/events$/, (m, _b, url) => {
+      const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit') ?? 50) || 50));
+      return db.listEvents(mustAgent(m[1]).id, limit, url.searchParams.get('type') || undefined);
+    }],
     // One agent's own usage (S-95): its harness and model, and its token and cost totals
     // for today and its whole life, for the agent's own view. A counter its harness does
     // not report comes back null, so the UI shows it as missing rather than 0.
@@ -5368,7 +6026,7 @@ export async function runDaemon(): Promise<void> {
   };
 
   const handler = async (req: IncomingMessage, res: ServerResponse) => {
-    const send = (status: number, data: unknown) => sendCompressed(req, res, status, { 'content-type': 'application/json' }, Buffer.from(JSON.stringify(data)));
+    const send = (status: number, data: unknown) => sendCompressed(req, res, status, { 'content-type': 'application/json' }, Buffer.from(JSON.stringify(scrubAgents(data))));
     // The web UI is web/'s build, web/dist (`npm run build` there; `stam deploy` runs it).
     const WEB = join(ROOT, 'web', 'dist');
     if (req.method === 'GET' && (req.url === '/' || req.url?.startsWith('/?') || req.url?.startsWith('/#'))) {
@@ -5456,7 +6114,7 @@ export async function runDaemon(): Promise<void> {
       const fromPeer = verified.kind === 'peer';
       const forwarded = fromPeer && req.headers['x-stam-local'] === '1' ? req.headers['x-stam-agent'] : undefined;
       // Past this point a peer acts as the shared token does, except for the peer-only routes (`local`).
-      const caller: Caller = forwarded ? { kind: 'agent', agent: String(forwarded), boss: req.headers['x-stam-agent-boss'] === '1', assistant: req.headers['x-stam-agent-assistant'] === '1', scope: branchScope.parseScope(req.headers['x-stam-branch-scope']) } : verified.kind === 'peer' ? { kind: 'shared' } : verified;
+      const caller: Caller = forwarded ? { kind: 'agent', agent: String(forwarded), boss: req.headers['x-stam-agent-boss'] === '1', assistant: req.headers['x-stam-agent-assistant'] === '1', forwarded: true, scope: branchScope.parseScope(req.headers['x-stam-branch-scope']), ...prReview.parseReviewHeaders(req.headers) } : verified.kind === 'peer' ? { kind: 'shared' } : verified;
       const owned = trustedHuman(req, owner);
       const url = new URL(req.url ?? '/', 'http://x');
       // Video, audio, and PDF players can't send a header, so an attachment may carry the
@@ -5466,7 +6124,7 @@ export async function runDaemon(): Promise<void> {
       // its protection, not the token (mcp-auth.ts).
       const oauthCallback = req.method === 'GET' && url.pathname === '/oauth/callback';
       if (caller.kind === 'none' && !req.headers.authorization && req.headers.origin && req.method !== 'GET') logDirectRefused(req, owner);
-      if (caller.kind === 'none' && fromPeerUi) throw new HttpError(403, peerUiHumanRoute(req.method ?? '', url.pathname) ? `only the human can do this, through ${MACHINE}'s Tailscale address (tailscale serve)` : `only the human can change shared settings, through ${MACHINE}'s Tailscale address (tailscale serve)`);
+      if (caller.kind === 'none' && fromPeerUi) throw new HttpError(403, peerUiHumanRoute(req.method ?? '', url.pathname) ? `only the human can do this, through ${MACHINE}'s page (tailscale serve)` : `only the human can change shared settings, through ${MACHINE}'s page (tailscale serve)`);
       if (caller.kind === 'none' && !mediaToken && !oauthCallback) throw new HttpError(401, 'bad token');
       // Without a token, the browser's tailnet identity is the only credential, and a page on any site
       // could use it (S-414). A request from another site is refused, except a peer's UI writing shared
@@ -5490,7 +6148,8 @@ export async function runDaemon(): Promise<void> {
       const oldHuman = notAgent && (req.headers['x-stam-human'] === '1' || owned);
       // Under auth.humanStrict only trustedHuman is the human (S-543). Otherwise a request the old rule
       // calls human and trustedHuman doesn't is logged, once a minute per path, so the setting can be
-      // turned on knowing what it would refuse, and with it on, the log says what it refused.
+      // turned on knowing what it would refuse; with it on, the log says what it refused, and with it off
+      // (S-2159) it says the request was allowed, so a fresh install doesn't read a refusal it didn't get.
       const human = strictOn() ? notAgent && owned && req.headers['x-stam-local'] !== '1' : oldHuman;
       if (oldHuman && !owned) logWouldRefuse(req, url.pathname, caller.kind);
       // A voice clip is binary: its route reads the request itself (voice.ts).
@@ -5551,7 +6210,7 @@ export async function runDaemon(): Promise<void> {
       if (path.startsWith('/api/requirements') && !settings().requirements.enabled) throw new HttpError(404, requirements.OFF_MESSAGE);
       // Refused here, before the proxy: forwarded without a via, the OpenCode server's read would reach the home as a peer's (S-587).
       if (req.method === 'GET' && /^\/api\/itsas\/(queue|attention|[\w-]+\/cost)$/.test(path)) notAgentToken(caller, path.endsWith('/cost') ? "read an ITSA's cost" : path.endsWith('/queue') ? 'read the merge queue' : 'read what waits on the human');
-      if (!local && /^\/api\/itsas\/(owner-stopped|unown-agent|join-parent|join)$/.test(path)) throw new HttpError(403, 'only a peer can call this');
+      if (!local && /^\/api\/itsas\/(owner-stopped|unown-agent|join-parent|join|leave|may-participate|incident-marked)$/.test(path)) throw new HttpError(403, 'only a peer can call this');
       if (!local && (path.startsWith('/api/itsas') || path.startsWith('/api/requirements') || path === '/api/retros' || path === '/api/processes' || path.startsWith('/api/processes/')) && itsaHome !== MACHINE) {
         const peer = peerByName(itsaHome);
         if (!peer) throw new HttpError(503, `ITSA home '${itsaHome}' is not a configured peer`);
@@ -5592,7 +6251,10 @@ export async function runDaemon(): Promise<void> {
       const status = e instanceof HttpError ? e.status : e instanceof AmbiguousAgentError ? 409 : 500;
       // Under auth.humanStrict the CLI is never the human; tell it where to answer (S-543).
       const hint = status === 403 && strictOn() && req.headers['x-stam-human'] === '1' && !trustedHuman(req, owner) ? { hint: "answer from stam's web UI" } : undefined;
-      send(status, { error: e instanceof Error ? e.message : String(e), ...hint, ...(e instanceof HttpError ? e.extra : undefined) });
+      // A page on 127.0.0.1 that isn't logged in as the human (a `stam web` token link) is told a local login is
+      // there, so it can offer one (S-2121). Only with auth.localHuman on, on Linux, where the login works.
+      const login = status === 403 && req.headers['x-stam-human'] === '1' && settings().auth.localHuman && process.platform === 'linux' && localDirect(req) && !trustedHuman(req, owner) ? { localLogin: true } : undefined;
+      send(status, { error: e instanceof Error ? e.message : String(e), ...hint, ...login, ...(e instanceof HttpError ? e.extra : undefined) });
     }
   };
 
@@ -5703,6 +6365,7 @@ export async function runDaemon(): Promise<void> {
       if (addr === addrs[0]) {
         watchHomeChanges();
         startSettingsSync();
+        void autostartAssistant();
       }
     });
   }

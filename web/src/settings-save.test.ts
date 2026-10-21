@@ -111,6 +111,11 @@ describe('buildPatch (S-294)', () => {
     expect(buildPatch(cur, base)).toEqual({ patch: { boardViews: { a: { n: 1 }, b: null } }, removed: [] })
     expect(cur.boardViews).toEqual({ a: { n: 1 } })
   })
+  it('a deleted Agents table view goes as a null for its id, so the daemon drops it', () => {
+    const base = { agentsTableCols: { main: { cols: ['role'], group: 'tree' } } }
+    const cur = { agentsTableCols: {} }
+    expect(buildPatch(cur, base)).toEqual({ patch: { agentsTableCols: { main: null } }, removed: [] })
+  })
   it('a dropped top-level key is reported, not sent', () => {
     expect(buildPatch({ x: 1 }, { x: 1, y: 2 })).toEqual({ patch: {}, removed: ['y'] })
   })

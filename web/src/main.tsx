@@ -102,10 +102,10 @@ function openItsaKey(key: string) {
 async function boot() {
   initPhone()
   // On 127.0.0.1 with auth.localHuman on and no accepted token, the page asks for a login code (S-613).
-  const loginDir = await needsLocalLogin(token)
-  if (loginDir) {
+  const login = await needsLocalLogin(token)
+  if (login) {
     applyTheme(initialTheme())
-    createRoot(document.getElementById('root')!).render(<LocalLogin dir={loginDir} />)
+    createRoot(document.getElementById('root')!).render(<LocalLogin dir={login.dir} passwordlessSudo={login.passwordlessSudo} />)
     return
   }
   // The boot fetches don't depend on each other, so they start together (S-150). The lists
@@ -150,4 +150,5 @@ boot()
 
 // For headless UI checks.
 // `live` applies a fake event from the daemon's stream, as if it had arrived (the system view's flights).
-Object.assign(window, { stamDebug: { sessions, shell, selectAgent, enterTree, exitTree, addDraft, live: applyLiveEvent } })
+// `toast` shows a transient notice (the login offer's check covers it with one, S-2121).
+Object.assign(window, { stamDebug: { sessions, shell, selectAgent, enterTree, exitTree, addDraft, live: applyLiveEvent, toast } })

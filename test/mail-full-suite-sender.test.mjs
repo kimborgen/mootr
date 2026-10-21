@@ -37,6 +37,10 @@ test('full-suite mail to the human is refused', async () => {
   await assert.rejects(mail.sendMail({ system: 'full-suite', to: ['alice', 'human'], subject: 's', body: 'b' }), /not your user/, 'among others too');
 });
 
+test('go-parity (S-2297) may not mail the human either', async () => {
+  await assert.rejects(mail.sendMail({ system: 'go-parity', to: ['human'], subject: 's', body: 'b' }), /not your user/);
+});
+
 test('an ITSA post naming the human, and a reply in a thread that reaches them, are refused', async () => {
   const x = await itsa.create({ title: 'Human in it', by: 'human', owner: 'alice', participants: ['human'] });
   await assert.rejects(itsa.post(x.key, { by: 'system:full-suite', body: 'hi', to: ['human'] }), /not your user/);

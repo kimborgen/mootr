@@ -9,6 +9,8 @@ const board = (id: string | null, height?: number) => pane(<Board id={id} viewKe
 // The saved view of a board, as settings hold it (`boardViews`, board-views.ts).
 const view = (key: string, v: { mode?: 'category' | 'status'; scope?: 'children' | 'subtree'; closedAll?: boolean }) => ({ 'GET /api/config/settings': { text: JSON.stringify({ boardViews: { [key]: { mode: 'category', scope: 'children', closedAll: false, ...v } } }) } })
 const menuOf = (id: string) => (el: HTMLElement) => el.querySelector<HTMLElement>(`.bcard[data-card="${id}"] .bc-menu`)?.click()
+// The issue card layout as settings hold it (`cardLayouts`, card-layout.ts), with the board's view.
+const withLayout = (layout: object, key = 'fx-i-910') => ({ 'GET /api/config/settings': { text: JSON.stringify({ boardViews: { [key]: { mode: 'category', scope: 'children', closedAll: false } }, cardLayouts: { issue: { ...layout, seen: [] } } }) } })
 
 export const stories: Story[] = [{
   name: 'Board',
@@ -18,7 +20,7 @@ export const stories: Story[] = [{
   code: ['web/src/itsa/Board.tsx#Board', 'web/src/itsa/Board.tsx#rankOf', 'web/src/itsa/board-views.ts#prefsFor'],
   rules: [
     'A column is a `--radius-md` panel on `--surface-app`; a card is `--surface-page` with a `--border-subtle` hairline and `--radius-sm`, and its border darkens to `--border-default` on hover over `--duration-fast`. Titles are `--type-chrome-md`, clamped to three lines.',
-    'The status shows in the card\'s foot in its `--is-*` tone with its glyph and words; a waiting-on-you ITSA also carries a warning badge with the user icon, and health is a dot in the success, warning or error tone with its label in the title and for screen readers, so neither is colour alone (' + ds('State vocabulary') + ').',
+    'A card is drawn from the issue card layout (`cardLayouts.issue`): its TOP, META, BADGES and FOOT slots take their items in order, and an empty slot takes no height. The status shows in META in its `--is-*` tone with its glyph and words, unless the column already says it. A waiting-on-you ITSA also carries a warning badge in TOP with the user icon, and health is a dot in the success, warning or error tone with its label for screen readers, so neither is colour alone (' + ds('State vocabulary') + ').',
     'Mouse and pen drag: the card dims in place, a ghost follows at `--shadow-float` and `--z-drag`, the target column takes `--drop-fill` with a `--drop-border` outline, and a line marks where it lands. Touch never drags: it scrolls, and a long press or the card\'s menu opens "Move to…".',
     'Keyboard: arrows move focus, Shift and the arrows move the card, M, the menu key or Shift+F10 opens "Move to…", Enter or Space opens the ITSA.',
     'The closed column shows the 10 most recently closed, newest first, with "Show all N" for the rest; it folds to a vertical strip (remembered on this device) and a drop on it sets the status only, since it orders by close time.',
@@ -35,6 +37,7 @@ export const stories: Story[] = [{
     { name: 'Long board with every closed card', data: itsaData(LONG), routes: view('fx-i-970', { closedAll: true }), render: () => board('fx-i-970', 720) },
     { name: 'Long board by status', data: itsaData(LONG), routes: view('fx-i-970', { mode: 'status' }), render: () => board('fx-i-970', 720) },
     { name: '"Move to…" menu', data: itsaData(TREE), routes: view('fx-i-910', {}), height: 620, render: () => <OnMount run={menuOf('fx-i-911')}>{board('fx-i-910', 580)}</OnMount> },
+    { name: 'Status moved to BADGES, title on one line', data: itsaData(TREE), routes: withLayout({ slots: { TOP: ['parent', 'kind', 'health'], META: ['rollup', 'links', 'owner'], BADGES: ['status'], FOOT: [] }, titleLines: 1 }), render: () => board('fx-i-910') },
     { name: 'Empty', data: itsaData([]), routes: view('all', {}), render: () => board(null, 360) },
   ],
 }]

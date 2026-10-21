@@ -15,8 +15,10 @@ import { closeSync, fstatSync, openSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STAM_HOME } from './config.ts';
 import * as db from './db.ts';
+import { checkCredential, send } from './llm/http.ts';
+import { envVar } from './env.ts';
 
-const base = () => process.env.STAM_ELEVENLABS_URL ?? 'https://api.elevenlabs.io';
+const base = () => envVar('ELEVENLABS_URL') ?? 'https://api.elevenlabs.io';
 const MODEL = 'scribe_v2';
 const PURPOSE = 'voice:transcribe';
 const ACCOUNT = 'elevenlabs';
@@ -59,9 +61,17 @@ export function apiKey(): string | undefined {
   }
 }
 
-// Whether voice is configured: the only thing the UI learns about the key.
+// Whether voice is configured: the only thing the UI learns about the key. A key that isn't a plain
+// header value (checkCredential, as transcribe refuses it) is not configured.
 export function configured(): boolean {
-  return apiKey() !== undefined;
+  const key = apiKey();
+  if (key === undefined) return false;
+  try {
+    checkCredential(key, 'ELEVENLABS_API_TOKEN');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Terms that help Scribe spell the names stam uses: agent names and ITSA keys.
@@ -96,11 +106,19 @@ export async function transcribe(audio: Buffer, contentType: string): Promise<{ 
   for (const t of terms) form.append('keyterms', t);
   const type = contentType || 'audio/webm';
   form.append('file', new Blob([audio], { type }), `clip.${extension(type)}`);
+  // A key that isn't a plain header value is refused before any call, with text that names no key (S-2117).
+  let xiKey: string;
+  try {
+    xiKey = checkCredential(key, 'ELEVENLABS_API_TOKEN');
+  } catch {
+    fail('invalid API key');
+    throw new VoiceError(503, 'voice is not configured: ELEVENLABS_API_TOKEN in voice.env is not a valid key');
+  }
   let res: Response;
   try {
-    res = await fetch(`${base()}/v1/speech-to-text`, {
+    res = await send(`${base()}/v1/speech-to-text`, {
       method: 'POST',
-      headers: { 'xi-api-key': key },
+      headers: { 'xi-api-key': xiKey },
       body: form,
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });

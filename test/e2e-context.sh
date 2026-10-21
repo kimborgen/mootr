@@ -8,6 +8,8 @@
 # Runs against its own daemon (test/lib.sh). Nothing waits on a timer: the checks poll state.
 set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
+# The statusline gate skips a report equal to the last within 10 s (S-2126), so each turn reports a
+# size of its own: the thresholds are re-read only when a report is processed.
 # The summary of a compaction is the /compact text: the resumed session repeats it as ${summary}.
 cat >"$TEST_TMP/context.json" <<'EOF2'
 { "turns": [
@@ -16,7 +18,7 @@ cat >"$TEST_TMP/context.json" <<'EOF2'
     { "reply": "ready" } ] },
   { "match": "from the human: hello", "steps": [
     { "mcp": "read_mail" },
-    { "status": { "context_tokens": 50000 } },
+    { "status": { "context_tokens": 50001 } },
     { "reply": "hello" } ] },
   { "match": "from the human: again", "steps": [
     { "mcp": "read_mail" },

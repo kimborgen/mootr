@@ -4,10 +4,12 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type DragEvent, type MouseEvent, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { selectAgent, selectThread } from './actions'
+import { Glyph } from './Glyph'
 import { Icon } from './Icon'
+import { threadChips, type WaitMark } from './mail/thread-chips'
 import { usePhone } from './ui/phone'
 import { byId, getData, permThread, useData } from './store'
-import { openItsa, StatusGlyph, statusLabel, topOwned, waitsOnHuman } from './itsa/itsa'
+import { openFromMail, openItsa, StatusGlyph, statusLabel, topOwned, waitsOnHuman } from './itsa/itsa'
 import type { Agent, Itsa, Resting, Wait } from './types'
 
 const RANK = ['human', 'agent', 'children', 'job', 'timer', 'event']
@@ -107,9 +109,17 @@ export function countdown(until: string | number, now: number) {
   return m < 60 ? m + 'm' : h < 24 ? h + 'h' : Math.ceil(s / 86400) + 'd'
 }
 
+// The tabs' fits that measure again when a countdown's text changes length (S-1872): `9m` becomes `10m`,
+// and the room the other slots have changes with it. Only a length change does it, never every tick.
+const remeasures = new Set<() => void>()
+const remeasureAll = () => remeasures.forEach((f) => f())
+
 // A timer badge's text. Only a timer badge mounts it, so the 1 Hz ticker redraws these and nothing else.
 function TimerText({ until }: { until: number }) {
-  return <>{countdown(until, useNow())}</>
+  const text = countdown(until, useNow())
+  const len = useRef(text.length)
+  useLayoutEffect(() => { if (len.current !== text.length) { len.current = text.length; remeasureAll() } }, [text.length])
+  return <>{text}</>
 }
 
 // A human wait on a pending request is the tab's approval badge already (as in WaitMark).
@@ -187,6 +197,9 @@ export function useTabFit(key: string, sig: string, wrap: RefObject<HTMLElement 
   const lastSig = useRef('')
   const flips = useRef(0)
   const lastW = useRef<number | undefined>(undefined)
+  // The latest measure, for the timers and the guard's clear, which run outside a render (S-1872).
+  const remeasure = useRef<() => void>(() => {})
+  const held = useRef(false)
   const measure = (resized = false) => {
     const el = wrap.current
     if (!el) return setFit(key, null)
@@ -207,10 +220,21 @@ export function useTabFit(key: string, sig: string, wrap: RefObject<HTMLElement 
     // a sibling's change can reopen one) is allowed only a few times in one task, after which the
     // slot keeps the narrower mode it has. A narrower mode is always allowed, so it never ends
     // squeezing the name under its floor (a guard that froze the slot mid-descent did, S-1452).
-    if (MODES.indexOf(f) < MODES.indexOf(shown)) { if (++flips.current > 4) f = shown; else setTimeout(() => { flips.current = 0 }) }
+    if (MODES.indexOf(f) < MODES.indexOf(shown)) {
+      if (++flips.current > 4) { f = shown; held.current = true }
+      setTimeout(clearFlips)
+    }
     fitNow.current = f; setFitState(f); setFit(key, f)
   }
+  // The counter clears between tasks. A slot the guard held measures again then: nothing else would, until the next render (S-1872).
+  const clearFlips = () => { flips.current = 0; if (held.current) { held.current = false; remeasure.current() } }
+  remeasure.current = () => measure()
   useLayoutEffect(() => { measure() })
+  useLayoutEffect(() => {
+    const f = () => remeasure.current()
+    remeasures.add(f)
+    return () => { remeasures.delete(f) }
+  }, [])
   useLayoutEffect(() => {
     const tab = wrap.current?.closest('.tab')
     if (!tab || typeof ResizeObserver === 'undefined') return
@@ -323,29 +347,43 @@ const stop = { onMouseDown: (e: MouseEvent) => e.stopPropagation(), onDragStart:
 const itsaFitKey = (k: string) => k + '#itsa'
 const chipTitle = (x: Itsa) => `${x.key} ${x.title} · ${statusLabel(x.status)}${waitsOnHuman(x) ? ': waits on you' : ''}`
 
-function Chips({ xs }: { xs: Itsa[] }) {
+// How a chip opens its ITSA: in place on an agent's tab, beside the thread on a thread's tab (S-93). `from` is
+// the element the chip is in, whose pane the ITSA opens beside.
+type OpenChip = (id: string, from: Element | null) => void
+const openInPlace: OpenChip = (id) => openItsa(id)
+
+function Chips({ xs, open = openInPlace }: { xs: Itsa[]; open?: OpenChip }) {
   return <>{xs.map((x) => (
     <button type="button" key={x.id} className={`ichip itsa-chip${waitsOnHuman(x) ? ' waits' : ''}`} data-itsa={x.id} title={chipTitle(x)} aria-label={chipTitle(x)} draggable={false} {...stop}
-      onClick={(e) => { e.stopPropagation(); openItsa(x.id) }}><StatusGlyph status={x.status} />{x.key}</button>
+      onClick={(e) => { e.stopPropagation(); open(x.id, e.currentTarget) }}><StatusGlyph status={x.status} />{x.key}</button>
   ))}</>
 }
 
 export function ItsaChips({ id, tabKey = id }: { id: string; tabKey?: string }) {
   useData()
-  const xs = topOwned(getData().itsas, id)
+  return <ItsaFold xs={topOwned(getData().itsas, id)} tabKey={tabKey} />
+}
+
+// The chips and their fold for an agent's owned ITSAs on its tab, fitted on their own (S-1452).
+export function ItsaFold({ xs, tabKey }: { xs: Itsa[]; tabKey: string }) {
   const wrap = useRef<HTMLSpanElement>(null)
   // The waits' own mode changes the room the chips have: follow it, so the chips measure again.
   useFit(tabKey)
   const fit = useTabFit(itsaFitKey(tabKey), xs.map((x) => x.id).join(), wrap)
+  return <ItsaFoldView xs={xs} fit={fit} wrap={wrap} />
+}
+
+// The chips and their pill for a fit given from outside: a thread's tab fits all its slots together.
+export function ItsaFoldView({ xs, fit, wrap, open: openTo = openInPlace }: { xs: Itsa[]; fit: Fit; wrap: RefObject<HTMLSpanElement | null>; open?: OpenChip }) {
   const { pop, setPop, open, popRef, badgeRef, toggle } = useBadgePop(wrap, fit === 'folded' && xs.length > 1)
   if (!xs.length || fit === 'none') return <span ref={wrap} className="itsa-chips" />
   // One ITSA is a chip already: its fold would only be a longer way to the same link.
-  if (fit === 'each' || xs.length === 1) return <span ref={wrap} className="itsa-chips"><Chips xs={xs} /></span>
+  if (fit === 'each' || xs.length === 1) return <span ref={wrap} className="itsa-chips"><Chips xs={xs} open={openTo} /></span>
   const name = `${xs.length} ITSAs: ${xs.map((x) => x.key).join(', ')}`
   return <span ref={wrap} className="itsa-chips">
     <button ref={badgeRef} type="button" className={`ichip itsa-chip${xs.some(waitsOnHuman) ? ' waits' : ''}`} data-itsa="folded" title={name} aria-label={name} aria-haspopup="dialog" aria-expanded={open} {...stop} onClick={toggle}>{xs.length} ITSAs</button>
     {open && pop ? <PopPortal pop={pop} popRef={popRef} label={name} onClose={() => setPop(null)}>
-      {xs.map((x) => <a key={x.id} href="#" className={waitsOnHuman(x) ? 'urgent' : ''} title={chipTitle(x)} data-itsa={x.id} onClick={(e) => { e.preventDefault(); openItsa(x.id) }}><StatusGlyph status={x.status} /> {x.key} {x.title}</a>)}
+      {xs.map((x) => <a key={x.id} href="#" className={waitsOnHuman(x) ? 'urgent' : ''} title={chipTitle(x)} data-itsa={x.id} onClick={(e) => { e.preventDefault(); openTo(x.id, wrap.current) }}><StatusGlyph status={x.status} /> {x.key} {x.title}</a>)}
     </PopPortal> : null}
   </span>
 }
@@ -355,10 +393,24 @@ export function ItsaChips({ id, tabKey = id }: { id: string; tabKey?: string }) 
 // inform, as in the strip. It holds waits only: a view's Reconnecting is its own line at the foot of the
 // conversation (OwnView), on a desktop and on a phone, so one view shows it once.
 export function WaitThinBar({ k }: { k?: string | null }) {
-  useData()
+  const d = useData()
   const phone = usePhone()
   const fit = useFit(k ?? undefined)
   const chipFit = useFit(k ? itsaFitKey(k) : undefined)
+  const agentFit = useFit(k ? agentFitKey(k) : undefined)
+  // A thread's chips: the same three slots as its tab, shown here once the tab has none of them room.
+  // A phone's thread tab only informs, so its thin bar stays as it is.
+  if (k?.startsWith('thread:')) {
+    if (phone) return null
+    // A story's key may carry a `#suffix` too (as for an agent's key below).
+    const c = threadChips(k.slice(7).split('#')[0], d)
+    const showMark = fit === 'none' && !!c.mark, showChips = chipFit === 'none' && c.itsas.length > 0, showAgents = agentFit === 'none' && c.agents.length > 0
+    if (!showMark && !showChips && !showAgents) return null
+    return <div className={`wait-thin${showChips || showAgents ? ' has-chips' : ''}`}>
+      {showMark && c.mark ? <MarkBadge mark={c.mark} /> : null}{showChips ? <Chips xs={c.itsas} open={openFromMail} /> : null}
+      {showAgents ? c.agents.map((id) => <AgentMark key={id} id={id} phone={false} />) : null}
+    </div>
+  }
   // A story's key may carry a `#suffix` to keep its states apart; the agent is the part before it.
   const id = k && /^(agent|view):/.test(k) ? k.slice(k.indexOf(':') + 1).split('#')[0] : undefined
   const a = id ? byId(id) : undefined
@@ -368,4 +420,164 @@ export function WaitThinBar({ k }: { k?: string | null }) {
   const showWaits = fit === 'none' && ws.length > 0, showChips = chipFit === 'none' && xs.length > 0
   if (!showWaits && !showChips && !showRest) return null
   return <div className={`wait-thin${showChips ? ' has-chips' : ''}`}>{showRest && a ? <RestBadge a={a} mode="compact" /> : null}{showWaits ? <KindBadges ws={ws} phone={phone} /> : null}{showChips ? <Chips xs={xs} /> : null}</div>
+}
+
+// A mail thread's tab (S-2311, S-1471 §2a) fills the chips slot with three slots: the wait mark, the
+// linked ITSA chips and the agent marks. They share one budget (useChipsFit), which walks the steps of
+// CHIP_STEPS in order as the tab narrows: agents fold, ITSAs fold, agents go to none, ITSAs go to none,
+// and the wait mark goes last. Each step's width is the sum of its slots' measured widths in that mode.
+const agentFitKey = (k: string) => k + '#agents'
+const MARK_ICON: Record<Exclude<WaitMark['kind'], 'unread'>, string> = { perm: 'shield-alert', human: 'user', deferred: 'alarm-clock', archived: 'archive' }
+const markLabel = (m: WaitMark) => ({ perm: 'Waiting for your answer to a permission request', human: 'Waiting for your answer', unread: `${m.count} unread`, deferred: 'Deferred: saved for later', archived: 'Archived' })[m.kind]
+// The mark itself, shared by the tab and the thin bar; it only informs, and a click selects the tab.
+function MarkBadge({ mark }: { mark: WaitMark }) {
+  const label = markLabel(mark)
+  const warn = mark.kind === 'perm' || mark.kind === 'human'
+  return <span className={`badge wait-badge${warn ? ' warn' : ''}`} data-wait={mark.kind} title={label} aria-label={label} role="img">
+    {mark.kind === 'unread' ? mark.count : <Icon name={MARK_ICON[mark.kind]} size="xs" />}
+  </span>
+}
+// An agent of the thread: its state glyph, opening the agent on a desktop; a phone's only informs.
+function AgentMark({ id, phone }: { id: string; phone: boolean }) {
+  const a = byId(id)
+  if (!a) return null
+  const label = `${a.name}: open the agent`
+  return phone
+    ? <span className="agent-mark" title={a.name}><Glyph agent={a} /></span>
+    : <button type="button" className="agent-mark" data-open-agent={id} title={label} aria-label={label} draggable={false} {...stop}
+      onClick={(e) => { e.stopPropagation(); selectAgent(id) }}><Glyph agent={a} /></button>
+}
+
+// The steps of a thread's chips, roomiest first, as [wait, ITSAs, agents]. The wait mark only goes at the last.
+const CHIP_STEPS: [Fit, Fit, Fit][] = [
+  ['each', 'each', 'each'], ['each', 'each', 'folded'], ['each', 'folded', 'folded'], ['each', 'folded', 'none'], ['each', 'none', 'none'], ['none', 'none', 'none'],
+]
+type ChipSlot = 'wait' | 'itsa' | 'agents'
+// The fit of a thread's three chip slots, as one budget. Each slot's width is measured in the mode it
+// shows and kept per mode, so a step's total is known before it is shown. A mode not measured yet
+// counts as zero, so the tab renders it once and measures it then. Like useTabFit, a resize, a changed
+// tab width or a changed `sig` starts again from the roomiest step, and a roomier step is allowed only a
+// few times in one task (the flip guard), while a narrower one is always allowed.
+function useChipsFit(tabKey: string, sig: string, refs: Record<ChipSlot, RefObject<HTMLElement | null>>, has: Record<ChipSlot, boolean>): Record<ChipSlot, Fit> {
+  const [step, setStep] = useState(0)
+  const stepNow = useRef(0)
+  stepNow.current = step
+  const sized = useRef<Partial<Record<ChipSlot, Partial<Record<Fit, number>>>>>({})
+  const lastTab = useRef(0)
+  const lastSig = useRef('')
+  const flips = useRef(0)
+  const lastW = useRef<number | undefined>(undefined)
+  // The roomiest step a squeeze has found too wide: no step at or above it is tried again until a reset.
+  const ceiling = useRef(-1)
+  const held = useRef(false)
+  const remeasure = useRef<() => void>(() => {})
+  const slots: ChipSlot[] = ['wait', 'itsa', 'agents']
+  const publish = (st: [Fit, Fit, Fit]) => {
+    setFit(tabKey, st[0])
+    setFit(itsaFitKey(tabKey), st[1])
+    setFit(agentFitKey(tabKey), st[2])
+  }
+  const measure = (resized = false) => {
+    const tab = refs.wait.current?.closest<HTMLElement>('.tab')
+    if (!tab) return
+    const cs = getComputedStyle(tab)
+    const inner = tab.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0)
+    if (inner <= 0 || !nameMin()) return // not laid out: keep what there is
+    const gap = parseFloat(cs.columnGap) || 0
+    const label = tab.querySelector<HTMLElement>('.label')
+    const own = slots.map((s) => refs[s].current)
+    // Every other child of the tab keeps its width: the close button, the glyph and any badge.
+    const others = [...tab.children].filter((c): c is HTMLElement => c !== label && !own.includes(c as HTMLElement) && (c as HTMLElement).offsetWidth > 0)
+    const othersW = others.reduce((n, c) => n + c.offsetWidth, 0)
+    const tabW = tab.offsetWidth
+    if (resized || tabW !== lastTab.current || sig !== lastSig.current) { sized.current = {}; ceiling.current = -1 }
+    lastTab.current = tabW
+    lastSig.current = sig
+    const cur = CHIP_STEPS[stepNow.current]
+    slots.forEach((s, i) => {
+      const el = refs[s].current
+      if (el && cur[i] !== 'none') (sized.current[s] ??= {})[cur[i]] = el.offsetWidth
+    })
+    const width = (s: ChipSlot, f: Fit) => (f === 'none' ? 0 : sized.current[s]?.[f] ?? 0)
+    const fitsStep = (st: [Fit, Fit, Fit]) => {
+      let total = nameMin() + othersW, n = others.length
+      slots.forEach((s, i) => { if (has[s] && st[i] !== 'none') { total += width(s, st[i]); n++ } })
+      return total + gap * n <= inner
+    }
+    let k = CHIP_STEPS.findIndex(fitsStep)
+    if (k < 0) k = CHIP_STEPS.length - 1
+    // The model can be off by the layout's own rounding, so the step shown is checked against the DOM: a name
+    // that is truncated under its floor means the step is too wide, and the next narrower step is taken.
+    const squeezed = !!label && label.offsetWidth < nameMin() && label.scrollWidth > label.offsetWidth
+    if (squeezed) ceiling.current = Math.max(ceiling.current, stepNow.current)
+    if (k <= ceiling.current) k = Math.min(ceiling.current + 1, CHIP_STEPS.length - 1)
+    // The guard holds a roomier step only while the step it holds still fits: a step that no longer fits
+    // (a reset that measured its modes at zero) must give way, or the name falls under its floor.
+    if (k < stepNow.current) {
+      if (++flips.current > 4 && fitsStep(CHIP_STEPS[stepNow.current])) { k = stepNow.current; held.current = true }
+      setTimeout(clearFlips)
+    }
+    stepNow.current = k
+    setStep(k)
+    publish(CHIP_STEPS[k])
+  }
+  // As in useTabFit: a held step measures again once the counter clears (S-1872).
+  const clearFlips = () => { flips.current = 0; if (held.current) { held.current = false; remeasure.current() } }
+  remeasure.current = () => measure()
+  useLayoutEffect(() => { measure() })
+  useLayoutEffect(() => {
+    const tab = refs.wait.current?.closest('.tab')
+    if (!tab || typeof ResizeObserver === 'undefined') return
+    // A callback at the width already seen (a height change, or the observer's echo of a step change) keeps
+    // what was measured: a resize is the only thing that starts the budget again.
+    const ro = new ResizeObserver((entries) => {
+      const w = entries?.[0]?.contentRect.width
+      if (w !== undefined && w === lastW.current) return
+      lastW.current = w
+      measure(true)
+    })
+    ro.observe(tab)
+    return () => ro.disconnect()
+  }, [tabKey])
+  useLayoutEffect(() => () => { setFit(tabKey, null); setFit(itsaFitKey(tabKey), null); setFit(agentFitKey(tabKey), null) }, [tabKey])
+  const cur = CHIP_STEPS[step]
+  return { wait: cur[0], itsa: cur[1], agents: cur[2] }
+}
+
+// The wait mark's slot. A mark with no room shows nothing; the thin bar holds it then.
+function MarkSlot({ mark, fit, wrap }: { mark: WaitMark | null; fit: Fit; wrap: RefObject<HTMLSpanElement | null> }) {
+  return <span ref={wrap} className="wait-badges">{mark && fit !== 'none' ? <MarkBadge mark={mark} /> : null}</span>
+}
+
+// The agent marks' slot: two marks then `+N` (one mark when folded), whose popover lists every agent by name.
+function AgentSlot({ ids, phone, fit, wrap }: { ids: string[]; phone: boolean; fit: Fit; wrap: RefObject<HTMLSpanElement | null> }) {
+  const shown = ids.slice(0, fit === 'folded' ? 1 : 2), more = ids.length - shown.length
+  const names = ids.map((id) => byId(id)?.name ?? id)
+  const name = `${ids.length} agents: ${names.join(', ')}`
+  const { pop, setPop, open, popRef, badgeRef, toggle } = useBadgePop(wrap, !phone && more > 0 && fit !== 'none')
+  if (!ids.length || fit === 'none') return <span ref={wrap} className="agent-marks" />
+  const moreEl = phone
+    ? <span className="agent-mark agent-more" data-agents="more">+{more}</span>
+    : <button ref={badgeRef} type="button" className="agent-mark agent-more" data-agents="more" title={name} aria-label={name} aria-haspopup="dialog" aria-expanded={open} {...stop} onClick={toggle}>+{more}</button>
+  return <span ref={wrap} className="agent-marks">
+    {shown.map((id) => <AgentMark key={id} id={id} phone={phone} />)}
+    {more > 0 ? moreEl : null}
+    {open && pop ? <PopPortal pop={pop} popRef={popRef} label={name} onClose={() => setPop(null)}>
+      {ids.map((id) => <a key={id} href="#" data-open-agent={id} onClick={(e) => { e.preventDefault(); selectAgent(id) }}><Glyph agent={byId(id)!} /> {byId(id)?.name ?? id}</a>)}
+    </PopPortal> : null}
+  </span>
+}
+
+export function ThreadChips({ tid, tabKey }: { tid: string; tabKey: string }) {
+  const d = useData()
+  const phone = usePhone()
+  const c = threadChips(tid, d)
+  const wait = useRef<HTMLSpanElement>(null), itsa = useRef<HTMLSpanElement>(null), agents = useRef<HTMLSpanElement>(null)
+  const sig = [c.mark ? c.mark.kind + c.mark.count : '', c.itsas.map((x) => x.id).join(), c.agents.join()].join('|')
+  const fit = useChipsFit(tabKey, sig, { wait, itsa, agents }, { wait: !!c.mark, itsa: c.itsas.length > 0, agents: c.agents.length > 0 })
+  return <>
+    <MarkSlot mark={c.mark} fit={fit.wait} wrap={wait} />
+    <ItsaFoldView xs={c.itsas} fit={fit.itsa} wrap={itsa} open={openFromMail} />
+    <AgentSlot ids={c.agents} phone={phone} fit={fit.agents} wrap={agents} />
+  </>
 }

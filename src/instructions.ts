@@ -10,7 +10,9 @@ import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { STAM_HOME } from './config.ts';
 import { render } from './templates.ts';
+import type { SecretRef } from './secrets.ts';
 import { peerShared, settings } from './settings.ts';
+import { envVar } from './env.ts';
 
 const NATIVE: Record<string, string[]> = {
   claude: ['CLAUDE.md', 'CLAUDE.local.md'],
@@ -217,7 +219,7 @@ export function claudePluginDir(): string | undefined {
 
 // The folder Codex, OpenCode, Gemini CLI and others read user skills from.
 // STAM_AGENTS_SKILLS moves it, so test daemons never write into the real one.
-export const agentsSkillsDir = () => process.env.STAM_AGENTS_SKILLS || join(homedir(), '.agents', 'skills');
+export const agentsSkillsDir = () => envVar('AGENTS_SKILLS') || join(homedir(), '.agents', 'skills');
 
 const sourceDirs = () => [join(homedir(), '.claude', 'skills'), SKILLS_DIR];
 
@@ -371,7 +373,9 @@ export function skillInfos(): SkillInfo[] {
 // through `stam mcp-proxy NAME` (see mcp-auth.ts and mcp-proxy.ts). `gh` reuses the user's
 // `gh` login; `oauth` follows the MCP authorization spec, with a dynamic client
 // registration when no client_id is given.
-export type McpAuth = { type: 'gh' } | { type: 'oauth'; client_id?: string; client_secret?: string; scopes?: string[] };
+// The client secret is a reference into the secret store (S-2736); a plain string is the old form,
+// moved into the store at start.
+export type McpAuth = { type: 'gh' } | { type: 'oauth'; client_id?: string; client_secret?: SecretRef | string; scopes?: string[] };
 
 // One MCP server from settings.mcpServers, in Claude Code's format: a stdio server has
 // `command`, `args`, and `env`; a remote one has `url` and `headers`. A remote server with

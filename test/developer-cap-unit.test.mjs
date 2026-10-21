@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const { developerCapRefusal, developerHolders, reserveSlot, releaseSlot, enqueueWaiter, grantSlots, queuedWaiters, queuePlace, dropWaiter, restoreQueue, saveQueueFile, loadQueueFile, hostHasRoom, roomRefusal, hostReadingFrom, cancelState, mayCancelWaiter, findDuplicate, spawnerKey, IDLE_HOLD_MS, SLOT_MIN_FREE_BYTES } = await import('../src/developer-cap.ts');
+const { incidentRefusal, homeSaysMarked, chainMarked, mayMarkIncident, demoteRevoked, developerCapRefusal, developerHolders, reserveSlot, releaseSlot, enqueueWaiter, grantSlots, queuedWaiters, queuePlace, dropWaiter, restoreQueue, saveQueueFile, loadQueueFile, hostHasRoom, roomRefusal, hostReadingFrom, cancelState, mayCancelWaiter, findDuplicate, spawnerKey, IDLE_HOLD_MS, SLOT_MIN_FREE_BYTES } = await import('../src/developer-cap.ts');
 
 // Host readings for grantSlots (S-2120): a quiet machine, and one over the load limit, one short of memory.
 const room = { load1: 1, freeBytes: 8 * 1024 ** 3 };
@@ -306,4 +306,96 @@ test('loading: no file is an empty queue, a corrupt file throws, a launched wait
   const r = loadQueueFile(file, (n) => n === 'launched');
   assert.deepEqual(r.waiting.map((w) => w.name), ['waiting']);
   assert.deepEqual(r.started.map((w) => w.name), ['launched']);
+});
+
+test('an incident waiter queues ahead of normal ones, like red-main (S-2406)', () => {
+  clear();
+  assert.equal(enqueueWaiter(waiter('n1')), 1);
+  assert.equal(enqueueWaiter(waiter('i1', { urgent: 'incident' })), 1);
+  assert.deepEqual(queuedWaiters().map((w) => w.name), ['i1', 'n1']);
+  clear();
+});
+
+test('an incident spawn gets no jump unless its ITSA chain is marked, and an unreadable mark is no mark (S-2406)', () => {
+  assert.equal(incidentRefusal('incident', true), null);
+  assert.equal(incidentRefusal('red-main', false), null);
+  assert.equal(incidentRefusal(undefined, false), null);
+  assert.match(incidentRefusal('incident', false), /marked as an incident/);
+  // The spawn's own ITSA, then its ancestors: one marked ancestor is enough, a marked child of an unmarked one is not.
+  assert.equal(chainMarked([{ incident: 0 }, { incident: 1 }]), true);
+  assert.equal(chainMarked([{ incident: 0 }, { incident: 0 }]), false);
+  assert.equal(chainMarked([{}, { incident: 0 }]), false);
+  assert.equal(chainMarked([]), false);
+  // Only a stored 1 counts: any other value, a missing one, fails closed.
+  for (const bad of [true, '1', null, undefined, 2]) assert.equal(chainMarked([{ incident: bad }]), false, String(bad));
+});
+
+// The ITSA home's answer to a spawn on another machine (S-2421): only a 200 with an explicit `marked: true` is a yes.
+test('a home that does not clearly say yes refuses an incident spawn (S-2421)', async () => {
+  const answers = (r) => homeSaysMarked(async () => r);
+  assert.equal(await answers({ status: 200, data: { marked: true } }), true);
+  assert.equal(await answers({ status: 200, data: { marked: false } }), false);
+  // A reply without the explicit flag, or a malformed one, is no.
+  assert.equal(await answers({ status: 200, data: {} }), false);
+  assert.equal(await answers({ status: 200, data: { marked: 'yes' } }), false);
+  assert.equal(await answers({ status: 200, data: { marked: 1 } }), false);
+  assert.equal(await answers({ status: 200, data: null }), false);
+  assert.equal(await answers({ status: 200, data: 'marked' }), false);
+  assert.equal(await answers({ status: 200, data: undefined }), false);
+  // A non-200 is no, even with a yes in the body.
+  assert.equal(await answers({ status: 403, data: { marked: true } }), false);
+  assert.equal(await answers({ status: 503, data: { marked: true } }), false);
+  // An unreachable home, or a timeout, throws: no.
+  assert.equal(await homeSaysMarked(async () => { throw new Error('the ITSA home is unreachable'); }), false);
+  assert.equal(await homeSaysMarked(() => { throw new Error('sync failure'); }), false);
+  assert.match(incidentRefusal('incident', false), /ITSA home did not answer yes/);
+});
+
+test('only the human or the chief of staff may set the incident mark (S-2406)', () => {
+  assert.equal(mayMarkIncident('human', true, 'cos1'), true);
+  assert.equal(mayMarkIncident('cos1', false, 'cos1'), true);
+  // A manager on its own ITSA and a caller with no id are refused.
+  assert.equal(mayMarkIncident('mgr1', false, 'cos1'), false);
+  assert.equal(mayMarkIncident('mgr1', false, undefined), false);
+  assert.equal(mayMarkIncident(undefined, false, undefined), false);
+  assert.equal(mayMarkIncident(undefined, false, 'cos1'), false);
+});
+
+test('a revoked incident waiter drops its priority and keeps its arrival place among the normal waiters (S-2406)', () => {
+  clear();
+  enqueueWaiter(waiter('n1', { at: 1 }));
+  enqueueWaiter(waiter('i1', { at: 2, urgent: 'incident', body: { urgent: 'incident', itsa: 'S-1' } }));
+  enqueueWaiter(waiter('n2', { at: 3 }));
+  assert.deepEqual(queuedWaiters().map((w) => w.name), ['i1', 'n1', 'n2']);
+  // Still marked: nothing changes.
+  assert.deepEqual(demoteRevoked(() => true), []);
+  assert.deepEqual(queuedWaiters().map((w) => w.name), ['i1', 'n1', 'n2']);
+  // Mark gone: i1 is a normal waiter again, behind n1 (which arrived first) and ahead of n2 (which arrived after it).
+  const demoted = demoteRevoked(() => false);
+  assert.deepEqual(demoted.map((w) => w.name), ['i1']);
+  assert.deepEqual(queuedWaiters().map((w) => w.name), ['n1', 'i1', 'n2']);
+  const i1 = queuedWaiters().find((w) => w.name === 'i1');
+  assert.equal(i1.urgent, undefined);
+  assert.equal('urgent' in i1.body, false);
+  assert.equal(i1.body.itsa, 'S-1');
+  clear();
+});
+
+// A queued spawn's notice (S-2720): an unreachable caller's machine is retried, then the fallback hears it; an unknown
+// caller goes straight to the fallback; a delivered notice never reaches it.
+test('deliverWaiterNotice retries an unreachable machine and then falls back', async () => {
+  const { deliverWaiterNotice } = await import('../src/developer-cap.ts');
+  let tries = 0;
+  const why = [];
+  assert.equal(await deliverWaiterNotice(async () => (++tries < 3 ? 'unreachable' : 'told'), async (w) => why.push(w), 5, 1), 'told');
+  assert.equal(tries, 3);
+  assert.deepEqual(why, []);
+  tries = 0;
+  assert.equal(await deliverWaiterNotice(async () => (tries++, 'unreachable'), async (w) => why.push(w), 2, 1), 'fallback');
+  assert.equal(tries, 3);
+  assert.match(why[0], /unreachable/);
+  tries = 0;
+  assert.equal(await deliverWaiterNotice(async () => (tries++, 'absent'), async (w) => why.push(w), 5, 1), 'fallback');
+  assert.equal(tries, 1);
+  assert.equal(await deliverWaiterNotice(async () => { throw new Error('x'); }, async (w) => why.push(w), 1, 1), 'fallback');
 });

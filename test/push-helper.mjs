@@ -7,7 +7,7 @@
 // serve`); an agent is one with the token and every header it could forge. Exits 1 on the
 // first failed check.
 import { createServer } from 'node:http';
-import { createECDH, createDecipheriv, createPublicKey, hkdfSync, randomBytes, verify } from 'node:crypto';
+import { createHash, createECDH, createDecipheriv, createPublicKey, hkdfSync, randomBytes, verify } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -50,9 +50,12 @@ function decrypt(body, b) {
 
 // The push service: /gone/ answers 410 (an expired subscription), the rest 201.
 const pushes = [];
+let echoText = '';
 const server = createServer((req, res) => {
   const chunks = [];
   req.on('data', (c) => chunks.push(c)).on('end', () => {
+    // /echo/ and /echogone/ answer 500 and 410 with a body that echoes secrets (echoText, set by the test).
+    if (req.url.startsWith('/echo')) return void res.writeHead(req.url.startsWith('/echogone/') ? 410 : 500).end(echoText);
     pushes.push({ path: req.url, headers: req.headers, body: Buffer.concat(chunks) });
     res.writeHead(req.url.startsWith('/gone/') ? 410 : 201).end();
   });
@@ -65,6 +68,7 @@ const until = async (n, what) => {
 };
 const quiet = async (n, what) => { await sleep(800); ok(pushes.length === n, `no push for ${what}`); };
 
+const vapidPrivate = () => JSON.parse(readFileSync(join(process.env.STAM_HOME, 'vapid.json'), 'utf8')).privateKey.replace(/-----[A-Z ]+-----|\s/g, '').slice(60, 100);
 // Key and devices.
 const info = (await call('GET', '/api/push')).data;
 ok(/^[A-Za-z0-9_-]{87}$/.test(info.publicKey), 'GET /api/push gives a P-256 public key');
@@ -81,6 +85,11 @@ const d2 = (await call('POST', '/api/push/devices', { subscription: sub('/gone/t
 const list = (await call('GET', '/api/push')).data.devices;
 ok(list.length === 2 && list.every((d) => d.p256dh === undefined && d.auth === undefined), 'the list shows both devices and no keys');
 ok((await call('GET', '/api/push')).data.devices.find((d) => d.id === d2.id).kinds.join() === 'permission', 'a device keeps the kinds it picked');
+// S-2539: no reply serves a device's endpoint (a capability URL) or its keys, and the page gets endpoint_hash to find its own device.
+const leakBodies = JSON.stringify([info, list, d1, again, d2, (await call('GET', '/api/push')).data, (await call('PATCH', `/api/push/devices/${d1.id}`, { label: 'Android · Chrome' })).data]);
+for (const secret of [ORIGIN + '/sub/phone', ORIGIN + '/gone/tablet', '/sub/phone', phone.p256dh, phone.auth, tablet.p256dh, tablet.auth, vapidPrivate()]) ok(!leakBodies.includes(secret), `no push reply carries ${secret.slice(0, 24)}`);
+ok(list.every((d) => !('endpoint' in d) && /^[0-9a-f]{64}$/.test(d.endpoint_hash)), 'a listed device has endpoint_hash and no endpoint');
+ok(d1.endpoint_hash === createHash('sha256').update(ORIGIN + '/sub/phone').digest('hex'), 'endpoint_hash is the SHA-256 of the endpoint');
 
 // Mail from an agent to the human pushes its sender and subject to the device that takes mail.
 const reg = async (name) => (await call('POST', '/api/register', { name, role: 'push test' }, 'agent')).data;
@@ -123,6 +132,18 @@ const t = (await call('POST', '/api/push/test', { device: d1.id })).data;
 ok(t.length === 1 && t[0].status === 201, 'a test reports the push service status');
 ok(decrypt(pushes[3].body, phone).kind === 'test', 'the test push decrypts');
 ok((await call('DELETE', `/api/push/devices/${d1.id}`)).status === 200 && !(await call('GET', '/api/push')).data.devices.length, 'removing the device empties the list');
+// S-2683: a push service that errors, 410 included (the row is deleted before the reply), echoes the endpoint and keys; the test reply carries none of it, in any form.
+for (const [path, status] of [['/echo/phone', 500], ['/echogone/phone', 410]]) {
+  const br = browser();
+  const ep = ORIGIN + path;
+  const dev = (await call('POST', '/api/push/devices', { subscription: { endpoint: ep, keys: { p256dh: br.p256dh, auth: br.auth } }, label: 'echo' })).data;
+  const forms = [ep, encodeURIComponent(ep), Buffer.from(ep).toString('base64url'), Buffer.from(ep).toString('base64'), path, br.p256dh, encodeURIComponent(br.p256dh), Buffer.from(br.p256dh).toString('base64url'), br.auth, Buffer.from(br.auth).toString('base64url'), Buffer.from(br.auth).toString('base64')];
+  echoText = 'push service said: ' + forms.join(' ');
+  const r = await call('POST', '/api/push/test', { device: dev.id });
+  ok(r.status === 200 && r.data.length === 1 && r.data[0].status === status && r.data[0].error, `a ${status} test reply reports the failure`);
+  ok(forms.every((f) => !JSON.stringify(r.data).includes(f)), `the ${status} test reply carries no endpoint or key, raw, URL-encoded, or base64`);
+}
+echoText = '';
 await call('POST', '/api/permissions', { agent: alice.id, action: 'after removal', reason: 'r', audience: 'human' }, 'agent');
 await quiet(4, 'a removed device');
 

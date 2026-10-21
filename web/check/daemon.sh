@@ -24,7 +24,12 @@ export STAM_TEST_ROOT
 # temporary folder). run.sh kills those by PID after this exits and removes the home (S-965).
 note() { [ -z "$CHECK_PIDS" ] || printf '%s %s\n' "$1" "$2" >>"$CHECK_PIDS"; }
 note home "$TEST_TMP"
-[ -n "$SKIP_BUILD" ] || (cd "$STAM_TEST_ROOT/web" && npm run build >&2)
+# A failed build leaves BUILD_FAILED=1 in the log, after the build's own output, so the callers
+# say the build failed, not that the daemon didn't start (S-2162).
+if [ -z "$SKIP_BUILD" ] && ! (cd "$STAM_TEST_ROOT/web" && npm run build >&2); then
+  echo "BUILD_FAILED=1" >&2
+  exit 1
+fi
 # The human's own routes (notification devices) want a request through tailscale serve;
 # this key stands in for it, and the URL carries it for the checks (testHuman=).
 STAM_TEST_HUMAN_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')
@@ -209,6 +214,23 @@ for _i in $(seq 1 50); do
   sleep 0.2
 done
 curl -sf -H "authorization: Bearer $(cat "$STAM_HOME/token")" "$STAM_URL/api/usage" | grep -q '"shares":{"five_hour":' || { echo "the claude windows never got their shares" >&2; exit 1; }
+fi
+# A wait gap the Time and cost block can show (S-2334): the ITSA's wait rows come from helper's gaps
+# between turns, and a gap under 0.5 s rounds to zero seconds and drops its row. A mail from kid after
+# two quiet seconds ends a gap well above that, whatever the machine's speed. (NO_HELLO pauses helper.)
+# It goes before the waits below: a mail from kid clears helper's declared wait on kid.
+if [ -z "$NO_HELLO" ]; then
+  sleep 2
+  stops() { "$STAM" events helper --type 'hook:Stop' --limit 200 | grep -c 'hook:Stop'; }
+  before=$(stops)
+  curl -sf -X POST -H "authorization: Bearer $(token_of kid)" -H 'content-type: application/json' -d '{"from":"kid","to":["helper"],"subject":"Check: a quiet moment","body":"Nothing to do; this only ends helper'"'"'s wait."}' "$STAM_URL/api/mail" >/dev/null
+  # helper's turn on the mail ends with a Stop; wait for it.
+  turn_ok=
+  for _i in $(seq 1 150); do
+    if [ "$(stops)" -gt "$before" ]; then turn_ok=1; break; fi
+    sleep 0.2
+  done
+  [ -n "$turn_ok" ] || { echo "helper never took a turn on the quiet-moment mail" >&2; exit 1; }
 fi
 # Waits for the tree, the world's line, and details: helper waits for kid's reply and a
 # timer, kid for the human and a background job.

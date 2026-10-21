@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TMUX_SOCKET, MACHINE } from './config.ts';
 import { agentProcesses, stopProcesses } from './proctree.ts';
+import { timed } from './stall.ts';
 
 function tmux(args: string[]): string {
   return execFileSync('tmux', ['-L', TMUX_SOCKET, ...args], { encoding: 'utf8' });
@@ -42,7 +43,25 @@ export function newSession(name: string, cwd: string, env: Record<string, string
 }
 
 export function hasSession(name: string): boolean {
-  return spawnSync('tmux', ['-L', TMUX_SOCKET, 'has-session', '-t', `=${name}`]).status === 0;
+  return timed('tmux has-session', () => spawnSync('tmux', ['-L', TMUX_SOCKET, 'has-session', '-t', `=${name}`]).status === 0);
+}
+
+// hasSession without holding the event loop while tmux answers: a fork from the daemon's big heap costs
+// tens of ms, and a fleet-wide resume asks once per agent (S-2369).
+// Only exit code 1 says the session is gone: a timeout, a signal or any other failure leaves it unknown, and the
+// caller relaunches a session that isn't there, which would kill a live harness. So unknown reads as present.
+export async function hasSessionAsync(name: string): Promise<boolean> {
+  const r = await runner(['-L', TMUX_SOCKET, 'has-session', '-t', `=${name}`]);
+  if (r.status === 0) return true;
+  if (r.status === 1) return false;
+  console.error(`tmux has-session ${name}: no answer (status ${r.status}); treated as present`);
+  return true;
+}
+
+// The tmux call behind hasSessionAsync, replaceable so a test can make it time out.
+let runner: (args: string[]) => Promise<Out> = (args) => run(args);
+export function setTmuxRunner(fn: ((args: string[]) => Promise<Out>) | null): void {
+  runner = fn ?? ((args) => run(args));
 }
 
 // Whether a `stam attach` or other tmux client has the agent's session open.
@@ -306,7 +325,7 @@ export function attachArgs(name: string): string[] {
 export function newShell(cwd: string): { id: string; cwd: string; machine: string } {
   const id = 'sh-' + Math.random().toString(36).slice(2, 7);
   const shell = process.env.SHELL || 'bash';
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('STAM_AGENT'))) as Record<string, string>;
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(STAM|MOOTR)_AGENT/.test(k))) as Record<string, string>;
   execFileSync('tmux', ['-L', TMUX_SOCKET, 'new-session', '-d', '-s', id, '-x', '120', '-y', '40', '-c', cwd, shell, '-l'], { env: { ...env, TERM: 'xterm-256color' } });
   tmux(['set-option', '-t', id, 'status', 'off']);
   return { id, cwd, machine: MACHINE };

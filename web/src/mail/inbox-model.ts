@@ -1,5 +1,5 @@
 // What the Inbox page lists (S-2054): the filter chips, the three groups, and a search's hits,
-// as plain functions over the store's lists, so the page and its tests agree. Kim's mail only:
+// as plain functions over the store's lists, so the page and its tests agree. The human's mail only:
 // the lists are the human's inbox, archive and deferred threads.
 import type { WaitingRow } from '../itsa/WaitingList'
 import { isUnreadForHuman, hasPendingPermission } from '../store'
@@ -46,6 +46,12 @@ export interface Shown {
 // and the deferred ones, archived threads too.
 export function filtered(filter: InboxFilter, d: Lists, waiting: WaitingRow[], deferred: WaitingRow[]): Shown {
   const byId = new Map(all(d).map((t) => [t.thread_id, t]))
+  // A deferred ask's thread is Deferred's, not the inbox's, while the human's own deferring reply is its last message.
+  // A new mail after that brings the thread back to the inbox, as a deferred thread's new mail does.
+  // The last mail that involves the human (from them or to them): mail between two agents doesn't bring it back.
+  const parked = (tid: string) => byId.get(tid)?.mails.filter((m) => m.from_id === 'human' || m.recipients.some((r) => r.id === 'human')).at(-1)?.from_id === 'human'
+  const askIds = new Set(deferred.map(waitThread).filter((x): x is string => !!x && parked(x)))
+  const deferredAsks = all(d).filter((t) => askIds.has(t.thread_id) && !d.humanDeferred.some((x) => x.thread_id === t.thread_id))
   switch (filter) {
     case 'toanswer': {
       const threads: Thread[] = []
@@ -59,13 +65,17 @@ export function filtered(filter: InboxFilter, d: Lists, waiting: WaitingRow[], d
       for (const t of d.humanThreads) if (hasPendingPermission(t) && !seen.has(t.thread_id)) { seen.add(t.thread_id); threads.push(t) }
       return { threads, loose }
     }
-    case 'unread': return { threads: d.humanThreads.filter(isUnreadForHuman), loose: [] }
+    case 'unread': return { threads: d.humanThreads.filter((t) => isUnreadForHuman(t) && !askIds.has(t.thread_id)), loose: [] }
     case 'awaiting': return { threads: all(d).filter(isAwaiting), loose: [] }
-    case 'deferred': return { threads: d.humanDeferred, loose: [] }
+    case 'deferred': return { threads: [...d.humanDeferred, ...deferredAsks], loose: [] }
     case 'archived': return { threads: d.humanArchived, loose: [] }
-    default: return { threads: d.humanThreads, loose: [] }
+    default: return { threads: d.humanThreads.filter((t) => !askIds.has(t.thread_id)), loose: [] }
   }
 }
+
+// The unread threads the Unread chip lists. The page's count, the bottom bar's and the sidebar's are its length, so they agree.
+export const unreadThreads = (d: Lists, waiting: WaitingRow[], deferred: WaitingRow[]): Thread[] => filtered('unread', d, waiting, deferred).threads
+export const unreadCount = (d: Lists, waiting: WaitingRow[], deferred: WaitingRow[]) => unreadThreads(d, waiting, deferred).length
 
 // Needs you first (oldest first, as the sidebar's attention list), then today's threads and the earlier
 // ones, newest first. A group with no thread isn't returned.

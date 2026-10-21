@@ -1,6 +1,7 @@
 // The one context menu, and the one transient notice bar. The design system bans toast
 // stacks: status renders at its source. What has no source on screen (a menu action's
-// result) gets one bar at the top centre, which a newer notice replaces.
+// result) gets one bar at the top centre, which a newer notice replaces. A standing notice
+// (the local login offer, S-2121), a state to act on, holds the bar when no transient one does.
 import { useEffect, useLayoutEffect, useRef, useSyncExternalStore, type ReactNode } from 'react'
 import { Icon } from '../Icon'
 
@@ -20,6 +21,7 @@ export type MenuItem =
 interface MenuState { x: number; y: number; items: MenuItem[]; body?: ReactNode; label?: string; above?: boolean; trigger: Element | null; restore: Element | null }
 let menu: MenuState | null = null
 let notice: { text: string; err: boolean; n: number } | null = null
+let standing: ReactNode = null
 let v = 0
 const ls = new Set<() => void>()
 const bump = () => { v++; for (const fn of ls) fn() }
@@ -63,6 +65,19 @@ export function toast(text: string, err = false) {
   bump()
   clearTimeout(timer)
   timer = window.setTimeout(() => { notice = null; bump() }, err ? 7000 : 3500)
+}
+
+// Ends the transient notice now (the stories' test, so none carries over to the next state).
+export function clearNotice() {
+  clearTimeout(timer)
+  notice = null
+  bump()
+}
+
+// Sets or clears the standing notice. A transient notice covers it while it shows, then it comes back.
+export function setStanding(node: ReactNode) {
+  standing = node
+  bump()
 }
 
 function Menu({ m }: { m: MenuState }) {
@@ -132,7 +147,7 @@ export function MenuLayer() {
   return (
     <>
       {menu ? <Menu m={menu} /> : null}
-      <div id="toasts">{notice ? <div key={notice.n} className={'toast' + (notice.err ? ' err' : '')} role={notice.err ? 'alert' : 'status'}>{notice.text}</div> : null}</div>
+      <div id="toasts">{notice ? <div key={notice.n} className={'toast' + (notice.err ? ' err' : '')} role={notice.err ? 'alert' : 'status'}>{notice.text}</div> : standing}</div>
     </>
   )
 }

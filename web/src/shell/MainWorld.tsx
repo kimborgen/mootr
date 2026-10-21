@@ -12,7 +12,7 @@ import { ThreadArchive } from '../views/ThreadView'
 import { choiceOf, switchable } from '../views/agent-view-choice'
 import { isRapid, setRapid } from '../views/rapid'
 import { viewMeta } from '../views/registry'
-import { ItsaChips, WaitBadges, WaitThinBar } from '../waits'
+import { ItsaChips, ThreadChips, WaitBadges, WaitThinBar } from '../waits'
 import { beside } from './beside'
 import { Tab, TabBar } from './Tab'
 import * as shell from './layout'
@@ -138,11 +138,12 @@ function Pane({ l, w, world, drop, setDrop, style }: { l: Leaf; w: World; world:
   // sits in the strip, so the strip shows.
   const shows = choiceOf(active)
   const sw = switchable(active, byId(shows?.id))
-  const bar = phone || !alone || !!l.showTabs || sw || agentWorld
+  // A mail thread's tab always shows its bar, as an agent's does: the bar carries its Defer and Archive (S-2286).
+  // A phone's open mail thread keeps its Archive here, not in the thread's scrolling header.
+  const thread = active?.startsWith('thread:') ? active.slice(7) : null
+  const bar = phone || !alone || !!l.showTabs || sw || agentWorld || !!thread
   const strip = phone ? shell.leaves(w.root).flatMap((x) => x.tabs.filter((k) => !foreignImage(k)).map((k) => ({ k, pane: x.id }))) : tabs.map((k) => ({ k, pane: l.id }))
   const term = phone && /^(agent|shell):/.test(active ?? '')
-  // A phone's open mail thread keeps its Archive here, not in the thread's scrolling header.
-  const thread = phone && active?.startsWith('thread:') ? active.slice(7) : null
   for (const k of tabs) shell.makeView(k)
   // The pane adopts its views' elements; the active one shows. Views leaving go back to the
   // store, alive.
@@ -219,7 +220,7 @@ function Pane({ l, w, world, drop, setDrop, style }: { l: Leaf; w: World; world:
   }, [])
   return (
     <div ref={paneRef} className={'pane' + (l.id === w.focused ? ' focused' : '') + (bar ? '' : ' bare')} data-world="main" data-id={l.id} style={style}>
-      {bar ? <TabBar tabsRef={tabsRef} actions={<>{sw && shows ? <ViewSwitch id={shows.id} view={shows.view} phone={phone} /> : null}{phone ? <div className="tab-actions">
+      {bar ? <TabBar tabsRef={tabsRef} actions={<>{sw && shows ? <ViewSwitch id={shows.id} view={shows.view} phone={phone} /> : null}{thread && !phone ? <div className="tab-actions desk"><ThreadArchive tid={thread} desktop /></div> : null}{phone ? <div className="tab-actions">
         {term ? <button className="icon-btn" data-keyboard title="Type into the terminal" aria-label="Type into the terminal" onClick={() => shell.viewHandle(active!)?.focus?.()}><Icon name="keyboard" /></button> : null}
         {thread ? <ThreadArchive tid={thread} /> : null}
         <button className="icon-btn" data-pane-menu title="Menu" aria-label="Menu" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); e.currentTarget.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left, clientY: r.bottom })) }}><Icon name="ellipsis" /></button>
@@ -227,7 +228,7 @@ function Pane({ l, w, world, drop, setDrop, style }: { l: Leaf; w: World; world:
         {strip.map(({ k, pane }) => {
           const m = viewMeta(k)
           return <Tab key={k} id={k} active={k === active} dropBefore={!!(mine?.strip && mine.before === k)} draggable={!phone} title={m.title} tooltip={m.tooltip} glyph={m.icon}
-            chips={<>{k.startsWith('agent:') || k.startsWith('view:') ? <><WaitBadges id={k.slice(k.indexOf(':') + 1)} tabKey={k} /><ItsaChips id={k.slice(k.indexOf(':') + 1)} tabKey={k} /></> : null}{m.badge ? <span className={`badge ${m.badgeClass ?? ''}`}>{m.badge}</span> : null}</>}
+            chips={<>{k.startsWith('agent:') || k.startsWith('view:') ? <><WaitBadges id={k.slice(k.indexOf(':') + 1)} tabKey={k} /><ItsaChips id={k.slice(k.indexOf(':') + 1)} tabKey={k} /></> : k.startsWith('thread:') ? <ThreadChips tid={k.slice(7)} tabKey={k} /> : null}{m.badge ? <span className={`badge ${m.badgeClass ?? ''}`}>{m.badge}</span> : null}</>}
             onSelect={() => { if (pane !== l.id) shell.setFocus('main', pane); shell.activate('main', pane, k) }}
             onClose={() => shell.close(k)}
             onDragStart={(e) => { e.dataTransfer.setData('text/stam-tab', JSON.stringify({ world: 'main', key: k })); e.dataTransfer.effectAllowed = 'move'; e.currentTarget.classList.add('dragging') }}

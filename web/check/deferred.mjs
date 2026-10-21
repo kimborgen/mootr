@@ -62,7 +62,20 @@ for (const size of sizes) {
   await p.goto(origin + '/#token=' + token);
   await p.waitForSelector('#tree .node', { timeout: 20000 });
   const nav = p.locator('[data-nav="mail"]');
-  if (await nav.isVisible()) await press(nav);
+  if (await nav.isVisible()) {
+    // The phone's Inbox page has no collapsed group: the deferred thread is under its Deferred chip, with its subject.
+    await press(nav);
+    await press(p.locator('[data-filter="deferred"]'));
+    const row = p.locator(`#inbox-view .mrow[data-thread="${dec.thread_id}"]`);
+    await row.waitFor();
+    check(tag, (await row.locator('.s').innerText()) === SUBJECT, 'the Deferred chip lists the row with its subject', await row.locator('.s').innerText());
+    const box = await row.boundingBox();
+    check(tag, !!box && box.x + box.width <= p.viewportSize().width, 'the row fits the width', box);
+    await p.waitForTimeout(300);
+    await p.screenshot({ path: `${out}/deferred-phone-${tag}.png` });
+    await ctx.close();
+    continue;
+  }
   // The deferred row sits under the collapsed group, not among the pinned rows.
   const group = p.locator('#mail-side details.mail-deferred');
   await group.waitFor();

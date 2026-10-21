@@ -205,6 +205,50 @@ test('a branch behind its base is not blamed for the base\'s story changes (S-18
   }
 });
 
+test('a criss-cross branch (several merge bases) is not blamed for the base\'s changes, sync and async (S-1338)', async () => {
+  const dir = tempDir('stam-story-crisscross-');
+  try {
+    const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: dir, encoding: 'utf8' }).trim();
+    const put = (p, s) => { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), s); };
+    git('init', '-q', '-b', 'main');
+    put('web/src/Tree.tsx', TREE);
+    put('web/src/Tree.stories.tsx', story('web/src/Tree.tsx#Tree'));
+    put('web/src/Pane.tsx', 'export const Pane = () => null\n');
+    put('web/src/Pane.stories.tsx', story('web/src/Pane.tsx#Pane'));
+    git('add', '-A'); git('commit', '-qm', 'base');
+    const baseSha = git('rev-parse', 'HEAD');
+    // Two sides each change a component without its story, then merge each other: main and the branch
+    // share both x1 and y1 as merge bases, and either one makes the other's change look like the branch's.
+    git('checkout', '-q', '-b', 'x', baseSha);
+    put('web/src/Pane.tsx', 'export const Pane = () => 1\n');
+    git('commit', '-qam', 'x: Pane changed');
+    const x1 = git('rev-parse', 'HEAD');
+    git('checkout', '-q', '-b', 'y', baseSha);
+    put('web/src/Tree.tsx', `${TREE}// y\n`);
+    git('commit', '-qam', 'y: Tree changed');
+    const y1 = git('rev-parse', 'HEAD');
+    git('checkout', '-q', 'x');
+    git('merge', '-q', '--no-ff', '-m', 'main takes y', y1);
+    const main = git('rev-parse', 'HEAD');
+    git('checkout', '-q', 'y');
+    git('merge', '-q', '--no-ff', '-m', 'feature takes x', x1);
+    put('README.md', 'own change\n');
+    git('add', '-A'); git('commit', '-qm', 'feature: own change');
+    const head = git('rev-parse', 'HEAD');
+    assert.equal(git('merge-base', '--all', main, head).split('\n').length, 2, 'the history is criss-cross');
+    assert.deepEqual(checkRange(main, head, { cwd: dir, body: '' }), []);
+    assert.deepEqual(await checkRangeAsync(main, head, { cwd: dir, body: '' }), []);
+    // The branch's own changes are still checked.
+    put('web/src/Pane.tsx', 'export const Pane = () => 2\n');
+    git('commit', '-qam', 'feature: Pane without its story');
+    const own = git('rev-parse', 'HEAD');
+    assert.match(checkRange(main, own, { cwd: dir, body: '' })[0], /web\/src\/Pane\.tsx changed but its stories/);
+    assert.deepEqual(await checkRangeAsync(main, own, { cwd: dir, body: '' }), checkRange(main, own, { cwd: dir, body: '' }));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('checkRangeAsync gives checkRange\'s answer, and a check that runs out of time rejects with timedOut (S-1942)', async () => {
   const dir = tempDir('stam-story-async-');
   try {
@@ -284,6 +328,7 @@ test('the CLI reads a git range and the PR body from STORY_CHECK_BODY', () => {
     git('init', '-q');
     // The CLI checks the repo its own script sits in (S-1300), so the throwaway repo gets a copy.
     put('scripts/story-check.mjs', readFileSync(SCRIPT, 'utf8'));
+    put('scripts/main-guard.mjs', readFileSync(join(ROOT, 'scripts/main-guard.mjs'), 'utf8'));
     put('web/src/Tree.tsx', TREE);
     put('web/src/Tree.stories.tsx', story('web/src/Tree.tsx#Tree'));
     git('add', '-A'); git('commit', '-qm', 'base');

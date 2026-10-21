@@ -624,3 +624,25 @@ test('a rollback gives back the owed mail with its batch and its read state', as
   db.ackDelivered(x.id, 'batch-kept');
   assert.deepEqual(db.defaultRead(x.id), []);
 });
+
+// S-2490: a ring turn queued to a working predecessor is still queued when it is switched. It moves
+// to the successor, which is prompted for it once, and the predecessor is never prompted for it.
+test('a ring turn queued before the switch reaches the successor exactly once (S-2490)', async () => {
+  const ring = await import('../src/ring.ts');
+  const x = agent('worker', mgr.id);
+  const other = agent('peer', mgr.id);
+  db.updateAgent(x.id, { activity: 'working' });
+  const topic = 'Swarm the widget seventy-seven';
+  ring.createRing({ name: 'widgets', format: 'rounds', topic, members: [x.name, other.name], maxRounds: 1, createdBy: 'human' });
+  assert.equal(mail.queuedNoticeCount(x.id), 1, 'the predecessor holds its ring turn');
+  await costSwitch.costSwitch({ agent: x.name, preset: 'cheap', by: mgr.id, ...fast });
+  const s = byName('worker-t2');
+  assert.equal(mail.queuedNoticeCount(x.id), 0, 'the predecessor no longer holds it');
+  assert.equal(mail.queuedNoticeCount(s.id), 1, 'the successor holds it');
+  db.updateAgent(s.id, { activity: 'idle' });
+  mail.schedulePush(s.id);
+  await until(() => (prompts.get(s.id) ?? []).some((t) => t.includes(topic)));
+  await sleep(100);
+  assert.equal((prompts.get(s.id) ?? []).filter((t) => t.includes(topic)).length, 1, 'the successor is prompted once');
+  assert.ok(!(prompts.get(x.id) ?? []).some((t) => t.includes(topic)), 'the predecessor is never prompted');
+});

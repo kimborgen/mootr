@@ -3,9 +3,9 @@ import { ds, reply, type Story } from '../stories/types'
 
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString()
 const DEVICES = [
-  { id: 'fx-d1', endpoint: 'https://push.example.com/fixture-1', label: 'Android · Chrome', kinds: ['mail', 'permission'], created_at: ago(9 * 86400000), last_ok_at: ago(3600000), last_error: null },
-  { id: 'fx-d2', endpoint: 'https://push.example.com/fixture-2', label: 'Mac · Firefox', kinds: ['mail'], created_at: ago(30 * 86400000), last_ok_at: null, last_error: 'fixture: the push service refused it (410)' },
-  { id: 'fx-d3', endpoint: 'https://push.example.com/fixture-3', label: 'iPhone · Safari', kinds: ['permission'], created_at: ago(2 * 86400000), last_ok_at: null, last_error: null },
+  { id: 'fx-d1', endpoint_hash: 'fixture-hash-1', label: 'Android · Chrome', kinds: ['mail', 'permission'], created_at: ago(9 * 86400000), last_ok_at: ago(3600000), last_error: null },
+  { id: 'fx-d2', endpoint_hash: 'fixture-hash-2', label: 'Mac · Firefox', kinds: ['mail'], created_at: ago(30 * 86400000), last_ok_at: null, last_error: 'fixture: the push service refused it (410)' },
+  { id: 'fx-d3', endpoint_hash: 'fixture-hash-3', label: 'iPhone · Safari', kinds: ['permission'], created_at: ago(2 * 86400000), last_ok_at: null, last_error: null },
 ]
 const info = (devices = DEVICES) => ({ 'GET /api/push': { publicKey: 'fixture-key', kinds: ['mail', 'permission'], devices } })
 

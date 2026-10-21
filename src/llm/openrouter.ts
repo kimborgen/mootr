@@ -1,33 +1,20 @@
 // The OpenRouter adapter (S-2113): chat completions with usage accounting, the credit and key
-// endpoints, the public model catalogue, and the alpha decisions endpoint. The key is the one
-// OpenCode uses (opencode.env under STAM_HOME); the base URL is overridable with STAM_OPENROUTER_URL
+// endpoints, the public model catalogue, and the alpha decisions endpoint. The key is stam's own
+// (the secret store's `stam` slot, src/secrets.ts); the base URL is overridable with STAM_OPENROUTER_URL
 // so a test can stub every call.
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { STAM_HOME } from '../config.ts';
-import { LlmHttpError, type Balance, type CompleteRequest, type CompleteResult, type KeyLimit, type LlmAdapter, type ModelInfo } from './types.ts';
+import { keyFor } from '../secrets.ts';
+import { checkCredential, retryAfterMs, send, signalFor } from './http.ts';
+import { probeKey } from './key-check.ts';
+import { LlmHttpError, type Balance, type CompleteRequest, type CompleteResult, type KeyCheck, type KeyLimit, type LlmAdapter, type ModelInfo } from './types.ts';
+import { envVar } from '../env.ts';
 
-const base = () => process.env.STAM_OPENROUTER_URL ?? 'https://openrouter.ai/api/v1';
+const base = () => envVar('OPENROUTER_URL') ?? 'https://openrouter.ai/api/v1';
 // The decisions endpoint's base; the override, when set, serves every path.
-const alphaBase = () => process.env.STAM_OPENROUTER_URL ?? 'https://openrouter.ai/api/alpha';
+const alphaBase = () => envVar('OPENROUTER_URL') ?? 'https://openrouter.ai/api/alpha';
 
-const RETRY_AFTER_MAX_MS = 300_000;
-
+// stam's own OpenRouter key: the environment, the secret store's `stam` slot, or opencode.env (S-2114).
 export function openRouterKey(): string | undefined {
-  try {
-    return readFileSync(join(STAM_HOME, 'opencode.env'), 'utf8').match(/^OPENROUTER_API_KEY=(.*)$/m)?.[1].trim() || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-// The Retry-After header as milliseconds: seconds, or an HTTP date. Undefined when absent or unreadable.
-function retryAfterMs(header: string | null): number | undefined {
-  if (!header) return undefined;
-  const secs = Number(header);
-  const ms = Number.isFinite(secs) ? secs * 1000 : Date.parse(header) - Date.now();
-  if (!Number.isFinite(ms)) return undefined;
-  return Math.min(RETRY_AFTER_MAX_MS, Math.max(0, ms));
+  return keyFor('OPENROUTER_API_KEY', 'stam');
 }
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -53,11 +40,6 @@ async function get(path: string, key: string | undefined = openRouterKey()): Pro
   }
 }
 
-function signalFor(req: { signal?: AbortSignal; timeoutMs?: number }): AbortSignal | undefined {
-  const t = req.timeoutMs != null ? AbortSignal.timeout(req.timeoutMs) : undefined;
-  return req.signal && t ? AbortSignal.any([req.signal, t]) : req.signal ?? t;
-}
-
 export const openrouter: LlmAdapter = {
   id: 'openrouter',
   apiKey: openRouterKey,
@@ -65,9 +47,9 @@ export const openrouter: LlmAdapter = {
   async complete(req: CompleteRequest): Promise<CompleteResult> {
     const key = openRouterKey();
     if (!key) throw new Error('no API key');
-    const res = await fetch(`${base()}/chat/completions`, {
+    const res = await send(`${base()}/chat/completions`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${checkCredential(key, 'API key')}`, 'content-type': 'application/json' },
       body: JSON.stringify({
         model: req.model,
         messages: req.messages,
@@ -115,17 +97,22 @@ export const openrouter: LlmAdapter = {
     return c ? { total: num(c.data?.total_credits), used: num(c.data?.total_usage) } : null;
   },
 
+  // GET /key: free, and answers 401 for a key OpenRouter doesn't know.
+  checkKey(key: string): Promise<KeyCheck> {
+    return probeKey(`${base()}/key`, { authorization: `Bearer ${key}` });
+  },
+
   async keyLimit(key?: string): Promise<KeyLimit | null> {
     const k = await get('/key', key);
     return k ? { limit: num(k.data?.limit), remaining: num(k.data?.limit_remaining) } : null;
   },
 
   async decisions(body, opts): Promise<any> {
-    const key = openRouterKey();
+    const key = opts.key ?? openRouterKey();
     if (!key) throw new Error('no API key');
-    const res = await fetch(`${alphaBase()}/decisions`, {
+    const res = await send(`${alphaBase()}/decisions`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${checkCredential(key, 'API key')}`, 'content-type': 'application/json' },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(opts.timeoutMs),
     });

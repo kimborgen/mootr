@@ -7,7 +7,7 @@
 // (lifecycle.isHeld), and a paused agent still gets its mail as a prompt.
 import * as db from './db.ts';
 import { accountFor } from './accounts.ts';
-import { spawnBlockers } from './rules.ts';
+import { spawnBlockers, exhaustedWindows } from './rules.ts';
 import { spawnHeld } from './budgets.ts';
 import { admitsProbe } from './cost-probes.ts';
 
@@ -55,6 +55,18 @@ export function admit(agent: string | db.Agent, kind: TurnKind): Admission {
   }
   db.addEvent(a.id, 'cost:refused', { kind, reason });
   return { ok: false, reason };
+}
+
+// Whether a reviewer type or chain entry should pick another type: the account is held as accountHeld
+// says, or its own window reads exhausted on a stale reading with the reset still ahead (exhaustedWindows,
+// S-905). Only the fallback choice uses this; it never refuses a spawn, which stays on accountHeld.
+export function heldForFallback(spec: { harness: string; model?: string | null }): { account: string; reason: string } | null {
+  const held = accountHeld(spec);
+  if (held) return held;
+  const account = accountFor(spec);
+  if (!account) return null;
+  const windows = exhaustedWindows(account);
+  return windows.length ? { account, reason: `account ${account} is blocked: ${windows.map((w) => `window (${w.reason})`).join('; ')}` } : null;
 }
 
 // Why a new agent may not spawn onto the account its harness and model bill to, or null.

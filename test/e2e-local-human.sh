@@ -10,14 +10,16 @@ set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 daemon_home main
 export STAM_TEST_HUMAN_CODE_DIR="$TEST_TMP/human-codes" STAM_TEST_HUMAN_CODE_ROOT_UID="$(id -u)"
+# The login page asks whether this user has passwordless sudo; the test answers, so no test runs sudo (S-2121).
+export STAM_TEST_PASSWORDLESS_SUDO=0
 fail() { echo "FAIL: $1"; exit 1; }
 jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
-# setauth LOCAL STRICT: auth.localHuman and auth.humanStrict (with legacyPeerToken off, so strict takes effect).
+# setauth LOCAL STRICT: auth.localHuman and auth.humanStrict.
 setauth() { python3 - "$TEST_TMP/main/settings.json" "$1" "$2" <<'PY'
 import json, os, sys
 p = sys.argv[1]
 s = json.load(open(p)) if os.path.exists(p) else {}
-s.setdefault('auth', {}).update({'localHuman': sys.argv[2] == 'true', 'humanStrict': sys.argv[3] == 'true', 'legacyPeerToken': sys.argv[3] != 'true'})
+s.setdefault('auth', {}).update({'localHuman': sys.argv[2] == 'true', 'humanStrict': sys.argv[3] == 'true'})
 json.dump(s, open(p, 'w'))
 PY
 }

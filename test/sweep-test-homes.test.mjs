@@ -5,6 +5,7 @@
 // our own stand in for /tmp and the cache; no sleeps: `node --test test/sweep-test-homes.test.mjs`.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import './scrub-env.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, linkSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -144,7 +145,7 @@ test('the prefixes a test gives its temporary folder are swept, with no hand lis
   const prefixes = testPrefixes();
   assert.ok(prefixes.length > 0, 'the derivation found no test prefixes');
   // A few a test makes, including one the old hand list had gone stale on.
-  for (const p of ['stam-budgets', 'stam-rules', 'stam-usage', 'stam-voice', 'stam-check-playwright-test']) {
+  for (const p of ['stam-budgets', 'stam-rules', 'stam-usage', 'stam-voice', 'stam-check-playwright-test', 'stam-cv', 'stam-nr']) {
     assert.ok(prefixes.includes(p), `${p} is not derived from the tests`);
   }
   for (const p of prefixes) {
@@ -161,6 +162,10 @@ test('the derivation reads real temp calls, never comments, strings, or computed
       "const home = tempHome('stam-derived-one-');",
       "const work = mkdtempSync(join(tmpdir(), 'stam-derived-two-'));",
       "const made = tempDir('stam-derived-four-');",
+      "const outside = tempDirOutside('stam-derived-five-');",
+      "const outsideComputed = tempDirOutside(name);",
+      "const withOutside = tempHome('stam-derived-six-', tempDirOutside);",
+      "const computedSecond = tempHome('stam-derived-seven-', pick);",
       "// const commented = tempHome('stam-commented-');",
       "/* const block = mkdtempSync(join(tmpdir(), 'stam-block-')); */",
       `const inString = "tempHome('stam-in-string-')";`,
@@ -175,7 +180,7 @@ test('the derivation reads real temp calls, never comments, strings, or computed
       "const unrelated = mkdtempSync(join(tmpdir(), 'other-four-'));",
     ].join('\n'));
     writeFileSync(join(dir, 'not-a-test.txt'), "tempHome('stam-derived-notread-')");
-    assert.deepEqual(testPrefixes(dir), ['stam-derived-four', 'stam-derived-one', 'stam-derived-two']);
+    assert.deepEqual(testPrefixes(dir), ['stam-derived-five', 'stam-derived-four', 'stam-derived-one', 'stam-derived-six', 'stam-derived-two']);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

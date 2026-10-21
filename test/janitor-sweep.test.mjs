@@ -5,7 +5,7 @@
 // so the test sets HOME, TMPDIR, and PATH before importing it: `node --test test/janitor-sweep.test.mjs`.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, chmodSync, lutimesSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -20,6 +20,7 @@ let activeErrFile;
 let noUnitFile;
 let log;
 let sweep;
+let sweepHookFiles;
 const saved = { HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, PATH: process.env.PATH };
 
 before(async () => {
@@ -52,7 +53,7 @@ before(async () => {
   process.env.HOME = home;
   process.env.TMPDIR = base;
   process.env.PATH = `${bin}:${saved.PATH}`;
-  ({ sweep } = await import('../src/janitor.ts'));
+  ({ sweep, sweepHookFiles } = await import('../src/janitor.ts'));
 });
 
 after(() => {
@@ -133,4 +134,59 @@ test('a stam-test folder that became a symlink is not discovered or read', async
   assert.ok(existsSync(victim), 'the sweep followed the symlink into the wider folder');
   assert.ok(existsSync(alias), 'the sweep removed the symlink as if it were a test folder');
   rmSync(alias, { force: true });
+});
+
+test('an hour-old stam-hook file is removed; fresh files, folders, and symlinks are kept', async () => {
+  // A hook killed before its trap leaves its payload file behind (bin/stam-fast). Only plain files
+  // that are an hour old go; the rest of the root is left alone.
+  const root = join(base, 'hook-root');
+  mkdirSync(root);
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const fresh = new Date(Date.now() - 10 * 60 * 1000);
+  const oldFile = join(root, 'stam-hook.OldOld');
+  const freshFile = join(root, 'stam-hook.NewNew');
+  const oldDir = join(root, 'stam-hook.DirDir');
+  const target = join(base, 'hook-target');
+  const link = join(root, 'stam-hook.LnLnLn');
+  const other = join(root, 'other.tmp');
+  writeFileSync(oldFile, '{}');
+  writeFileSync(freshFile, '{}');
+  mkdirSync(oldDir);
+  writeFileSync(target, '{}');
+  symlinkSync(target, link);
+  writeFileSync(other, '{}');
+  utimesSync(oldFile, old, old);
+  utimesSync(freshFile, fresh, fresh);
+  utimesSync(oldDir, old, old);
+  utimesSync(target, old, old);
+  lutimesSync(link, old, old);
+  utimesSync(other, old, old);
+
+  const dry = await sweepHookFiles([root], { dryRun: true });
+  assert.deepEqual(dry.map((a) => a.target), [oldFile], JSON.stringify(dry));
+  assert.ok(existsSync(oldFile), 'a dry run removed the file');
+
+  const r = await sweepHookFiles([root]);
+  assert.deepEqual(r, [{ kind: 'hook', target: oldFile, dir: root }], JSON.stringify(r));
+  assert.ok(!existsSync(oldFile), 'the old file survived');
+  assert.ok(existsSync(freshFile), 'the fresh file was removed');
+  assert.ok(existsSync(oldDir), 'the folder was removed');
+  assert.ok(existsSync(link) && existsSync(target), 'the symlink or its target was removed');
+  assert.ok(existsSync(other), 'a file outside the stam-hook.* name was removed');
+});
+
+test('an unscoped sweep removes an old stam-hook file under TMPDIR; a scoped sweep leaves it (S-2266 wiring)', async () => {
+  // sweep() is the caller of sweepHookFiles: the sweep's own roots include TMPDIR (base). A dry run
+  // keeps the test from deleting stale files in the real /tmp, which the unscoped sweep also scans.
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const hookFile = join(base, 'stam-hook.WireWi');
+  writeFileSync(hookFile, '{}');
+  utimesSync(hookFile, old, old);
+  const hooks = (r) => r.actions.filter((a) => a.kind === 'hook').map((a) => a.target);
+  const scoped = await sweep({ dryRun: true, only: [join(base, 'stam-test.zzgone.Gg1234')] });
+  assert.ok(!hooks(scoped).includes(hookFile), JSON.stringify(scoped.actions));
+  const unscoped = await sweep({ dryRun: true });
+  assert.ok(hooks(unscoped).includes(hookFile), JSON.stringify(unscoped.actions));
+  assert.ok(existsSync(hookFile), 'a dry run removed the file');
+  rmSync(hookFile);
 });

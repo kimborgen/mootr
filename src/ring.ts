@@ -88,6 +88,10 @@ const now = () => new Date().toISOString();
 const get = (id: string) => db.open().prepare('SELECT * FROM rings WHERE id = ? OR name = ?').get(id, id) as Ring | undefined;
 const members = (r: Ring): string[] => JSON.parse(r.members);
 const nameOf = (id: string) => (id === HUMAN ? 'the human' : (db.getAgent(id)?.name ?? id));
+// Whether agentId holds the seat of member id: itself, or the successor its cost_switch takeover
+// records (agents.forwarded_to, through forwardTarget). Only that link counts, so an unrelated
+// agent with a similar name is refused, and so is an archived successor (S-2485).
+const standsFor = (id: string | null, agentId: string): boolean => id !== null && (id === agentId || db.forwardTarget(id) === agentId);
 const submissions = (r: Ring, round?: number) =>
   db
     .open()
@@ -131,8 +135,10 @@ export function turnPrompt(r: Ring, agentId: string): string {
   }).replace(/\n{3,}/g, '\n\n');
 }
 
+// The turn goes to the member's live successor when it was taken over (S-2485): a held
+// predecessor runs nothing, so its notices would never be read.
 function prompt(r: Ring, agentId: string): void {
-  queueNotice(agentId, turnPrompt(r, agentId), { idleOnly: true, ring: true });
+  queueNotice(db.forwardTarget(agentId), turnPrompt(r, agentId), { idleOnly: true, ring: true });
 }
 
 // Prompts whoever's turn it is: every member for rounds, the next member otherwise.
@@ -184,19 +190,44 @@ export function createRing(input: {
   }
 }
 
-export function submit(ringRef: string, agentId: string, text: string, agree: boolean, verdict?: string): string {
+// `round` is the round the submitter's turn prompt showed, when it sends one: a prompt from an earlier round, sent after the
+// ring moved on, writes nothing (S-2646). Left out, the submit goes to the ring's current round, as before.
+// `seat` is the member name the text is for (S-2760). Left out, a caller with one open seat submits to it, as before; a caller
+// with two or more open seats is refused, so a retry can't land under a predecessor's name.
+export function submit(ringRef: string, agentId: string, text: string, agree: boolean, verdict?: string, round?: number, seat?: string): string {
   // The daemon's guard as well as the MCP tool's: an older MCP process sends no text when it passes `body` (S-1919).
   if (!text.trim()) throw new Error('text is required: your findings for the ring, as a non-empty string');
   let r = get(ringRef);
   if (!r) throw new Error(`no ring ${ringRef}`);
   if (r.status !== 'running') throw new Error(`ring ${r.name} is ${r.status}`);
+  if (round !== undefined && round !== r.round) throw new Error(`ring ${r.name} is on round ${r.round}, not ${round}: your turn prompt is out of date, so read the current one before you submit`);
   const m = members(r);
-  if (!m.includes(agentId)) throw new Error('you are not a member of this ring');
-  if (r.format !== 'rounds' && m[r.turn % m.length] !== agentId) throw new Error(`it is ${nameOf(m[r.turn % m.length])}'s turn`);
+  // The submission is the member's, whoever holds its seat now (S-2485), so the round, the turn and the names stay the member's.
+  // The agent's own seat comes first: a member can also be the successor of another member (S-2490). The seat it stands for
+  // is the fallback, only when its own is already in this round or it isn't its turn (S-2646). Without a free seat, the own one.
+  const seats = [agentId, ...m.filter((id) => id !== agentId && standsFor(id, agentId))].filter((id) => m.includes(id));
+  if (!seats.length) throw new Error('you are not a member of this ring');
+  const filled = new Set(submissions(r, r.round).map((s) => s.agent_id));
+  const turnOwner = m[r.turn % m.length];
+  const parallel = r.format === 'rounds';
+  // The open seats are the ones that can take text now: not filled this round, and in a fire or debate ring, the turn's.
+  const open = seats.filter((id) => !filled.has(id) && (parallel || turnOwner === id));
+  const openSeats = `your open seats in ${r.name} are ${open.length ? open.map(nameOf).join(', ') : 'none'}`;
+  let member: string;
+  if (seat !== undefined) {
+    const named = seats.find((id) => nameOf(id) === seat);
+    if (!named) throw new Error(`you do not hold the seat ${seat}: ${openSeats}`);
+    if (filled.has(named)) throw new Error(`the seat ${seat} is already filled in round ${r.round}: ${openSeats}`);
+    member = named;
+  } else {
+    if (open.length > 1) throw new Error(`you hold ${open.length} open seats, so pass seat, the member's name, for whose text this is: ${openSeats}`);
+    member = open[0] ?? seats[0];
+  }
+  if (r.format !== 'rounds' && m[r.turn % m.length] !== member) throw new Error(`it is ${nameOf(m[r.turn % m.length])}'s turn`);
   const v = verdictOf(r.topic, text, verdict);
   db.open()
     .prepare('INSERT OR REPLACE INTO ring_submissions (ring_id, round, agent_id, text, agree, verdict, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(r.id, r.round, agentId, text, agree ? 1 : 0, v, now());
+    .run(r.id, r.round, member, text, agree ? 1 : 0, v, now());
 
   if (r.format !== 'rounds') {
     r = update(r, { turn: r.turn + 1 });
@@ -211,39 +242,68 @@ export function submit(ringRef: string, agentId: string, text: string, agree: bo
   return 'Submitted. The round is complete.';
 }
 
-function roundComplete(r: Ring): void {
+// Whether the round's members agree, and the split line when their verdicts don't all match.
+function agreement(r: Ring): { split: string; allAgree: boolean } {
   const subs = submissions(r, r.round);
   const split = splitLine(r, subs);
-  const allAgree = !split && subs.length >= members(r).length && subs.every((s) => s.agree);
+  return { split, allAgree: !split && subs.length >= members(r).length && subs.every((s) => s.agree) };
+}
+
+// The moderator's turn for the round just completed.
+function moderatePrompt(r: Ring): string {
+  const { split, allAgree } = agreement(r);
+  return render('ring-moderate', {
+    ring: r.name,
+    ring_id: r.id,
+    format: r.format,
+    round: r.round,
+    max_rounds: r.max_rounds,
+    topic: r.topic,
+    history: history(r),
+    instructions: split ? `The members' verdicts don't all match (${split}), so they don't agree yet.` : allAgree ? 'All members agree to end.' : 'Not all members agree yet.',
+    decide: r.moderator_decides ? ' with your decision' : ', which you should do only when the members agree or the last round is done',
+    pr: verdictLine(r.topic, true),
+  });
+}
+
+function roundComplete(r: Ring): void {
   if (r.moderator_id) {
     update(r, { status: 'moderating' });
-    queueNotice(
-      r.moderator_id,
-      render('ring-moderate', {
-        ring: r.name,
-        ring_id: r.id,
-        format: r.format,
-        round: r.round,
-        max_rounds: r.max_rounds,
-        topic: r.topic,
-        history: history(r),
-        instructions: split ? `The members' verdicts don't all match (${split}), so they don't agree yet.` : allAgree ? 'All members agree to end.' : 'Not all members agree yet.',
-        decide: r.moderator_decides ? ' with your decision' : ', which you should do only when the members agree or the last round is done',
-        pr: verdictLine(r.topic, true),
-      }),
-      { idleOnly: true, ring: true },
-    );
+    queueNotice(db.forwardTarget(r.moderator_id), moderatePrompt(r), { idleOnly: true, ring: true });
     return;
   }
+  const { split, allAgree } = agreement(r);
   if (allAgree) return finish(r, 'all members agreed');
   if (r.round >= r.max_rounds) return finish(r, split ? `split (${split})` : 'the last round ended');
   advance(update(r, { round: r.round + 1, note: null }));
 }
 
+// After a daemon restart the queued turn notices are gone (they live in memory), so each open seat
+// of a running ring is prompted again from the durable ring state (S-2490): a rounds ring's members
+// who haven't submitted this round, a fire or debate ring's next member, a moderated ring's
+// moderator. Returns how many seats were prompted.
+export function promptOpenSeats(): number {
+  let n = 0;
+  const rings = db.open().prepare("SELECT * FROM rings WHERE status IN ('running', 'moderating')").all() as unknown as Ring[];
+  for (const r of rings) {
+    if (r.status === 'moderating') {
+      if (r.moderator_id) queueNotice(db.forwardTarget(r.moderator_id), moderatePrompt(r), { idleOnly: true, ring: true });
+      n++;
+      continue;
+    }
+    const m = members(r);
+    const subs = submissions(r, r.round);
+    const open = r.format === 'rounds' ? m.filter((id) => !subs.some((s) => s.agent_id === id)) : [m[r.turn % m.length]];
+    for (const id of open) prompt(r, id);
+    n += open.length;
+  }
+  return n;
+}
+
 export function decide(ringRef: string, agentId: string, cont: boolean, text: string): string {
   const r = get(ringRef);
   if (!r) throw new Error(`no ring ${ringRef}`);
-  if (r.moderator_id !== agentId) throw new Error('only the moderator decides');
+  if (!standsFor(r.moderator_id, agentId)) throw new Error('only the moderator decides');
   if (r.status !== 'moderating') throw new Error(`ring ${r.name} is ${r.status}, not waiting for you`);
   if (!cont || r.round >= r.max_rounds) {
     const split = splitLine(r, submissions(r, r.round));

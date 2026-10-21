@@ -52,6 +52,9 @@ R=$(agent "{\"name\":\"dev4\",\"type\":\"developer\",\"urgent\":\"red-main\",\"c
 printf %s "$R" | grep -q '"place":1' || fail "urgent spawn not first: $R"
 R=$(agent "{\"name\":\"dev5\",\"type\":\"developer\",\"urgent\":\"because\",\"cwd\":\"$REPO\"}")
 [ "$(printf %s "$R" | tail -1)" = 400 ] || fail "bad urgent reason accepted: $R"
+R=$(agent "{\"name\":\"dev6\",\"type\":\"developer\",\"urgent\":\"incident\",\"cwd\":\"$REPO\"}")
+[ "$(printf %s "$R" | tail -1)" = 403 ] || fail "incident spawn with no marked ITSA not refused: $R"
+[ "$(worktrees)" = 2 ] || fail "the refused incident spawn left a worktree ($(worktrees))"
 
 echo "-- 3. a reviewer is not capped"
 R=$(agent "{\"name\":\"rev1\",\"type\":\"reviewer\",\"cwd\":\"$REPO\"}")

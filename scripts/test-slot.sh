@@ -1,11 +1,17 @@
 #!/bin/sh
-# Runs CMD... in one of N machine-wide slots, so heavy test commands (test/run.sh, web vitest,
+# Runs CMD... in one of N machine-wide slots, so heavy test commands (test/run.sh,
 # web/check) don't pile up: storage hit load 41 on 8 cores from six worktrees at once (S-692).
 #   scripts/test-slot.sh [--light] CMD [ARGS...]
 # N is STAM_TEST_SLOTS, else max(1, nproc/4). Each slot is a flock on $STAM_TEST_SLOT_DIR/slot.I
 # (default /tmp/stam-test-slots). It tries every slot without waiting, then polls them every second
 # and, once, names the holders (pid, worktree) from the slot.I.owner files. The lock is released when
 # CMD ends, however it ends: a killed holder's flock dies with it. STAM_TEST_NOSLOT=1 skips the slots.
+# Waiters are first come, first served (S-2153): each takes a ticket, a number in $DIR/queue.POOL/ that holds
+# its pid, numbered under $DIR/queue.POOL.lock. Only the lowest ticket whose pid is alive tries for a slot, so a
+# later run that polls first can't take a freed slot from an earlier one. No queue lock is held across that check
+# and the flock try: a ticket leaves the queue only when its owner takes a slot (the holder removes it before CMD
+# starts) or exits (a trap; a killed waiter's pid fails the check). So two waiters never both see themselves
+# first while the other is still queued, and the flock stays the atomic step that decides which slot is taken.
 # --light (or STAM_TEST_LIGHT=1) takes the light pool instead: slot files $STAM_TEST_SLOT_DIR/light.I, count
 # STAM_TEST_LIGHT_SLOTS (default STAM_TEST_SLOTS, else as N), for plain unit tests with no daemon or browser (S-1288), so a 30 ms
 # `node --test` never queues behind phone checks. Heavy runs keep the slot.I pool; the pools don't block each other.
@@ -19,8 +25,24 @@
 # Lock order: gate.lock (the merge gate), then a slot (heavy or light), then test/run.sh's suite lock, then the Chromium
 # lock. Nothing takes a slot and then an earlier lock, so they never cycle. The gate takes no slot of
 # its own: each gate command it runs (test/run.sh, npm test, web/check/run.sh) takes one, in turn.
+# Runs CMD with its own TMPDIR under the worktree when the caller set none (S-2586, test/runtmp.sh): CMD is a
+# child then, so the folder can be removed when it ends; with a TMPDIR already set it is exec'd as before.
+runcmd() {
+  root=$(dirname "$(dirname "$HERE")")
+  . "$root/test/runtmp.sh"
+  runtmp_make "$root"
+  [ -n "$RUNTMP_OWNED" ] || exec "$@"
+  # Foreground, so Ctrl-C reaches CMD and CMD keeps stdin; a signal to this shell runs the EXIT trap once CMD is gone.
+  trap 'rm -rf "$RUNTMP_OWNED"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  "$@"
+  rc=$?
+  exit $rc
+}
 held() {
-  [ -n "$STAM_TEST_NOSLOT" ] && return 0
+  [ -n "${MOOTR_TEST_NOSLOT:-${STAM_TEST_NOSLOT:-}}" ] && return 0
   command -v flock >/dev/null || return 0
   [ -n "$STAM_TEST_SLOT_HELD" ] && [ -f "$STAM_TEST_SLOT_HELD" ] || return 1
   flock -n -E 75 "$STAM_TEST_SLOT_HELD" true
@@ -34,9 +56,10 @@ held() {
   done
   return 1
 }
-POOL=slot; COUNT=$STAM_TEST_SLOTS
-if [ "$1" = --light ] || [ "$STAM_TEST_LIGHT" = 1 ]; then
-  POOL=light; COUNT=${STAM_TEST_LIGHT_SLOTS:-$STAM_TEST_SLOTS}; COUNTVAR=LIGHT_
+HERE=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+POOL=slot; COUNT=${MOOTR_TEST_SLOTS:-${STAM_TEST_SLOTS:-}}
+if [ "$1" = --light ] || [ "${MOOTR_TEST_LIGHT:-${STAM_TEST_LIGHT:-}}" = 1 ]; then
+  POOL=light; COUNT=${MOOTR_TEST_LIGHT_SLOTS:-${STAM_TEST_LIGHT_SLOTS:-${MOOTR_TEST_SLOTS:-${STAM_TEST_SLOTS:-}}}}; COUNTVAR=LIGHT_
   [ "$1" = --light ] && shift
 fi
 if [ "$1" = --held ]; then held; exit; fi
@@ -46,16 +69,49 @@ if [ "$STAM_TEST_SLOT_RUN" = 1 ]; then
   # holder (exec keeps this pid), then become CMD.
   : >"$STAM_TEST_SLOT_STARTED"
   printf '%s %s %s\n' "$$" "$(pwd)" "$*" >"$STAM_TEST_SLOT_FILE.owner"
-  unset STAM_TEST_SLOT_RUN STAM_TEST_SLOT_FILE STAM_TEST_SLOT_STARTED
-  exec "$@"
+  rm -f "$STAM_TEST_SLOT_TICKET" # the slot is ours: the next ticket in line may try now
+  unset STAM_TEST_SLOT_RUN STAM_TEST_SLOT_FILE STAM_TEST_SLOT_STARTED STAM_TEST_SLOT_TICKET
+  runcmd "$@"
 fi
-if held; then exec "$@"; fi
+if held; then runcmd "$@"; fi
 N=${COUNT:-$(( $(nproc 2>/dev/null || echo 4) / 4 ))}
 case $N in ''|*[!0-9]*) N=1 ;; esac
 [ "$N" -ge 1 ] || N=1
-DIR=${STAM_TEST_SLOT_DIR:-/tmp/stam-test-slots}
+DIR=${MOOTR_TEST_SLOT_DIR:-${STAM_TEST_SLOT_DIR:-/tmp/stam-test-slots}}
 mkdir -p "$DIR" 2>/dev/null && chmod 1777 "$DIR" 2>/dev/null
 HERE=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+QUEUE=$DIR/queue.$POOL
+# A ticket is a file named by its number, written as "$$" (the waiter's pid) through a temp name, so a reader
+# never sees it half written. Numbers come from the counter under the queue lock, so they are unique and in arrival order.
+take_ticket() {
+  mkdir -p "$QUEUE" 2>/dev/null && chmod 1777 "$QUEUE" 2>/dev/null
+  (
+    flock 9
+    n=$(cat "$DIR/queue.$POOL.next" 2>/dev/null)
+    n=$((${n:-0} + 1))
+    echo "$n" >"$DIR/queue.$POOL.next"
+    echo "$$" >"$QUEUE/.$n"
+    mv "$QUEUE/.$n" "$QUEUE/$n"
+    echo "$n"
+  ) 9>"$DIR/queue.$POOL.lock"
+}
+# A pid that is running. A zombie (killed, not yet reaped by its parent) is dead; without /proc, kill -0 decides.
+live() {
+  st=$(sed -n 's/^.*) \([A-Za-z]\).*/\1/p' "/proc/$1/stat" 2>/dev/null)
+  [ -n "$st" ] && { [ "$st" != Z ]; return; }
+  kill -0 "$1" 2>/dev/null
+}
+# The lowest ticket whose pid is alive; the dead ones are dropped on the way.
+first() {
+  for n in $(ls "$QUEUE" 2>/dev/null | sort -n); do
+    pid=$(cat "$QUEUE/$n" 2>/dev/null)
+    if [ -n "$pid" ] && live "$pid"; then
+      echo "$n"
+      return
+    fi
+    rm -f "$QUEUE/$n"
+  done
+}
 # -o closes the lock fd in CMD, so a daemon it starts can't keep the slot. -E 75: busy.
 try() {
   i=0
@@ -64,7 +120,7 @@ try() {
     started=$DIR/.started.$$.$i
     rm -f "$started"
     STAM_TEST_SLOT_RUN=1 STAM_TEST_SLOT_FILE=$f STAM_TEST_SLOT_STARTED=$started STAM_TEST_SLOT_HELD=$f \
-      flock -n -o -E 75 "$f" sh "$HERE" "$@"
+      STAM_TEST_SLOT_TICKET=$TICKET flock -n -o -E 75 "$f" sh "$HERE" "$@"
     rc=$?
     if [ -e "$started" ]; then rm -f "$started"; exit "$rc"; fi
     [ "$rc" = 75 ] || exit "$rc"
@@ -78,10 +134,19 @@ holders() {
     kill -0 "$pid" 2>/dev/null && echo "  pid $pid in $rest"
   done
 }
-try "$@"
+MINE=$(take_ticket)
+TICKET=$QUEUE/$MINE
+# A signal exits through the EXIT trap, which drops this waiter's ticket. A holder has already removed its ticket.
+trap 'rm -f "$TICKET"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ "$(first)" = "$MINE" ]; then try "$@"; fi
 echo "waiting for a test slot (all $N busy, STAM_TEST_${COUNTVAR}SLOTS to change); holders:"
 holders
 while :; do
   sleep 1
-  try "$@"
+  # A cleared queue (its dir or this ticket removed) would leave no ticket to be first: take a new one.
+  [ -f "$TICKET" ] || { MINE=$(take_ticket); TICKET=$QUEUE/$MINE; }
+  if [ "$(first)" = "$MINE" ]; then try "$@"; fi
 done

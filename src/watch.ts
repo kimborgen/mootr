@@ -19,6 +19,7 @@ import { chiefOfStaff } from './org.ts';
 import { settings } from './settings.ts';
 import { MACHINE } from './config.ts';
 import { checkEvent as checkRequirementsOn } from './req-check.ts';
+import { envVar } from './env.ts';
 
 // 'process' is a start node of a process file (S-947, src/process-run.ts); only stam makes those.
 export type SubscriberKind = 'agent' | 'itsa' | 'human' | 'process';
@@ -88,7 +89,7 @@ function newId(): string {
 // The fold window: events for one subscription closer than this go out together. A test
 // sets STAM_EVENT_FOLD_MS small; 0 disables folding (each event delivers at once).
 function foldMs(): number {
-  const n = Number(process.env.STAM_EVENT_FOLD_MS);
+  const n = Number(envVar('EVENT_FOLD_MS'));
   return Number.isFinite(n) && n >= 0 ? n : 20_000;
 }
 

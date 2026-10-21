@@ -1,6 +1,6 @@
-import { join } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, realpathSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { STAM_BIN, STAM_HOME, STAM_URL, ROOT } from '../config.ts';
@@ -15,17 +15,23 @@ import { onIdle, dropRestRequest } from '../lifecycle.ts';
 import { onContext, setCompactInstructions } from '../context.ts';
 import { report } from '../usage.ts';
 import { pollCreditsAfterTurn } from '../credits.ts';
+import * as secrets from '../secrets.ts';
+import { secretCommandPatterns, secretPaths } from '../secret-files.ts';
 import { ingestSoon } from '../activity.ts';
 import { indexTurnsSoon } from '../turn-vectors.ts';
 import { extraMcpServers, linkSkills } from '../instructions.ts';
 import { replaceHookWaits, type HookWait } from './hook-waits.ts';
+import { opencodeProviders } from './opencode-providers.ts';
+import { settings } from '../settings.ts';
+import { registry } from '../registry.ts';
+import { envVar } from '../env.ts';
 
 // stam runs its own OpenCode server, so it needs no access to the user's background
 // service. Every stam OpenCode agent is a TUI attached to this server.
-const PORT = Number(process.env.STAM_OPENCODE_PORT ?? 4790);
+const PORT = Number(envVar('OPENCODE_PORT') ?? 4790);
 const SERVER = `http://127.0.0.1:${PORT}`;
 const SERVER_SESSION = '_opencode';
-const BIN = process.env.STAM_OPENCODE_BIN ?? (existsSync(join(homedir(), '.opencode/bin/opencode')) ? join(homedir(), '.opencode/bin/opencode') : 'opencode');
+const BIN = envVar('OPENCODE_BIN') ?? (existsSync(join(homedir(), '.opencode/bin/opencode')) ? join(homedir(), '.opencode/bin/opencode') : 'opencode');
 const CONFIG_DIR = join(STAM_HOME, 'opencode');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -35,12 +41,46 @@ function password(): string {
   return readFileSync(f, 'utf8').trim();
 }
 
+// Each secret file as a session may name it: absolute, by its real path where a symlink holds it, and
+// relative to the agent's folder. OpenCode names a file relative to the session's directory, in its
+// project or not (`../stam/token`), and which folder is its project doesn't matter here: a relative
+// name for a secret file reaches only that file, so naming every secret from every folder denies
+// the ones OpenCode will name, whatever project it finds (a core.worktree, a .hg, or none). The
+// folder is given and real, since a symlinked cwd is named either way. This guards canonical-path
+// reads only; it is no boundary against an agent that means to read the file (see docs/status).
+function secretResources(cwd?: string): string[] {
+  const abs = secretPaths();
+  if (!cwd) return abs;
+  const secrets = [...new Set([...abs, ...abs.map(realOrSelf)])];
+  const given = resolve(cwd);
+  const dirs = [...new Set([given, realOrSelf(given)])];
+  return [...new Set([...secrets, ...dirs.flatMap((d) => secrets.map((p) => relative(d, p)))])];
+}
+
+// A path's real path, or the path itself when it doesn't exist.
+function realOrSelf(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
 // A new session's permission rules: every tool allowed in bypass, asked in 'default' (S-1967), and
-// OpenCode's own rules in auto. A session keeps them; see permission-modes.ts's switchesInPlace.
-export function sessionPermissions(mode: string): { action: string; resource: string; effect: string }[] | null {
-  if (mode === 'bypass') return [{ action: '*', resource: '*', effect: 'allow' }];
-  if (mode === 'default') return [{ action: '*', resource: '*', effect: 'ask' }];
-  return null;
+// OpenCode's own rules in auto. A resume re-applies them; see permission-modes.ts's switchesInPlace.
+// The secret files (S-1888) are denied in every mode: OpenCode takes the session's rules after its
+// own (the last matching rule wins), so a deny here holds over the allow of bypass and the asks of
+// default, and in auto it adds to OpenCode's own rules without replacing them.
+// `cwd` is the agent's folder: OpenCode names a file inside it, or inside its project root, relative to
+// that folder, so those forms are denied too (S-1891 review).
+export function sessionPermissions(mode: string, cwd?: string): { action: string; resource: string; effect: string }[] {
+  const denies = secretResources(cwd).flatMap((p) => [
+    { action: 'read', resource: p, effect: 'deny' },
+    { action: 'edit', resource: p, effect: 'deny' },
+  ]);
+  const shell = secretCommandPatterns().map((p) => ({ action: 'shell', resource: p, effect: 'deny' }));
+  const modeRule = mode === 'bypass' ? [{ action: '*', resource: '*', effect: 'allow' }] : mode === 'default' ? [{ action: '*', resource: '*', effect: 'ask' }] : [];
+  return [...modeRule, ...denies, ...shell];
 }
 
 export async function oc(method: string, path: string, body?: unknown): Promise<any> {
@@ -80,11 +120,26 @@ export function opencodeMcpServers(): Record<string, unknown> {
   return servers;
 }
 
+// settings.providers as OpenCode provider blocks and the env that carries their keys (S-2118).
+function providers(): ReturnType<typeof opencodeProviders> {
+  try {
+    const r = opencodeProviders(settings().providers, registry());
+    if (r.collisions.length) console.error(`opencode: providers ${r.collisions.join(', ')} share a key variable; none of them is configured`);
+    return r;
+  } catch {
+    return { blocks: {}, env: {}, collisions: [] };
+  }
+}
+
 // The plugin and config are rewritten on every daemon start; OpenCode reloads them.
 function writeConfig(): void {
   mkdirSync(join(CONFIG_DIR, 'plugins', 'stam'), { recursive: true });
   copyFileSync(join(ROOT, 'src/adapters/opencode-plugin/index.ts'), join(CONFIG_DIR, 'plugins/stam/index.ts'));
-  writeFileSync(join(CONFIG_DIR, 'opencode.json'), JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp: { servers: opencodeMcpServers() } }, null, 2));
+  const { blocks } = providers();
+  writeFileSync(
+    join(CONFIG_DIR, 'opencode.json'),
+    JSON.stringify({ $schema: 'https://opencode.ai/config.json', ...(Object.keys(blocks).length ? { provider: blocks } : {}), mcp: { servers: opencodeMcpServers() } }, null, 2),
+  );
   linkSkills(join(CONFIG_DIR, 'skills'));
 }
 
@@ -105,7 +160,7 @@ async function startServer(): Promise<void> {
   tmux.newSession(
     SERVER_SESSION,
     STAM_HOME,
-    { ...providerEnv(), OPENCODE_SERVER_PASSWORD: password(), OPENCODE_CONFIG_DIR: CONFIG_DIR, STAM_URL, STAM_TOKEN: token },
+    { ...providerEnv(), ...providers().env, OPENCODE_SERVER_PASSWORD: password(), OPENCODE_CONFIG_DIR: CONFIG_DIR, ...{ STAM_URL, STAM_TOKEN: token } },
     [BIN, 'serve', '--hostname', '127.0.0.1', '--port', String(PORT)],
   );
   for (let i = 0; i < 40; i++) {
@@ -115,16 +170,11 @@ async function startServer(): Promise<void> {
   throw new Error('OpenCode server did not start');
 }
 
-// Provider keys for stam's OpenCode server, such as OPENROUTER_API_KEY, as KEY=VALUE
-// lines in STAM_HOME/opencode.env (mode 600). Lets a machine run OpenCode without
-// the user's own OpenCode login.
+// Provider keys for stam's OpenCode server, such as OPENROUTER_API_KEY: the secret store's
+// `agent` slot over the KEY=VALUE lines of STAM_HOME/opencode.env (S-2114). Lets a machine run
+// OpenCode without the user's own OpenCode login.
 function providerEnv(): Record<string, string> {
-  try {
-    const lines = readFileSync(join(STAM_HOME, 'opencode.env'), 'utf8').split('\n');
-    return Object.fromEntries(lines.filter((l) => /^[A-Z_][A-Z0-9_]*=/.test(l)).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1).trim()]));
-  } catch {
-    return {};
-  }
+  return secrets.agentEnv();
 }
 
 function agentForSession(sid: string | undefined): Agent | undefined {
@@ -434,6 +484,9 @@ export const opencode: Adapter = {
   async launch(agent: Agent, opts: { resume?: boolean } = {}): Promise<LaunchSpec> {
     await ensureServer();
     if (opts.resume && agent.session_id) {
+      // A session keeps the permissions it was made with, so one made before the secret denies (S-1891)
+      // gets them at its resume. session.update takes the same permissions as a new session.
+      await oc('PATCH', `/api/session/${agent.session_id}`, { permissions: sessionPermissions(agent.permission_mode, agent.cwd) });
       const argv = [BIN, '--server', SERVER, '--session', agent.session_id];
       return { argv, env: { OPENCODE_SERVER_PASSWORD: password() } };
     }
@@ -442,7 +495,7 @@ export const opencode: Adapter = {
       const [providerID, ...rest] = agent.model.split('/');
       model = { providerID, id: rest.join('/') };
     }
-    const permissions = sessionPermissions(agent.permission_mode);
+    const permissions = sessionPermissions(agent.permission_mode, agent.cwd);
     const s = await oc('POST', '/api/session', { title: agent.name, location: { directory: agent.cwd }, model, permissions, metadata: { stam_agent: agent.id } });
     const argv = [BIN, '--server', SERVER, '--session', s.id];
     return { argv, env: { OPENCODE_SERVER_PASSWORD: password() }, fields: { session_id: s.id } };

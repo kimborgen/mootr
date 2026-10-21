@@ -17,6 +17,7 @@
 import { cachedLessons, warmLessons } from '../retro-lessons.ts';
 import { workspacePrompt } from '../workspace-prompt.ts';
 import { grantedPaths } from '../workspace-share.ts';
+import { secretPaths } from '../secret-files.ts';
 import { loadOwned, itsaPrompt } from '../itsa-owners.ts';
 import { prompt as requirementsPrompt } from '../requirements.ts';
 import { join } from 'node:path';
@@ -25,6 +26,7 @@ import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync, mkdirSyn
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import WebSocket from 'ws';
 import { STAM_BIN, STAM_HOME, agentDir } from '../config.ts';
+import { settings } from '../settings.ts';
 import { isReviewerType } from '../agent-types.ts';
 import * as db from '../db.ts';
 import { signal as costSignal } from '../rules.ts';
@@ -39,8 +41,9 @@ import { instructionsPrompt, extraMcpServers, linkSkills, agentsSkillsDir } from
 import { replaceHookWaits, clearHookWaits, type HookWait } from './hook-waits.ts';
 import { onContext } from '../context.ts';
 import { report, reportSubscription } from '../usage.ts';
+import { envVar, withMootrTwins } from '../env.ts';
 
-const BIN = process.env.STAM_CODEX_BIN ?? (existsSync(join(homedir(), '.local/bin/codex')) ? join(homedir(), '.local/bin/codex') : 'codex');
+const BIN = envVar('CODEX_BIN') ?? (existsSync(join(homedir(), '.local/bin/codex')) ? join(homedir(), '.local/bin/codex') : 'codex');
 const HOOK_COMMAND = `${STAM_BIN} hook codex`;
 // Stop is a fallback for when the daemon isn't following the app-server; idle normally
 // comes from thread/status/changed.
@@ -146,42 +149,54 @@ function probeHooks(): Promise<{ key: string; command: string; currentHash: stri
 // the reviewer says no, the agent asks through stam's request_permission tool. 'bypass'
 // is Codex's --dangerously-bypass-approvals-and-sandbox: no sandbox, no approvals. 'default' is
 // 'auto' with the requests left to the user, in the TUI or the conversation view (S-1967).
+// Non-bypass modes name the sandbox profile STAM_PROFILE instead of sandbox_mode: only a profile
+// can deny reads of the secret files (S-1888), and agentSandbox defines it.
+export const STAM_PROFILE = 'stam';
 export function permissionConfig(mode: string): Record<string, string> {
   if (mode === 'bypass') return { approval_policy: 'never', sandbox_mode: 'danger-full-access', approvals_reviewer: 'user' };
-  return { approval_policy: 'on-request', sandbox_mode: 'workspace-write', approvals_reviewer: mode === 'default' ? 'user' : 'auto_review' };
+  return { approval_policy: 'on-request', default_permissions: STAM_PROFILE, approvals_reviewer: mode === 'default' ? 'user' : 'auto_review' };
 }
 
-// The same settings as thread parameters, for threads that already exist.
-function permissionParams(mode: string) {
+// The same settings as thread parameters, for threads that already exist. A profile is not sent as
+// a thread's `sandbox`: that drops the profile, and the thread runs the plain workspace-write policy
+// (checked with 0.162.1), so a non-bypass thread leaves the sandbox to the profile in its config.
+export function permissionParams(mode: string) {
   const c = permissionConfig(mode);
   return { approvalPolicy: c.approval_policy, sandbox: c.sandbox_mode, approvalsReviewer: c.approvals_reviewer };
 }
 
-// What a reviewer's Codex workspace-write sandbox needs and the default one withholds (S-731):
-// network, so `gh` and `git fetch` work, and ~/.cache/stam-review writable, where the reviewer
-// brief makes its own clone (S-817). Only that scratch root: never the shared repo's git dir. A
-// reviewer usually runs in the live deploy checkout, so a writable shared .git would let it write
-// hooks and config that then run for every agent and the deploy watcher. The root is made here,
-// before the launch script is written: Codex's sandbox can't create a writable root that doesn't
-// exist, and ~/.cache is read-only to it. Scoped to reviewer types; every other Codex agent keeps
-// the plain workspace-write policy. Codex takes these as app-server config, so they apply to the
-// whole agent, TUI turns included; a thread started with sandbox 'workspace-write' reads them
-// (checked with 0.162.1).
-export function reviewerSandbox(agent: Agent): Record<string, unknown> {
-  if (!isReviewerType(agent.type ?? '')) return {};
+// What a reviewer's Codex sandbox needs and the default one withholds (S-731): network, so `gh` and
+// `git fetch` work, and ~/.cache/stam-review writable, where the reviewer brief makes its own clone
+// (S-817). Only that scratch root: never the shared repo's git dir. A reviewer usually runs in the
+// live deploy checkout, so a writable shared .git would let it write hooks and config that then run
+// for every agent and the deploy watcher. The root is made here, before the launch script is
+// written: Codex's sandbox can't create a writable root that doesn't exist, and ~/.cache is
+// read-only to it. Scoped to reviewer types; every other Codex agent keeps the plain grants.
+export function reviewerSandbox(agent: Agent): { network: boolean; writable: string[] } {
+  if (!isReviewerType(agent.type ?? '')) return { network: false, writable: [] };
   const root = join(homedir(), '.cache', 'stam-review');
   mkdirSync(root, { recursive: true });
-  return { 'sandbox_workspace_write.network_access': true, 'sandbox_workspace_write.writable_roots': [root] };
+  return { network: true, writable: [root] };
 }
 
-// reviewerSandbox plus the agent's own workspace and the ones shared with it for writing (S-896),
-// as writable roots. A read share needs nothing here: Codex can read them already.
+// The profile STAM_PROFILE for a default or auto agent (S-1888): it extends `:workspace`, Codex's
+// workspace-write policy (its workspace, /tmp and read-only .git stay as they were, checked with
+// 0.162.1), adds the reviewer's network and writable roots (reviewerSandbox) and the agent's own
+// workspace and the ones shared with it for writing (S-896), and denies every secret file for reads
+// and writes. Codex takes these as app-server config, so they apply to the whole agent, TUI turns
+// included. Bypass has no sandbox and so no profile: Codex can't deny reads there.
 export function agentSandbox(agent: Agent): Record<string, unknown> {
-  const base = reviewerSandbox(agent);
-  const write = [...(agent.personal_workspace ? [agent.personal_workspace] : []), ...grantedPaths(agent.id, 'write')];
-  if (!write.length) return base;
-  const roots = (base['sandbox_workspace_write.writable_roots'] as string[] | undefined) ?? [];
-  return { ...base, 'sandbox_workspace_write.writable_roots': [...roots, ...write] };
+  const reviewer = reviewerSandbox(agent);
+  if (agent.permission_mode === 'bypass') return {};
+  const write = [...reviewer.writable, ...(agent.personal_workspace ? [agent.personal_workspace] : []), ...grantedPaths(agent.id, 'write')];
+  return {
+    'permissions.stam.extends': ':workspace',
+    'permissions.stam.filesystem': {
+      ...Object.fromEntries(write.map((p) => [p, 'write'])),
+      ...Object.fromEntries(secretPaths().map((p) => [p, 'none'])),
+    },
+    ...(reviewer.network ? { 'permissions.stam.network.enabled': true } : {}),
+  };
 }
 
 // When the tmux server goes down without a reboot, the Codex TUI outlives the hangup and
@@ -214,7 +229,7 @@ export function codexMcpServers(): { overrides: Record<string, unknown>; env: Re
     if (s.auth) {
       // The token lives in the daemon, so the proxy gets it at call time from the app-server's
       // environment, as stam's own server does; nothing secret rides on this command line.
-      overrides[`mcp_servers.${name}`] = { command: STAM_BIN, args: ['mcp-proxy', name], env_vars: ['STAM_AGENT_ID', 'STAM_URL', 'STAM_TOKEN'] };
+      overrides[`mcp_servers.${name}`] = { command: STAM_BIN, args: ['mcp-proxy', name], env_vars: withMootrTwins(['STAM_AGENT_ID', 'STAM_URL', 'STAM_TOKEN']) };
     } else if (s.url) {
       const o: Record<string, unknown> = { url: s.url };
       const headers: Record<string, string> = {};
@@ -917,6 +932,8 @@ export const codex: Adapter = {
       ...overrides({
         ...(agent.model ? { model: agent.model } : {}),
         ...(agent.effort ? { model_reasoning_effort: agent.effort } : {}),
+        // settings.harness.codex (S-2240): none set adds no override.
+        ...settings().harness.codex,
         ...permissions,
         ...trust,
         // The network and writable roots a reviewer needs (S-731); empty for other types.
@@ -924,7 +941,7 @@ export const codex: Adapter = {
         // settings.mcpServers, beside stam's own server.
         ...mcp.overrides,
         // Codex passes MCP servers only an allowlist of variables; env_vars adds stam's.
-        'mcp_servers.stam': { command: STAM_BIN, args: ['mcp'], env_vars: ['STAM_AGENT_ID', 'STAM_URL', 'STAM_TOKEN'], default_tools_approval_mode: 'approve' },
+        'mcp_servers.stam': { command: STAM_BIN, args: ['mcp'], env_vars: withMootrTwins(['STAM_AGENT_ID', 'STAM_URL', 'STAM_TOKEN']), default_tools_approval_mode: 'approve' },
         'hooks.state': await hookTrust(),
       }),
       ...hookArgs(),

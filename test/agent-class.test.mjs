@@ -98,7 +98,8 @@ test('parseAgentFilter: type lists, and the older presets and +/- lists', () => 
   assert.equal(cls.filterKey(cls.parseAgentFilter('+cos,-cos')), 'none');
   assert.equal(cls.filterKey(null), '');
   assert.equal(cls.filterKey(cls.parseAgentFilter('manager,developer')), 'developer,manager', 'sorted');
-  for (const bad of ['nope', '+nope', 'cos', 'developer,x', '+cos,x']) assert.throws(() => cls.parseAgentFilter(bad), /agents must be/, bad);
+  assert.deepEqual(keep(cls.parseAgentFilter('cos')), ['cos'], 'a registry type since S-2142');
+  for (const bad of ['nope', '+nope', 'developer,x', '+cos,x']) assert.throws(() => cls.parseAgentFilter(bad), /agents must be/, bad);
 });
 
 test('the summary lists the types present with counts, before the filter', async () => {

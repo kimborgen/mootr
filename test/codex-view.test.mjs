@@ -12,10 +12,11 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startFakeCodex } from './fake-codex/server.mjs';
-import { tempHome } from './tmphome.mjs';
+import { tempHome, tempDirOutside } from './tmphome.mjs';
 
 const fx = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/codex-view.json'), 'utf8'));
-const home = tempHome('stam-cv-');
+// The fake app-server listens on a socket under this home: a short folder, outside a deep TMPDIR (test/run.sh's).
+const home = tempHome('stam-cv-', tempDirOutside);
 process.env.STAM_HOME = home;
 process.env.STAM_TMUX_SOCKET = `codex-view-test-${process.pid}`;
 for (const k of ['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT']) delete process.env[k];

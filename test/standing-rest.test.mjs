@@ -334,6 +334,78 @@ test('a hold or an unpause cancels a pending retry', async () => {
   }
 });
 
+test('a wake prompt whose push rejects asynchronously is not a wake: it goes back to rest and retries', async () => {
+  const m = manualTimer();
+  lifecycle.setWakeRetry({ delays: [1, 5, 15], timer: m.timer });
+  const { adapters } = await import('../src/adapters/index.ts');
+  const tmux = await import('../src/tmux.ts');
+  const ok = adapters.fake.pushPrompt;
+  let calls = 0;
+  try {
+    const a = agent();
+    await rested(a);
+    tmux.newSession(a.id, a.cwd, {}, ['sleep', '600']);
+    adapters.fake.pushPrompt = async (...args) => (++calls === 1 ? Promise.reject(new Error('push boom')) : ok(...args));
+    await lifecycle.wakeResting(a.id, 'test').catch(() => {});
+    assert.equal(events(a.id, 'standing:wake-error').length, 1);
+    assert.equal(lifecycle.isResting(db.getAgent(a.id)), true, 'back to rest after the rejected prompt');
+    assert.deepEqual(m.pending().map((t) => t.ms), [1], 'the timed retry is scheduled');
+    assert.equal(events(a.id, 'unpause').length, 0, 'no unpause is recorded for a wake that did not take');
+    await m.fire();
+    await settled(() => db.getAgent(a.id).lifecycle === 'active');
+    assert.equal(events(a.id, 'standing:wake-gave-up').length, 0);
+  } finally {
+    adapters.fake.pushPrompt = ok;
+    lifecycle.setWakeRetry();
+  }
+});
+
+test('a resume that is not a wake, with no stream to take its prompt, ends active and does not throw', async () => {
+  const { adapters } = await import('../src/adapters/index.ts');
+  const tmux = await import('../src/tmux.ts');
+  const ok = adapters.fake.pushPrompt;
+  try {
+    const a = agent();
+    db.updateAgent(a.id, { lifecycle: 'paused', paused_by: null });
+    tmux.newSession(a.id, a.cwd, {}, ['sleep', '600']);
+    adapters.fake.pushPrompt = async () => false;
+    assert.equal(await lifecycle.resumeNow(a.id, 'cost-resumed'), 'active');
+    assert.equal(db.getAgent(a.id).lifecycle, 'active');
+    assert.equal(events(a.id, 'unpause').length, 1);
+  } finally {
+    adapters.fake.pushPrompt = ok;
+  }
+});
+
+test('a shutdown that lands while the wake prompt is in flight is not undone by the rollback', async () => {
+  const m = manualTimer();
+  lifecycle.setWakeRetry({ delays: [1, 5, 15], timer: m.timer });
+  const { adapters } = await import('../src/adapters/index.ts');
+  const tmux = await import('../src/tmux.ts');
+  const ok = adapters.fake.pushPrompt;
+  let reject;
+  try {
+    const a = agent();
+    const parent = agent();
+    db.updateAgent(a.id, { parent_id: parent.id });
+    await rested(a);
+    tmux.newSession(a.id, a.cwd, {}, ['sleep', '600']);
+    adapters.fake.pushPrompt = () => new Promise((_, rej) => (reject = rej));
+    const woke = lifecycle.wakeResting(a.id, 'test').catch(() => {});
+    await settled(() => typeof reject === 'function');
+    await lifecycle.shutdown(db.getAgent(a.id), true);
+    reject(new Error('push boom'));
+    await woke;
+    assert.equal(db.getAgent(a.id).lifecycle, 'shut_down', 'the shutdown has the last word');
+    assert.equal(m.pending().length, 0, 'no retry is scheduled');
+    assert.equal(events(a.id, 'standing:wake-retry').length, 0);
+    assert.equal(events(parent.id, 'notice:queued').filter((e) => /is running/.test(JSON.stringify(e))).length, 0, 'the parent is not told it is running');
+  } finally {
+    adapters.fake.pushPrompt = ok;
+    lifecycle.setWakeRetry();
+  }
+});
+
 test('a wake prompt that fails after the agent went active tells the parent and does not retry', async () => {
   const m = manualTimer();
   lifecycle.setWakeRetry({ delays: [1, 5, 15], timer: m.timer });

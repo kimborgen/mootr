@@ -21,7 +21,7 @@ after(() => rmSync(home, { recursive: true, force: true }));
 function release(name) {
   const dir = join(R, name);
   mkdirSync(dir, { recursive: true });
-  for (const d of ['bin', 'src', 'templates', 'package.json']) cpSync(join(root, d), join(dir, d), { recursive: true });
+  for (const d of ['bin', 'src', 'scripts', 'templates', 'package.json']) cpSync(join(root, d), join(dir, d), { recursive: true });
   symlinkSync(join(root, 'node_modules'), join(dir, 'node_modules'));
   return dir;
 }

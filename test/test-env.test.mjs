@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ignoredTestOnlyEnv, testHome, testOnlyEnv } from '../src/test-env.ts';
+import { ignoredTestOnlyEnv, serviceEnv, testHome, testOnlyEnv } from '../src/test-env.ts';
 import { tempDir } from './tmphome.mjs';
 
 const base = tempDir('test-env-');
@@ -34,4 +34,12 @@ test('ignored on the live home even with the gate', () => {
   const h = mk('live');
   assert.equal(testOnlyEnv('STAM_TEST_HUMAN_KEY', env, h, true), undefined);
   assert.equal(ignoredTestOnlyEnv('STAM_TEST_HUMAN_KEY', {}, h, false), false);
+});
+
+test('the service unit keeps STAM_TEST_COST_HOOKS in a test home only (S-2596)', () => {
+  const e = { STAM_PORT: '1', STAM_TEST_COST_HOOKS: '1' };
+  const keys = ['STAM_PORT'];
+  assert.equal(serviceEnv(keys, e, mk('unit-ok'), false), 'Environment=STAM_PORT=1\nEnvironment=STAM_TEST_COST_HOOKS=1\n');
+  assert.equal(serviceEnv(keys, e, mk('unit-live'), true), 'Environment=STAM_PORT=1\n');
+  assert.equal(serviceEnv(keys, e, mk('unit-nomarker', { marker: false }), false), 'Environment=STAM_PORT=1\n');
 });

@@ -133,3 +133,26 @@ test('a voice.env that is not mode 600 turns voice off, and the event says only 
   }
   assert.equal(voice.configured(), true);
 });
+
+test('a key that is not a plain header value is refused before any call, and the message names no key (S-2117)', async () => {
+  const before = requests.length;
+  const bad = 'el-bad key-do-not-leak';
+  writeFileSync(envFile, `ELEVENLABS_API_TOKEN=${bad}\n`, { mode: 0o600 });
+  try {
+    const errors = events('voice:error').length;
+    assert.equal(voice.configured(), false);
+    let err;
+    await voice.transcribe(clip, 'audio/webm').catch((e) => (err = e));
+    assert.ok(err instanceof voice.VoiceError);
+    assert.equal(err.status, 503);
+    assert.ok(!err.message.includes('do-not-leak'));
+    assert.equal(requests.length, before);
+    // The refusal is recorded as a voice error, with the reason and no key.
+    const errs = events('voice:error').map(String);
+    assert.equal(errs.length, errors + 1);
+    assert.ok(errs.some((d) => d.includes('invalid API key')), 'the event names the reason');
+    assert.ok(errs.every((d) => !d.includes('do-not-leak')), 'the key stays out of the event');
+  } finally {
+    writeFileSync(envFile, `ELEVENLABS_API_TOKEN=${KEY}\n`, { mode: 0o600 });
+  }
+});

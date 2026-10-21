@@ -23,6 +23,7 @@ import * as requirements from './requirements.ts';
 import { branchDiff } from './itsa-queue.ts';
 import type { ExtEvent } from './watch.ts';
 import type { Requirement, Verdict, WaiverKind } from './requirements.ts';
+import { envVar } from './env.ts';
 
 export type SubjectKind = 'mail' | 'mail-to-human' | 'itsa' | 'branch' | 'tool' | 'event' | 'manual';
 
@@ -628,7 +629,7 @@ export function toolFromPeer(body: any): Promise<ToolVerdict> {
 // The copy of the home's enforced-tools index; null until first fetched.
 let remoteIndex: Set<string> | null = null;
 let fetching = false;
-const INDEX_POLL_MS = Number(process.env.STAM_REQ_INDEX_MS) || 60_000;
+const INDEX_POLL_MS = Number(envVar('REQ_INDEX_MS')) || 60_000;
 
 export function enforcedToolsList(): string[] {
   return [...requirements.enforcedTools()].sort();

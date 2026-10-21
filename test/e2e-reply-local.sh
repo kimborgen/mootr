@@ -10,7 +10,8 @@
 #   - a cost_switch successor replies to mail its predecessor got
 #   - an agent's own token can't set the fields only stam sets (thread_id, itsa_id, forwarded, ...),
 #     which would place mail in any thread or skip these checks; its plain mail still goes out
-#     (inferred too, S-608: naming a recipient as inferred would skip a refusal)
+#     (inferred too, S-608: naming a recipient as inferred would skip a refusal), and the ITSA post
+#     route refuses the same fields (S-945), but not kind or health, which a comment or update sets
 # intruder is a fake Claude Code run (test/fake-claude), for a real agent token; no model runs.
 set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
@@ -20,6 +21,8 @@ isolate
 trap stam_test_cleanup EXIT
 TOKEN=$(cat "$STAM_HOME/token")
 api() { curl -s -X "$1" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' ${4:+-H 'x-stam-human: 1'} "$STAM_URL$2" ${3:+-d "$3"}; }
+# tapi: api for /api/test/* routes; -f fails at the call when the gate answers 404.
+tapi() { curl -sf -X "$1" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' ${4:+-H 'x-stam-human: 1'} "$STAM_URL$2" ${3:+-d "$3"}; }
 jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 reg() { api POST /api/register "{\"name\":\"$1\",\"role\":\"test\",\"harness\":\"claude\"}" | jget "d['id']"; }
 fail() { echo "FAIL: $1"; exit 1; }
@@ -75,10 +78,7 @@ ITSA_ID=$(api GET "/api/itsas/$KEY" | jget "d['id']")
 echo "-- a cost_switch successor replies to mail its predecessor got"
 PRED=$(reg pred); SUCC=$(reg succ)
 M4=$(api POST /api/mail "{\"from\":\"$ALICE\",\"to\":[\"pred\"],\"subject\":\"Handover\",\"body\":\"Carry on.\",\"new_thread\":true}" | jget "d['id']")
-python3 - "$STAM_HOME/stam.db" "$PRED" "$SUCC" <<'PY'
-import sqlite3, sys
-c = sqlite3.connect(sys.argv[1], timeout=10); c.execute("UPDATE agents SET forwarded_to = ? WHERE id = ?", (sys.argv[3], sys.argv[2])); c.commit()
-PY
+tapi POST /api/test/agent "{\"agent\":\"$PRED\",\"forwarded_to\":\"$SUCC\"}" >/dev/null
 R=$(send "$SUCC" alice "$M4" "On it.")
 [ "$(thread_of "$R")" = "$M4" ] || fail "the successor's reply to its predecessor's mail isn't in the thread (got: $R)"
 
@@ -102,6 +102,19 @@ for f in '"relay":true' '"itsa_id":"'"$ITSA_ID"'"' '"mail_id":"m1234abcd"' '"fro
   refused "$(printf "%s" "$f" | sed 's/^"\([a-z_]*\)".*/\1/')" "$f"
 done
 [ "$(got bob "$INTRUDER")" = False ] || fail "a refused mail from intruder reached bob"
+# The ITSA post route refuses the same fields (S-945) before it checks the poster, so the field refusal shows.
+as_post() { curl -s -X POST -H "authorization: Bearer $ITOKEN" -H 'content-type: application/json' "$STAM_URL/api/itsas/$KEY/post" -d "$1"; }
+for f in '"inferred":["bob"]' '"thread_id":"'"$M1"'"'; do
+  _r=$(as_post "{\"body\":\"injected\",$f}")
+  printf "%s" "$_r" | grep -q "set only by stam, not in an agent's post" || fail "intruder's ITSA post with $f wasn't refused (got: $_r)"
+done
+# The intruder becomes a participant, so its post is authorized: an update's kind and health are accepted and stored.
+api PATCH "/api/itsas/$KEY" "{\"participants\":[\"$BOB\",\"$INTRUDER\"],\"by\":\"human\"}" human >/dev/null
+api GET "/api/itsas/$KEY" | jget "'$INTRUDER' in d['participants']" | grep -qx True || fail "intruder wasn't made a participant"
+_r=$(as_post "{\"by\":\"$INTRUDER\",\"body\":\"an update\",\"kind\":\"update\",\"health\":\"at_risk\"}")
+PID=$(printf "%s" "$_r" | jget "d['id']") || fail "intruder's update post wasn't accepted (got: $_r)"
+TID=$(api GET "/api/itsas/$KEY" | jget "d['thread_id']")
+api GET "/api/threads/$TID" | jget "[(m['kind'], m['health']) for m in d if m['id']=='$PID']" | grep -qx "\[('update', 'at_risk')\]" || fail "the stored post lacks kind update and health at_risk"
 api GET "/api/threads/$M1" | jget "any(m['from_id']=='$INTRUDER' for m in d)" | grep -qx False || fail "intruder's mail landed in alice's thread"
 R=$(as_intruder "{\"to\":[\"bob\"],\"reply_to\":\"$M1\",\"body\":\"by reply\"}")
 printf "%s" "$R" | grep -q "mail $M1 isn't visible to you" || fail "intruder's reply by its own token wasn't refused (got: $R)"

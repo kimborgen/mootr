@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Tab } from './shell/Tab'
 import { setData } from './store'
 import type { Agent, Itsa, ItsaStatus } from './types'
-import { ItsaChips, WaitBadges, WaitThinBar } from './waits'
+import { ItsaChips, setClock, WaitBadges, WaitThinBar } from './waits'
 
 const openItsa = vi.hoisted(() => vi.fn())
 vi.mock('./itsa/itsa', async (orig) => ({ ...(await orig<typeof import('./itsa/itsa')>()), openItsa }))
@@ -182,6 +182,53 @@ describe('a drag from a chip', () => {
     expect(chip.getAttribute('draggable')).toBe('false')
     await act(async () => { chip.dispatchEvent(new Event('dragstart', { bubbles: true, cancelable: true })) })
     expect(onDragStart).not.toHaveBeenCalled()
+  })
+  // A browser starts the drag on the draggable tab, so the dragstart arrives there: it is the press that tells them apart (S-1872).
+  it('cancels the tab\'s dragstart when the press began on a chip, and not when it began on the name', async () => {
+    const onDragStart = vi.fn()
+    setData({ agents: [agent], itsas: [x('1')], itsaStatuses: statuses })
+    await act(async () => { root.render(<Tab id="agent:a1" title="lead" glyph={null} chips={<ItsaChips id="a1" tabKey="agent:a1" />} onSelect={() => {}} onDragStart={onDragStart} draggable />) })
+    const tabEl = host.querySelector<HTMLElement>('.tab')!
+    host.querySelector<HTMLElement>('[data-itsa="1"]')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    const fromChip = new Event('dragstart', { bubbles: true, cancelable: true })
+    await act(async () => { tabEl.dispatchEvent(fromChip) })
+    expect(fromChip.defaultPrevented).toBe(true)
+    expect(onDragStart).not.toHaveBeenCalled()
+    host.querySelector<HTMLElement>('.label')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    const fromName = new Event('dragstart', { bubbles: true, cancelable: true })
+    await act(async () => { tabEl.dispatchEvent(fromName) })
+    expect(fromName.defaultPrevented).toBe(false)
+    expect(onDragStart).toHaveBeenCalledTimes(1)
+  })
+})
+
+// The chips are measured with the wait badges beside them, and a timer's text is part of the badge's width: a badge
+// that grows a character (`1m` to `59s`) takes room the chips had measured, so they measure again (S-1872).
+describe('a timer whose text grows', () => {
+  let now = Date.parse('2026-10-18T12:00:00Z')
+  beforeEach(() => {
+    vi.useFakeTimers()
+    setClock(() => now)
+    // A badge is 30 px and 6 px a character of its text; the chips are 40 px each, as above.
+    Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, get(this: HTMLElement) {
+      if (this.classList.contains('itsa-chips')) return chipsW(this)
+      if (this.classList.contains('wait-badges')) return this.children.length * 30 + (this.textContent?.length ?? 0) * 6
+      return 0
+    } })
+  })
+  afterEach(() => { setClock(null); vi.useRealTimers(); room = 300 })
+  it('re-measures the chips when the text grows, so the name keeps its floor', async () => {
+    // Beside `1m` (42 px) two chips (80 px) and their gaps leave the name 52 px: each. Beside `59s` (48 px) it is 46 px: folded.
+    room = 186
+    const timer = { id: 'w-t', kind: 'timer', since: '2026-10-18T11:00:00Z', source: 'wait_for', until: new Date(now + 60_000).toISOString() }
+    setData({ agents: [{ ...agent, waits: [timer] } as Agent], itsas: [x('1'), x('2')], itsaStatuses: statuses })
+    await act(async () => { root.render(<div className="tabs"><Tab id="agent:a1" title="lead" glyph={null} chips={<><WaitBadges id="a1" tabKey="agent:a1" /><ItsaChips id="a1" tabKey="agent:a1" /></>} onSelect={() => {}} /></div>) })
+    expect(host.querySelector('[data-wait=timer]')?.textContent).toBe('1m')
+    expect(host.querySelector('.tab [data-itsa="folded"]')).toBeNull()
+    now += 1000
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    expect(host.querySelector('[data-wait=timer]')?.textContent).toBe('59s')
+    expect(host.querySelector('.tab [data-itsa="folded"]')).not.toBeNull()
   })
 })
 

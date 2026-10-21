@@ -3,16 +3,25 @@ import { Icon } from '../Icon'
 import { DiffFileHead } from './DiffFileHead'
 import type { DiffEditor, DiffEditorViews, DiffMode } from './mergeEditor'
 import type { DeclHit, DeclSide } from '../decl/declExt'
-import { DiffFail, fetchSide, fetchWhole, type Side, type SideRef } from './diffApi'
+import { DiffFail } from './diffApi'
 import { estimateLines, type DiffFileItem } from './diffModel'
+import type { FileSides } from './fileSides'
 
-// One file of the PR diff (S-1531): its header (path, counts, Hide, Expand all, Viewed) and, once the file scrolls into
-// view, its diff in a CodeMirror merge view. Binary, over-cap, denied and unchanged-content files get a row, never a diff.
+// One file of a diff (S-1531): its header (path, counts, Hide, Expand all, Viewed) and, once the file scrolls into view,
+// its diff in a CodeMirror merge view. Binary, over-cap, denied and unchanged-content files get a row, never a diff. The
+// sides come from the file's source: a PR's are fetched, a patch's are read from a checkout and matched against the patch
+// (S-2104) — a file nothing matched is drawn from its own hunks in one document instead.
 export interface FileDiffProps {
   // The scroll container the file sits in, the root of the draw-ahead observer; the viewport when absent.
   scroller?: RefObject<HTMLElement | null>
   file: DiffFileItem
-  refs: SideRef
+  // Loads this file's sides. A stable function per file is not required (it is read through a ref), but `loadKey` must
+  // change when what it would load changes, so a reload replaces what is shown.
+  load: (signal?: AbortSignal) => Promise<FileSides>
+  loadKey: string
+  // Downloads the whole head side, for a file too large to diff. A source with nothing to download (a patch) leaves it
+  // out, and the row offers no button.
+  download?: () => Promise<Blob>
   mode: DiffMode
   wrap: boolean
   viewed: boolean
@@ -20,6 +29,9 @@ export interface FileDiffProps {
   onHide: () => void
   // The EditorViews of a drawn file, and null when they go.
   onEditor?: (views: DiffEditorViews | null, path: string) => void
+  // What this file's sides turned out to be, when they load (the view counts the two-sided ones: a patch's files are two
+  // sided only where a checkout matched).
+  onSides?: (sides: FileSides) => void
   // Go to declaration (S-1532): an identifier clicked or tapped in this file, and whether a name has a declaration.
   onDecl?: (hit: DeclHit) => void
   hasDecl?: (name: string, side: DeclSide) => Promise<boolean>
@@ -31,12 +43,7 @@ export interface FileDiffProps {
   onTarget?: (n: number) => void
 }
 
-type Data =
-  | { s: 'loading' }
-  | { s: 'error'; message: string }
-  | { s: 'text'; base: string; head: string }
-  | { s: 'binary'; size: number }
-  | { s: 'large'; size: number }
+type Data = { s: 'loading' } | { s: 'error'; message: string } | FileSides
 
 // A file draws within DRAW_MARGIN of the scroller and tears its editor down beyond FAR_MARGIN; the gap keeps a file at the
 // edge from drawing and tearing down on every scroll tick. About three screens of a phone.
@@ -45,24 +52,8 @@ export const FAR_MARGIN = 3000
 // The server serves nothing above this, `all=1` included; an unknown size (a 413) offers no download either.
 const BINARY_CAP = 50 * 1024 * 1024
 const kb = (n: number) => `${Math.max(1, Math.round(n / 1024))} KB`
-const sideText = (s: Side): string => (s.kind === 'text' ? s.text : '')
 
-// Fetches both sides of a file with the list's shas. An added file has no base, a deleted one no head, and a rename's
-// base side is at its old path.
-export async function loadFile(f: DiffFileItem, refs: SideRef, signal?: AbortSignal): Promise<Data> {
-  const none: Side = { kind: 'missing' }
-  const [base, head] = await Promise.all([
-    f.status === 'added' ? none : fetchSide(refs, f.oldPath ?? f.path, 'base', signal),
-    f.status === 'deleted' ? none : fetchSide(refs, f.path, 'head', signal),
-  ])
-  for (const s of [head, base]) {
-    if (s.kind === 'large') return { s: 'large', size: s.size }
-    if (s.kind === 'binary') return { s: 'binary', size: s.size }
-  }
-  return { s: 'text', base: sideText(base), head: sideText(head) }
-}
-
-export function FileDiff({ scroller, file, refs, mode, wrap, viewed, onViewed, onHide, onEditor, onDecl, hasDecl, forceOpen, target, onTarget }: FileDiffProps) {
+export function FileDiff({ scroller, file, load, loadKey, download, mode, wrap, viewed, onViewed, onHide, onEditor, onSides, onDecl, hasDecl, forceOpen, target, onTarget }: FileDiffProps) {
   const root = useRef<HTMLElement>(null)
   const host = useRef<HTMLDivElement>(null)
   const [near, setNear] = useState(typeof IntersectionObserver === 'undefined')
@@ -73,8 +64,8 @@ export function FileDiff({ scroller, file, refs, mode, wrap, viewed, onViewed, o
   const noDiff = file.denied || (file.status === 'renamed' && !file.additions && !file.deletions && !file.binary)
   const open = (!viewed || !!forceOpen) && !noDiff
   // The latest callbacks, so a new closure from the parent doesn't redraw the editor.
-  const cb = useRef({ onDecl, hasDecl, onTarget })
-  cb.current = { onDecl, hasDecl, onTarget }
+  const cb = useRef({ onDecl, hasDecl, onTarget, onSides, load })
+  cb.current = { onDecl, hasDecl, onTarget, onSides, load }
   const ed = useRef<DiffEditor | null>(null)
   const [drawn, setDrawn] = useState(0)
   const revealed = useRef(0)
@@ -131,19 +122,20 @@ export function FileDiff({ scroller, file, refs, mode, wrap, viewed, onViewed, o
   }, [near, drawn])
 
   const fetching = near && open
-  // What was fetched, so closing a file (Viewed) and opening it again keeps its data instead of fetching both sides again.
+  // What was loaded, so closing a file (Viewed) and opening it again keeps its data instead of loading it again.
   const loadedFor = useRef('')
   useEffect(() => {
     if (!fetching) return
-    const id = [refs.repo, refs.pr, refs.head, refs.base, file.path, tries].join('\0')
+    const id = [loadKey, file.path, tries].join('\0')
     if (loadedFor.current === id) return
     const ctl = new AbortController()
     setData({ s: 'loading' })
-    loadFile(file, refs, ctl.signal).then((d) => { loadedFor.current = id; setData(d) }, (e) => { if (!ctl.signal.aborted) setData({ s: 'error', message: e instanceof DiffFail || e instanceof Error ? e.message : 'Could not load this file.' }) })
+    cb.current.load(ctl.signal).then((d) => { loadedFor.current = id; setData(d); cb.current.onSides?.(d) }, (e) => { if (!ctl.signal.aborted) setData({ s: 'error', message: e instanceof DiffFail || e instanceof Error ? e.message : 'Could not load this file.' }) })
     return () => ctl.abort()
-  }, [fetching, file, refs.repo, refs.pr, refs.head, refs.base, tries])
+  }, [fetching, file, loadKey, tries])
 
   const text = data.s === 'text' ? data : null
+  const hunks = data.s === 'hunks' ? data.lines : null
   useEffect(() => {
     if (!text || !host.current || !open || !near) return
     let dead = false
@@ -160,6 +152,21 @@ export function FileDiff({ scroller, file, refs, mode, wrap, viewed, onViewed, o
     }, () => { if (!dead) setData({ s: 'error', message: 'Could not draw this file.' }) })
     return () => { dead = true; if (made) { ed.current = null; onEditor?.(null, file.path); made.destroy() } }
   }, [text, open, near, mode, whole, wrap, file.path])
+
+  // A patch file no checkout matched draws from its own hunks: one document, no merge view, so it has no views to hand
+  // back and nowhere to jump (`target`), and wrap is all it takes from the text settings.
+  useEffect(() => {
+    if (!hunks || !host.current || !open || !near) return
+    let dead = false
+    let made: { destroy(): void } | undefined
+    void import('./hunkEditor').then((m) => m.createHunkEditor(host.current!, hunks, wrap)).then((e) => {
+      if (dead) return e.destroy()
+      made = e
+      setDrawn((n) => n + 1)
+      setPinned(0)
+    }, () => { if (!dead) setData({ s: 'error', message: 'Could not draw this file.' }) })
+    return () => { dead = true; made?.destroy() }
+  }, [hunks, open, near, wrap])
 
   // Once the editor is drawn, a pending jump expands, scrolls to and marks its line, once per jump.
   useEffect(() => {
@@ -183,10 +190,11 @@ export function FileDiff({ scroller, file, refs, mode, wrap, viewed, onViewed, o
     })
   }, [target?.n, drawn])
 
-  const download = async () => {
+  const save = async () => {
+    if (!download) return
     setNote('Preparing…')
     try {
-      const b = await fetchWhole(refs, file.path, file.status === 'deleted' ? 'base' : 'head')
+      const b = await download()
       const a = document.createElement('a')
       const u = URL.createObjectURL(b)
       a.href = u
@@ -198,24 +206,26 @@ export function FileDiff({ scroller, file, refs, mode, wrap, viewed, onViewed, o
   }
 
   return (
-    <section ref={root} className="dv-file" data-dv-file={file.path} data-status={file.status} aria-label={file.path} style={{ ['--dv-lines' as string]: estimateLines(file), ...(pinned && open && data.s === 'text' ? { minHeight: pinned } : {}) }}>
+    <section ref={root} className="dv-file" data-dv-file={file.path} data-status={file.status} aria-label={file.path} style={{ ['--dv-lines' as string]: estimateLines(file), ...(pinned && open && (text || hunks) ? { minHeight: pinned } : {}) }}>
       <DiffFileHead file={file} viewed={viewed} onViewed={onViewed} onHide={onHide}>
         {text && open && <button type="button" className="dv-btn" aria-pressed={whole} onClick={() => setWhole((w) => !w)}>{whole ? 'Collapse' : 'Expand all'}</button>}
       </DiffFileHead>
+      {(data.s === 'text' || data.s === 'hunks') && data.note && <div className="dv-row muted">{data.note}</div>}
       {file.denied && <div className="dv-row muted"><Icon name="lock" /> hidden: protected file</div>}
       {!file.denied && file.status === 'renamed' && noDiff && <div className="dv-row muted">Renamed, no content changes.</div>}
       {open && data.s === 'loading' && <div className="dv-row muted dv-loading">{near ? 'Loading…' : ''}</div>}
       {open && data.s === 'error' && <div className="dv-row" role="alert"><span className="dv-err">{data.message}</span> <button type="button" className="dv-btn" onClick={() => setTries((n) => n + 1)}>Try again</button></div>}
+      {open && data.s === 'hunks' && !data.lines.length && <div className="dv-row muted">No hunks in this patch.</div>}
       {open && data.s === 'binary' && <div className="dv-row muted">binary, {kb(data.size)}</div>}
       {open && data.s === 'large' && (
         <div className="dv-row muted">
           too large to show{data.size ? ` (${kb(data.size)})` : ''}.{' '}
-          {data.size > 0 && data.size <= BINARY_CAP && <button type="button" className="dv-btn" onClick={download}><Icon name="download" /> Download file</button>}
+          {download && data.size > 0 && data.size <= BINARY_CAP && <button type="button" className="dv-btn" onClick={save}><Icon name="download" /> Download file</button>}
           {note && <span> {note}</span>}
         </div>
       )}
-      {open && data.s === 'text' && (file.additions + file.deletions === 0 && data.base === data.head) && <div className="dv-row muted">No line changes.</div>}
-      <div className="dv-code" ref={host} hidden={!(open && data.s === 'text')} />
+      {open && text && (file.additions + file.deletions === 0 && text.base === text.head) && <div className="dv-row muted">No line changes.</div>}
+      <div className="dv-code" ref={host} hidden={!(open && (text || hunks))} />
     </section>
   )
 }

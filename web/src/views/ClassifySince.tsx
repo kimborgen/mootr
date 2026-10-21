@@ -1,5 +1,5 @@
 // Settings › Mail to you: label the open activity items from a date now (S-214). The daemon
-// answers only the human, so this runs in the browser through stam's Tailscale address. It
+// answers only the human, so this runs in the browser as the human (tailscale serve or local login). It
 // spends OpenRouter credit, up to the daily cap. The backfill runs in the background (S-252):
 // Classify starts it, then the control polls its progress every 3 s while it runs.
 import { useEffect, useState } from 'react'

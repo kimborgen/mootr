@@ -195,7 +195,7 @@ function NodeForm({ id, draft, issues, statuses, processIds, onChange, onMode }:
       {n.kind === 'end' ? (
         <Field label="Closes the ITSA as"><select value={n.status ?? ''} onChange={(e) => set({ status: e.target.value })} aria-label="Status">{END_STATUSES.map((a) => <option key={a} value={a}>{a}</option>)}</select></Field>
       ) : null}
-      {n.kind === 'script' ? <Field label="Run"><input value={n.run ?? ''} onChange={(e) => set({ run: e.target.value })} placeholder="scripts/merge-pr.mjs" aria-label="Run" /></Field> : null}
+      {n.kind === 'script' ? <Field label="Run"><input value={n.run ?? ''} onChange={(e) => set({ run: e.target.value })} placeholder="npm run build" aria-label="Run" /></Field> : null}
       {n.kind === 'wait' ? <Field label="Event"><input value={n.event ?? ''} onChange={(e) => set({ event: e.target.value })} placeholder="deploy" aria-label="Event" /></Field> : null}
       {n.kind === 'agent' ? (
         <Field label="Calls the process" hint="A sub-process, optional.">

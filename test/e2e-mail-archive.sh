@@ -10,7 +10,6 @@ set -e
 isolate
 T=$(date +%s)
 TOKEN=$(cat "$STAM_HOME/token")
-HELPER="$(dirname "$(readlink -f "$0")")/mail-archive-helper.mjs"
 fail() { echo "FAIL: $1"; exit 1; }
 
 get() { curl -sf -H "authorization: Bearer $TOKEN" "$STAM_URL$1"; }
@@ -23,7 +22,10 @@ tids() { python3 -c 'import json,sys; [print(t["thread_id"]) for t in json.load(
 count() { python3 -c 'import json,sys; print(len(json.load(sys.stdin)))'; }
 has() { tids | grep -qx "$1"; }
 field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s)[process.argv[1]]??""))' "$1"; }
-helper() { node "$HELPER" "$@"; }
+# Test-only routes: shape the mail the API can't (a fixed timestamp, a forced archive, a shut-down mailbox).
+test_agent() { post /api/test/mail "{\"action\":\"agent\",\"id\":\"$1\",\"name\":\"$2\"}" >/dev/null; }
+set_time() { post /api/test/mail "{\"action\":\"set-time\",\"mail\":\"$1\",\"at\":\"$2\"}" >/dev/null; }
+force_archive() { post /api/test/mail "{\"action\":\"archive\",\"mailbox\":\"$1\",\"thread\":\"$2\"}" >/dev/null; }
 # A mail as the human; prints the new mail's id.
 send() { post /api/mail "$1" | field id; }
 # A mail as an agent (no human flag); prints the response body.
@@ -45,7 +47,7 @@ get "/api/agents/human/threads?limit=60" | has "$TID" || fail "unarchiving didn'
 get "/api/agents/human/threads?limit=60&archived=1" | has "$TID" && fail "the archived list still shows the unarchived thread"
 
 # The agent the replies below come from (it has no running harness, so it is only a row).
-helper agent pa-test "Permission Helper"
+test_agent pa-test "Permission Helper"
 
 # The decision is over ids, not clocks: an agent's reply returns the thread even with a timestamp
 # equal to the archived one, and a reply with an older timestamp returns it too. The agent is a
@@ -55,12 +57,12 @@ M1=$(send "{\"from\":\"human\",\"to\":[\"human\",\"pa-test\"],\"new_thread\":tru
 CTID=$M1
 post "/api/agents/human/threads/$CTID/archive" '{}' >/dev/null
 M2=$(agentsend /api/mail "{\"from\":\"pa-test\",\"to\":[\"human\"],\"reply_to\":\"$M1\",\"body\":\"two\"}" | field id)
-helper set-time "$M2" "$(get "/api/threads/$CTID" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["created_at"])')"
+set_time "$M2" "$(get "/api/threads/$CTID" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["created_at"])')"
 get "/api/agents/human/threads?limit=60" | has "$CTID" || fail "a reply with an equal timestamp didn't un-archive the thread"
-helper archive human "$CTID"
+force_archive human "$CTID"
 get "/api/agents/human/threads?limit=60" | has "$CTID" && fail "the thread stayed listed after re-archiving"
 M3=$(agentsend /api/mail "{\"from\":\"pa-test\",\"to\":[\"human\"],\"reply_to\":\"$M1\",\"body\":\"three\"}" | field id)
-helper set-time "$M3" "2000-01-01T00:00:00.000Z"
+set_time "$M3" "2000-01-01T00:00:00.000Z"
 get "/api/agents/human/threads?limit=60" | has "$CTID" || fail "a reply older than the archive time didn't un-archive the thread"
 get "/api/agents/human/threads?limit=60&archived=1" | has "$CTID" && fail "the thread is still archived after a new message"
 
@@ -68,7 +70,7 @@ get "/api/agents/human/threads?limit=60&archived=1" | has "$CTID" && fail "the t
 post /api/permissions "{\"agent\":\"pa-test\",\"action\":\"Run the archive check\",\"reason\":\"because\",\"details\":\"none\",\"audience\":\"human\"}" >/dev/null
 PTID=$(get "/api/agents/human/threads?limit=60" | python3 -c "import json,sys; print([t['thread_id'] for t in json.load(sys.stdin) if t['mails'][0]['subject'].startswith('Permission: ')][0])")
 [ "$(hpost "/api/agents/human/threads/$PTID/archive" '{}')" = 409 ] || fail "archiving a pending permission thread wasn't refused with 409"
-helper archive human "$PTID"
+force_archive human "$PTID"
 get "/api/agents/human/threads?limit=60" | has "$PTID" || fail "a pending permission thread was hidden by archive"
 get "/api/agents/human/threads?limit=60&archived=1" | has "$PTID" && fail "a pending permission thread appeared in the archived list"
 
@@ -105,7 +107,7 @@ get "/api/agents/human/threads?limit=60&archived=1" | has "$FTID" || fail "the h
 
 # `with=ID` (S-1121) keeps the threads that agent sent or received, in every box, and combines
 # with archived=1 and the limit. Threads with other agents stay out.
-helper agent pw-other "With Other"
+test_agent pw-other "With Other"
 OTID=$(post /api/mail "{\"from\":\"human\",\"to\":[\"pw-other\"],\"new_thread\":true,\"subject\":\"With other $T\",\"body\":\"x\"}" | field thread_id)
 get "/api/agents/human/threads?limit=60&with=pa-test" | has "$NTID" || fail "with= left out the agent's inbox thread"
 get "/api/agents/human/threads?limit=60&with=pa-test" | has "$OTID" && fail "with= listed another agent's thread"

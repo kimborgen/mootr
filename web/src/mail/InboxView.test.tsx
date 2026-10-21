@@ -6,7 +6,7 @@ import { act } from 'react'
 
 const open = vi.fn()
 const getMock = vi.fn(async (..._a: unknown[]): Promise<unknown> => [])
-const keysMock = { open: null as string | null, step: vi.fn(), triage: vi.fn(), undo: vi.fn() }
+const keysMock = { open: null as string | null, step: vi.fn(), triage: vi.fn(), toggle: vi.fn(), undo: vi.fn() }
 // Where the page is: the Inbox world on a desktop, unless a test changes it.
 const env = { world: 'w:inbox' as string | null, phone: false }
 vi.mock('../api', () => ({ api: (...a: unknown[]) => getMock(...a), hash: new URLSearchParams() }))
@@ -16,6 +16,7 @@ vi.mock('../actions', async (orig) => ({
   inboxThread: () => keysMock.open,
   stepInbox: (d: number) => keysMock.step(d),
   triageInboxThread: (t: string, v: string) => keysMock.triage(t, v),
+  toggleInboxUnread: (t: string) => keysMock.toggle(t),
   undoInboxTriage: () => keysMock.undo(),
 }))
 // The desktop, on the Inbox page: the keys act only there.
@@ -126,7 +127,7 @@ describe('Inbox page', () => {
 
 describe('Inbox page keys', () => {
   const press = (key: string, init: KeyboardEventInit = {}, at: EventTarget = window) => act(() => { at.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init })) })
-  const reset = () => { keysMock.open = null; keysMock.step.mockClear(); keysMock.triage.mockClear(); keysMock.undo.mockClear() }
+  const reset = () => { keysMock.open = null; keysMock.step.mockClear(); keysMock.triage.mockClear(); keysMock.toggle.mockClear(); keysMock.undo.mockClear() }
   it('j and k step the rows, e and d triage the open thread, z undoes', async () => {
     reset()
     await mount()
@@ -137,6 +138,18 @@ describe('Inbox page keys', () => {
     expect(keysMock.triage.mock.calls).toEqual([['new', 'archive'], ['new', 'defer']])
     await press('z')
     expect(keysMock.undo).toHaveBeenCalledTimes(1)
+  })
+  it('u toggles unread on the open thread, and does nothing with none open', async () => {
+    reset()
+    await mount()
+    await press('u')
+    expect(keysMock.toggle).not.toHaveBeenCalled()
+    keysMock.open = 'new'
+    await press('u')
+    expect(keysMock.toggle.mock.calls).toEqual([['new']])
+    await press('u', { ctrlKey: true })
+    await press('u', { shiftKey: true })
+    expect(keysMock.toggle).toHaveBeenCalledTimes(1)
   })
   it('e and d do nothing with no thread open, r does nothing either', async () => {
     reset()
@@ -180,11 +193,90 @@ describe('Inbox page keys', () => {
   it('Escape clears the focus left on a row, and nothing else', async () => {
     reset()
     const { el } = await mount()
+    // The filter is kept across mounts (a pushed thread comes back to it), so an earlier test's chip is set back first.
+    await act(async () => { chip(el, 'all').click() })
     const row = el.querySelector<HTMLElement>('[data-inbox-row][data-thread="new"]')!
     row.focus()
     expect(document.activeElement).toBe(row)
     await press('Escape', {}, row)
     expect(document.activeElement).not.toBe(row)
+  })
+  it('keeps the filter when the page comes back, as a pushed thread returns to the list (on the phone)', async () => {
+    env.phone = true
+    const { el } = await mount()
+    await act(async () => { chip(el, 'unread').click() })
+    await act(async () => { roots.pop()!.unmount() })
+    const { el: again } = await mount()
+    expect(chip(again, 'unread').getAttribute('aria-pressed')).toBe('true')
+    await act(async () => { chip(again, 'all').click() })
+    env.phone = false
+  })
+  it('the desktop page starts on All and keeps no filter, with no Swipe, History, or group of its own', async () => {
+    const { el } = await mount()
+    await act(async () => { chip(el, 'unread').click() })
+    await act(async () => { roots.pop()!.unmount() })
+    const { el: again } = await mount()
+    expect(chip(again, 'all').getAttribute('aria-pressed')).toBe('true')
+    expect(again.querySelector('[data-swipe-toggle]')).toBeNull()
+    expect(again.querySelector('[data-history-toggle]')).toBeNull()
+    expect(again.querySelector('[data-delegated-group]')).toBeNull()
+    expect(again.querySelector('[data-group="decide-later"]')).toBeNull()
+  })
+  it('a deferred ask\'s row offers no Undefer and no defer swipe: its ask is cleared by the human\'s reply', async () => {
+    const { el } = await mount()
+    const store = await import('../store')
+    // The ask's thread ends with the human's deferring reply, and the ask is deferred.
+    const answer = { id: 'm-defer', from_id: 'human', from_name: 'human', subject: 'Re: Pick one', created_at: iso(at(1)), recipients: [{ id: 'a1', read_at: null }], body: 'Deferring this one' }
+    const threads = store.getData().humanThreads.map((t) => (t.thread_id === 'ask' ? { ...t, mails: [...t.mails, answer] } : t))
+    await act(async () => { store.setData({ humanThreads: threads, attention: [{ id: 'i1', key: 'S-1', title: 'An ask', status: 'needs_input', since: iso(at(1)), ask_thread_id: 'ask', thread_id: 'ask', owner: 'a1', deferred: true }] } as never) })
+    await act(async () => { chip(el, 'deferred').click() })
+    const wrap = el.querySelector('[data-thread="ask"]')?.closest('.mrow-wrap')
+    expect(wrap).toBeTruthy()
+    expect(wrap!.querySelector('.mrow-act.defer')).toBeNull()
+    await act(async () => { chip(el, 'all').click() })
+  })
+  it('lists the dialogs with the parent or the chief of staff under All, as the Mail list did (on the phone)', async () => {
+    env.phone = true
+    const { el } = await mount()
+    const store = await import('../store')
+    await act(async () => { store.setData({ delegateDialogs: [{ id: 'dlg1', agent_id: 'a1', agent_name: 'fixture-dev', action: 'Claude Code asks to allow Bash', created_at: iso(at(1)) }] } as never) })
+    expect(el.querySelector('[data-delegated-group] [data-delegated="dlg1"]')).not.toBeNull()
+    await act(async () => { chip(el, 'unread').click() })
+    expect(el.querySelector('[data-delegated-group]')).toBeNull()
+    await act(async () => { chip(el, 'all').click() })
+    env.phone = false
+  })
+  it('the digest card\'s Needs line brings the list back from History, and shows the Needs group (on the phone)', async () => {
+    env.phone = true
+    const digest = { window: { since: iso(at(-9)), until: iso(at(0)) }, dismissedAt: null, happened: { merged: [], closed: [], spawned: [], archived: [], spend: { usd: 0 } }, needs: [{ kind: 'decision', ref: 'S-9', title: 'Pick', since: iso(at(1)), new: true }], next: { itsas: [], working: [] } }
+    getMock.mockImplementation(async (...a: unknown[]) => (a[1] === '/api/digest' ? digest : []))
+    const { el } = await mount()
+    const settle = () => act(async () => { for (let i = 0; i < 5; i++) await Promise.resolve() })
+    await settle()
+    const list = el.querySelector<HTMLElement>('[data-inbox-list]')!
+    const toggle = el.querySelector<HTMLButtonElement>('[data-history-toggle]')!
+    await act(async () => { toggle.click() })
+    expect(list.hidden).toBe(true)
+    await act(async () => { el.querySelector<HTMLButtonElement>('[data-digest-needs]')!.click() })
+    await settle()
+    expect(list.hidden).toBe(false)
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    getMock.mockImplementation(async () => [])
+    env.phone = false
+  })
+  it('switches the list for the history, and back (on the phone)', async () => {
+    env.phone = true
+    const { el } = await mount()
+    const list = el.querySelector<HTMLElement>('[data-inbox-list]')!
+    const toggle = el.querySelector<HTMLButtonElement>('[data-history-toggle]')!
+    expect(toggle.textContent).toBe('History')
+    await act(async () => { toggle.click() })
+    expect(list.hidden).toBe(true)
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+    await act(async () => { toggle.click() })
+    expect(list.hidden).toBe(false)
+    expect(toggle.textContent).toBe('History')
+    env.phone = false
   })
 })
 

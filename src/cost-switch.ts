@@ -18,7 +18,8 @@
 //   5. launch    the successor starts with takeover.md: the original spawn prompt, HANDOVER.md,
 //                the predecessor's transcript path, its last compaction summary, the threads.
 //   6. tell      the successor's parents hear it (cost-notices.switched), and the
-//                predecessor's open cost notices are acknowledged.
+//                predecessor's open cost notices are acknowledged. Its queued ring turns move
+//                to the successor after the launch, once (mail.moveRingNotices, S-2490).
 //
 // If anything after the stop fails, including the successor's startup and the delivery of its
 // takeover prompt (startupMs, 3 minutes), the move is undone in one transaction, every mail
@@ -44,7 +45,7 @@ import { assertMayManageTree } from './cost-auth.ts';
 import { copyGrants } from './workspace-share.ts';
 import { preset as presetOf, capabilitiesFor } from './registry.ts';
 import { render } from './templates.ts';
-import { queueNotice, dropNotice, HUMAN } from './mail.ts';
+import { queueNotice, dropNotice, moveRingNotices, HUMAN } from './mail.ts';
 import { settings } from './settings.ts';
 import { effectiveMode, permissionSource } from './permission-modes.ts';
 import type { Workspace } from './workspace.ts';
@@ -259,7 +260,7 @@ function move(plan: SwitchPlan, threads: { thread_id: string }[]): { successor: 
     moved.itsaOwned = (d.prepare('SELECT id FROM itsas WHERE owner = ? AND closed_at IS NULL').all(a.id) as { id: string }[]).map((r) => r.id);
     d.prepare('UPDATE itsas SET owner = ?, updated_at = ? WHERE owner = ? AND closed_at IS NULL').run(id, new Date().toISOString(), a.id);
     const join = d.prepare('INSERT OR IGNORE INTO itsa_participants (itsa_id, agent_id) VALUES (?, ?)');
-    for (const r of d.prepare('SELECT p.itsa_id FROM itsa_participants p JOIN itsas i ON i.id = p.itsa_id WHERE p.agent_id = ? AND i.closed_at IS NULL').all(a.id) as { itsa_id: string }[])
+    for (const r of d.prepare('SELECT p.itsa_id FROM itsa_participants p JOIN itsas i ON i.id = p.itsa_id WHERE p.agent_id = ? AND p.left_at IS NULL AND i.closed_at IS NULL').all(a.id) as { itsa_id: string }[])
       if (Number(join.run(r.itsa_id, id).changes) > 0) moved.itsaJoined.push(r.itsa_id);
 
     // The workspaces shared with the predecessor are shared with the successor too (S-896);
@@ -456,6 +457,8 @@ export async function costSwitch(opts: SwitchOptions, plan: SwitchPlan = check(o
       ({ successor: s, moved } = move(plan, threads));
       const { text, handover } = takeoverPrompt(db.getAgent(a.id)!, s, plan, threads);
       await launch(s, text, opts);
+      // The ring turns queued to the predecessor are the successor's now, once (S-2490).
+      moveRingNotices(a.id, s.id);
       await blockers.addBlocker(a.id, { kind: TAKEN_OVER, reason: `taken over by ${s.name} on preset ${plan.preset}` });
       acked.push(...ackOpen());
       costNotices.switched(db.getAgent(a.id)!, db.getAgent(s.id)!, plan.preset, plan.by);
@@ -478,6 +481,8 @@ export async function costSwitch(opts: SwitchOptions, plan: SwitchPlan = check(o
         const succ = db.getAgent(s.id);
         tmux.killSession(s.id);
         if (succ) await adapters[succ.harness]?.stop?.(succ).catch((x) => db.addEvent(a.id, 'cost:switch-stop-error', String(x)));
+        // The ring turns go back to the predecessor, which is resumed or stays held.
+        moveRingNotices(s.id, a.id);
         unmove(db.getAgent(a.id)!, s, moved);
       }
       db.open().prepare('DELETE FROM blockers WHERE agent_id = ? AND kind = ?').run(a.id, TAKEN_OVER);

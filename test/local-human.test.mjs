@@ -4,6 +4,7 @@
 // where a test checks that a file this user owns is refused. No daemon: `node --test test/local-human.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import './scrub-env.mjs';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';

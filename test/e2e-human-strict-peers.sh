@@ -1,5 +1,5 @@
 #!/bin/sh
-# auth.humanStrict across two daemons (S-543): with strict on and auth.legacyPeerToken off at both, main
+# auth.humanStrict across two daemons (S-543): with strict on at both, main
 # relays the human's mail to an agent on twin and a terminal on twin, each with the peer token, so both
 # work; the same relays with the shared token and x-stam-local (no peer token) are refused by twin.
 # Free: a registered agent and a plain terminal, no models.
@@ -21,7 +21,7 @@ for me, other in (("main", "twin"), ("twin", "main")):
     try: s = json.load(open(path))
     except Exception: s = {}
     s["peers"] = [{"name": other, "url": env(other)["STAM_URL"], "token": open(f"{tmp}/{other}/token").read().strip()}]
-    s["auth"] = {"humanStrict": True, "legacyPeerToken": False}
+    s["auth"] = {"humanStrict": True}
     json.dump(s, open(path, "w"), indent=2)
 PY
 # Each daemon's peer token is created when it starts; the other's settings need it, so start, write, restart.
@@ -52,9 +52,9 @@ BOB=$(curl -s -X POST -H "authorization: Bearer $TWIN_TOKEN" -H "$J" -H "$KEY" -
 [ -n "$BOB" ] || fail "bob didn't register on twin"
 
 echo "-- the human's mail to an agent on twin relays with the peer token"
-[ "$(code -X POST -H "authorization: Bearer $MAIN_TOKEN" -H "$KEY" -H "$J" -d "{\"from\":\"human\",\"to\":\"$BOB\",\"subject\":\"hi\",\"body\":\"from kim\"}" "$MAIN_URL/api/mail")" = 200 ] || fail "the human's mail to twin was refused: $(cat "$TEST_TMP/body")"
+[ "$(code -X POST -H "authorization: Bearer $MAIN_TOKEN" -H "$KEY" -H "$J" -d "{\"from\":\"human\",\"to\":\"$BOB\",\"subject\":\"hi\",\"body\":\"from octocat\"}" "$MAIN_URL/api/mail")" = 200 ] || fail "the human's mail to twin was refused: $(cat "$TEST_TMP/body")"
 curl -s -H "authorization: Bearer $TWIN_TOKEN" "$TWIN_URL/api/agents/$BOB/inbox" >"$TEST_TMP/inbox"; grep -q "\"subject\":\"hi\"" "$TEST_TMP/inbox" || fail "bob didn't get the mail on twin: $(head -c 400 "$TEST_TMP/inbox")"
-FWD="{\"from\":\"human\",\"forwarded\":{\"from_name\":\"kim\"},\"to\":\"$BOB\",\"subject\":\"fwd\",\"body\":\"b\"}"
+FWD="{\"from\":\"human\",\"forwarded\":{\"from_name\":\"octocat\"},\"to\":\"$BOB\",\"subject\":\"fwd\",\"body\":\"b\"}"
 [ "$(code -X POST -H "authorization: Bearer $TWIN_TOKEN" -H 'x-stam-local: 1' -H "$J" -d "$FWD" "$TWIN_URL/api/mail")" = 403 ] || fail "twin took forwarded human mail from the shared token"
 [ "$(code -X POST -H "authorization: Bearer $TWIN_PEER" -H 'x-stam-local: 1' -H "$J" -d "$FWD" "$TWIN_URL/api/mail")" = 200 ] || fail "twin refused forwarded human mail from the peer token: $(cat "$TEST_TMP/body")"
 

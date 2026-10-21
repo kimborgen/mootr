@@ -577,7 +577,7 @@ export function runDetached(o: DetachedOptions): Promise<ScriptResult> {
       }
       const logFile = join(o.logDir, `${basename(o.script)}-${o.args.join('-')}-${now}.log`);
       const fd = openSync(logFile, 'a');
-      const child = spawnProcess(o.node, ['--no-warnings', o.script, ...o.args], { cwd: o.cwd, env: { ...process.env, STAM_GATE_REPO: o.cwd }, detached: true, stdio: ['ignore', fd, fd] });
+      const child = spawnProcess(o.node, ['--no-warnings', o.script, ...o.args], { cwd: o.cwd, env: { ...process.env, ...{ STAM_GATE_REPO: o.cwd } }, detached: true, stdio: ['ignore', fd, fd] });
       closeSync(fd);
       child.on('error', reject);
       child.on('close', (code, signal) => resolve({ code, signal, output: readTail(logFile) }));

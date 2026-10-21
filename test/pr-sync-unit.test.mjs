@@ -290,3 +290,44 @@ test('a reused branch name: storage holds an old merged head, pr_open recorded t
   assert.match(logs[0], /conflict/);
   assert.notEqual(oldHead, newHead);
 });
+
+test('a noteSynced that lands between the tick\'s read and its write survives (S-675)', async () => {
+  const N = 'stam/noted';
+  const origin = join(d, 'origin.git');
+  git(dev, ['checkout', '-q', '-b', N, 'main']);
+  const n1 = commit(dev, 'noted n1');
+  git(dev, ['push', '-q', 'origin', N]);
+  git(dev, ['push', '-q', origin, `${N}:refs/heads/${N}`]);
+  const n2 = commit(dev, 'noted n2');
+  git(dev, ['push', '-q', 'origin', N]);
+  writeFileSync(stateFile, JSON.stringify({ [N]: 'c'.repeat(40) }));
+  setPrs([{ number: 3, headRefName: N, headRefOid: n1 }]);
+  // The log line comes after the push and before the write: pr_open notes a head there.
+  const noted = 'f'.repeat(40);
+  const r = await sync.syncPrs(cfg, () => sync.noteSynced(N, noted, stateFile), stateFile);
+  assert.deepEqual(r.pushed, [N]);
+  assert.equal(remoteSha(origin, `refs/heads/${N}`), n2);
+  assert.equal(state()[N], noted, 'the newer note wins over the tick\'s own sha');
+});
+
+test('conflictLogged forgets a branch whose PR closed: the same conflict logs again on reopen (S-675)', async () => {
+  const L = 'stam/log';
+  const logs = [];
+  const conflicts = () => logs.filter((l) => /conflict/.test(l)).length;
+  const gh = remoteSha(join(d, 'origin.git'), `refs/heads/${L}`);
+  // An earlier test left this pair logged: a tick with the PR closed prunes it.
+  setPrs([]);
+  await sync.syncPrs(cfg, () => {}, stateFile);
+  setPrs([{ number: 2, headRefName: L, headRefOid: gh }]);
+  const c1 = sha(dev, `${L}~1`);
+  writeFileSync(stateFile, JSON.stringify({ [L]: c1 }));
+  await sync.syncPrs(cfg, (l) => logs.push(l), stateFile);
+  await sync.syncPrs(cfg, (l) => logs.push(l), stateFile);
+  assert.equal(conflicts(), 1, 'logged once while open');
+  setPrs([]);
+  await sync.syncPrs(cfg, (l) => logs.push(l), stateFile);
+  setPrs([{ number: 2, headRefName: L, headRefOid: gh }]);
+  writeFileSync(stateFile, JSON.stringify({ [L]: c1 }));
+  await sync.syncPrs(cfg, (l) => logs.push(l), stateFile);
+  assert.equal(conflicts(), 2, 'the entry was pruned while the PR was closed');
+});

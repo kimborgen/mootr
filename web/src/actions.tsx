@@ -15,6 +15,7 @@ import type { Agent, PlainShell, Thread, UploadFile } from './types'
 import { choiceOf, defaultView, keyFor, swapForDefault, type AgentViewChoice } from './views/agent-view-choice'
 import { doneFocus } from './mail/mailFocus'
 import { inboxOrder } from './mail/inbox-order'
+import { showTab } from './sidebar-panes'
 
 // Each agent has its own world in main: usually just its terminal, plus the tabs the
 // user adds there.
@@ -71,11 +72,34 @@ export function openBeside(id: string) {
 export function openFor(id: string, key: string) { if (shell.currentWorld() !== id) selectAgent(id, { asDefault: !choiceOf(key) }); shell.open('main', key) }
 export const openInbox = (id: string) => openFor(id, 'mail:' + id)
 // Settings, usage, the Work page, the system view, and the process view are worlds of their own, like an agent's or a thread's.
-export const openWorld = (name: 'config' | 'inventory' | 'usage' | 'work' | 'system' | 'process' | 'swipe' | 'files' | 'inbox') => {
+// The Inbox, Work and Agents pages open through here too: the nav bar's icons and the sidebar's tab headers (S-1428).
+export const openWorld = (name: 'config' | 'inventory' | 'usage' | 'work' | 'system' | 'process' | 'swipe' | 'files' | 'inbox' | 'agents') => {
+  // Mail opens in the sidebar when the setting says so (S-2310); a sidebar without a Mail tab keeps the page.
+  if (name === 'inbox' && mailInSidebar() && showTab('mail')) {
+    if (!shell.worldOpen('left')) shell.toggleWorld('left', true)
+    return
+  }
   doneFocus()
   shell.showAgentWorld('w:' + name)
   if (name === 'inbox') focusInboxList()
 }
+// Mail on a phone is the Inbox page, full width, as Work is: the bottom bar's Mail and every entry that used to open the mail list.
+// The world Mail covers is remembered, so the phone's Main button returns to it, as the drawer left main as it was.
+let beforeMail: string | null = null
+export function openMail() {
+  const cw = shell.currentWorld()
+  if (cw !== 'w:inbox') beforeMail = cw
+  shell.phoneShow(null)
+  openWorld('inbox')
+}
+// Main leaves the page for the world it covered, or, after a reload (none remembered), the home world.
+export function leaveMail() {
+  if (shell.currentWorld() === 'w:inbox') shell.showAgentWorld(beforeMail)
+  beforeMail = null
+}
+
+// Where Mail opens on the desktop: the sidebar's Mail tab (settings.mailOpens, S-2310). A phone always shows its Mail view.
+const mailInSidebar = () => !shell.isPhone() && getData().mailOpens === 'sidebar'
 // An agent type's page, `w:type:NAME`.
 export const openType = (name: string) => { doneFocus(); shell.showAgentWorld('w:type:' + name) }
 // An issue's own world, `w:itsa:ID`, as Settings and Usage are worlds of their own.
@@ -110,8 +134,10 @@ export const inboxThread = (): string | null => {
 }
 // A phone shows the world's focused pane alone, and the layout is shared with the desktop, where a thread's pane
 // takes focus: the phone puts the list's pane back in front, so the page opens, and returns, as a list.
+// A thread left open after its list was closed (S-2310) gets the list back, to its left, when the page opens.
 function focusInboxList() {
-  const list = inboxPanes().list
+  const { list, right } = inboxPanes()
+  if (!shell.isPhone() && !list && right) { shell.open('main', 'inbox', { pane: right.id, split: 'left' }); return }
   if (shell.isPhone() && list && shell.mainWorld().focused !== list.id) shell.setFocus('main', list.id)
 }
 // The saved queue: the rows as the list showed them when a thread opened, each with its state then. Advancing walks
@@ -120,11 +146,13 @@ type Queue = { order: string[]; from: Map<string, string> }
 let queue: Queue = { order: [], from: new Map() }
 const snapshot = (order: string[]): Queue => ({ order, from: new Map(order.map((t) => [t, stateOf(t)])) })
 export function openInboxThread(tid: string) {
-  if (shell.isPhone() || shell.currentWorld() !== 'w:inbox') {
-    if (shell.currentWorld() === 'w:inbox') focusInboxList()
+  const onPage = shell.currentWorld() === 'w:inbox'
+  // The rows as the page listed them, for advancing: on the phone too, so the Unread chip's rows stay put once read.
+  if (onPage) queue = snapshot(inboxOrder())
+  if (shell.isPhone() || !onPage) {
+    if (onPage) focusInboxList()
     return selectThread(tid)
   }
-  queue = snapshot(inboxOrder())
   showInboxThread(tid)
 }
 // Shows a thread in the Inbox page's pane, without taking a new queue.
@@ -147,16 +175,19 @@ function showInboxThread(tid: string) {
 // In the Inbox page, the thread after `tid` in the list as shown (its chip, search and groups), else in the inbox:
 // opens it in the pane and returns true; false when none is left.
 export function advanceInbox(tid: string): boolean {
-  // The saved queue minus the rows completed since it was taken: a row archived or deferred since (here, or in
-  // another pane) is passed over. A thread the queue doesn't hold walks the list as it is now.
-  const saved = queue.order.includes(tid) ? queue : snapshot(inboxOrder())
-  const shown = saved.order.filter((t) => t === tid || saved.from.get(t) === stateOf(t))
+  const { saved, shown } = queuedRows(tid)
   const next = nextMail(shown.includes(tid) ? shown.map((t) => ({ thread_id: t })) : mailOrder(getData()), tid, priorMail)
   if (!next) return false
   showInboxThread(next)
   // `tid` is leaving the list (archived or deferred right after this): the queue drops it, and the rest waits for the next advance.
   queue = { order: saved.order.filter((t) => t !== tid), from: saved.from }
   return true
+}
+// The saved queue minus the rows completed since it was taken: a row archived or deferred since (here, or in
+// another pane) is passed over. A thread the queue doesn't hold walks the list as it is now.
+function queuedRows(tid: string): { saved: Queue; shown: string[] } {
+  const saved = queue.order.includes(tid) ? queue : snapshot(inboxOrder())
+  return { saved, shown: saved.order.filter((t) => t === tid || saved.from.get(t) === stateOf(t)) }
 }
 // Closes the Inbox page's thread pane (nothing is left to open next).
 function closeInboxThread() {
@@ -172,32 +203,49 @@ export function stepInbox(dir: 1 | -1) {
   if (next !== undefined) openInboxThread(next)
 }
 const stateOf = (tid: string) => (isArchivedThread(tid) ? 'archived' : isDeferredThread(tid) ? 'deferred' : 'inbox')
-// The newest archive or defer the keys made, recorded when the key is pressed: where the thread came from, and the
-// request that moves it. Only the newest counts, so an older request's answer never replaces it.
-let lastTriage: { tid: string; from: string; sent: Promise<void> } | null = null
+// The newest triage the keys made (archive, defer or unread), recorded when the key is pressed: `sent` is its request and
+// `undo` puts it back. Only the newest counts, so an older request's answer never replaces it.
+let lastTriage: { tid: string; sent: Promise<unknown>; undo: () => Promise<unknown> } | null = null
 // `e` archives and `d` defers the open thread: as the row's buttons do, the next row opens. On the Archived or
 // Deferred list the same key restores the thread, as the header's button does.
 export function triageInboxThread(tid: string, verb: 'archive' | 'defer'): Promise<void> {
   const from = stateOf(tid)
   const sent = verb === 'archive' ? toggleThreadArchived(tid) : toggleThreadDeferred(tid)
-  lastTriage = { tid, from, sent }
+  lastTriage = { tid, sent, undo: () => undoMove(tid, from) }
   return sent
 }
-// `z`: puts the newest archived or deferred thread back where it came from, and opens it when it returns to the list.
-// It waits for that thread's own request first, so the server sees the two in order; a request that failed leaves nothing to undo.
+// Puts a thread back in the state it was in before `e` or `d`: where it came from, and it opens again when it returns to
+// the list, if the Inbox page still shows.
+async function undoMove(tid: string, from: string) {
+  const now = stateOf(tid)
+  if (now === from) return
+  if (from === 'inbox') {
+    if (now === 'archived') await setThreadArchived(tid, false)
+    else await setThreadDeferred(tid, false)
+    if (shell.currentWorld() === 'w:inbox') openInboxThread(tid)
+  } else if (from === 'archived') await setThreadArchived(tid, true)
+  else await setThreadDeferred(tid, true)
+}
+// `u` toggles the open thread's unread state (S-2246): a thread with unread mail for the human is marked read, and one
+// without is marked unread at its latest mail to the human. The rows and counts change at once.
+export function toggleInboxUnread(tid: string): Promise<void> {
+  const d = getData()
+  const mails = [...d.humanThreads, ...d.humanArchived, ...d.humanDeferred].find((t) => t.thread_id === tid)?.mails.filter((m) => m.recipients.some((r) => r.id === 'human')) ?? []
+  const unread = mails.filter((m) => m.recipients.some((r) => r.id === 'human' && !r.read_at)).map((m) => m.id)
+  const latest = mails.at(-1)?.id
+  if (!unread.length && !latest) return Promise.resolve()
+  const sent = unread.length ? markMailRead(unread) : markThreadUnread(tid, [latest!])
+  lastTriage = { tid, sent, undo: () => (unread.length ? markThreadUnread(tid, unread) : markMailRead([latest!])) }
+  return sent.then(() => undefined)
+}
+// `z`: undoes the newest triage, `e`, `d` or `u`. It waits for that request first, so the server sees the two in order;
+// a request that failed leaves nothing to undo.
 export async function undoInboxTriage() {
   const l = lastTriage
   if (!l) return
   lastTriage = null
   await l.sent
-  const now = stateOf(l.tid)
-  if (now === l.from) return
-  if (l.from === 'inbox') {
-    if (now === 'archived') await setThreadArchived(l.tid, false)
-    else await setThreadDeferred(l.tid, false)
-    openInboxThread(l.tid)
-  } else if (l.from === 'archived') await setThreadArchived(l.tid, true)
-  else await setThreadDeferred(l.tid, true)
+  await l.undo()
 }
 
 // The human's threads the list counts as unread: the threads in the inbox, not the archive or the deferred ones.
@@ -229,6 +277,12 @@ const markRead = (ids: string[], at: string) => (d: Data): Data => {
   const humanThreads = d.humanThreads.map(mark)
   return { ...d, humanThreads, humanArchived: d.humanArchived.map(mark), humanDeferred: d.humanDeferred.map(mark), unread: unreadIn(humanThreads) }
 }
+const markUnread = (ids: string[]) => (d: Data): Data => {
+  const mark = (t: Thread): Thread => t.mails.some((m) => ids.includes(m.id)) ? { ...t, mails: t.mails.map((m) => ids.includes(m.id)
+    ? { ...m, recipients: m.recipients.map((r) => (r.id === 'human' && r.read_at ? { ...r, read_at: null } : r)) } : m) } : t
+  const humanThreads = d.humanThreads.map(mark)
+  return { ...d, humanThreads, humanArchived: d.humanArchived.map(mark), humanDeferred: d.humanDeferred.map(mark), unread: unreadIn(humanThreads) }
+}
 const isRead = (p: Data, id: string) => [...p.humanThreads, ...p.humanArchived, ...p.humanDeferred].some((t) => t.mails.some((m) => m.id === id && m.recipients.some((r) => r.id === 'human' && !!r.read_at)))
 
 // Archiving hides a thread from the human's mail list, without deleting it; a new mail in
@@ -246,14 +300,28 @@ export function setThreadArchived(tid: string, archived: boolean, answered = fal
     failed: archived ? "Couldn't archive" : "Couldn't unarchive",
   })
 }
+// The human's mail that `u` marked unread, by thread. A thread view that is showing one doesn't read it again when its
+// reload sees it unread (ThreadView); the entry goes when the thread view opens again, or the mail is read.
+export const keptUnread = new Map<string, Set<string>>()
 // Marks the human's mail read as the thread opens: the rows stop being unread at once.
 export function markMailRead(ids: string[]): Promise<boolean> {
   const at = new Date().toISOString()
+  for (const kept of keptUnread.values()) for (const id of ids) kept.delete(id)
   return optimistic({
     apply: markRead(ids, at),
     send: async () => { await api('POST', '/api/agents/human/read', { ids }); void refreshSlow() },
     settled: (p) => ids.every((id) => isRead(p, id)),
     failed: "Couldn't mark read",
+  })
+}
+// Marks the human's copies of these mail unread again (`u`, S-2246): the rows count them at once.
+export function markThreadUnread(tid: string, ids: string[]): Promise<boolean> {
+  keptUnread.set(tid, new Set([...(keptUnread.get(tid) ?? []), ...ids]))
+  return optimistic({
+    apply: markUnread(ids),
+    send: async () => { await api('POST', `/api/agents/human/threads/${tid}/unread`, { ids }); void refreshSlow() },
+    settled: (p) => ids.every((id) => !isRead(p, id)),
+    failed: "Couldn't mark unread",
   })
 }
 // The mail list in the order the inbox shows it: permission requests first, then the rest.
@@ -291,8 +359,13 @@ function advanceFrom(tid: string) {
   if (fromSwipe === tid) { fromSwipe = null; shownMail = null; openWorld('swipe'); return }
   // A thread closed from the Deferred list moves on within that list, as the inbox does within its own.
   const d = getData()
-  const list = d.humanDeferred.some((t) => t.thread_id === tid) ? d.humanDeferred : mailOrder(d)
+  // On the phone, the Inbox page's rows as the list showed them when this thread opened (a pushed thread leaves the list
+  // under it, and the queue walks as the desktop's does). The desktop keeps the mail order.
+  const page = shell.isPhone() ? queuedRows(tid) : null
+  const shown = page?.shown ?? []
+  const list = d.humanDeferred.some((t) => t.thread_id === tid) ? d.humanDeferred : shown.includes(tid) ? shown.map((t) => ({ thread_id: t })) : mailOrder(d)
   const next = nextMail(list, tid, priorMail)
+  if (page && shown.includes(tid)) queue = { order: page.saved.order.filter((t) => t !== tid), from: page.saved.from }
   if (next) selectThread(next)
   else { shownMail = null; shell.showAgentWorld(null) }
 }

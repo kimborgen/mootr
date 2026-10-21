@@ -5,14 +5,23 @@
 // moved is refused (409) before anything is posted. The reviewer is the caller's own agent, never a name
 // in the body (as pr_open takes its agent, S-514).
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { isReviewerType } from './agent-types.ts';
 import { MACHINE } from './config.ts';
+import * as db from './db.ts';
+import { releaseReviewer } from './itsa-owners.ts';
 import { prOpenConfig, type PrOpenConfig } from './pr-open.ts';
 import { peerByName, peerCall, type Via } from './peers.ts';
 import { settings } from './settings.ts';
+import { testOnlyEnv } from './test-env.ts';
 
 const run = promisify(execFile);
+
+// The verdict script, in the ITSA home's checkout. The public export drops it (export/exclude.txt), so a build without it refuses
+// a verdict before anything is posted (S-1645). STAM_PR_REVIEW_SCRIPT replaces its path in a test home only (test-env.ts).
+const reviewScript = (cfg: PrOpenConfig): string => testOnlyEnv('STAM_PR_REVIEW_SCRIPT') || join(cfg.repo, 'scripts/pr-review.mjs');
 
 // A refused or failed verdict, with the HTTP status the route answers.
 export class ReviewError extends Error {
@@ -42,10 +51,44 @@ export interface ReviewPosted {
 
 const VERDICTS = ['approve', 'request_changes'];
 
-// A forwarded agent that came with the shared token (settings.auth.legacyPeerToken, S-1061) is no peer's word:
-// the shared token can forge x-stam-agent. Only a peer's own token proves the agent, so a verdict from one is refused.
-export function assertPeerCaller(caller: { legacy?: boolean }): void {
-  if (caller.legacy) throw new ReviewError(403, 'a verdict is relayed only from a peer that proves the agent with its peer token; the shared token can\'t name a reviewer (S-1061)');
+const MANAGER_TYPES = ['manager', 'coordinator'];
+
+// The branch an agent's worktree was made on (workspace.ts): a string, null for an agent with no worktree, and
+// undefined when the workspace metadata can't be read (so ownership is unknown, never "owns nothing").
+function worktreeBranchOf(a: db.Agent): string | null | undefined {
+  if (!a.workspace) return null;
+  try {
+    const wt = JSON.parse(a.workspace)?.worktree;
+    if (wt === undefined || wt === null) return null;
+    return typeof wt.branch === 'string' && wt.branch ? wt.branch : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// What this daemon knows of one of its own agents (S-1065): its review role and the branches it owns. A manager is
+// a manager or coordinator type; nothing else counts (an agent with helpers is no manager). ownBranches is null when
+// unknown. Returns null for an agent not in this database, or on another machine.
+export function reviewFacts(agent: string): Pick<Via, 'reviewRole' | 'ownBranches'> | null {
+  const a = db.getAgent(agent);
+  if (!a || a.machine !== MACHINE) return null;
+  const reviewRole = a.type && isReviewerType(a.type) ? 'reviewer' : a.type && MANAGER_TYPES.includes(a.type) ? 'manager' : 'other';
+  const wt = worktreeBranchOf(a);
+  return { reviewRole, ownBranches: wt === undefined ? null : [`stam/${a.name}`, ...(wt ? [wt] : [])] };
+}
+
+// The facts a peer forwarded (x-stam-review-role, x-stam-own-branches); only read from a peer's token-proven call.
+// Missing or malformed branches stay unknown (null), which the relay refuses.
+export function parseReviewHeaders(h: Record<string, string | string[] | undefined>): { reviewRole?: 'reviewer' | 'manager' | 'other'; ownBranches?: string[] | null } {
+  const role = h['x-stam-review-role'];
+  if (role !== 'reviewer' && role !== 'manager' && role !== 'other') return {};
+  let own: unknown = null;
+  try {
+    own = JSON.parse(String(h['x-stam-own-branches']));
+  } catch {
+    /* unknown */
+  }
+  return { reviewRole: role, ownBranches: Array.isArray(own) && own.every((b) => typeof b === 'string') ? (own as string[]) : null };
 }
 
 function checkInput(input: ReviewInput): { pr: string; verdict: string; summary: string; head: string } {
@@ -64,13 +107,38 @@ function checkInput(input: ReviewInput): { pr: string; verdict: string; summary:
 export async function reviewPrHere(input: ReviewInput, via?: Via, cfg: PrOpenConfig = prOpenConfig()): Promise<ReviewPosted> {
   const v = checkInput(input);
   if (!via) throw new ReviewError(403, 'only an agent posts a review: this request names no reviewing agent (S-1061)');
+  // Who may post (S-1065), decided from the home's own database or the facts the caller's daemon proved; fail closed.
+  if (!via.boss) {
+    if (!via.reviewRole) throw new ReviewError(403, `can't tell what ${via.agent} may review: its role is unknown here (S-1065)`);
+    if (via.reviewRole === 'other') throw new ReviewError(403, `${via.agent} may not post a verdict: only a reviewer, a manager, or the chief of staff does (S-1065)`);
+  }
+  if (!via.boss && !Array.isArray(via.ownBranches)) throw new ReviewError(403, `can't tell which branches ${via.agent} owns, so can't rule out a review of its own PR (S-1065)`);
+  // Checked before gh runs: only the script's absence refuses. Any other failure of the script surfaces as it always has.
+  const script = reviewScript(cfg);
+  if (!existsSync(script)) {
+    // The body is single-quoted for the shell, with each ' written as '\'' so a summary's quotes, $ or backticks paste as they are.
+    const body = `'${`Review (${via.agent}): ${v.verdict}. ${v.summary}`.replace(/'/g, "'\\''")}'`;
+    const state = v.verdict === 'approve' ? 'success' : 'failure';
+    throw new ReviewError(501, `this build has no verdict script (${script}), so pr_review can't post PR #${v.pr}. Nothing was posted. Post the verdict by hand: \`gh pr comment ${v.pr} --repo ${cfg.github} --body ${body}\`, and set the stam/review status on the head: \`gh api repos/${cfg.github}/statuses/${v.head} -f state=${state} -f context=stam/review\`.`);
+  }
+  let branch = '';
   try {
-    const { stdout } = await run(process.execPath, [join(cfg.repo, 'scripts/pr-review.mjs'), v.pr, v.verdict, v.summary, '--head', v.head], {
+    branch = String(JSON.parse((await run(cfg.gh, ['pr', 'view', v.pr, '--json', 'headRefName'], { cwd: cfg.repo, timeout: 60_000 })).stdout).headRefName ?? '');
+  } catch {
+    /* fails closed below */
+  }
+  if (!branch) throw new ReviewError(502, `can't read PR #${v.pr}'s branch, so can't tell whether ${via.agent} owns it (S-1065)`);
+  if (!via.boss && via.ownBranches?.includes(branch)) throw new ReviewError(403, `${via.agent} owns ${branch} and may not review its own PR (S-1065)`);
+  try {
+    const { stdout } = await run(process.execPath, [script, v.pr, v.verdict, v.summary, '--head', v.head], {
       cwd: cfg.repo,
       // The gh binary is settings.itsa.prOpen.gh, as pr_open runs it (the script's gate reads STAM_GH).
-      env: { ...process.env, STAM_AGENT_ID: via.agent, STAM_GH: cfg.gh },
+      env: { ...process.env, ...{ STAM_AGENT_ID: via.agent, STAM_GH: cfg.gh } },
       timeout: 120_000,
     });
+    // S-3015: an approve ends the reviewer's review, so it leaves the ITSAs linked to this PR's branch. A request_changes
+    // keeps it in them. Its own catch: the posted verdict stands either way.
+    if (v.verdict === 'approve' && via.reviewRole === 'reviewer' && !via.boss) await releaseReviewer(via.agent, via.agent, branch).catch((e) => console.error(`pr_review: couldn't take ${via.agent} out of its ITSAs: ${e.message}`));
     return { pr: Number(v.pr), verdict: v.verdict, head: v.head, line: stdout.trim() };
   } catch (e: any) {
     // pr-review.mjs exits 3 for a moved head, 2 for a bad argument, 1 for a gh failure (its stderr says why).
@@ -84,6 +152,9 @@ export async function reviewPrHere(input: ReviewInput, via?: Via, cfg: PrOpenCon
 // the peer link, with the reviewer's identity forwarded (as openPrRouted does).
 export async function reviewPrRouted(input: ReviewInput, via?: Via): Promise<ReviewPosted> {
   const home = settings().itsa.home ?? MACHINE;
+  // A call from this daemon's own agent: its role and branches come from this database, never from the caller.
+  // The local facts win over anything the request carried; a peer's agent isn't in this database, so its forwarded facts stand.
+  if (via) via = { ...via, ...reviewFacts(via.agent) };
   if (home === MACHINE) return reviewPrHere(input, via);
   const peer = peerByName(home);
   if (!peer) throw new ReviewError(502, `ITSA home '${home}' is not a configured peer`);

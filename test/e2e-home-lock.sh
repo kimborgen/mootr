@@ -21,10 +21,7 @@ trap reap EXIT
 # Row counts of what a boot writes: unchanged means the second daemon wrote nothing. The agent's own
 # hook events (hook:*) are left out: its harness reports them on its own clock, after `wait --until idle`
 # has returned, so counting them made the snapshot race the agent under load (S-882).
-rows() {
-  node -e "const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(process.argv[1], { readOnly: true });
-    for (const t of ['agents', 'events', 'mail', 'itsas']) console.log(t, db.prepare('SELECT COUNT(*) AS n FROM ' + t + (t === 'events' ? \" WHERE type NOT LIKE 'hook:%'\" : '')).get().n);" "$STAM_HOME/stam.db" 2>/dev/null
-}
+rows() { curl -sf -m 5 -H "authorization: Bearer $(cat "$STAM_HOME/token")" "$STAM_URL/api/test/counts"; }
 sessions() { tmux -L "$STAM_TMUX_SOCKET" list-sessions -F '#{session_name}' 2>/dev/null | sort; }
 # A process that has exited, or is a zombie waiting to be reaped.
 exited() { ! kill -0 "$1" 2>/dev/null || grep -q '^State:[[:space:]]*Z' "/proc/$1/status" 2>/dev/null; }
@@ -42,8 +39,7 @@ DIR="$(mktemp -d "$TEST_TMP/work.XXXX")"
 "$STAM" spawn cl --harness claude --model claude-sonnet-5-5 --cwd "$DIR" --role "Test agent." >/dev/null
 # The agent is idle at SessionStart, before its first prompt is delivered: wait for the delivery
 # event, then for the turn to end, so the row snapshot below isn't taken mid-boot (S-882).
-event_seen() { node -e "const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(process.argv[1], { readOnly: true });
-  process.exit(db.prepare(\"SELECT 1 FROM events WHERE type = 'first-prompt:delivered'\").get() ? 0 : 1)" "$STAM_HOME/stam.db" 2>/dev/null; }
+event_seen() { [ "$(curl -sf -m 5 -H "authorization: Bearer $(cat "$STAM_HOME/token")" "$STAM_URL/api/test/events?type=first-prompt:delivered" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -ge 1 ]; }
 wait_until event_seen
 "$STAM" wait cl --until idle --timeout 60 >/dev/null
 main_pid=$(cat "$TEST_TMP/main/daemon.pid")
@@ -66,13 +62,11 @@ grep -q "another stam daemon (pid $main_pid)" "$TEST_TMP/main.second.log" || fai
 [ "$(sessions)" = "$before_sessions" ] || fail "the second daemon changed tmux sessions"
 up main || fail "the running daemon stopped answering"
 
-# 2. A holder started by a script that calls runDaemon (not `daemon run`), as in the S-346 incident.
+# 2. A holder that is not the CLI's own child (daemon_up starts it detached), as in the S-346 incident: a second daemon
+# on its home is refused, naming the holder's pid.
 daemon_home wrapped
-printf 'const { runDaemon } = await import("%s/src/daemon.ts");\nawait runDaemon();\n' "$ROOT" >"$TEST_TMP/wrapper.mjs"
-(use wrapped && exec node --no-warnings "$TEST_TMP/wrapper.mjs") >"$TEST_TMP/wrapped.wrapper.log" 2>&1 &
-wrapper=$!
-pids="$pids $wrapper"
-wait_until up wrapped
+daemon_up wrapped
+wrapper=$(cat "$TEST_TMP/wrapped/daemon.pid")
 run_bg wrapped second
 w2=$!
 pids="$pids $w2"
@@ -80,7 +74,6 @@ await_exit "$w2" || fail "a second daemon on a wrapper's home is still running"
 rc=0
 wait "$w2" || rc=$?
 pids=""
-pids="$wrapper"
 [ "$rc" != 0 ] || fail "a second daemon started beside a wrapper's holder"
 grep -q "another stam daemon (pid $wrapper)" "$TEST_TMP/wrapped.second.log" || fail "no refusal naming the wrapper's pid $wrapper: $(cat "$TEST_TMP/wrapped.second.log")"
 # SIGKILL: no exit handler runs, and the home is still free for the next start.

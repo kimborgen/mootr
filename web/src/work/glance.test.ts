@@ -90,9 +90,9 @@ describe('glance at scale', () => {
   })
 
   it('indexes 300 cost rows by key', () => {
-    const report = { note: '', issues: Array.from({ length: N }, (_, i) => ({ key: 'S-c' + i, total: { cost_usd: i } })) } as unknown as Parameters<typeof costIndex>[0]
+    const report = { note: '', issues: Array.from({ length: N }, (_, i) => ({ key: 'S-c' + i, total: { cost_usd: i }, cost: null })) } as unknown as Parameters<typeof costIndex>[0]
     const ix = costIndex(report)
     expect(ix.size).toBe(N)
-    expect(ix.get('S-c299')).toBe(299)
+    expect(ix.get('S-c299')?.key).toBe('S-c299')
   })
 })

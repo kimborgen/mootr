@@ -16,6 +16,16 @@ import { tempDir } from './tmphome.mjs';
 const dir = tempDir('stam-proctree-');
 const ID = `proctree-${process.pid}`;
 const started = [];
+// The sweep protects the checkout's parent folder (the worktrees folder, or ~/projects), and under
+// test/run.sh TMPDIR is a folder inside the worktree, so a scratch base made in `dir` reads as protected.
+// The removeAgentScratchDirs tests make theirs in ~/.cache instead; each is removed when the run ends.
+const scratchRoots = [];
+function scratchRoot() {
+  mkdirSync(join(homedir(), '.cache'), { recursive: true });
+  const root = mkdtempSync(join(homedir(), '.cache', 'stam-proctree-scratch-'));
+  scratchRoots.push(root);
+  return root;
+}
 after(() => {
   for (const p of started) {
     try {
@@ -23,6 +33,7 @@ after(() => {
     } catch {}
   }
   rmSync(dir, { recursive: true, force: true });
+  for (const r of scratchRoots) rmSync(r, { recursive: true, force: true });
 });
 
 // A stand-in daemon: its command line is `node DIR/cli.ts daemon run`, as a real one's, and it
@@ -165,6 +176,7 @@ test('removeClaudeScratch: removed alone, kept when shared, protected, in use, o
 
 // S-733: an archived agent's worktrees and scratch clones under stam-wt and stam-test.
 test('removeAgentScratchDirs: removes its worktree and clone, spares others, live, in-use dirs', async () => {
+  const dir = scratchRoot();
   const { removeAgentScratchDirs } = await import('../src/proctree.ts');
   const { execFileSync } = await import('node:child_process');
   const git = (cwd, ...a) => execFileSync('git', a, { cwd, stdio: 'pipe', encoding: 'utf8' });
@@ -172,11 +184,22 @@ test('removeAgentScratchDirs: removes its worktree and clone, spares others, liv
   mkdirSync(main);
   git(main, 'init', '-q', '-b', 'main');
   git(main, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'x');
+  // The main checkout is never pushed; each worktree's own branch is (S-2298: a worktree is judged by its HEAD).
+  const scrOrigin = join(dir, 'scr-origin.git');
+  git(dir, 'init', '-q', '--bare', scrOrigin);
+  git(main, 'remote', 'add', 'origin', scrOrigin);
   const wt = join(dir, 'scr-wt'), tst = join(dir, 'scr-test');
   mkdirSync(wt);
   mkdirSync(tst);
-  const addWt = (n) => git(main, 'worktree', 'add', '-q', '-b', `b-${n}`, join(wt, n));
+  const addWt = (n) => {
+    git(main, 'worktree', 'add', '-q', '-b', `b-${n}`, join(wt, n));
+    git(join(wt, n), 'push', '-q', 'origin', `b-${n}`);
+  };
   for (const n of ['mine', 'mine2', 'live', 'busy']) addWt(n);
+  // An unrelated unpushed branch on the shared refs: it must not keep a pushed worktree.
+  const ident = ['-c', 'user.name=t', '-c', 'user.email=t@example.com'];
+  const unrelated = git(main, ...ident, 'commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'unrelated').trim();
+  git(main, 'update-ref', 'refs/heads/unrelated', unrelated);
   mkdirSync(join(tst, 'mine', 'node_modules'), { recursive: true });
   mkdirSync(join(tst, 'other'));
   mkdirSync(join(tst, 'stam-test.aid1.abc123'));
@@ -201,7 +224,82 @@ test('removeAgentScratchDirs: removes its worktree and clone, spares others, liv
   }
 });
 
+// S-2298: a scratch clone with commits on no remote is moved aside, never deleted; a pushed clone and a plain
+// folder are deleted; a repo whose state can't be read is kept (moved aside too).
+test('removeAgentScratchDirs: keeps a clone with unpushed commits or an unreadable repo, deletes a pushed clone and a plain dir', async () => {
+  const dir = scratchRoot();
+  const { removeAgentScratchDirs } = await import('../src/proctree.ts');
+  const { execFileSync } = await import('node:child_process');
+  const git = (cwd, ...a) => execFileSync('git', a, { cwd, stdio: 'pipe', encoding: 'utf8' });
+  const ident = ['-c', 'user.name=t', '-c', 'user.email=t@example.com'];
+  const bare = join(dir, 'k-origin.git'), src = join(dir, 'k-src'), kb = join(dir, 'k', 'stam-test');
+  git(dir, 'init', '-q', '--bare', bare);
+  mkdirSync(src);
+  git(src, 'init', '-q', '-b', 'main');
+  git(src, ...ident, 'commit', '-q', '--allow-empty', '-m', 'x');
+  git(src, 'remote', 'add', 'origin', bare);
+  git(src, 'push', '-q', 'origin', 'main');
+  mkdirSync(kb, { recursive: true });
+  git(kb, 'clone', '-q', bare, 'pushed');
+  git(kb, 'clone', '-q', bare, 'unpushed');
+  git(join(kb, 'unpushed'), ...ident, 'commit', '-q', '--allow-empty', '-m', 'local only');
+  mkdirSync(join(kb, 'broken'));
+  writeFileSync(join(kb, 'broken', '.git'), 'gitdir: /nonexistent/stam-k\n');
+  mkdirSync(join(kb, 'plain'));
+  writeFileSync(join(kb, 'plain', 'a.txt'), 'x');
+
+  const msg = (await removeAgentScratchDirs({ id: 'kid', name: 'unpushed' }, [], [kb])).join('\n');
+  assert.equal(existsSync(join(kb, 'unpushed')), false, 'moved out of the scratch base');
+  assert.match(msg, /kept, has 1 commit on no remote \(head [0-9a-f]+\); moved to .*\/stam-kept\//);
+  const kept = msg.match(/moved to (\S+)/)[1];
+  assert.equal(git(kept, 'log', '-1', '--format=%s').trim(), 'local only', 'the commit is still there');
+
+  await removeAgentScratchDirs({ id: 'kid', name: 'pushed' }, [], [kb]);
+  assert.equal(existsSync(join(kb, 'pushed')), false, 'a pushed clone is deleted');
+
+  await removeAgentScratchDirs({ id: 'kid', name: 'plain' }, [], [kb]);
+  assert.equal(existsSync(join(kb, 'plain')), false, 'a non-git dir is deleted');
+
+  const broken = (await removeAgentScratchDirs({ id: 'kid', name: 'broken' }, [], [kb])).join('\n');
+  assert.equal(existsSync(join(kb, 'broken')), false);
+  assert.match(broken, /can't be read/);
+  assert.equal(existsSync(broken.match(/moved to (\S+)/)[1]), true, 'an unreadable repo is kept, not deleted');
+  // A test home (stam-test.ID.RAND) belongs to the test suites: its repo with no remote is deleted, not kept.
+  const home = join(kb, 'stam-test.kid.abc');
+  mkdirSync(home);
+  git(home, 'init', '-q', '-b', 'main');
+  git(home, ...ident, 'commit', '-q', '--allow-empty', '-m', 'test');
+  await removeAgentScratchDirs({ id: 'kid', name: 'other' }, [], [kb]);
+  assert.equal(existsSync(home), false, 'a test home is deleted as before');
+});
+
+// S-2298: a clone nested below the agent's dir (up to 3 levels) with commits on no remote keeps the whole dir.
+test('removeAgentScratchDirs: keeps the agent dir when a nested clone has unpushed commits', async () => {
+  const dir = scratchRoot();
+  const { removeAgentScratchDirs } = await import('../src/proctree.ts');
+  const { execFileSync } = await import('node:child_process');
+  const git = (cwd, ...a) => execFileSync('git', a, { cwd, stdio: 'pipe', encoding: 'utf8' });
+  const ident = ['-c', 'user.name=t', '-c', 'user.email=t@example.com'];
+  const bare = join(dir, 'n-origin.git'), src = join(dir, 'n-src'), nb = join(dir, 'n', 'stam-test');
+  git(dir, 'init', '-q', '--bare', bare);
+  mkdirSync(src);
+  git(src, 'init', '-q', '-b', 'main');
+  git(src, ...ident, 'commit', '-q', '--allow-empty', '-m', 'x');
+  git(src, 'remote', 'add', 'origin', bare);
+  git(src, 'push', '-q', 'origin', 'main');
+  mkdirSync(join(nb, 'nest', 'work', 'app'), { recursive: true });
+  git(join(nb, 'nest', 'work', 'app'), 'clone', '-q', bare, 'clone');
+  git(join(nb, 'nest', 'work', 'app', 'clone'), ...ident, 'commit', '-q', '--allow-empty', '-m', 'nested local');
+
+  const msg = (await removeAgentScratchDirs({ id: 'kid', name: 'nest' }, [], [nb])).join('\n');
+  assert.equal(existsSync(join(nb, 'nest')), false, 'the agent dir is moved out whole');
+  assert.match(msg, /kept, nested repo work\/app\/clone has 1 commit on no remote/);
+  const kept = msg.match(/moved to (\S+)/)[1];
+  assert.equal(git(join(kept, 'work', 'app', 'clone'), 'log', '-1', '--format=%s').trim(), 'nested local');
+});
+
 test('removeAgentScratchDirs: a symlinked base still sees processes, symlinked and protected dirs stay, a test home does nothing', async () => {
+  const dir = scratchRoot();
   const { removeAgentScratchDirs } = await import('../src/proctree.ts');
   const real = join(dir, 'sl-real'), link = join(dir, 'sl-link');
   mkdirSync(join(real, 'busy'), { recursive: true });

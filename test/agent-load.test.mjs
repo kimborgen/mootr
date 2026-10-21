@@ -92,6 +92,18 @@ test('the cache serves a second call within the TTL, refreshes after it, and ski
   assert.equal(load.cachedLoadOf(db.getAgent('S2'), 2_000_000), null);
 });
 
+test('an insert drops the cached loads past the TTL and keeps the fresh ones', () => {
+  for (const id of ['S4', 'S5', 'S6']) {
+    db.createAgent({ id, name: `sweep-${id}`, role: 'r', machine: 'x', harness: 'claude', model: 'm', effort: null, cwd: '/tmp', parent_id: null, session_id: null });
+  }
+  load.cachedLoadOf(db.getAgent('S4'), 1_000);
+  load.cachedLoadOf(db.getAgent('S5'), 1_000 + load.LOAD_TTL_MS - 1);
+  assert.deepEqual(load.cachedAgentIds(), ['S4', 'S5']);
+  // S4 is exactly one TTL old now, so it goes; S5 is one millisecond young and stays.
+  load.cachedLoadOf(db.getAgent('S6'), 1_000 + load.LOAD_TTL_MS);
+  assert.deepEqual(load.cachedAgentIds(), ['S5', 'S6']);
+});
+
 test('workspace walk skips an unreadable folder and counts folders against the cap', () => {
   const ws = join(home, 'workspaces', 'many');
   mkdirSync(ws, { recursive: true });

@@ -169,6 +169,8 @@ export function validate(cost: CostConfig): string | null {
     const m = accounts[name]?.match;
     if (!m || typeof m.harness !== 'string' || !m.harness) return `account ${name} has no match.harness`;
     if (m.model != null && typeof m.model !== 'string') return `account ${name} has a bad match.model`;
+    const provider = accounts[name]?.provider;
+    if (provider != null && (typeof provider !== 'string' || !provider)) return `account ${name} has a bad provider`;
   }
   // Each harness and model matches at most one account.
   for (let i = 0; i < names.length; i++) {
@@ -257,4 +259,14 @@ export function openRouterAccounts(): string[] {
   const names = Object.entries(settings().cost.accounts ?? {}).filter(([n, a]) => isOpenRouter(a, n)).map(([n]) => n);
   for (const n of ['openrouter', SYSTEM_ACCOUNT]) if (!names.includes(n)) names.push(n);
   return names;
+}
+
+// The provider an account pays per token (S-2118), or null for a subscription or unmanaged one:
+// `openrouter` for an OpenRouter account, the account's own `provider`, or for OpenCode the
+// configured provider its match.model names as `ID/`.
+export function payPerTokenProvider(acct: CostAccount, name: string, providers: Record<string, unknown> = settings().providers): string | null {
+  if (isOpenRouter(acct, name)) return 'openrouter';
+  if (typeof acct.provider === 'string' && acct.provider) return acct.provider;
+  const prefix = acct.match.harness === 'opencode' ? (acct.match.model ?? '').split('/')[0] : '';
+  return prefix && (acct.match.model ?? '').includes('/') && Object.hasOwn(providers ?? {}, prefix) ? prefix : null;
 }

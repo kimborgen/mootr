@@ -101,3 +101,44 @@ describe('a terminal socket opens only at an origin the daemon listed (S-544)', 
     expect(terminalOriginFor('storage', undefined)).toBeUndefined()
   })
 })
+
+describe('a human action refused on 127.0.0.1 with a local login there (S-2121)', () => {
+  it('shows the login offer in the one notice bar, only on loopback and only when the daemon says a login is there', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act, createElement } = await import('react')
+    const { MenuLayer, toast } = await import('./ui/menu')
+    const { loginOffered } = await import('./local-login')
+    const el = document.createElement('div')
+    await act(async () => { createRoot(el).render(createElement(MenuLayer)) })
+    const refuse = async (body: object) => {
+      answers.push(() => reply(403, { error: 'only the human', ...body }))
+      await act(async () => { await err(api('POST', '/api/permissions/p1/answer', { approve: true })) })
+    }
+    vi.stubGlobal('location', { protocol: 'http:', hostname: 'box.example.com' })
+    await refuse({ localLogin: true })
+    vi.stubGlobal('location', { protocol: 'http:', hostname: '127.0.0.1' })
+    await refuse({})
+    expect(el.querySelector('#login-offer')).toBeNull()
+    await refuse({ localLogin: true })
+    expect(el.querySelector('#toasts #login-offer')?.textContent).toContain("isn't logged in as the human")
+    expect(el.querySelector('#login-offer .btn.primary')?.textContent).toBe('Log in')
+    // A transient notice takes the one bar while it shows (never stacked), then the offer comes back.
+    vi.useFakeTimers()
+    try {
+      act(() => toast('Copied stam/fixture-branch.'))
+      expect(el.querySelectorAll('#toasts > *').length).toBe(1)
+      expect(el.querySelector('#toasts .toast')?.textContent).toBe('Copied stam/fixture-branch.')
+      expect(el.querySelector('#login-offer')).toBeNull()
+      act(() => { vi.advanceTimersByTime(4000) })
+      expect(el.querySelector('#toasts #login-offer')).not.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+    // Dismissed, it comes back with the next refusal.
+    await act(async () => { el.querySelector<HTMLButtonElement>('#login-offer .icon-btn')!.click() })
+    expect(el.querySelector('#login-offer')).toBeNull()
+    await refuse({ localLogin: true })
+    expect(el.querySelector('#login-offer')).not.toBeNull()
+    expect(loginOffered()).toBe(true)
+  })
+})

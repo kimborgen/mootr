@@ -81,22 +81,27 @@ S3=$(ask "$B" "Old withdrawn ask")
 # A decision mail naming S1, sent while it was pending, from an older daemon that didn't hide it.
 DS=$(mail "{\"from\":\"bob\",\"to\":[\"human\"],\"subject\":\"About $S1\",\"body\":\"${FENCE}yesno\nGo ($S1)?\n${FENCE}\",\"new_thread\":true}")
 daemon_stop main
-python3 - "$STAM_HOME/stam.db" "$B" "$S1" "$S2" "$S3" "$DS" <<'EOF'
-import sqlite3, sys
-db, b, s1, s2, s3, ds = sys.argv[1:]
-c = sqlite3.connect(db)
-w = "INSERT INTO waits (id, agent_id, kind, target, detail, since, source, data) VALUES (?, ?, 'human', NULL, ?, ?, 'declared', ?)"
-# Waits an older daemon left untied: the times put each in its request's pending window.
-c.execute("UPDATE permission_requests SET created_at = '2026-10-14T06:00:00.000Z' WHERE id IN (?, ?, ?)", (s1, s2, s3))
-c.execute("UPDATE permission_requests SET status = 'approved', decided_by = 'human', decided_at = '2026-10-14T06:30:00.000Z' WHERE id = ?", (s1,))
-c.execute("UPDATE permission_requests SET status = 'withdrawn', decided_at = '2026-10-14T06:30:00.000Z' WHERE id = ?", (s3,))
-c.execute(w, ('wstale1', b, 'answer to ' + s1, '2026-10-14T06:10:00.000Z', '{"on":"human"}'))
-c.execute(w, ('wstale3', b, 'about ' + s3, '2026-10-14T06:10:00.000Z', '{"on":"human"}'))
-c.execute(w, ('wtie', b, 'auto-mode block', '2026-10-14T06:40:00.000Z', '{"on":"human"}'))
-c.execute(w, ('wkeep', b, 'colour pick', '2026-10-14T06:40:00.000Z', '{"on":"human","thread":"mnothere"}'))
-c.execute("UPDATE mail SET created_at = '2026-10-14T06:20:00.000Z' WHERE id = ?", (ds,))
-c.commit()
-EOF
+# Waits an older daemon left untied, written for the next start (test-seed.json): the times put each in its request's pending window.
+python3 - "$STAM_HOME/test-seed.json" "$B" "$S1" "$S2" "$S3" "$DS" <<'SEEDPY'
+import json, sys
+out, b, s1, s2, s3, ds = sys.argv[1:]
+wait = lambda id, detail, since, data: {"id": id, "agent": b, "kind": "human", "detail": detail, "since": since, "source": "declared", "data": data}
+json.dump({
+    "permissions": [
+        {"id": s, "created_at": "2026-10-14T06:00:00.000Z"} for s in (s1, s2, s3)
+    ] + [
+        {"id": s1, "status": "approved", "decided_by": "human", "decided_at": "2026-10-14T06:30:00.000Z"},
+        {"id": s3, "status": "withdrawn", "decided_at": "2026-10-14T06:30:00.000Z"},
+    ],
+    "waits": [
+        wait("wstale1", "answer to " + s1, "2026-10-14T06:10:00.000Z", {"on": "human"}),
+        wait("wstale3", "about " + s3, "2026-10-14T06:10:00.000Z", {"on": "human"}),
+        wait("wtie", "auto-mode block", "2026-10-14T06:40:00.000Z", {"on": "human"}),
+        wait("wkeep", "colour pick", "2026-10-14T06:40:00.000Z", {"on": "human", "thread": "mnothere"}),
+    ],
+    "mail": [{"mail": ds, "at": "2026-10-14T06:20:00.000Z"}],
+}, open(out, "w"))
+SEEDPY
 daemon_up main
 D="$(declared "$B")"
 case "$D" in *"answer to $S1"* | *"about $S3"*) fail "a wait on a settled request survived the start: $D" ;; esac

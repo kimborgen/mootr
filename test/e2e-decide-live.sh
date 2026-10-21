@@ -1,7 +1,7 @@
 #!/bin/sh
-# One live call to the decision model through OpenRouter, about $0.00001: decide() returns a
-# noul probability from microsoft/microsoft-decision-1. A throwaway home, no daemon. In
-# `test/run.sh --live` only; without a key it skips.
+# One live call to the decision model (settings.decisions.model, microsoft/microsoft-decision-1 through
+# OpenRouter), about $0.00001: decide() returns a probability that 7 is prime. A throwaway home, no daemon. In
+# `test/run.sh --smoke` only; without a key it skips.
 set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 # A live test: it calls OpenRouter, so it gets the real key (lib.sh).

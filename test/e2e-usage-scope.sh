@@ -18,15 +18,11 @@ A1J=$(reg a1); A2J=$(reg a2); B1J=$(reg b1); B2J=$(reg b2)
 for n in A1 A2 B1 B2; do eval "${n}=\$(printf '%s' \"\$${n}J\" | jget \"d['id']\"); ${n}T=\$(printf '%s' \"\$${n}J\" | jget \"d['token']\")"; done
 [ -n "$A1" ] && [ -n "$A2T" ] && [ -n "$B2T" ] || fail "agents didn't register with tokens"
 # The trees and their usage, straight into the test DB.
-python3 - "$TEST_TMP/main/stam.db" "$A1" "$A2" "$B1" "$B2" <<'PY'
-import sqlite3, sys, datetime
-db = sqlite3.connect(sys.argv[1]); a1, a2, b1, b2 = sys.argv[2:6]
-db.execute("UPDATE agents SET parent_id=? WHERE id=?", (a1, a2)); db.execute("UPDATE agents SET parent_id=? WHERE id=?", (b1, b2))
-day = datetime.datetime.now(datetime.timezone.utc).date().isoformat()  # the daemon buckets by UTC day, not the local one
-for a, c in ((a1, 0.01), (a2, 0.02), (b1, 0.04), (b2, 0.08)):
-    db.execute("INSERT INTO usage (agent_id, day, harness, model, cost_usd, tokens_in) VALUES (?, ?, 'claude', 'm', ?, 10)", (a, day, c))
-db.commit()
-PY
+tapi() { curl -sf -X POST -H "authorization: Bearer $TOKEN" -H "$J" -d "$2" "$URL/api/test/$1" >/dev/null; }
+tapi agent "{\"agent\":\"$A2\",\"parent\":\"$A1\"}"; tapi agent "{\"agent\":\"$B2\",\"parent\":\"$B1\"}"
+DAY=$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).date().isoformat())')  # the daemon buckets by UTC day, not the local one
+usage_row() { printf '{"agent":"%s","day":"%s","harness":"claude","model":"m","cost_usd":%s,"tokens_in":10}' "$1" "$DAY" "$2"; }
+tapi usage "{\"table\":\"usage\",\"rows\":[$(usage_row "$A1" 0.01),$(usage_row "$A2" 0.02),$(usage_row "$B1" 0.04),$(usage_row "$B2" 0.08)]}"
 get() { _t=$1; shift; curl -s -o "$TEST_TMP/body" -w '%{http_code}' -H "authorization: Bearer $_t" "$@"; }
 ids() { python3 -c "import json,sys; d=json.load(open('$TEST_TMP/body')); print(' '.join(sorted(r['agent_id'] for r in d['by_agent'])))"; }
 
@@ -103,14 +99,9 @@ IA=$(mk "$A2T" "a's issue" "$A2"); IB=$(mk "$B1T" "b's issue" "$B1")
 case "$IA$IB" in S-*S-*) ;; *) fail "ITSAs weren't made: $IA $IB";; esac
 # Spend sampled after each ITSA was made, so an ITSA shows in the cost lists.
 sleep 1
-python3 - "$TEST_TMP/main/stam.db" "$A2" "$B1" <<'PY'
-import sqlite3, sys, datetime
-db = sqlite3.connect(sys.argv[1])
-b = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=2)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
-for a in sys.argv[2:4]:
-    db.execute("INSERT INTO usage_samples (agent_id, account, harness, model, bucket, cost_usd, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write) VALUES (?, '', 'claude', 'm', ?, 0.5, 10, 10, 0, 0)", (a, b))
-db.commit()
-PY
+BUCKET=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))')
+sample_row() { printf '{"agent":"%s","bucket":"%s","harness":"claude","model":"m","cost_usd":0.5,"tokens_in":10,"tokens_out":10}' "$1" "$BUCKET"; }
+tapi usage "{\"table\":\"usage_samples\",\"rows\":[$(sample_row "$A2"),$(sample_row "$B1")]}"
 sleep 3
 keys() { python3 -c "import json; d=json.load(open('$TEST_TMP/body')); print(' '.join(sorted(r['key'] for r in d['$1'])))"; }
 [ "$(get "$A2T" "$URL/api/usage/issues")" = 200 ] || fail "issues as a2"

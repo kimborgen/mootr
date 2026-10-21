@@ -10,6 +10,7 @@ import { useData } from '../store'
 import { useFileBase } from '../files/fileBase'
 import { fileLinkClick, linkFilePaths, type FileBase } from '../files/pathLinks'
 import { useDiffRepos } from '../diff/diffRepos'
+import { wireDiffOpen } from './diffOpen'
 import { linkPrUrls } from './prLinks'
 import { askFocus } from './mailFocus'
 import * as mb from './mailblocks'
@@ -36,9 +37,10 @@ export function Rendered({ text, className = '', base, resolve }: { text: string
     mb.markDecisions(el, { created_at: '' }, [], false)
     for (const s of el.querySelectorAll('.mb-status')) s.textContent = ''
     linkFilePaths(el, fb)
+    wireDiffOpen(el, fb, repos)
   }, [html, fb.host, fb.cwd])
   // Its own effect: the served repos arrive after the first paint, and finishing a mail again for them would redraw its diagrams.
-  useLayoutEffect(() => { linkPrUrls(ref.current!, repos) }, [html, repos])
+  useLayoutEffect(() => { linkPrUrls(ref.current!, repos); wireDiffOpen(ref.current!, fb, repos) }, [html, repos, fb.host, fb.cwd])
   // A mail link opens its thread at the mail it names (S-415), as in a thread's own mails.
   const click = (e: MouseEvent) => {
     // A fold or control in a diff block never reaches the card around it (S-2100).

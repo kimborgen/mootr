@@ -9,7 +9,7 @@
   ⎿  ccd4a114d2723395b45b9fed4ad5f1b2ca2
      e26aa
 
-● Skill(kim-style)
+● Skill(house-style)
   ⎿  Successfully loaded skill
 
 ● The command ran and printed ccd4a114d2

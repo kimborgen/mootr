@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
-    "test": "sh ../scripts/test-slot.sh vitest run",
+    "test": "sh ../scripts/test-slot.sh --light vitest run",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -65,6 +65,12 @@
     "playwright-core": "1.63.0",
     "typescript": "~6.0.2",
     "vite": "^8.2.2",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "openapi-typescript": "7.13.0"
+  },
+  "overrides": {
+    "openapi-typescript": {
+      "typescript": "$typescript"
+    }
   }
 }

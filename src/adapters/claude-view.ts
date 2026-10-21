@@ -10,6 +10,7 @@ import * as db from '../db.ts';
 import { ViewError } from '../agent-view.ts';
 import type { LiveSink, ViewMessage, ViewPermission, ViewSource, ViewStore } from '../agent-view.ts';
 import { claude } from './claude.ts';
+import { restoreTranscript } from '../transcript-gz.ts';
 import { Transcript } from './claude-transcript.ts';
 
 export { Transcript };
@@ -96,6 +97,8 @@ export const claudeView: ViewSource = {
   // page is copied out, so a caller can't change what the cache holds.
   async page(a, { limit, before }) {
     const cur = db.getAgent(a.id) ?? a;
+    // A gzipped transcript (an archived agent's) is restored first; a failure is the view's error.
+    await restoreTranscript(a.id, cur.transcript_path ?? a.transcript_path);
     const t = transcriptFor(cur.transcript_path ?? a.transcript_path!);
     t.read();
     const all = t.messages;

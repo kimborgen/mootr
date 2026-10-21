@@ -33,8 +33,8 @@ save("peer", {"home": "home", "peers": [peer("home")], "itsa": {"repos": {"p": "
 PY
 fail() { echo "FAIL: $1"; exit 1; }
 jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
-# eff DAEMON EXPR: a value of the daemon's settings() as its daemon reads them (EXPR in JS, on s).
-eff() { on "$1" node --input-type=module -e "const { settings } = await import('$ROOT/src/settings.ts'); const s = settings(); console.log(JSON.stringify($2));" 2>/dev/null; }
+# eff DAEMON EXPR: a value of the daemon's effective settings as it reads them (a test route; EXPR in JS, on s).
+eff() { curl -sf -m 5 -H "authorization: Bearer $(tok "$1")" "$(url "$1")/api/test/settings" | node -e "let t = ''; process.stdin.on('data', (c) => (t += c)).on('end', () => { const s = JSON.parse(t); console.log(JSON.stringify($2)); })"; }
 # file DAEMON EXPR: a value of the daemon's settings.json as written (EXPR in Python, on s).
 file() { python3 -c "import json,sys; s=json.load(open(sys.argv[1])); print(json.dumps($2))" "$TEST_TMP/$1/settings.json"; }
 url() { on "$1" sh -c 'echo "$STAM_URL"'; }
@@ -45,12 +45,12 @@ api() { curl -s -m 5 -X "$2" -H "authorization: Bearer $(tok "$1")" -H 'content-
 human() { curl -s -m 15 -w '\n%{http_code}' -X "$2" -H "authorization: Bearer $(tok "$1")" -H "x-stam-test-human: $STAM_TEST_HUMAN_KEY" -H 'content-type: application/json' -d "$4" "$(url "$1")$3"; }
 status() { printf '%s\n' "$1" | tail -1; }
 body() { printf '%s\n' "$1" | head -n -1; }
+# tapi DAEMON METHOD PATH [BODY]: a test-route call (-f: a gate 404 fails here).
+tapi() { curl -sf -m 5 -X "$2" -H "authorization: Bearer $(tok "$1")" -H 'content-type: application/json' ${4:+-d "$4"} "$(url "$1")$3"; }
 # agent_token DAEMON NAME: registers an agent there and prints its id and the token it now holds.
 agent_token() {
   id=$(api "$1" POST /api/register "{\"name\":\"$2\",\"role\":\"test\",\"harness\":\"claude\"}" | jget "d['id']")
-  on "$1" node --input-type=module -e "
-    const { DatabaseSync } = await import('node:sqlite'); const { createHash } = await import('node:crypto');
-    new DatabaseSync(process.env.STAM_HOME + '/stam.db').prepare('UPDATE agents SET token_hash = ? WHERE id = ?').run(createHash('sha256').update('agent-token-$id').digest('hex'), '$id');" 2>/dev/null
+  curl -sf -m 5 -X POST -H "authorization: Bearer $(tok "$1")" -H 'content-type: application/json' -d "{\"agent\":\"$id\",\"token\":\"agent-token-$id\"}" "$(url "$1")/api/test/agent" >/dev/null
   echo "$id agent-token-$id"
 }
 snapshot() { HOME_FILE=$(cat "$TEST_TMP/home/settings.json"); PEER_FILE=$(cat "$TEST_TMP/peer/settings.json"); }
@@ -185,10 +185,9 @@ REQ=$(body "$R" | jget "d['requested']")
 
 echo "-- setSetting on the peer writes local parts only"
 snapshot
-on peer node --input-type=module -e "
-  const { settings, setSetting } = await import('$ROOT/src/settings.ts');
-  setSetting('resourceWarn', { ...settings().resourceWarn, lastWarned: { cpu: 123 } });
-  setSetting('chiefOfStaff', 'someone-else');" 2>"$TEST_TMP/setsetting.err"
+tapi peer POST /api/test/set-setting '{"key":"resourceWarn","merge":true,"value":{"lastWarned":{"cpu":123}}}' >"$TEST_TMP/setsetting1.out"
+tapi peer POST /api/test/set-setting '{"key":"chiefOfStaff","value":"someone-else"}' >"$TEST_TMP/setsetting2.out"
+cat "$TEST_TMP/setsetting1.out" "$TEST_TMP/setsetting2.out" >"$TEST_TMP/setsetting.err"
 [ "$(file peer "s['resourceWarn']['lastWarned']")" = '{"cpu": 123}' ] || fail "resourceWarn.lastWarned wasn't written on the peer: $(file peer s)"
 [ "$(file peer "s.get('chiefOfStaff')")" = "$(printf '%s' "$PEER_FILE" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin).get('chiefOfStaff')))")" ] || fail "a shared setSetting wrote the peer's file"
 grep -q "chiefOfStaff is shared and lives on home" "$TEST_TMP/setsetting.err" || fail "the dropped shared setSetting wasn't warned: $(cat "$TEST_TMP/setsetting.err")"

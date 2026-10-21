@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { STAM_URL, readToken } from './config.ts';
+import { envVar } from './env.ts';
 
 // A mail or a post can wait on the daemon's mail check and title generation, so under load it takes
 // longer than the 10 s default; past it the client gave up while the daemon still delivered (S-1663).
@@ -33,7 +34,7 @@ export async function api<T = any>(method: string, path: string, body?: unknown,
       // The CLI speaks for the human, except when an agent runs it or it is the MCP server
       // (`stam mcp` alone, whose calls act as the agent; `stam mcp login|logout|status` is
       // the human managing a shared login).
-      ...(process.env.STAM_AGENT_ID || (process.argv[2] === 'mcp' && process.argv[3] === undefined) || asSystem(method, path, body) ? {} : { 'x-stam-human': '1' }),
+      ...(envVar('AGENT_ID') || (process.argv[2] === 'mcp' && process.argv[3] === undefined) || asSystem(method, path, body) ? {} : { 'x-stam-human': '1' }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),

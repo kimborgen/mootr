@@ -22,12 +22,13 @@ import * as org from './org.ts';
 import { NODE_ID, parseProcess } from './process.ts';
 import { prOpenConfig, type PrOpenConfig } from './pr-open.ts';
 import { PROPOSAL_KIND, lastAction, processProposalOf } from './retro-loop.ts';
+import { envVar } from './env.ts';
 
 const run = promisify(execFile);
 
 // The key of the ITSA proposals file under (S-866, Visual process designer); a deployment that
 // lacks it files them at the top level.
-export const PARENT_REF = process.env.STAM_PROCESS_PROPOSAL_PARENT || 'S-866';
+export const PARENT_REF = envVar('PROCESS_PROPOSAL_PARENT') || 'S-866';
 // The gates a process change needs: the YAML loads and its tests pass.
 const GATES = 'run process process-counts process-stage process-run';
 const APPROVAL = 'needs_approval';
@@ -247,7 +248,7 @@ export async function onProposalStatus(x: itsa.Itsa, actor: string, from: string
     const act = lastAction(x);
     if (act === 'approve' && x.owner && n) {
       const sha = /^Commit: ([0-9a-f]{7,40})$/m.exec((x.body ?? '').split(/\n\s*\n/)[0]!)?.[1];
-      mail.queueNotice(x.owner, `${x.key} (the ${id} process change) is approved${sha ? ` at commit ${sha}` : ''}. Its PR #${n} goes through the normal path: a reviewer reads it (\`scripts/pr-review.mjs\`), then you merge it with \`node scripts/merge-pr.mjs ${n}\`${sha ? `; merge only if the PR head is still ${sha}, so a commit pushed after the approval isn't merged unseen` : ''}. The deploy watcher closes ${x.key} after the deploy.`);
+      mail.queueNotice(x.owner, `${x.key} (the ${id} process change) is approved${sha ? ` at commit ${sha}` : ''}. Its PR #${n} goes through the normal path: a reviewer reads it (the \`pr_review\` tool), then you merge it with the \`pr_merge\` tool (PR ${n})${sha ? `; merge only if the PR head is still ${sha}, so a commit pushed after the approval isn't merged unseen` : ''}. The deploy watcher closes ${x.key} after the deploy.`);
       return;
     }
     if (act === 'changes') {

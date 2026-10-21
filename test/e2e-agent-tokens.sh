@@ -42,7 +42,8 @@ NEW_TOKEN=$(token_of "$NEW")
 [ -n "$NEW_TOKEN" ] || { echo "FAIL: $NEW has no STAM_TOKEN in its environment"; exit 1; }
 [ "$NEW_TOKEN" != "$SHARED" ] || { echo "FAIL: $NEW got the shared token"; exit 1; }
 # The daemon keeps only the hash: the plain token is in no file of its home.
-grep -rqF "$NEW_TOKEN" "$STAM_HOME"/*.db* 2>/dev/null && { echo "FAIL: the plain agent token is stored in the daemon's database"; exit 1; }
+TAR=$(curl -sf -H "authorization: Bearer $SHARED" "$STAM_URL/api/test/token-at-rest?token=$NEW_TOKEN")
+[ "$TAR" = '{"plain":false,"hashed":true}' ] || { echo "FAIL: the agent token isn't stored only as a hash: $TAR"; exit 1; }
 
 # The legacy caller (shared token) lists agents but can't name one with its own token (S-545); the new agent reaches the daemon.
 [ "$(status "$SHARED" GET /api/agents)" = 200 ] || { echo "FAIL: the shared token can't list agents"; exit 1; }
@@ -66,5 +67,14 @@ wait_until rotated
 NEXT_TOKEN=$(token_of "$NEW")
 [ "$(status "$NEW_TOKEN" GET /api/agents)" = 401 ] || { echo "FAIL: the token from before the relaunch still works"; exit 1; }
 [ "$(status "$NEXT_TOKEN" GET /api/agents)" = 200 ] || { echo "FAIL: the token from the relaunch doesn't work"; exit 1; }
+
+# No agent route serves the stored hash (S-2519): the list, the detail, and the token holder's own view.
+HASH=$(printf %s "$NEXT_TOKEN" | sha256sum | cut -d' ' -f1)
+for path in /api/agents "/api/agents/$NEW"; do
+  for tok in "$SHARED" "$NEXT_TOKEN"; do
+    body=$(curl -s -H "authorization: Bearer $tok" "$STAM_URL$path")
+    case "$body" in *token_hash*|*"$HASH"*) echo "FAIL: GET $path leaks the token hash"; exit 1 ;; esac
+  done
+done
 
 echo "PASS e2e-agent-tokens"

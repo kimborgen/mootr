@@ -108,11 +108,7 @@ WORKER3=$(register main worker-three)
 C4=$(mk "{\"title\":\"Worker three child\",\"parent\":\"$P2\",\"owner\":\"$WORKER3\",\"status\":\"in_progress\"}")
 WORKER4=$(register main worker-four)
 C5=$(mk "{\"title\":\"Worker four child\",\"parent\":\"$P2\",\"owner\":\"$WORKER4\",\"status\":\"in_progress\"}")
-pending_rows() { python3 - "$TEST_TMP/main/stam.db" <<'PY'
-import sqlite3, sys
-print(sqlite3.connect(sys.argv[1]).execute("SELECT count(*) FROM itsa_pending_unown").fetchone()[0])
-PY
-}
+pending_rows() { api main GET /api/test/pending-unown | jget "d['count']"; }
 pending_is() { [ "$(pending_rows)" = "$1" ]; }
 home_port_closed() { ! curl -s -m 2 -o /dev/null "$HOME_URL/"; }
 on home "$STAM" daemon stop >/dev/null
@@ -129,10 +125,7 @@ api main POST "/api/agents/$WORKER4/retro-final" "{\"by\":\"$WORKER4\",\"effort\
 api main POST "/api/agents/$WORKER4/archive" '{}' >/dev/null || true
 stop main "$WORKER4"
 wait_until pending_is 2 || fail "the second failed unown wasn't kept (pending rows: $(pending_rows))"
-python3 - "$TEST_TMP/main/stam.db" "$WORKER4" <<'PY'
-import sqlite3, sys
-c = sqlite3.connect(sys.argv[1], timeout=10); c.execute("UPDATE agents SET lifecycle='active', activity='idle' WHERE id=?", (sys.argv[2],)); c.commit()
-PY
+api main POST /api/test/agent "{\"agent\":\"$WORKER4\",\"lifecycle\":\"active\",\"activity\":\"idle\"}" >/dev/null
 on home "$STAM" daemon start >/dev/null
 for i in $(seq 1 60); do
   [ "$(api home GET "/api/itsas/$C4" 2>/dev/null | jget "d['owner']" 2>/dev/null)" = None ] && break
@@ -142,11 +135,7 @@ done
 # The resumed agent's row is dropped, not retried: once no pending row is left, C5 still has its owner.
 wait_until pending_is 0 || fail "pending unown rows are left ($(pending_rows))"
 [ "$(api home GET "/api/itsas/$C5" | jget "d['owner']")" = "$WORKER4" ] || fail "a resumed agent lost its ITSA"
-LEFT=$(python3 - "$TEST_TMP/main/stam.db" <<'PY'
-import sqlite3, sys
-print(sqlite3.connect(sys.argv[1]).execute("SELECT count(*) FROM itsa_pending_unown").fetchone()[0])
-PY
-)
+LEFT=$(pending_rows)
 [ "$LEFT" = 0 ] || fail "pending unown rows are left ($LEFT)"
 
 echo "-- a spawn on main joins its parent's open ITSA on the home"

@@ -96,7 +96,7 @@ for (const [m, model, title, k] of TEAMS) {
 // long names among them, so Cards on a phone is shot at the scale and the name lengths it meets.
 if (flags.includes('--real')) {
   const LONG = ['sb-motion-settings', 'stam2-android-longpress', 'oss-readme-and-license', 'settings-migrate-to-store', 'reply-system-threads', 'perm-route-parent-agent', 'dev-usage-limits-drill', 'peer-ui-writes-guard', 'mail-dead-session-recovery', 'gate-rules-fresh-clone',
-    'work-phone', 'tmux-env-leak-fix', 'withdraw-ask-core', 'saved-202-replies', 'story-c2-system-view', 'delegate-first-spawns', 'inbox-box-sizing', 'kim-only-text-audit', 'rt-spawn-migrate-machines', 'wait-for-errors-surface'];
+    'work-phone', 'tmux-env-leak-fix', 'withdraw-ask-core', 'saved-202-replies', 'story-c2-system-view', 'delegate-first-spawns', 'inbox-box-sizing', 'human-only-text-audit', 'rt-spawn-migrate-machines', 'wait-for-errors-surface'];
   for (const name of LONG) add(name, cos, pick(['claude', 'opencode']), 'haiku', { state: pick(['working', 'idle', 'waiting']) });
   // A team two deep under one of them, so a row sits four levels in: the widest a phone's column gets.
   const deep = add('sb-motion-dev', agents.find((a) => a.name === 'sb-motion-settings'), 'claude', 'haiku', { state: 'working' });
@@ -385,6 +385,38 @@ async function motion(p, tag, size, theme) {
   await p.screenshot({ path: `${out}/archive-${tag}.png` });
   await p.waitForSelector('.sv-card.leave', { state: 'detached', timeout: 10000 });
   check(tag, 'the archived card is gone', true);
+
+  // A far chip (zoomed out) leaves without the shrink: its name draws at 14 px or more all the way out (S-1030).
+  if (!size.phone) {
+    const bf = await p.locator(card(rel)).boundingBox();
+    await p.mouse.move(bf.x, bf.y);
+    for (let i = 0; i < 20 && !(await p.locator('.sv-stage.far').count()); i++) { await p.mouse.wheel(0, 200); await p.waitForTimeout(80); }
+    await p.waitForSelector('.sv-stage.far', { timeout: 5000 });
+    const fkid = add(`spawn-${tag}-${++spawnN}`, cos, 'claude', 'haiku', { state: 'working', act: 'Starting', cost: 0, status: 'in_progress', title: 'A far chip leaves' });
+    itsaOf(fkid).parent_id = itsaOf(cos).id;
+    fkid.cost.tree.api = 0;
+    fkid.created_at = new Date(Date.parse(asst.created_at) + 30_000).toISOString();
+    await live(p, 'agent.spawned', { id: fkid.id, name: fkid.name, parent_id: cos.id });
+    await p.waitForSelector(card(fkid));
+    // The name as drawn: its font size times how much the transforms above it scale it.
+    const namePx = (sel) => p.evaluate((sel) => { const b = document.querySelector(sel + ' .sv-chip .c1 b'); const cs = getComputedStyle(b), laid = parseFloat(cs.width); if (!laid) return null; return +(parseFloat(cs.fontSize) * b.getBoundingClientRect().width / laid).toFixed(2); }, sel);
+    await p.waitForTimeout(150);
+    const inPx = await namePx(card(fkid));
+    check(tag, 'a far chip fades in with its name at 14 px or more', inPx != null && inPx >= 14, inPx);
+    await p.waitForTimeout(5000);
+    fkid.lifecycle = 'archived';
+    await live(p, 'agent.archived', { id: fkid.id });
+    await p.waitForSelector('.sv-card.leave');
+    const samples = [];
+    for (let i = 0; i < 4; i++) { await p.waitForTimeout(250); const px = await namePx('.sv-card.leave'); if (px != null) samples.push(px); }
+    check(tag, 'an archived far chip keeps its name at 14 px or more while it exits', samples.length > 0 && samples.every((px) => px >= 14), JSON.stringify(samples));
+    await p.screenshot({ path: `${out}/archive-far-${tag}.png` });
+    await p.waitForSelector('.sv-card.leave', { state: 'detached', timeout: 10000 });
+    // Back in, close enough to read the cards for the checks after.
+    for (let i = 0; i < 30 && await p.locator('.sv-stage.far').count(); i++) { await p.mouse.wheel(0, -200); await p.waitForTimeout(80); }
+    await p.mouse.wheel(0, -150);
+    await p.waitForTimeout(200);
+  }
 
   // The header's spend and meters roll.
   USAGE.today.cost_usd = +(USAGE.today.cost_usd + 12.5).toFixed(2);

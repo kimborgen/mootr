@@ -57,11 +57,16 @@ export async function fetchWhole(s: SideRef, path: string, side: 'base' | 'head'
   return r.blob()
 }
 
-// The repos the diff API serves (S-1533): each name in `settings.itsa.repos` with the GitHub `OWNER/REPO` its origin names.
-export interface DiffRepo { name: string; github: string | null }
+// The repos the diff API serves (S-1533): each name in `settings.itsa.repos` with the GitHub `OWNER/REPO` its origin
+// names, and — S-2104, so a pasted patch can be matched against the checkout and labelled with where it came from — the
+// checkout's own path and its HEAD, and the machine those checkouts are on (`host`, which is not this page's daemon when
+// the ITSA home is another one). Path, sha and host are absent from an older daemon's answer, which a patch then resolves
+// without its writer's base still answering, if the entry carries one.
+export interface DiffRepo { name: string; github: string | null; path?: string; sha?: string | null; host?: string }
 export async function fetchDiffRepos(signal?: AbortSignal): Promise<DiffRepo[]> {
   const r = await fetch('/api/diff/repos', { signal, headers: headers() })
   if (!r.ok) throw await fail(r)
-  const d = await r.json() as { repos?: DiffRepo[] }
-  return Array.isArray(d.repos) ? d.repos : []
+  const d = await r.json() as { machine?: string; repos?: DiffRepo[] }
+  const host = typeof d.machine === 'string' ? d.machine : undefined
+  return Array.isArray(d.repos) ? d.repos.map((x) => (host ? { ...x, host } : x)) : []
 }

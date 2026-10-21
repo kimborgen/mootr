@@ -1,0 +1,10 @@
+type: object
+description: >
+  The error envelope every failing route returns: `{error}` with the HTTP status. A handler may add
+  fields (`hint`, `login`, `layout`, the refusal fields), so the object is open.
+required: [error]
+properties:
+  error:
+    type: string
+additionalProperties: true
+x-legacy: handlers add ad-hoc fields to the envelope (daemon.ts HttpError extra)

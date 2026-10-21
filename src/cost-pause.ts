@@ -14,8 +14,9 @@
 //   until=TIME   clears when the wall-clock time T passes.
 //
 // Every reading calls evaluatePauses(), and a timer per pause calls it at the clear time, so
-// a paused tree that reports no reading still lifts. A tree also covers agents spawned into
-// it later: attachSpawn gives a new agent the pause its parent chain carries.
+// a paused tree that reports no reading still lifts. The reading may be a peer's of the same
+// account (S-2367): a window reads at its newest reading on any machine. A tree also covers
+// agents spawned into it later: attachSpawn gives a new agent the pause its parent chain carries.
 import * as db from './db.ts';
 import * as tree from './tree.ts';
 import * as blockers from './blockers.ts';
@@ -135,7 +136,7 @@ export async function attachSpawn(agent: db.Agent): Promise<void> {
 
 // The window closest to 100% among an account's fresh readings, for the default until=reset.
 function closestWindow(account: string, now: number): { window: string; win: rules.Win } | undefined {
-  const wins = Object.entries(rules.accountWindows(account)).filter(([, w]) => fresh(w.at, now));
+  const wins = Object.entries(rules.accountWindows(account, now)).filter(([, w]) => fresh(w.at, now));
   wins.sort(([, a], [, b]) => Math.abs(100 - a.pct) - Math.abs(100 - b.pct) || b.pct - a.pct || 0);
   return wins.length ? { window: wins[0][0], win: wins[0][1] } : undefined;
 }
@@ -146,7 +147,7 @@ function resolveClear(opts: PauseOptions, root: db.Agent, now: number): { clear:
   if (opts.until === 'reset') {
     const account = opts.account ?? accountOfTree(root);
     if (!account) throw new Error(`no cost account in ${root.name}'s tree; pass account`);
-    const wins = rules.accountWindows(account);
+    const wins = rules.accountWindows(account, now);
     let window = opts.window;
     if (!window) {
       const pick = closestWindow(account, now);
@@ -221,7 +222,7 @@ function cleared(c: PauseClear, now: number): { text: string; unconfirmed: boole
     return Number.isFinite(at) && now >= at ? { text: `the set time ${c.until} passed`, unconfirmed: false } : null;
   }
   const after = Date.parse(c.after);
-  const w = c.account && c.window ? rules.accountWindows(c.account)[c.window] : undefined;
+  const w = c.account && c.window ? rules.accountWindows(c.account, now)[c.window] : undefined;
   if (w && fresh(w.at, now) && w.at > after) {
     const old = c.pct ?? 100;
     if (w.pct < old) return { text: `a fresh reading of ${c.window} on ${c.account} is ${w.pct}%, below the ${old}% when it was paused`, unconfirmed: false };

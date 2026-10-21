@@ -131,6 +131,8 @@ test('decide > no key, no call', async () => {
   const key = join(home, 'opencode.env');
   const saved = 'OPENROUTER_API_KEY=test-key\n';
   rmSync(key);
+  // The key was imported into the secret store (S-2114): no key means neither file.
+  rmSync(join(home, 'secrets.json'), { force: true });
   requests.length = 0;
   const r = await decide.decide('state', { yes: { type: 'noul', instructions: '?' } }, { purpose: 'decide:test' });
   assert.equal(r, null);

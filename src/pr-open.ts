@@ -5,23 +5,28 @@
 // describes. Before any push it runs the merge gate's stories and export-overrides checks (S-1942).
 // Names come from settings.itsa.prOpen, so a test can point them at throwaway repos.
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { MACHINE } from './config.ts';
 import { checkRangeAsync } from '../scripts/story-check.mjs';
+import { CONFIG_PATH, parseRepoGates, readRepoConfig, type RepoConfig } from '../scripts/repo-config.mjs';
 import * as itsa from './itsa.ts';
 import { HUMAN } from './mail.ts';
 import { processProposalOf } from './retro-loop.ts';
 import { itsaRefusal, mayEditItsa } from './mail-visibility.ts';
 import * as db from './db.ts';
-import { branchScope, foreignRefusal, localScope } from './branch-scope.ts';
+import { branchScope, foreignRefusal, linkRefusal, localScope } from './branch-scope.ts';
 import { peerByName, peerCall, type Via } from './peers.ts';
 import { primaryRepoName, settings } from './settings.ts';
 import { defaultGithubRepo, originRepo } from './github-repo.ts';
 import { isAncestor, noteSynced, readSyncState } from './pr-sync.ts';
 import { mirrorPrHead, storageRemote } from './pr-mirror.ts';
+import { claudeSlug, claudeTmpBase } from './proctree.ts';
+import { testOnlyEnv } from './test-env.ts';
 
 const run = promisify(execFile);
 
@@ -50,6 +55,12 @@ export interface PrOpenConfig {
   base: string;
   // The timeout of each git and tar call of the stories and overrides checks (default CHECK_GIT_MS); a test sets it small.
   checkTimeoutMs?: number;
+  // Whether pr_open runs the LIGHT tests the gate adds itself (S-2480; default on). A test fixture with no test tree sets it false.
+  runLight?: boolean;
+  // The timeout of each LIGHT test pr_open runs itself, slot wait included (default LIGHT_TEST_MS, S-2480).
+  lightTimeoutMs?: number;
+  // The time all the LIGHT tests of a PR may take together (default LIGHT_TOTAL_MS): a test that starts after it is spent is refused.
+  lightBudgetMs?: number;
 }
 
 export interface PrOpened {
@@ -59,6 +70,10 @@ export interface PrOpened {
   created: boolean;
   branch: string;
   head: string;
+  // Set when GitHub's head was behind the branch and this run moved it (S-2267).
+  warning?: string;
+  // The LIGHT tests that failed, timed out or were skipped: advisory, never a refusal, and also in the PR body.
+  advisory?: string[];
 }
 
 // The first lines of the body, which merge-pr.mjs and the gates parse (docs/pull-requests.md).
@@ -78,23 +93,108 @@ export function prOpenConfig(): PrOpenConfig {
 }
 
 // The merge gate's parser, loaded on first use: the public export drops scripts/gate.mjs (export/exclude.txt), and a
-// static import would stop its daemon at start (S-2140).
-const gate = () => import('../scripts/gate.mjs');
+// static import would stop its daemon at start (S-2140). Only a config repo (S-2202) needs no gate: every other call refuses
+// here, before anything is pushed, when the file is missing (S-1645). STAM_PR_OPEN_GATE replaces its path in a test home only.
+const gatePath = (): string => testOnlyEnv('STAM_PR_OPEN_GATE') || fileURLToPath(new URL('../scripts/gate.mjs', import.meta.url));
+async function gate(): Promise<typeof import('../scripts/gate.mjs')> {
+  const path = gatePath();
+  if (!existsSync(path)) throw new Error(`pr_open can't check this PR against the merge gate: ${path} is missing (the public export drops it). A repo with a .stam/repo.json on its main branch (S-2202) needs no gate; for any other repo, open the PR with \`gh pr create\`. Nothing was pushed.`);
+  return import(pathToFileURL(path).href);
+}
 
-async function checkInput(cfg: PrOpenConfig, input: PrOpenInput): Promise<void> {
+// The repo's merge flow (S-2202), and the branch its PRs target. The config is .stam/repo.json on the repo's trusted main
+// branch as fetched now (never the PR's branch), under settings.itsa.repoConfig[NAME]. The trusted main is the one the
+// scripts use: the setting's mainBranch, else origin's default branch. A config repo's PRs target its mainBranch; a repo
+// with neither file nor setting (stam's own) gets config null and keeps cfg.base (itsa.mainBranch) and the private gate.mjs
+// flow. A failed lookup, fetch or read throws, so a config repo's Gates line is never checked the other way.
+export async function repoConfigOf(cfg: PrOpenConfig): Promise<{ config: RepoConfig | null; base: string }> {
+  const fallback = settings().itsa.repoConfig[cfg.repoName] ?? null;
+  const named = typeof fallback?.mainBranch === 'string' && fallback.mainBranch ? fallback.mainBranch : '';
+  const head = named ? '' : /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(await git(cfg, ['ls-remote', '--symref', cfg.origin, 'HEAD']))?.[1] ?? '';
+  const main = named || head || cfg.base;
+  const ref = `refs/stam/pr-open-config/${process.pid}-${randomBytes(4).toString('hex')}`;
+  try {
+    await git(cfg, ['fetch', '--no-tags', cfg.origin, `+refs/heads/${main}:${ref}`]);
+    const config = readRepoConfig(cfg.repo, ref, fallback);
+    if (!config) return { config, base: cfg.base };
+    if (config.mainBranch !== main) throw new Error(`${cfg.repoName}'s ${CONFIG_PATH} says mainBranch ${config.mainBranch}, but its main branch is ${main}: set settings.itsa.repoConfig.${cfg.repoName}.mainBranch or fix the file`);
+    return { config, base: main };
+  } finally {
+    await git(cfg, ['update-ref', '-d', ref]).catch(() => {});
+  }
+}
+
+// The largest body_file a pr_open call may send (S-2677): a PR body is text, so a bigger file is refused, not read.
+export const BODY_FILE_MAX = 256 * 1024;
+
+// The body of a pr_open call (S-2677): the inline `body`, or the text of `body_file`, which is read here, on the caller's
+// own machine, before anything is sent. It is read only from the caller's worktree (its cwd) or its Claude scratch dir,
+// so a file for another machine is never read, and no other agent's files are. The caller is the local agent `me`.
+export function resolveBody<T extends PrOpenInput & { body_file?: string | null }>(input: T, me: { cwd: string; machine: string } | undefined): Omit<T, 'body_file'> {
+  const { body_file: file, ...rest } = input;
+  if (file == null) return rest;
+  if (input.body != null) throw new Error('pass exactly one of body and body_file to pr_open, not both');
+  if (!me || me.machine !== MACHINE) throw new Error('body_file is read on the machine the calling agent runs on: call pr_open from that agent, or pass the body text in body');
+  const roots = [me.cwd, join(claudeTmpBase(), claudeSlug(me.cwd))].flatMap((r) => {
+    try {
+      return [realpathSync(r)];
+    } catch {
+      return [];
+    }
+  });
+  let path: string;
+  try {
+    path = realpathSync(resolve(me.cwd, file));
+  } catch {
+    throw new Error(`body_file ${file} doesn't exist: pass the body text in body, or the path of a file in your worktree or scratch dir in body_file`);
+  }
+  if (!roots.some((r) => path.startsWith(r + '/'))) {
+    throw new Error(`body_file ${file} is outside your worktree (${me.cwd}) and your scratch dir: pass the body text in body, or a file in one of those in body_file`);
+  }
+  const st = statSync(path);
+  if (!st.isFile()) throw new Error(`body_file ${file} is not a file`);
+  if (st.size > BODY_FILE_MAX) throw new Error(`body_file ${file} is ${st.size} bytes; a PR body may be at most ${BODY_FILE_MAX}`);
+  return { ...rest, body: readFileSync(path, 'utf8') };
+}
+
+// Checks the input before anything is pushed. Returns the repo's config (null for the gate.mjs flow) and cfg with the base
+// its PRs target.
+async function checkInput(cfg: PrOpenConfig, input: PrOpenInput): Promise<{ repoConfig: RepoConfig | null; cfg: PrOpenConfig }> {
   const branch = String(input.branch ?? '');
   if (!BRANCH.test(branch) || branch.startsWith('-') || branch.includes('..') || branch.endsWith('/') || branch.endsWith('.lock')) {
     throw new Error(`a branch name is letters, digits, . _ / and -, not starting with -: ${branch}`);
   }
   if (!cfg.github) throw new Error(`pr_open: no GitHub repo: set settings.itsa.prOpen.github, or give ${cfg.repoName}'s ${cfg.origin} remote a github.com url`);
-  if (branch === cfg.base) throw new Error(`pr_open won't open a PR from ${cfg.base}`);
   if (!String(input.title ?? '').trim() || /[\r\n]/.test(input.title)) throw new Error('a PR needs a one-line title');
+  const text = String(input.body ?? '').trim();
+  // A lone path, or nothing, is a call that meant body_file, or passed no body at all (S-2677).
+  const lonePath = !text.includes('\n') && /^\S+$/.test(text) && /\/|\.(md|txt)$/.test(text);
+  if (!text || lonePath) throw new Error('pass the body text in `body`, or the path in `body_file`');
   const lines = String(input.body ?? '').split('\n');
   HEADER.forEach((label, i) => {
     if (!lines[i]?.startsWith(label)) throw new Error(`the PR body starts with the lines ITSA:, Gates:, Deploy: (docs/pull-requests.md); line ${i + 1} must start with ${label}`);
   });
-  // The Gates line parses as merge-pr.mjs parses it, so an unknown token is refused here, not after review (S-1292).
-  (await gate()).parseGates(input.body);
+  const { config: repoConfig, base } = await repoConfigOf(cfg);
+  if (branch === base) throw new Error(`pr_open won't open a PR from ${base}`);
+  if (repoConfig) {
+    // A config repo (S-2202): its branches carry the prefix, and the Gates line names its gates, as repo-gate.mjs reads them.
+    if (!branch.startsWith(repoConfig.branchPrefix)) throw new Error(`${cfg.repoName}'s ${CONFIG_PATH} wants branches named ${repoConfig.branchPrefix}*: ${branch}`);
+    try {
+      parseRepoGates(input.body, repoConfig);
+    } catch (e) {
+      throw new Error(`Gates: ${e instanceof Error ? e.message : e}`);
+    }
+  } else {
+    // The Gates line parses as merge-pr.mjs parses it, so an unknown token is refused here, not after review (S-1292).
+    (await gate()).parseGates(input.body, await runNames({ ...cfg, base }));
+  }
+  return { repoConfig, cfg: { ...cfg, base } };
+}
+
+// The names test/run.sh runs, in any list, on main: a bare Gates token naming one is refused with the `run NAME` to write (S-2553).
+async function runNames(cfg: PrOpenConfig): Promise<Set<string>> {
+  const runSh = await git(cfg, ['show', `${cfg.base}:test/run.sh`]).catch(() => '');
+  return new Set([...runTestNames(runSh), ...(await gate()).lightTests(runSh)]);
 }
 
 // A call that ran past its timeout (S-1942): pr_open refuses it, rather than passing or hanging.
@@ -122,15 +222,42 @@ async function gh(cfg: PrOpenConfig, args: string[]): Promise<string> {
 
 const short = (sha: string): string => sha.slice(0, 8);
 
+// What a push that replaces GitHub's head `current` with `head` says (S-2267). "Behind" only when `current` is an ancestor of
+// `head`; a rebase or a rewind is "changed from A to B" (S-2390). Empty when the head is unchanged or GitHub had none.
+export async function headNote(cfg: PrOpenConfig, branch: string, current: string, head: string): Promise<string> {
+  if (!current || current === head) return '';
+  const fastForward = await isAncestor(cfg, current, head).catch(() => false);
+  const what = fastForward ? `was at ${short(current)}, behind ${short(head)}` : `changed from ${short(current)} to ${short(head)} (not a fast-forward)`;
+  return `GitHub's ${branch} ${what}; pushed it to GitHub. Later pushes to ${branch} from storage reach only storage's bare repo, not GitHub: run pr_open again after each one.`;
+}
+
+// Whether the checkout has refs/heads/BRANCH, checked out or not (S-754, S-2316).
+async function hasLocalBranch(cfg: PrOpenConfig, branch: string): Promise<boolean> {
+  return (await git(cfg, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).catch(() => '')) !== '';
+}
+
 // Refuses to replace GitHub's head `current` with `head` (S-673) unless it's the head stam last pushed for the
 // branch, or an ancestor of `head`: a fix a manager pushed straight to GitHub must not be overwritten. The
-// head is fetched into `ref` (this run's own), so the check reads what GitHub holds now.
-async function checkGithubHead(cfg: PrOpenConfig, branch: string, current: string, head: string, ref: string): Promise<void> {
+// head is fetched into `ref` (this run's own), so the check reads what GitHub holds now. With a storage remote, the refusal
+// first copies GitHub's head there as gh/BRANCH (S-675), since a storage agent can't reach GitHub to merge it.
+async function checkGithubHead(cfg: PrOpenConfig, branch: string, current: string, head: string, ref: string, storage = ''): Promise<void> {
   if (readSyncState()[branch] === current) return;
   await git(cfg, ['fetch', '--no-tags', cfg.origin, `+refs/heads/${branch}:${ref}`]);
   if ((await git(cfg, ['rev-parse', '--verify', ref])) !== current) throw new Error(`GitHub's ${branch} moved while pr_open checked it; run pr_open again`);
   if (await isAncestor(cfg, current, head)) return;
-  throw new Error(`GitHub's ${branch} is at ${short(current)}, which isn't in your branch (${short(head)}); a fix may have been pushed there. Merge it first.`);
+  const cause = `GitHub's ${branch} is at ${current}, which pr_open didn't push and which isn't in your branch ${head}: someone pushed a commit there, or you pushed and then rebased. Merge GitHub's head into your branch as below; don't rebase a branch pr_open already pushed.`;
+  if (!storage) throw new Error(`${cause} Run git fetch origin ${branch} && git merge --no-edit origin/${branch}, then pr_open again.`);
+  const copy = `gh/${branch}`;
+  const copied = await git(cfg, ['push', '--force', storage, `${ref}:refs/heads/${copy}`], 60_000).then(() => true, () => false);
+  if (!copied) throw new Error(`${cause} Copying GitHub's head to storage as ${copy} failed: ask an agent that can reach GitHub to merge it, or retry pr_open.`);
+  throw new Error(`${cause} Its head is on storage as ${copy}: run git fetch origin +refs/heads/${copy}:refs/remotes/origin/${copy} && git merge --no-edit origin/${copy}, push ${branch}, then pr_open again.`);
+}
+
+// GitHub's head of the branch as the checks began (`current`) must still be its head just before the push: the checks can take
+// minutes, and a raw lease error would say nothing a developer can act on (S-3009).
+export async function recheckGithubHead(cfg: PrOpenConfig, branch: string, current: string): Promise<void> {
+  const now = (await git(cfg, ['ls-remote', '--heads', cfg.origin, `refs/heads/${branch}`])).split('\t')[0] ?? '';
+  if (now !== current) throw new Error(`GitHub's ${branch} moved while pr_open checked it; run pr_open again`);
 }
 
 // The open PR whose head is the branch, or null.
@@ -156,6 +283,15 @@ export function runTestNames(runSh: string): Set<string> {
   return names;
 }
 
+// The lists of test/run.sh (LIGHT, FREE, SMOKE) a name is in, so a refusal can say which list it lacks (S-2327).
+export function runTestLists(runSh: string, name: string): string[] {
+  return ['LIGHT', 'FREE', 'SMOKE'].filter((list) => {
+    // LIGHT's closing quote follows its last name on one line, so the list ends at the first quote.
+    const m = new RegExp(`^${list}="\\n([^"]*)"`, 'm').exec(runSh);
+    return m ? m[1].split('\n').some((n) => n.trim() === name) : false;
+  });
+}
+
 // Each `run NAME` in the Gates line names a test the PR's test/run.sh knows (S-1292): an unknown one fails the merge
 // gate only after review, so it is refused here. The names are read from the head's run.sh (the tree the gate tests,
 // so a PR that adds a test and its name passes), fetched into this checkout by openPr.
@@ -175,7 +311,10 @@ async function checkRunNames(cfg: PrOpenConfig, body: string, head: string): Pro
     const test = runTestName(name);
     if (known.has(test)) continue;
     const unit = known.has(`${test}-unit`) ? ` (did you mean ${test}-unit?)` : '';
-    throw new Error(`Gates: no test ${name} in test/run.sh${unit}`);
+    // A name in LIGHT alone is one run.sh refuses by name too: say which list it lacks (S-2327).
+    const lists = runTestLists(runSh, test);
+    const where = lists.length ? ` (it is in ${lists.join(', ')} but not in FREE or SMOKE, which run.sh runs by name)` : '';
+    throw new Error(`Gates: no test ${name} in test/run.sh${where}${unit}`);
   }
 }
 
@@ -188,13 +327,19 @@ async function checkRunNames(cfg: PrOpenConfig, body: string, head: string): Pro
 // The time each git and tar call of the stories and overrides checks may take, and the overrides' --check (S-1942).
 const CHECK_GIT_MS = 30_000;
 const CHECK_CHECK_MS = 60_000;
+// The time one LIGHT test may take, its slot wait included, and the time all of them may take together (S-2480): PrOpenConfig's
+// lightTimeoutMs and lightBudgetMs. The total fits inside PR_OPEN_PEER_MS with room for the push and gh, and the MCP client waits
+// longer still (mcp.ts PR_OPEN_CALL_MS).
+const LIGHT_TEST_MS = 60_000;
+export const LIGHT_TOTAL_MS = 120_000;
 // The shipped trees: a branch that changes one of them runs the overrides check.
 const SHIPPED_DIRS = ['docs', 'export', 'templates', 'blocks', 'registry'];
 const SHIPPED_TREE = new RegExp(`^(${SHIPPED_DIRS.join('|')})/`);
 type Manifest = { docs?: Record<string, string>; templates?: Record<string, string> };
-async function checkTree(cfg: PrOpenConfig, body: string, head: string, dir: string): Promise<void> {
+async function checkTree(cfg: PrOpenConfig, body: string, head: string, dir: string): Promise<string[]> {
   const baseRef = `refs/stam/pr-open-base/${basename(dir)}`;
   const problems: string[] = [];
+  const advisory: string[] = [];
   try {
     const ms = cfg.checkTimeoutMs ?? CHECK_GIT_MS;
     await git(cfg, ['fetch', '--no-tags', cfg.origin, `+refs/heads/${cfg.base}:${baseRef}`], ms);
@@ -202,6 +347,14 @@ async function checkTree(cfg: PrOpenConfig, body: string, head: string, dir: str
     // the PR's own changes, not the structure of a base it is behind on (S-1942).
     for (const e of await checkRangeAsync(baseRef, head, { cwd: cfg.repo, body, mode: 'branch', timeoutMs: ms })) problems.push(`stories: ${e}`);
     const changed = (await git(cfg, ['diff', '--name-only', '--no-renames', `${baseRef}...${head}`], ms)).split('\n').filter(Boolean);
+    // The gate's own prediction for this diff, on main's rules (S-2480); the LIGHT ones among it run here, before the body is read.
+    // The required set is the merge result's, as runPr reads it (predicted.changed and modes), not the branch's own diff.
+    const predicted = await (await gate()).predictPr({ repo: cfg.repo, cache: dir, base: await git(cfg, ['rev-parse', '--verify', baseRef], ms), head, ms });
+    const light = cfg.runLight === false ? new Map<string, string | null>() : await runLightTests(cfg, head, predicted.tests, dir);
+    // A LIGHT test that failed, timed out or was skipped is advisory: a test can still fail on the head, so it is noted, not refused. The body's NAME: PASS line is what counts.
+    advisory.push(...[...light.values()].filter((p): p is string => p !== null));
+    const headRunSh = await git(cfg, ['show', `${head}:test/run.sh`], ms);
+    problems.push(...(await gateAddedProblems(body, predicted.changed, { rows: predicted.rows, light, note: predicted.note, modes: predicted.modes, inRunSh: (name) => runTestLists(headRunSh, name).length > 0 })));
     if (changed.some((p) => SHIPPED_TREE.test(p))) problems.push(...(await overridesProblems(cfg, head, changed, dir)));
   } catch (e: any) {
     // A check that ran out of time is refused, never passed (S-1942): the caller runs pr_open again.
@@ -211,6 +364,48 @@ async function checkTree(cfg: PrOpenConfig, body: string, head: string, dir: str
     await git(cfg, ['update-ref', '-d', baseRef]).catch(() => {});
   }
   if (problems.length) throw new Error(`pr_open refuses: ${problems.join('; ')}`);
+  return advisory;
+}
+
+// The tests the merge gate adds for the branch's files (addPathGates, S-2250), each of which the body must report as run in one strict
+// format, a token `NAME: PASS` (NAME may be in backticks, PASS may be PASSED, any case) in the free text below the header, several to a line
+// separated by `,` or `;`. Nothing else counts (a Gates listing, `ran NAME`, counts, a bare mention, `blocks/foo.md` for `blocks`), and a
+// `NAME: FAIL`, `NAME: SKIPPED` or `NAME: NOT RUN` token refuses it, quoting the line, as does a PASS followed by a count
+// (`pass 118`) or on a line that counts failures (`fail 2`). Prose was tried and dropped after three review
+// rounds of false passes and false refusals. #682 said "not run; the gate adds them" and failed merge-pr-unit in the train.
+// S-2480: the tests are the merge gate's for main's rows (ROWS; this checkout's when none), and a LIGHT test pr_open ran itself counts as
+// evidence when it passed (LIGHT, from runLightTests), so the body needs no line for it. The refusal lists every predicted test with the
+// path and rule that matched, and every missing NAME: PASS line at once, and it names the rules' note when main's copy didn't load.
+// `inRunSh` (S-2842) says whether the branch's own test/run.sh lists a name: one main's rules add that it doesn't is merged-in work to pull, not a missing line.
+export async function gateAddedProblems(body: string, changed: string[], { rows, light = new Map(), note = null, modes = [], inRunSh = null }: { rows?: unknown[]; light?: Map<string, string | null>; note?: string | null; modes?: string[]; inRunSh?: ((name: string) => boolean) | null } = {}): Promise<string[]> {
+  const gates = await gate();
+  const required: string[] = gates.pathGateTests(changed, rows, modes);
+  if (required.length === 0) return [];
+  const { added } = gates.addPathGates([], changed, modes, rows);
+  const why = (name: string): string => {
+    const a = added.find((g: { gate: string }) => g.gate.split(' ').slice(1).includes(name));
+    return a ? a.reasons.map((r: { why: string; paths: string[] }) => `${r.why}: ${r.paths.slice(0, 3).join(', ')}${r.paths.length > 3 ? ', ...' : ''}`).join('; ') : '';
+  };
+  const text = body.split('\n').slice(HEADER.length);
+  const bad: string[] = [];
+  const absent = inRunSh ? required.filter((name) => !inRunSh(name)) : [];
+  const absentLines = absent.map((name) => `${name} isn't in this branch's test/run.sh: merge origin/main first`);
+  for (const name of required) {
+    if (absent.includes(name)) continue;
+    // A LIGHT test pr_open ran and passed is evidence. A failed, timed-out or skipped one is advisory and needs the body's NAME: PASS line.
+    if (light.get(name) === null) continue;
+    const n = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const token = new RegExp(`\`?(?<![\\w./-])${n}(?![\\w/-])\`?\\s*:\\s*(PASS(?:ED)?\\b(?!\\s*\\d)|FAIL(?:ED|S|ING)?\\b|SKIPPED\\b|NOT\\s+RUN\\b)`, 'gi');
+    const verdicts = text.flatMap((l) => [...l.matchAll(token)].map((m) => ({ line: l, verdict: m[1].toUpperCase() })));
+    // A PASS on a line that also counts failures (`fail 2`, `2 failures`) is not a pass.
+    const failCount = /\bfail(?:ed|s|ures?)?\s*[:=]?\s*[1-9]|\b[1-9]\d*\s+fail/i;
+    const notPass = verdicts.find((v) => !v.verdict.startsWith('PASS') || failCount.test(v.line));
+    if (notPass) bad.push(`${name} (the body says: "${notPass.line.trim()}")`);
+    else if (verdicts.length === 0) bad.push(`${name} (add the line \`${name}: PASS\`)`);
+  }
+  if (bad.length === 0) return absentLines;
+  const predicted = required.map((name) => `${name} (${why(name)})`).join('; ');
+  return [...absentLines, `the gate adds these tests for this branch's files: ${predicted}. The body doesn't report as \`NAME: PASS\`: ${bad.join('; ')}. Run each with scripts/test-slot.sh test/run.sh NAME and add its \`NAME: PASS\` line to the body${note ? `; ${note}` : ''}`];
 }
 
 // The export overrides problems of a branch (S-858): the ports its shipped edits lack, and the branch's own --check.
@@ -235,7 +430,7 @@ async function overridesProblems(cfg: PrOpenConfig, head: string, changed: strin
     const doc = `docs/${name}`;
     const port = `export/overrides/docs/${name}`;
     if (changed.includes(doc) && !changed.includes(port)) {
-      problems.push(`${doc} is shipped and this branch edits it, but not its public version ${port}: port the edit there and set the sha256 of the new ${doc} under "docs" in export/overrides/manifest.json (sha256sum ${doc})`);
+      problems.push(`${doc} is shipped and this branch edits it, but not its public version ${port}: port the edit there, commit it, then run node export/doc-shas.mjs to set the docs entry in export/overrides/manifest.json`);
     }
   }
   for (const name of Object.keys(manifest.templates ?? {})) {
@@ -254,6 +449,77 @@ async function overridesProblems(cfg: PrOpenConfig, head: string, changed: strin
   return problems;
 }
 
+// S-2480: the LIGHT tests among the predicted ones, run by pr_open itself on the head's tree, so a body needn't report them. Each runs
+// through the light test slot (scripts/test-slot.sh --light, S-1288) under `timeout`, one after another: a hung test is killed, and the
+// slot with it, so the daemon never waits on one. The timeout wraps the test, not this process, so a daemon restart can't leave it
+// holding the slot. The exit code is written only when the test returns: no result is a failure (fail closed). The tree gets this
+// checkout's node_modules and web/node_modules, as `stam deps` links them, so a test that imports a package runs. Those are main's
+// installed packages, so when the head's package-lock.json or web/package-lock.json differs from the checkout's, no LIGHT test runs
+// and the body must report each one as NAME: PASS (the merge gate installs the PR's own packages, which these don't match). All of
+// them share the budget: a test that starts after it is spent is skipped, never passed. Returns name -> null when it passed, or the
+// reason it is advisory (failed, timed out or skipped): checkTree notes it in the result and the PR body, and it never refuses.
+export async function runLightTests(cfg: PrOpenConfig, head: string, names: string[], dir: string): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  if (names.length === 0) return out;
+  const ms = cfg.checkTimeoutMs ?? CHECK_GIT_MS;
+  const light: string[] = (await gate()).lightTests(await git(cfg, ['show', `${head}:test/run.sh`], ms));
+  const mine = names.filter((n) => light.includes(n));
+  if (mine.length === 0) return out;
+  for (const lock of ['package-lock.json', 'web/package-lock.json']) {
+    const checkout = existsSync(join(cfg.repo, lock)) ? readFileSync(join(cfg.repo, lock), 'utf8') : '';
+    // The head's copy is compared only when git confirms it exists: any other error skips the run, so two missing files never compare equal.
+    const confirmed = await git(cfg, ['cat-file', '-e', `${head}:${lock}`], ms).then(() => true, () => false);
+    const theirs = confirmed ? await git(cfg, ['show', `${head}:${lock}`], ms).catch(() => null) : null;
+    if (theirs !== checkout.trim()) return out;
+  }
+  const budget = cfg.lightBudgetMs ?? LIGHT_TOTAL_MS;
+  const deadline = Date.now() + budget;
+  // A detached worktree of the head, not an archive (S-2639): a test that asks git for its files needs the .git the archive lacks.
+  // Pruned first, so a registration a daemon restart left behind doesn't linger; removed in the finally, on every path.
+  const tree = join(dir, 'light');
+  await git(cfg, ['worktree', 'prune'], ms).catch(() => {});
+  await git(cfg, ['worktree', 'add', '--detach', tree, head], ms);
+  try {
+    for (const pkgs of LIGHT_LINKS) {
+      if (!existsSync(join(cfg.repo, pkgs))) continue;
+      mkdirSync(dirname(join(tree, pkgs)), { recursive: true });
+      symlinkSync(join(cfg.repo, pkgs), join(tree, pkgs));
+    }
+    for (const name of mine) {
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        out.set(name, `${name} wasn't run: the LIGHT tests used their ${budget / 1000} s budget first: run pr_open again, or move a slow test out of LIGHT`);
+        continue;
+      }
+      const testMs = Math.min(cfg.lightTimeoutMs ?? LIGHT_TEST_MS, left);
+      const secs = testMs / 1000;
+      const result = join(dir, `light-${name}.result`);
+      const log = join(dir, `light-${name}.log`);
+      // $1 is the test, $2 its log, $3 its exit code file. The shell is the one timeout kills.
+      await run('timeout', ['-k', '5', String(secs), 'sh', '-c', 'exec >"$2" 2>&1; sh scripts/test-slot.sh --light sh test/run.sh "$1"; echo "$?" >"$3"', 'sh', name, log, result], { cwd: tree, timeout: testMs + 15_000 }).catch(() => {});
+      const code = existsSync(result) ? readFileSync(result, 'utf8').trim() : '';
+      if (code === '0') out.set(name, null);
+      else if (code === '') out.set(name, `${name} gave no result (it timed out after ${secs} s or was killed): run pr_open again`);
+      else {
+        const tail = readFileSync(log, 'utf8').trimEnd().split('\n').slice(-5).join(' | ');
+        out.set(name, `${name} failed (exit ${code}): ${tail}`);
+      }
+    }
+  } finally {
+    await removeLightTree(cfg, tree, ms);
+  }
+  return out;
+}
+
+// The checkout's packages the LIGHT tree links to (S-2480). Removed with the tree, the links first, so git never follows one into the checkout.
+const LIGHT_LINKS = ['node_modules', 'web/node_modules'];
+async function removeLightTree(cfg: PrOpenConfig, tree: string, ms: number): Promise<void> {
+  for (const pkgs of LIGHT_LINKS) rmSync(join(tree, pkgs), { force: true });
+  await git(cfg, ['worktree', 'remove', '--force', tree], ms).catch(() => {});
+  rmSync(tree, { recursive: true, force: true });
+  await git(cfg, ['worktree', 'prune'], ms).catch(() => {});
+}
+
 // Fetches the branch from storage (or, with `local`, takes the checkout's own branch), pushes it to origin, and opens or updates the PR, then mirrors its head to
 // storage as refs/pull/N/head (S-1347; a failed mirror never fails the open). The mirror is for a branch that came from
 // storage: a `local` open (a developer on the home) skips it unless the storage setting names a remote, so a stopped
@@ -265,8 +531,8 @@ export async function openPr(cfg: PrOpenConfig, input: PrOpenInput, local = fals
   return pr;
 }
 
-async function openOrUpdate(cfg: PrOpenConfig, input: PrOpenInput, local: boolean): Promise<PrOpened> {
-  await checkInput(cfg, input);
+async function openOrUpdate(given: PrOpenConfig, input: PrOpenInput, local: boolean): Promise<PrOpened> {
+  const { repoConfig, cfg } = await checkInput(given, input);
   const branch = input.branch;
   const title = input.title.trim();
   const dir = mkdtempSync(join(tmpdir(), 'stam-pr-open-'));
@@ -274,32 +540,54 @@ async function openOrUpdate(cfg: PrOpenConfig, input: PrOpenInput, local: boolea
   const ghRef = `refs/stam/pr-open-gh/${basename(dir)}`;
   try {
     const bodyFile = join(dir, 'body.md');
-    writeFileSync(bodyFile, input.body);
     const scratch = `refs/stam/pr-open/${branch}`;
     // Without a storage remote the branch is the checkout's own local one.
     // An unset storage setting ('') means the `storage` remote when the checkout has one, else the local branch;
     // a named remote the checkout lacks is an error, not a silent local push.
     // `local` (the caller works on this machine, whose worktrees share the checkout's refs) takes the local branch
     // unless the storage setting names a remote: a developer on the home has no storage copy to fetch, or a stale one.
+    // An explicit storage wins whenever storage has the branch: the checkout's ref may be stale (a manager's B at A while
+    // the developer pushed B to storage), and force-with-lease would rewind GitHub to it (S-2390 review). The checkout's
+    // branch is the fallback only when storage lacks it (S-754, S-2316): storage may not have it yet.
     const storage = local && !cfg.storage ? '' : await storageRemote(cfg);
     let source = scratch;
-    if (storage) await git(cfg, ['fetch', '--no-tags', storage, `+refs/heads/${branch}:${scratch}`]);
-    else source = `refs/heads/${branch}`;
+    if (storage) {
+      const missing = await git(cfg, ['fetch', '--no-tags', storage, `+refs/heads/${branch}:${scratch}`]).then(
+        () => false,
+        (e: Error) => {
+          if (!/couldn't find remote ref/.test(e.message)) throw e;
+          return e.message;
+        },
+      );
+      if (missing && local && (await hasLocalBranch(cfg, branch))) source = `refs/heads/${branch}`;
+      else if (missing) throw new Error(`${missing}; ${branch} isn't on the ${storage} remote: run git push ${storage} ${branch} from its worktree, then pr_open again`);
+    } else source = `refs/heads/${branch}`;
     const head = await git(cfg, ['rev-parse', '--verify', source]);
-    await checkRunNames(cfg, input.body, head);
-    await checkTree(cfg, input.body, head, dir);
-    // The lease expects origin's current sha (empty when the branch is new), so a push can't clobber
-    // a commit that landed on origin since the check, nor one that landed since the fetch.
+    // The lease expects origin's current sha (empty when the branch is new), so a push can't clobber a commit that landed on
+    // origin since this read. Every refusal runs before the push (S-3009), so a refused pr_open leaves GitHub's branch as it was.
     const current = (await git(cfg, ['ls-remote', '--heads', cfg.origin, `refs/heads/${branch}`])).split('\t')[0] ?? '';
-    if (current) await checkGithubHead(cfg, branch, current, head, ghRef);
+    if (current) await checkGithubHead(cfg, branch, current, head, ghRef, storage);
+    // `run NAME`, the stories and the export overrides belong to the gate.mjs flow; a config repo's gates are checked in checkInput.
+    let advisory: string[] = [];
+    if (!repoConfig) {
+      await checkRunNames(cfg, input.body, head);
+      advisory = await checkTree(cfg, input.body, head, dir);
+    }
+    // The advisory LIGHT notes go below the body's own lines, so the PR says what didn't run; the header lines are unchanged.
+    const prBody = advisory.length ? `${input.body.trimEnd()}\n\nLIGHT advisory (not a refusal):\n${advisory.map((a) => `- ${a}`).join('\n')}\n` : input.body;
+    writeFileSync(bodyFile, prBody);
+    await recheckGithubHead(cfg, branch, current);
     await git(cfg, ['push', `--force-with-lease=refs/heads/${branch}:${current}`, cfg.origin, `${source}:refs/heads/${branch}`]);
 
     // The sync (pr-sync.ts) treats this head as already on GitHub, and a later run may replace it (checkGithubHead).
     noteSynced(branch, head);
+    // GitHub's head was behind the branch and this push moved it: say so, since later pushes need pr_open again (S-2267).
+    const warning = await headNote(cfg, branch, current, head);
+    const opened = (r: PrOpened): PrOpened => ({ ...r, ...(warning ? { warning } : {}), ...(advisory.length ? { advisory } : {}) });
     const open = await openPrFor(cfg, branch);
     if (open) {
       await gh(cfg, ['api', '-X', 'PATCH', `repos/${cfg.github}/pulls/${open.number}`, '-F', `body=@${bodyFile}`]);
-      return { number: open.number, url: open.url, created: false, branch, head };
+      return opened({ number: open.number, url: open.url, created: false, branch, head });
     }
     let out: string;
     try {
@@ -313,12 +601,12 @@ async function openOrUpdate(cfg: PrOpenConfig, input: PrOpenInput, local: boolea
         await gh(cfg, ['api', '-X', 'PATCH', `repos/${cfg.github}/pulls/${made.number}`, '-F', `body=@${bodyFile}`]);
       }
       console.error(`pr_open: create failed (${e instanceof Error ? e.message : e}), but PR #${made.number} is open on ${branch}: using it`);
-      return { number: made.number, url: made.url, created: true, branch, head };
+      return opened({ number: made.number, url: made.url, created: true, branch, head });
     }
     const url = out.trim().split('\n').pop() ?? '';
     const m = /\/pull\/(\d+)$/.exec(url);
     if (!m) throw new Error(`gh pr create printed no PR url: ${out.trim()}`);
-    return { number: Number(m[1]), url, created: true, branch, head };
+    return opened({ number: Number(m[1]), url, created: true, branch, head });
   } finally {
     await git(cfg, ['update-ref', '-d', ghRef]).catch(() => {});
     rmSync(dir, { recursive: true, force: true });
@@ -361,7 +649,18 @@ export async function pushRefusal(via: Via, branch: string): Promise<string | nu
   if (scope === 'foreign') return foreignRefusal(via, branch, 'push');
   if (linked.some((l) => mayEditItsa(via.agent, l.itsa_id))) return null;
   const name = db.getAgent(via.agent)?.name ?? via.agent;
-  return `${name} can't push ${branch}: it is not the branch of ${name}'s own worktree or a child's, and no ITSA ${name} owns or takes part in links it (itsa_link, system branch; rule 2).`;
+  const link = `itsa_link (itsa: the ITSA, system: "branch", external_id: "${branch}", repo: "${primaryRepoName(settings().itsa)}")`;
+  return `${name} can't push ${branch}: it is not the branch of ${name}'s own worktree or a child's, and no ITSA ${name} owns or takes part in links it (rule 2). Run ${link} on an ITSA you own, then pr_open again.`;
+}
+
+// The push refusal, after linking the branch to ITSA `ref` when the caller owns that ITSA and rule 2 is all that refuses it (S-2269):
+// the link is the one itsa_link makes, so a second branch in the caller's own worktree opens in one pr_open. A rule 1 refusal stays.
+async function pushRefusalLinking(via: Via, branch: string, ref: string | null): Promise<string | null> {
+  const why = await pushRefusal(via, branch);
+  // Only the owner links: a participant, a creator or an ancestor's owner may change the ITSA but doesn't own the branch's link (S-2390).
+  if (!why || !ref || !why.includes('rule 2') || itsa.must(ref).owner !== via.agent || (await linkRefusal(via, branch))) return why;
+  await itsa.addLink(ref, { system: 'branch', external_id: branch, repo: primaryRepoName(settings().itsa), url: '' }, via.agent);
+  return pushRefusal(via, branch);
 }
 
 // On the ITSA home: refuses an unknown ITSA or one the asker may not change before any push.
@@ -369,7 +668,7 @@ export async function openPrHere(input: PrOpenInput, via?: Via, cfg: PrOpenConfi
   const ref = input.itsa ? itsa.must(input.itsa).id : null;
   if (ref && via && !via.boss && !mayEditItsa(via.agent, ref)) throw new itsa.ForbiddenError(itsaRefusal(via.agent, ref, 'change'));
   if (via && !via.boss) {
-    const why = await pushRefusal(via, String(input.branch ?? ''));
+    const why = await pushRefusalLinking(via, String(input.branch ?? ''), ref);
     if (why) throw new itsa.ForbiddenError(why);
   }
   // A caller on this machine (the ITSA home) works in a worktree of this checkout, so its branch is a local ref.
@@ -472,23 +771,22 @@ export async function githubRepoRouted(): Promise<string | null> {
 // Asks the ITSA home for the full verdict (rule 1 and rule 2) before a push to this machine's origin (S-684):
 // the ITSA links live there. Throws ForbiddenError on a refusal, and an error when the home can't be reached
 // (fails closed). Like openPrRouted, this daemon sends its own answer for rule 1 (Via.scope).
-async function pushCheckHome(branch: string, via: Via): Promise<void> {
+async function pushCheckHome(branch: string, via: Via, itsaRef: string | null = null): Promise<void> {
   const home = settings().itsa.home ?? MACHINE;
   if (home === MACHINE) {
-    const why = await pushRefusal(via, branch);
-    if (why) throw new itsa.ForbiddenError(why);
+    await pushCheckHere(branch, via, itsaRef);
     return;
   }
   const peer = peerByName(home);
   if (!peer) throw new Error(`ITSA home '${home}' is not a configured peer`);
-  const r = await peerCall(peer, 'POST', '/api/pr/push-check', { branch, by: via.agent }, 30_000, false, { ...via, scope: localScope(via.agent, branch) });
+  const r = await peerCall(peer, 'POST', '/api/pr/push-check', { branch, by: via.agent, itsa: itsaRef }, 30_000, false, { ...via, scope: localScope(via.agent, branch) });
   if (r.status === 403) throw new itsa.ForbiddenError(r.data?.error ?? `${home}: HTTP 403`);
   if (r.status !== 200) throw new Error(`can't push ${branch} now: the ITSA home ${home} could not check its links (${r.data?.error ?? `HTTP ${r.status}`}). Try again when it is up.`);
 }
 
 // The home's side of pushCheckHome: runs pushRefusal in full for the forwarded caller.
-export async function pushCheckHere(branch: string, via: Via): Promise<void> {
-  const why = await pushRefusal(via, branch);
+export async function pushCheckHere(branch: string, via: Via, itsaRef: string | null = null): Promise<void> {
+  const why = await pushRefusalLinking(via, branch, itsaRef ? itsa.must(itsaRef).id : null);
   if (why) throw new itsa.ForbiddenError(why);
 }
 
@@ -498,7 +796,7 @@ export async function pushCheckHere(branch: string, via: Via): Promise<void> {
 // base branch and a checkout that isn't a linked worktree (the repo's main checkout, the deploy checkout),
 // and when `via` is given, a branch the ITSA home refuses (rules 1 and 2, asked before the push: S-684). The push is a plain fast-forward: a branch that
 // diverged on origin is rejected, never overwritten.
-export async function pushOwnBranch(cwd: string | null | undefined, branch: string, via?: Via): Promise<boolean> {
+export async function pushOwnBranch(cwd: string | null | undefined, branch: string, via?: Via, itsaRef: string | null = null): Promise<boolean> {
   if ((settings().itsa.home ?? MACHINE) === MACHINE || !cwd || !BRANCH.test(branch) || branch.startsWith('-')) return false;
   if (branch === settings().itsa.mainBranch) throw new Error(`pr_open won't push or open a PR from ${branch}`);
   const g = async (args: string[]) => (await run('git', args, { cwd, maxBuffer: 16 << 20, timeout: 120_000 })).stdout.trim();
@@ -507,7 +805,7 @@ export async function pushOwnBranch(cwd: string | null | undefined, branch: stri
     // A linked worktree has its own git dir, apart from the common one; the main checkout does not.
     const [gitDir, common] = await Promise.all([g(['rev-parse', '--absolute-git-dir']), g(['rev-parse', '--path-format=absolute', '--git-common-dir'])]);
     if (gitDir === common) throw new Error(`${cwd} is a main checkout, not a linked worktree`);
-    if (via && !via.boss) await pushCheckHome(branch, via);
+    if (via && !via.boss) await pushCheckHome(branch, via, itsaRef);
     await g(['push', 'origin', `refs/heads/${branch}:refs/heads/${branch}`]);
     return true;
   } catch (e: any) {

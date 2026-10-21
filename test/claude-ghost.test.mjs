@@ -102,3 +102,15 @@ test('promptInBox: a box too tall for the pane shows its last rows, which end th
   // Extra text after the end is never one copy.
   assert.equal(promptInBox(box('❯ alpha bravo charlie delta echo', '  foxtrot golf hotel india juliet', '  alpha bravo charlie delta echo fo', '  more'), long), 'other');
 });
+
+test('promptInBox: a resumed transcript above the box repeating the prompt, and blank rows inside it (S-2532)', () => {
+  const text = 'Resume work.\n\nNext: when #743 merges, do X';
+  const above = ['● Summary', '  Next: when #743 merges, do X', '', '  Resume work.', ''];
+  // The pasted blank line is a blank row inside the box; the transcript above is not the box.
+  assert.equal(promptInBox([...above, ...box('❯ Resume work.', '', '  Next: when #743 merges, do X')], text), 'one');
+  assert.equal(promptInBox([...above, ...box('❯ Resume work.', '  Next: when #743 merges, do X')], text), 'one');
+  // Two copies in the box still fail, blank row or not.
+  assert.equal(promptInBox([...above, ...box('❯ Resume work.', '', '  Next: when #743 merges, do X', '', '  Resume work.', '', '  Next: when #743 merges, do X')], text), 'other');
+  // Partial in the box fails closed even though the transcript above holds the whole prompt.
+  assert.equal(promptInBox([...above, ...box('❯ Resume work.', '')], text), 'other');
+});

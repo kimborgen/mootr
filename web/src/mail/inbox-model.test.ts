@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { WaitingRow } from '../itsa/WaitingList'
-import { filtered, grouped, hitGroup, isAwaiting, needsIds } from './inbox-model'
+import { filtered, grouped, hitGroup, isAwaiting, needsIds, unreadCount } from './inbox-model'
 
 const mail = (from: string, at: string, extra = {}) => ({ id: 'm' + at, from_id: from, from_name: from, subject: 's', created_at: at, recipients: [], ...extra })
 const thread = (id: string, from: string, at: string, extra = {}) => ({ thread_id: id, mails: [mail(from, at, extra)] }) as never
@@ -44,6 +44,36 @@ describe('inbox filters', () => {
     const s = filtered('toanswer', lists, [wait('w1', 'i3'), wait('w2', 'ar'), wait('w3', null)], [wait('w4', 'df')])
     expect(ids(s)).toEqual(['i3', 'ar', 'df'])
     expect(s.loose.map((w) => w.key)).toEqual(['w3'])
+  })
+  // The ask's thread: the agent's ask, then the human's deferring reply (the last message), unread for the human.
+  const askThread = (extraMails: { from: string; at: string; to?: string }[] = []) => ({ thread_id: 'ask', mails: [mail('x', yesterday, { recipients: [{ id: 'human', read_at: null }] }), mail('human', today), ...extraMails.map((m) => mail(m.from, m.at, { recipients: [{ id: m.to ?? 'human', read_at: null }] }))] }) as never
+  it('a deferred ask with a thread is under Deferred, not the inbox', () => {
+    const withAsk = { ...lists, humanThreads: [...lists.humanThreads, askThread()] }
+    const deferredWaits = [wait('d1', 'ask')]
+    expect(ids(filtered('all', withAsk, [], deferredWaits))).toEqual(['i1', 'i2', 'i3'])
+    expect(ids(filtered('unread', withAsk, [], deferredWaits))).toEqual(['i1'])
+    expect(ids(filtered('deferred', withAsk, [], deferredWaits))).toEqual(['df', 'ask'])
+  })
+  it('new mail in a deferred ask\'s thread brings it back to the inbox and the Unread list', () => {
+    const replied = { ...lists, humanThreads: [...lists.humanThreads, askThread([{ from: 'x', at: today }])] }
+    const deferredWaits = [wait('d1', 'ask')]
+    expect(ids(filtered('all', replied, [], deferredWaits))).toEqual(['i1', 'i2', 'i3', 'ask'])
+    expect(ids(filtered('deferred', replied, [], deferredWaits))).toEqual(['df'])
+  })
+  it('mail between two agents, after the deferral, leaves a deferred ask under Deferred', () => {
+    const between = { ...lists, humanThreads: [...lists.humanThreads, askThread([{ from: 'x', at: today, to: 'fixture-dev' }])] }
+    const deferredWaits = [wait('d1', 'ask')]
+    expect(ids(filtered('all', between, [], deferredWaits))).toEqual(['i1', 'i2', 'i3'])
+    expect(ids(filtered('deferred', between, [], deferredWaits))).toEqual(['df', 'ask'])
+  })
+  it('the unread count is the Unread list\'s length, with a deferred ask\'s thread left out', () => {
+    const withAsk = { ...lists, humanThreads: [...lists.humanThreads, askThread()] }
+    expect(unreadCount(withAsk, [], [wait('d1', 'ask')])).toBe(filtered('unread', withAsk, [], [wait('d1', 'ask')]).threads.length)
+    expect(unreadCount(withAsk, [], [wait('d1', 'ask')])).toBe(1)
+    expect(unreadCount(withAsk, [], [])).toBe(2)
+  })
+  it('a deferred thread stays under Deferred once and is not listed twice', () => {
+    expect(ids(filtered('deferred', lists, [], [wait('d2', 'df')]))).toEqual(['df'])
   })
   it('needs-you ids are the waiting rows\' threads', () => {
     expect([...needsIds([wait('w1', 'i3'), wait('w3', null)], lists)]).toEqual(['i3'])

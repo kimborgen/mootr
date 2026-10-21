@@ -28,7 +28,7 @@ process.env.PATH = `${join(home, 'bin')}:${process.env.PATH}`;
 
 const readBody = (req) => new Promise((resolve) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => resolve(b)); });
 
-let server, origin, mcpAuth;
+let server, origin, mcpAuth, secrets, settings;
 // What the fake server recorded, to assert the client's requests.
 const fake = { registered: null, challenges: new Map(), exchanges: [], refreshCount: 0 };
 
@@ -71,14 +71,14 @@ before(async () => {
     }
     if (req.method === 'POST' && url.pathname === '/register') {
       fake.registered = JSON.parse((await readBody(req)) || '{}');
-      return send(200, { client_id: 'stam-client-1' });
+      return send(200, { client_id: 'stam-client-1', client_secret: 'DCR-SECRET-1' });
     }
     if (req.method === 'POST' && url.pathname === '/token') {
       const form = new URLSearchParams(await readBody(req));
       if (form.get('grant_type') === 'authorization_code') {
         const challenge = fake.challenges.get(form.get('code'));
         const ok = Boolean(challenge) && createHash('sha256').update(form.get('code_verifier') ?? '').digest('base64url') === challenge;
-        fake.exchanges.push({ code: form.get('code'), resource: form.get('resource'), redirect_uri: form.get('redirect_uri'), client_id: form.get('client_id'), verifier: form.get('code_verifier'), ok });
+        fake.exchanges.push({ code: form.get('code'), resource: form.get('resource'), redirect_uri: form.get('redirect_uri'), client_id: form.get('client_id'), client_secret: form.get('client_secret'), verifier: form.get('code_verifier'), ok });
         if (!ok) return send(400, { error: 'invalid_grant', error_description: 'PKCE failed' });
         // CODE-2 models a provider that issues no refresh_token, so the previous grant's
         // refresh token must not survive the new login.
@@ -87,6 +87,7 @@ before(async () => {
       if (form.get('grant_type') === 'refresh_token') {
         fake.refreshCount++;
         fake.refreshedWith = form.get('refresh_token');
+        fake.refreshedSecret = form.get('client_secret');
         return send(200, { access_token: 'ACCESS-2', refresh_token: 'REFRESH-2', expires_in: 3600 });
       }
     }
@@ -104,10 +105,16 @@ before(async () => {
         issuerbad: { url: `${origin}/badmcp`, auth: { type: 'oauth' } },
         badresource: { url: `${origin}/goodmcp`, auth: { type: 'oauth' } },
         github: { url: `${origin}/mcp`, auth: { type: 'gh' } },
+        slack: { url: `${origin}/mcp`, auth: { type: 'oauth', client_id: 'slack-id', client_secret: 'PLAIN-SLACK' } },
+        oldslack: { url: `${origin}/mcp`, auth: { type: 'oauth' } },
+        // A secret the store can't hold (it has a space), to see a login refuse it before any exchange.
+        badsecret: { url: `${origin}/mcp`, auth: { type: 'oauth', client_id: 'bad-id', client_secret: 'has a space' } },
       },
     }),
   );
   mcpAuth = await import('../src/mcp-auth.ts');
+  secrets = await import('../src/secrets.ts');
+  settings = await import('../src/settings.ts');
 });
 
 after(() => {
@@ -143,6 +150,11 @@ test('oauth > discovery from a 401, DCR, PKCE, and the exchange', async () => {
   assert.equal(mcpAuth.store().linear.access_token, 'ACCESS-1');
   assert.equal(mcpAuth.store().linear.refresh_token, 'REFRESH-1');
   assert.ok(mcpAuth.store().linear.expires_at > Date.now(), 'expires_at comes from expires_in');
+  // The registered client secret goes to the secret store; the token file holds only its name.
+  assert.equal(fake.exchanges[0].client_secret, 'DCR-SECRET-1', 'the exchange sent the registered secret');
+  assert.deepEqual(mcpAuth.store().linear.client_secret, { secret: secrets.mcpClientSecretName('linear') });
+  assert.equal(secrets.getSecret(secrets.mcpClientSecretName('linear')), 'DCR-SECRET-1');
+  assert.ok(!readFileSync(join(home, 'mcp-auth.json'), 'utf8').includes('DCR-SECRET-1'), 'the token file holds no secret value');
 });
 
 test('oauth > the state is single use', async () => {
@@ -168,6 +180,7 @@ test('oauth > refreshes with the refresh_token near expiry', async () => {
   assert.equal(await mcpAuth.token('linear'), 'ACCESS-2');
   assert.equal(fake.refreshCount, 1);
   assert.equal(fake.refreshedWith, 'REFRESH-1');
+  assert.equal(fake.refreshedSecret, 'DCR-SECRET-1', 'the refresh reads the secret from the store');
   assert.equal(mcpAuth.store().linear.access_token, 'ACCESS-2');
 });
 
@@ -233,4 +246,201 @@ test('logout > forgets the stored tokens', async () => {
   assert.equal(mcpAuth.store().linear, undefined);
   const rows = await mcpAuth.status();
   assert.equal(rows.find((r) => r.name === 'linear').logged_in, false);
+});
+
+test('secrets > a plain-text client secret moves into the store once, and refresh still finds it', async () => {
+  const settingsFile = join(home, 'settings.json');
+  const tokenFile = join(home, 'mcp-auth.json');
+  const readSettingsText = () => readFileSync(settingsFile, 'utf8');
+  // Plain text in settings (slack) and in the token file (oldslack), as before S-2736.
+  const s = JSON.parse(readSettingsText());
+  s.mcpServers.slack.auth.client_secret = 'PLAIN-SLACK';
+  writeFileSync(settingsFile, JSON.stringify(s));
+  mcpAuth.writeStore({
+    ...mcpAuth.store(),
+    oldslack: { server_url: `${origin}/mcp`, client_id: 'old-id', client_secret: 'PLAIN-TOKEN', access_token: 'ACCESS-OLD', refresh_token: 'REFRESH-OLD', expires_at: Date.now() - 1000, token_endpoint: `${origin}/token`, resource: `${origin}/mcp` },
+  });
+
+  mcpAuth.migrateClientSecrets();
+  assert.deepEqual(JSON.parse(readSettingsText()).mcpServers.slack.auth.client_secret, { secret: secrets.mcpClientSecretName('slack') });
+  assert.equal(secrets.getSecret(secrets.mcpClientSecretName('slack')), 'PLAIN-SLACK');
+  assert.deepEqual(mcpAuth.store().oldslack.client_secret, { secret: secrets.mcpClientSecretName('oldslack') });
+  assert.equal(secrets.getSecret(secrets.mcpClientSecretName('oldslack')), 'PLAIN-TOKEN');
+  assert.ok(!readSettingsText().includes('PLAIN-SLACK'), 'the plain text left settings');
+  assert.ok(!readFileSync(tokenFile, 'utf8').includes('PLAIN-TOKEN'), 'the plain text left the token file');
+  assert.equal(statSync(join(home, 'secrets.json')).mode & 0o777, 0o600, 'the store is 0600');
+
+  // Idempotent: a second run changes neither file.
+  const once = [readSettingsText(), readFileSync(tokenFile, 'utf8')];
+  mcpAuth.migrateClientSecrets();
+  assert.deepEqual([readSettingsText(), readFileSync(tokenFile, 'utf8')], once);
+
+  // Refresh after the move: the reference resolves from the store.
+  assert.equal(await mcpAuth.token('oldslack'), 'ACCESS-2');
+  assert.equal(fake.refreshedSecret, 'PLAIN-TOKEN');
+});
+
+test('secrets > a broken store moves nothing and loses no setting; a later start moves it', async () => {
+  const settingsFile = join(home, 'settings.json');
+  const readSettingsText = () => readFileSync(settingsFile, 'utf8');
+  const s = JSON.parse(readSettingsText());
+  s.mcpServers.slack.auth.client_secret = 'PLAIN-SLACK-2';
+  writeFileSync(settingsFile, JSON.stringify(s));
+  writeFileSync(join(home, 'secrets.json'), '{not json');
+
+  mcpAuth.migrateClientSecrets();
+  assert.equal(JSON.parse(readSettingsText()).mcpServers.slack.auth.client_secret, 'PLAIN-SLACK-2', 'the setting kept its value');
+
+  rmSync(join(home, 'secrets.json'));
+  mcpAuth.migrateClientSecrets();
+  assert.deepEqual(JSON.parse(readSettingsText()).mcpServers.slack.auth.client_secret, { secret: secrets.mcpClientSecretName('slack') });
+  assert.equal(secrets.getSecret(secrets.mcpClientSecretName('slack')), 'PLAIN-SLACK-2');
+});
+
+test('secrets > names that sanitize alike get separate secrets, and a login never overwrites another server\'s', () => {
+  const a = secrets.mcpClientSecretName('a b');
+  const b = secrets.mcpClientSecretName('a-b');
+  assert.notEqual(a, b, 'two servers never share a store name');
+  assert.ok(secrets.NAME_RE.test(a) && secrets.NAME_RE.test(b), 'both names fit the store rule');
+  assert.equal(secrets.mcpClientSecretName('a b'), a, 'the name is stable for one server');
+  secrets.set(a, { value: 'SECRET-A' });
+  secrets.set(b, { value: 'SECRET-B' });
+  assert.equal(secrets.getSecret(a), 'SECRET-A');
+  assert.equal(secrets.getSecret(b), 'SECRET-B');
+});
+
+test('secrets > settings show the secret name to an agent, never the value', () => {
+  const shown = settings.redactValue({ mcpServers: { slack: { url: 'https://x', auth: { type: 'oauth', client_secret: { secret: 'mcp-slack-client' } } } } });
+  assert.deepEqual(shown.mcpServers.slack.auth.client_secret, { secret: 'mcp-slack-client' });
+  const plain = settings.redactValue({ mcpServers: { x: { auth: { type: 'oauth', client_secret: 'PLAIN-X' } } } });
+  assert.equal(plain.mcpServers.x.auth.client_secret, '[redacted]');
+});
+
+test('settings > a login with a settings reference sends the stored secret, and the grant keeps the reference', async () => {
+  const name = secrets.mcpClientSecretName('slack');
+  const r = await mcpAuth.startLogin('slack', `${origin}/oauth/callback`);
+  const u = new URL(r.url);
+  fake.challenges.set('CODE-S', u.searchParams.get('code_challenge'));
+  await mcpAuth.finishLogin('CODE-S', u.searchParams.get('state'));
+  const ex = fake.exchanges.at(-1);
+  assert.equal(ex.ok, true);
+  assert.equal(ex.client_secret, 'PLAIN-SLACK-2', 'the exchange sent the value the store holds');
+  assert.deepEqual(mcpAuth.store().slack.client_secret, { secret: name });
+  assert.ok(!readFileSync(join(home, 'mcp-auth.json'), 'utf8').includes('PLAIN-SLACK-2'), 'the token file holds no value');
+});
+
+test('settings > logout removes a registration secret, and keeps one the settings name', () => {
+  const slackName = secrets.mcpClientSecretName('slack');
+  mcpAuth.logout('slack');
+  assert.equal(secrets.getSecret(slackName), 'PLAIN-SLACK-2', 'a settings-named secret stays');
+  const oldName = secrets.mcpClientSecretName('oldslack');
+  secrets.set(oldName, { value: 'PLAIN-TOKEN', provider: 'mcp' });
+  assert.equal(mcpAuth.store().oldslack.client_secret.secret, oldName, 'the grant names it');
+  mcpAuth.logout('oldslack');
+  assert.equal(secrets.getSecret(oldName), undefined, 'a registration-style secret goes with its grant');
+});
+
+test('secrets > a migration never overwrites a value the store holds under the name', () => {
+  const settingsFile = join(home, 'settings.json');
+  const s = JSON.parse(readFileSync(settingsFile, 'utf8'));
+  s.mcpServers.slack.auth.client_secret = 'PLAIN-DIFF';
+  writeFileSync(settingsFile, JSON.stringify(s));
+  mcpAuth.migrateClientSecrets();
+  assert.equal(JSON.parse(readFileSync(settingsFile, 'utf8')).mcpServers.slack.auth.client_secret, 'PLAIN-DIFF', 'the plain text stays in place');
+  assert.equal(secrets.getSecret(secrets.mcpClientSecretName('slack')), 'PLAIN-SLACK-2', 'the stored value is unchanged');
+});
+
+test('oauth > a client secret the store refuses fails the login before any exchange', async () => {
+  const before = fake.exchanges.length;
+  await assert.rejects(() => mcpAuth.startLogin('badsecret', `${origin}/oauth/callback`), /client secret/);
+  assert.equal(fake.exchanges.length, before, 'no exchange was sent');
+});
+
+test('settings > a client secret written through settings moves into the store, the file keeps the reference', () => {
+  const settingsFile = join(home, 'settings.json');
+  const servers = JSON.parse(readFileSync(settingsFile, 'utf8')).mcpServers;
+  delete servers.badsecret; // a value the store refuses; the test below covers it
+  servers.slack.auth.client_secret = 'TYPED-NEW';
+  const r = settings.patchSettings({ mcpServers: servers });
+  assert.ok('text' in r, 'the patch was written');
+  const text = readFileSync(settingsFile, 'utf8');
+  assert.ok(!text.includes('TYPED-NEW'), 'the value never reached settings.json');
+  assert.deepEqual(JSON.parse(text).mcpServers.slack.auth.client_secret, { secret: secrets.mcpClientSecretName('slack') });
+  assert.equal(secrets.getSecret(secrets.mcpClientSecretName('slack')), 'TYPED-NEW');
+  // A whole-file save takes the same path.
+  const whole = JSON.parse(readFileSync(settingsFile, 'utf8'));
+  whole.mcpServers.slack.auth.client_secret = 'TYPED-FILE';
+  settings.writeSettingsText(JSON.stringify(whole));
+  assert.ok(!readFileSync(settingsFile, 'utf8').includes('TYPED-FILE'), 'a whole-file save moves it too');
+  assert.equal(secrets.getSecret(secrets.mcpClientSecretName('slack')), 'TYPED-FILE');
+});
+
+test('settings > a patch refused for cost leaves the stored secret and the file as they were (S-2767)', () => {
+  const settingsFile = join(home, 'settings.json');
+  const name = secrets.mcpClientSecretName('slack');
+  const old = secrets.getSecret(name);
+  assert.ok(old, 'the slack secret is stored');
+  const text = readFileSync(settingsFile, 'utf8');
+  const servers = JSON.parse(text).mcpServers;
+  servers.slack.auth.client_secret = 'TYPED-REFUSED';
+  const cost = { accounts: { a: { match: { harness: 'claude' } }, b: { match: { harness: 'claude' } } } };
+  const r = settings.patchSettings({ mcpServers: servers, cost });
+  assert.equal(r.field, 'cost');
+  assert.match(r.problem, /both match/);
+  assert.equal(secrets.getSecret(name), old, 'the store keeps the old value');
+  assert.equal(readFileSync(settingsFile, 'utf8'), text, 'nothing was written');
+});
+
+test('settings > a value the store refuses writes nothing, the stored secret stays (S-2767)', () => {
+  const settingsFile = join(home, 'settings.json');
+  const name = secrets.mcpClientSecretName('slack');
+  const old = secrets.getSecret(name);
+  const text = readFileSync(settingsFile, 'utf8');
+  const servers = JSON.parse(text).mcpServers;
+  servers.slack.auth.client_secret = 'has a space';
+  assert.throws(() => settings.patchSettings({ mcpServers: servers }), /no spaces/);
+  assert.equal(secrets.getSecret(name), old, 'the store keeps the old value');
+  assert.equal(readFileSync(settingsFile, 'utf8'), text, 'nothing was written');
+});
+
+// A reference to a store entry that isn't tagged `mcp` is refused before any exchange, and the error never shows its value (S-2767).
+async function refusesRef(entry, provider, value) {
+  const settingsFile = join(home, 'settings.json');
+  const original = JSON.parse(readFileSync(settingsFile, 'utf8')).mcpServers;
+  secrets.set(entry, { value, provider });
+  try {
+    const servers = structuredClone(original);
+    servers.wrongref = { url: `${origin}/mcp`, auth: { type: 'oauth', client_id: 'wrong-id', client_secret: { secret: entry } } };
+    settings.patchSettings({ mcpServers: servers });
+    const sent = fake.exchanges.length;
+    await assert.rejects(
+      () => mcpAuth.startLogin('wrongref', `${origin}/oauth/callback`),
+      (e) => {
+        assert.match(e.message, new RegExp(`${entry} is not an MCP client secret`));
+        assert.ok(!e.message.includes(value), 'the error never shows the value');
+        return true;
+      },
+    );
+    assert.equal(fake.exchanges.length, sent, 'no exchange was sent');
+  } finally {
+    settings.patchSettings({ mcpServers: original });
+    secrets.remove(entry);
+  }
+}
+
+test('oauth > a client secret naming a provider key is refused before any exchange (S-2767)', async () => {
+  await refusesRef('openrouter', 'openrouter', 'OR-KEY-LEAK-1');
+});
+
+test('oauth > a client secret naming an untagged store entry is refused before any exchange (S-2767)', async () => {
+  await refusesRef('untagged-key', '', 'UNTAGGED-KEY-LEAK-1');
+});
+
+test('oauth > a peer that holds no secret says to log in on the home machine', async () => {
+  const settingsFile = join(home, 'settings.json');
+  const s = JSON.parse(readFileSync(settingsFile, 'utf8'));
+  s.home = 'some-other-machine';
+  s.mcpServers.peer = { url: `${origin}/mcp`, auth: { type: 'oauth', client_id: 'peer-id', client_secret: { secret: 'mcp-peer-client' } } };
+  writeFileSync(settingsFile, JSON.stringify(s));
+  await assert.rejects(() => mcpAuth.startLogin('peer', `${origin}/oauth/callback`), /log in on the home machine/);
 });

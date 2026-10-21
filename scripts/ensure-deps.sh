@@ -8,12 +8,12 @@
 set -e
 
 [ -f package-lock.json ] || exit 0
-home=${STAM_HOME:-$HOME/.local/share/stam}
+home=${MOOTR_HOME:-${STAM_HOME:-$HOME/.local/share/stam}}
 new=$(sha256sum package-lock.json | cut -d' ' -f1)
 old=$(cat "$home/checkout-deps.sha" 2>/dev/null || true)
 [ "$new" = "$old" ] && [ -d node_modules ] && exit 0
 
 echo "ensure-deps: package-lock.json changed, running npm ci"
-timeout 280 ${STAM_NPM:-npm} ci --no-audit --no-fund
+timeout 280 ${MOOTR_NPM:-${STAM_NPM:-npm}} ci --no-audit --no-fund
 mkdir -p "$home"
 printf '%s' "$new" > "$home/checkout-deps.sha"

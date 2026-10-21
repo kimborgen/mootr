@@ -6,6 +6,9 @@
 #   - a reviewer's own token on main is forwarded over the peer token, and posts as that reviewer
 #   - an OpenCode server naming its agent with `by` posts as that agent, and without `by` is refused
 #   - a head that moved is refused (409) and nothing is posted
+#   - who may post (S-1065): a forwarded reviewer, chief of staff and assistant (unknown to the home) post, a forwarded
+#     developer and the owner of the PR's branch are refused (403) before gh posts, and a local agent's forged
+#     review-role headers are ignored
 set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 daemon_home main
@@ -17,7 +20,7 @@ MOVED=abcdef1234567890abcdef1234567890abcdef12
 cat >"$G/gh" <<GH
 #!/bin/sh
 echo "\$*" >>"$G/calls"
-case "\$1 \$2" in "pr view") echo "{\"headRefOid\":\"$HEAD\"}" ;; esac
+case "\$1 \$2" in "pr view") case "\$*" in *headRefName*) echo "{\"headRefName\":\"\$(cat "$G/branch" 2>/dev/null || echo stam/someone-else)\"}" ;; *) echo "{\"headRefOid\":\"$HEAD\"}" ;; esac ;; esac
 GH
 chmod +x "$G/gh"
 printf '%s' peer-token-main >"$TEST_TMP/main/peer-token"
@@ -33,6 +36,7 @@ for d in ("main", "home"):
     path = f"{tmp}/{d}/settings.json"
     s = json.load(open(path))
     s["peers"] = [peer("home", "peer-token-home")] if d == "main" else [peer("main", "peer-token-main")]
+    if d == "home": s["chiefOfStaff"] = "pcos"
     s["itsa"] = {"home": "home", "repos": {"stam2": repo}, "prOpen": {"repo": "stam2", "storage": "", "origin": "origin", "gh": f"{g}/gh", "github": "example/stam"}}
     json.dump(s, open(path, "w"), indent=2)
 PY
@@ -48,19 +52,18 @@ api() {
   _url=$MAIN_URL; _tok=$MAIN_TOKEN; [ "$1" = home ] && { _url=$HOME_URL; _tok=$HOME_TOKEN; }
   curl -s -X "$2" -H "authorization: Bearer $_tok" -H 'content-type: application/json' -H 'x-stam-human: 1' ${4:+-d "$4"} "$_url$3"
 }
-# reg DAEMON NAME [HARNESS]: a registered agent with a known token (tok-NAME); prints its id.
+# tapi: api for /api/test/* routes; -f fails at the call when the gate answers 404.
+tapi() {
+  _url=$MAIN_URL; _tok=$MAIN_TOKEN; [ "$1" = home ] && { _url=$HOME_URL; _tok=$HOME_TOKEN; }
+  curl -sf -X "$2" -H "authorization: Bearer $_tok" -H 'content-type: application/json' -H 'x-stam-human: 1' ${4:+-d "$4"} "$_url$3"
+}
+# reg DAEMON NAME [HARNESS] [TYPE] [KIND]: a registered agent with a known token (tok-NAME); prints its id.
 reg() {
   _id=$(api "$1" POST /api/register "{\"name\":\"$2\",\"role\":\"reviewer\",\"harness\":\"${3:-claude}\"}" | jget "d['id']")
-  python3 - "$TEST_TMP/$1" "$_id" "$2" <<'PY'
-import hashlib, sqlite3, sys, glob
-home, id, name = sys.argv[1:4]
-db = sqlite3.connect(glob.glob(f"{home}/*.db")[0], timeout=10)
-db.execute("UPDATE agents SET token_hash = ? WHERE id = ?", (hashlib.sha256(f"tok-{name}".encode()).hexdigest(), id))
-db.commit()
-PY
+  tapi "$1" POST /api/test/agent "{\"agent\":\"$_id\",\"token\":\"tok-$2\"${4:+,\"type\":\"$4\"}${5:+,\"kind\":\"$5\"}}" >/dev/null
   echo "$_id"
 }
-A=$(reg main pa)
+A=$(reg main pa claude reviewer)
 [ -n "$A" ] || fail "an agent didn't register"
 # verdict URL TOKEN PR HEAD VERDICT [BY] [HEADER]: the status of the route; the reply is in $TEST_TMP/body.
 verdict() {
@@ -80,7 +83,7 @@ echo "-- a reviewer's own token on main is forwarded over the peer token, and po
 calls | grep -qF "Review ($A): approve. Checked." || fail "the comment didn't name the reviewer: $(calls)"
 
 echo "-- an OpenCode server naming its agent with by posts as that agent; without by it is refused"
-O=$(reg main oc opencode)
+O=$(reg main oc opencode reviewer)
 [ "$(verdict "$MAIN_URL" oc-test-token 42 "$HEAD" request_changes "$O")" = 200 ] || fail "the OpenCode verdict was refused: $(cat "$TEST_TMP/body")"
 calls | grep -qF "Review ($O): request_changes. Checked." || fail "the OpenCode comment didn't name its agent: $(calls)"
 [ "$(verdict "$MAIN_URL" oc-test-token 42 "$HEAD" approve)" = 403 ] || fail "an OpenCode verdict without by wasn't refused"
@@ -89,4 +92,29 @@ echo "-- a moved head is refused (409) and nothing is posted"
 rm -f "$G/calls"
 [ "$(verdict "$MAIN_URL" tok-pa 42 "$MOVED" approve)" = 409 ] || fail "a moved head wasn't refused: $(cat "$TEST_TMP/body")"
 calls | grep -qF 'pr comment' && fail "a comment was posted for a moved head" || true
+
+echo "-- who may post (S-1065): a forwarded chief of staff and assistant, unknown to the home, post; a forwarded developer does not"
+rm -f "$G/calls"
+reg main pcos claude cos >/dev/null
+[ "$(api main GET /api/chief-of-staff | jget "d['chiefOfStaff']")" = pcos ] || fail "main doesn't know pcos as its chief of staff: $(api main GET /api/chief-of-staff)"
+[ "$(verdict "$MAIN_URL" tok-pcos 42 "$HEAD" approve)" = 200 ] || fail "a forwarded chief of staff was refused: $(cat "$TEST_TMP/body")"
+reg main passt claude developer assistant >/dev/null
+[ "$(verdict "$MAIN_URL" tok-passt 42 "$HEAD" approve)" = 200 ] || fail "a forwarded assistant was refused: $(cat "$TEST_TMP/body")"
+D=$(reg main pdev claude developer)
+rm -f "$G/calls"
+[ "$(verdict "$MAIN_URL" tok-pdev 42 "$HEAD" approve)" = 403 ] || fail "a forwarded developer wasn't refused: $(cat "$TEST_TMP/body")"
+calls | grep -qF 'pr comment' && fail "a comment was posted for a developer" || true
+
+echo "-- the owner of the PR's branch is refused, forwarded and local"
+reg main pself claude reviewer >/dev/null
+echo stam/pself >"$G/branch"
+[ "$(verdict "$MAIN_URL" tok-pself 42 "$HEAD" approve)" = 403 ] || fail "a forwarded owner wasn't refused: $(cat "$TEST_TMP/body")"
+grep -qF 'own PR' "$TEST_TMP/body" || fail "the refusal didn't say why: $(cat "$TEST_TMP/body")"
+rm -f "$G/branch"
+
+echo "-- a local agent on the home sending review headers is ignored: the home's own facts decide"
+reg home hdev claude developer >/dev/null
+[ "$(verdict "$HOME_URL" tok-hdev 42 "$HEAD" approve '' 'x-stam-review-role: manager')" = 403 ] || fail "a forged role header was honoured: $(cat "$TEST_TMP/body")"
+reg home hrev claude reviewer >/dev/null
+[ "$(verdict "$HOME_URL" tok-hrev 42 "$HEAD" approve)" = 200 ] || fail "a local reviewer was refused: $(cat "$TEST_TMP/body")"
 echo PASS

@@ -8,13 +8,15 @@
 // (archived, forgotten, unknown): then its shell is stopped too (S-195). A user's run keeps its
 // shell only while the run is younger than the age limit. Conservative by design: when unsure it
 // keeps the folder and says why. It never looks at the live daemon, its `stam` tmux socket,
-// or ~/.local/share/stam, and only ever removes paths under /tmp/stam-test.*.
+// or ~/.local/share/stam, and only ever removes paths under /tmp/stam-test.*, plus the hook payload
+// files of a hook killed hard (sweepHookFiles, S-2266).
 import { lstat, readdir, readFile, rm, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { testTmpBase } from './config.ts';
+import { envVar } from './env.ts';
 
 const MAX_AGE_MS = 3 * 60 * 60 * 1000;
 // A tmux or systemctl call that hasn't answered in this long is killed. A hung test tmux server
@@ -28,6 +30,9 @@ const TMUX_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 // run without --only), along with its tmux servers: its test may be starting or still sweeping
 // its own fixtures. A scoped sweep (--only) ignores it.
 const FRESH_MS = 5 * 60 * 1000;
+// A hook payload file (bin/stam-fast's mktemp stam-hook.*) older than this is a leftover of a hook
+// that was killed before its trap ran. A hook takes well under a second, so an hour is safe.
+const HOOK_FILE_MAX_AGE_MS = 60 * 60 * 1000;
 const LIVE_SOCKET = 'stam';
 const UNIT_DIR = join(homedir(), '.config', 'systemd', 'user');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -52,6 +57,9 @@ function run(file: string, args: string[]): Promise<Run> {
   });
 }
 const tmux = (socket: string, args: string[]) => run('tmux', ['-L', socket, ...args]);
+
+// Where tmux keeps its sockets: TMUX_TMPDIR, else /tmp. tmux ignores TMPDIR, so a caller's TMPDIR (a test run's, S-2586) never moves them.
+const tmuxSocketDir = () => join(process.env.TMUX_TMPDIR || '/tmp', `tmux-${process.getuid?.() ?? 0}`);
 const systemctl = (...args: string[]) => run('systemctl', ['--user', ...args]);
 
 // What a tmux server that didn't answer leaves in the result: its socket is skipped this round.
@@ -62,7 +70,7 @@ function tmuxSkipped(socket: string): Kept {
 }
 
 export interface Action {
-  kind: 'unit' | 'tmux' | 'daemon' | 'dir';
+  kind: 'unit' | 'tmux' | 'daemon' | 'dir' | 'hook';
   target: string;
   dir: string;
   detail?: string;
@@ -153,6 +161,27 @@ async function testDirs(roots: string[]): Promise<string[]> {
   return out;
 }
 
+// The stam-hook.* payload files directly under each root that an hour old or more: plain files this
+// user owns. A folder, a symlink (lstat doesn't follow it), a newer file, or another user's file is
+// kept. Removes them unless dryRun, and returns what it removed (or would).
+export async function sweepHookFiles(roots: string[], opts: { dryRun?: boolean; now?: number } = {}): Promise<Action[]> {
+  const now = opts.now ?? Date.now();
+  const uid = process.getuid?.();
+  const out: Action[] = [];
+  for (const root of roots) {
+    const names = await readdir(root).catch((): string[] => []);
+    for (const n of names) {
+      if (!/^stam-hook\./.test(n)) continue;
+      const p = join(root, n);
+      const st = await lstat(p).catch(() => undefined);
+      if (!st?.isFile() || (uid !== undefined && st.uid !== uid) || now - st.mtimeMs < HOOK_FILE_MAX_AGE_MS) continue;
+      if (!opts.dryRun && !(await rm(p).then(() => true, () => false))) continue;
+      out.push({ kind: 'hook', target: p, dir: root });
+    }
+  }
+  return out;
+}
+
 async function readOwner(dir: string): Promise<Owner | undefined> {
   const text = await readFile(join(dir, 'owner'), 'utf8').catch(() => undefined);
   if (text === undefined) return undefined;
@@ -223,7 +252,7 @@ async function ownerShellAlive(owner: Owner): Promise<boolean> {
 }
 
 function pidsUnder(dir: string, all: Proc[]): Proc[] {
-  return all.filter((p) => p.pid !== process.pid && p.env.STAM_HOME && (p.env.STAM_HOME === dir || p.env.STAM_HOME.startsWith(dir + '/')));
+  return all.filter((p) => p.pid !== process.pid && envVar('HOME', p.env) && (envVar('HOME', p.env) === dir || envVar('HOME', p.env)!.startsWith(dir + '/')));
 }
 
 async function subdirs(dir: string): Promise<string[]> {
@@ -241,27 +270,26 @@ async function socketsFor(dir: string): Promise<string[]> {
   for (const sub of await subdirs(dir)) {
     const text = await readFile(join(sub, 'test.env'), 'utf8').catch(() => undefined);
     if (text === undefined) continue;
-    const m = text.match(/STAM_TMUX_SOCKET=('?)([^\s'"]+)\1/);
+    const m = text.match(/(?:MOOTR|STAM)_TMUX_SOCKET=('?)([^\s'"]+)\1/);
     if (m && m[2] !== LIVE_SOCKET) set.add(m[2]);
   }
   const m = basename(dir).match(/^stam-test\.(.+)\.([^.]+)$/);
   if (m) {
     const prefix = `stam-test-${m[1]}-${m[2]}-`;
-    const sockDir = join(tmpdir(), `tmux-${process.getuid?.() ?? 0}`);
-    for (const s of await readdir(sockDir).catch((): string[] => [])) if (s.startsWith(prefix) && s !== LIVE_SOCKET) set.add(s);
+    for (const s of await readdir(tmuxSocketDir()).catch((): string[] => [])) if (s.startsWith(prefix) && s !== LIVE_SOCKET) set.add(s);
   }
   return [...set];
 }
 
-// stamd-test-* units and the test home each one runs.
+// stamd-test-* units (and the mootrd-test-* alias, S-2889) and the test home each one runs.
 async function testUnits(): Promise<{ name: string; path: string; home?: string }[]> {
   const names = await readdir(UNIT_DIR).catch((): string[] => []);
   const out: { name: string; path: string; home?: string }[] = [];
   for (const n of names) {
-    if (!/^stamd-test-.*\.service$/.test(n)) continue;
+    if (!/^(stamd|mootrd)-test-.*\.service$/.test(n)) continue;
     const path = join(UNIT_DIR, n);
     const text = await readFile(path, 'utf8').catch(() => undefined);
-    const home = text?.match(/^Environment=STAM_HOME=(.+)$/m)?.[1]?.trim();
+    const home = text?.match(/^Environment=(?:MOOTR|STAM)_HOME=(.+)$/m)?.[1]?.trim();
     out.push({ name: n.replace(/\.service$/, ''), path, home });
   }
   return out;
@@ -319,7 +347,7 @@ async function stopTmux(socket: string): Promise<boolean> {
       process.kill(-p, 'SIGTERM');
     } catch {}
   }
-  await rm(join(tmpdir(), `tmux-${process.getuid?.() ?? 0}`, socket), { force: true });
+  await rm(join(tmuxSocketDir(), socket), { force: true });
   return true;
 }
 
@@ -339,7 +367,7 @@ export function leakedTmux(s: { ownerActive: boolean; ageMs: number; shellAlive:
 
 // The test tmux servers under the tmux socket directory, other than the live `stam` one.
 async function testSockets(): Promise<string[]> {
-  const names = await readdir(join(tmpdir(), `tmux-${process.getuid?.() ?? 0}`)).catch((): string[] => []);
+  const names = await readdir(tmuxSocketDir()).catch((): string[] => []);
   return names.filter((s) => s.startsWith('stam-test-') && s !== LIVE_SOCKET);
 }
 
@@ -357,7 +385,7 @@ export async function sweep(opts: { dryRun?: boolean; only?: string[]; activeAge
   const dirs = (await testDirs(roots)).filter(inScope);
   result.dirs = dirs.length;
   const orphans: { dir: string; procs: Proc[] }[] = [];
-  const activeAgent = (id: string) => (opts.activeAgents ? opts.activeAgents.has(id) : all.some((p) => p.env.STAM_AGENT_ID === id));
+  const activeAgent = (id: string) => (opts.activeAgents ? opts.activeAgents.has(id) : all.some((p) => envVar('AGENT_ID', p.env) === id));
   // An owner this daemon's registry doesn't hold: a live agent of another daemon on this machine, or a
   // forgotten one. Its folders and servers are kept (the age limits still apply), not swept.
   const unknownOwner = (id: string) => Boolean(opts.knownAgents && !opts.knownAgents.has(id));
@@ -380,7 +408,7 @@ export async function sweep(opts: { dryRun?: boolean; only?: string[]; activeAge
         continue;
       }
     }
-    const agentAlive = Boolean(owner.agent && owner.agent !== 'user' && all.some((p) => p.env.STAM_AGENT_ID === owner.agent));
+    const agentAlive = Boolean(owner.agent && owner.agent !== 'user' && all.some((p) => envVar('AGENT_ID', p.env) === owner.agent));
     if (agentAlive && (await ageMs(dir, owner)) <= MAX_AGE_MS) {
       result.kept.push({ path: dir, why: `owner agent ${owner.agent} is alive` });
       continue;
@@ -493,6 +521,9 @@ export async function sweep(opts: { dryRun?: boolean; only?: string[]; activeAge
       result.actions.push({ kind: 'tmux', target: socket, dir: dir ?? '', detail: why });
     }
   }
+
+  // Hook payload leftovers are not test folders, so a scoped (--only) sweep leaves them alone.
+  if (!only.length) result.actions.push(...(await sweepHookFiles(roots, { dryRun })));
 
   return result;
 }

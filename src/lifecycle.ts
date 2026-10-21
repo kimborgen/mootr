@@ -15,20 +15,26 @@ import * as tree from './tree.ts';
 import * as tmux from './tmux.ts';
 import { adapters } from './adapters/index.ts';
 import { render, renderWithRetro, withRetroReminder } from './templates.ts';
-import { cleanupWorkspace, type Workspace } from './workspace.ts';
+import { branchIsBase, cleanupWorkspace, workspaceUnpushedRefusal, type Workspace } from './workspace.ts';
 import { markCompacted, idleCompactIfDue } from './context.ts';
 import { markCold } from './cache-cold.ts';
 import { typeOf } from './agent-class.ts';
-import { compactorProcesses, dirProcesses, removeAgentScratchDirs, removeClaudeScratch, removeReviewDir, removeReviewTmpDir, reviewDirOf, reviewTmpForSpawn, stopAndConfirm } from './proctree.ts';
+import { compactorProcesses, dirProcesses, removeAgentScratchDirs, removeClaudeScratch, removeReviewDir, removeReviewTmpDir, reviewDirForLaunch, reviewTmpForSpawn, stopAndConfirm } from './proctree.ts';
 import { isReviewerType } from './agent-types.ts';
 import { admit, heldBy, type TurnKind } from './admission.ts';
-import { schedulePush, queueNotice, tellAnywhere, queuedNoticeCount, onRestWake, tellStopped } from './mail.ts';
+import { schedulePush, queueNotice, tellAnywhere, wakeableNoticeCount, onRestWake, tellStopped } from './mail.ts';
 import { failLaunch } from './test-hooks.ts';
 import { switchFailed, type SwitchUndo } from './permission-modes.ts';
 import { registry } from './registry.ts';
 import { settings } from './settings.ts';
 import { chiefOfStaff, syncChildrenWaits } from './org.ts';
+import { isAssistant } from './mail-visibility.ts';
 import * as itsa from './itsa.ts';
+import { restoreTranscript } from './transcript-gz.ts';
+import * as costFallback from './cost-fallback.ts';
+import { withdrawStaleRequests } from './permissions.ts';
+import { envVar } from './env.ts';
+import { networkUp } from './network-probes.ts';
 
 type Pending =
   // `at` (epoch ms, S-1402): the deadline for the final round a plain shutdown now asks for.
@@ -39,7 +45,7 @@ type Pending =
   // agent's current step", and still implies `discard` for older callers. `discard` removes
   // uncommitted worktree changes. `at` (epoch ms) is the deadline for the final round: past it,
   // the sweep archives regardless of the agent's turn. `tries` counts deadline retries.
-  | { type: 'archive'; force?: boolean; discard?: boolean; at?: number; tries?: number; midTurn?: boolean; waited?: boolean }
+  | { type: 'archive'; force?: boolean; discard?: boolean; forceUnpushed?: boolean; at?: number; tries?: number; midTurn?: boolean; waited?: boolean }
   // `permission`: a mode switch's undo, applied if the relaunch fails (S-1967).
   | { type: 'restart'; reason: string; permission?: SwitchUndo }
   | { type: 'compact'; instructions?: string; prompt?: string; reason: string }
@@ -88,7 +94,7 @@ export function serial<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
 // generation and rechecks it around the awaits.
 const launchSeq = new Map<string, number>();
 function launchCurrent(id: string, gen: number): boolean {
-  return launchSeq.get(id) === gen;
+  return (launchSeq.get(id) ?? 0) === gen;
 }
 // Cancels any launch in flight for this agent, so one that resolves later does nothing.
 export function invalidateLaunch(id: string): void {
@@ -131,7 +137,7 @@ export async function startHarness(a: db.Agent, prompt: string | undefined, resu
   const token = mintAgentToken(a.id);
   // A reviewer's test folder (S-1330) sits in its writable root, so its runs work in a sandbox; the
   // folder is made here, before the runner's mktemp -d. A STAM_TEST_TMPDIR the spec sets wins, and a test home makes none.
-  const reviewDir = a.type && isReviewerType(a.type) ? reviewDirOf(a.name) : null;
+  const reviewDir = a.type && isReviewerType(a.type) ? reviewDirForLaunch(a.name) : null;
   const reviewTmp = reviewDir ? reviewTmpForSpawn(a.name, spec.env) : null;
   if (reviewTmp) mkdirSync(reviewTmp, { recursive: true });
   tmux.newSession(a.id, a.cwd, { ...spec.env, ...(reviewDir ? { STAM_REVIEW_DIR: reviewDir } : {}), ...(reviewTmp ? { STAM_TEST_TMPDIR: reviewTmp } : {}), STAM_AGENT_ID: a.id, STAM_URL, STAM_TOKEN: token }, spec.argv);
@@ -340,10 +346,10 @@ async function trackCompaction(id: string, data: object, run: (op: string) => Pr
 
 // S-257: compacts a shut-down agent's conversation headless on its own session, before any resume: a
 // resumed harness that is still near its limit would overflow before it can compact.
-async function compactShutDown(a: db.Agent, instructions?: string): Promise<void> {
+async function compactShutDown(a: db.Agent, instructions?: string, reason = 'shut down'): Promise<void> {
   if (!a.session_id) throw new Error(`${a.name} has no session to compact`);
   if (!adapterFor(a).compact) throw new Error(`${a.harness} agents can't be compacted by stam`);
-  await trackCompaction(a.id, { reason: 'shut down', headless: true }, async (op) => {
+  await trackCompaction(a.id, { reason, headless: true }, async (op) => {
     await adapterFor(a).compact!(a, instructions, { op });
     markCompacted(a.id);
   });
@@ -392,6 +398,35 @@ function giveWrapUpTurn(a: db.Agent, p: Pending & { type: 'shutdown' | 'archive'
   return true;
 }
 
+// An archive that failed where nobody is waiting on the call (the deadline, a turn end, a dead harness)
+// leaves its reason on the agent and tells its parent, else the chief of staff. `when` says where it ran.
+function archiveFailedNotice(a: db.Agent, msg: string, when: string): void {
+  db.updateAgent(a.id, { activity_detail: `archive failed: ${msg}` });
+  // A parent may live on another machine: tellAnywhere reaches its daemon.
+  const who = db.parentsOf(a).filter((x) => { const o = db.getAgent(x); return !o || o.lifecycle === 'active'; });
+  const text = `[stam] The archive of ${a.name} failed ${when}: ${msg}. It is still ${db.getAgent(a.id)?.lifecycle ?? a.lifecycle}.`;
+  // A parent that is forgotten or on a machine that is down can't be told: then the chief of staff is.
+  const cos = chiefOfStaff()?.id;
+  Promise.all(who.map((x) => tellAnywhere(x, text).catch(() => 'unreachable' as const))).then((r) => {
+    if (cos && !r.includes('told')) return tellAnywhere(cos, text);
+  }).catch(() => {});
+}
+
+// S-2201: archiveNow for a pending archive that runs without a caller (a turn end, a dead harness): a
+// failure is recorded as `archive:failed` and told to the parent instead of vanishing in the hook.
+async function archiveNowPending(a: db.Agent, p: Pending & { type: 'archive' }, when: string): Promise<void> {
+  try {
+    await archiveNow(a, { force: p.force, discard: p.discard, forceUnpushed: p.forceUnpushed });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    db.addEvent(a.id, 'archive:failed', { at: p.at, tries: p.tries ?? 0, error: msg });
+    if (archiveRetryable(msg)) throw e;
+    archiveFailedNotice(a, msg, when);
+    // At a turn end the agent just did its wrap-up and is still running: tell it too, so it can push.
+    if (when === 'when its turn ended' && db.getAgent(a.id)?.lifecycle === 'active') queueNotice(a.id, `[stam] Your archive was refused: ${msg}`);
+  }
+}
+
 async function runPending(a: db.Agent, p: Pending): Promise<string | void> {
   db.updateAgent(a.id, { pending_action: null });
   if ((p.type === 'shutdown' || p.type === 'archive') && giveWrapUpTurn(a, p)) return `waiting for ${a.name} to finish its step`;
@@ -404,7 +439,7 @@ async function runPending(a: db.Agent, p: Pending): Promise<string | void> {
   if (p.type === 'archive') {
     // The turn ended: the round was asked for in it; no `retro_final` means it wasn't filed.
     noteRoundSkipped(a, 'turn_ended_no_round');
-    return archiveNow(a, { force: p.force, discard: p.discard });
+    return archiveNowPending(a, p, 'when its turn ended');
   }
   if (p.type === 'compact') return compactNow(a, p);
   if (p.type === 'recover') return;
@@ -574,16 +609,17 @@ export function unpause(a: db.Agent, opts: { by: string; force?: boolean } = { b
 // and notices that waited while it was blocked go in after, as for any idle agent.
 // `delivered` waits for the harness to take `text` (or keep it back at the gate) before returning, and
 // fails with the launch error otherwise: for a prompt a person typed, whose loss must not read as sent (S-2034).
-export async function resumeNow(id: string, text: string, delivered = false): Promise<string> {
+// `wake` marks a wake of a resting agent: a prompt it doesn't take is a failed wake (see below).
+export async function resumeNow(id: string, text: string, delivered = false, wake = false): Promise<string> {
   const release = acquire(db.getAgent(id)!, 'resume');
   try {
-    return await resumeNowLocked(id, text, delivered);
+    return await resumeNowLocked(id, text, delivered, wake);
   } finally {
     release();
   }
 }
 
-async function resumeNowLocked(id: string, text: string, delivered: boolean): Promise<string> {
+async function resumeNowLocked(id: string, text: string, delivered: boolean, wake: boolean): Promise<string> {
   const a = db.getAgent(id)!;
   assertNotTakenOver(a);
   if (a.lifecycle !== 'paused') throw new Error(`${a.name} is ${a.lifecycle}`);
@@ -591,8 +627,10 @@ async function resumeNowLocked(id: string, text: string, delivered: boolean): Pr
   if (!ok.ok) throw new Error(`${a.name} stays paused: ${ok.reason}`);
   db.updateAgent(id, { paused_by: null });
   // Its terminal went down with the tmux server while it was paused: resume it.
-  if (a.workspace && !tmux.hasSession(id)) {
+  if (a.workspace && !(await tmux.hasSessionAsync(id))) {
     if (!a.session_id) throw new Error(`${a.name} has no session to resume`);
+    // A compaction a restart cut off may still write to the session: stopped and repaired first (S-2238).
+    await clearInterruptedCompaction(a);
     const { launched } = await startHarness(db.getAgent(id)!, text, true, 'unpause');
     if (delivered) await launched;
     db.addEvent(id, 'unpause');
@@ -600,8 +638,16 @@ async function resumeNowLocked(id: string, text: string, delivered: boolean): Pr
     return 'active';
   }
   db.updateAgent(id, { lifecycle: 'active' });
+  const gen = launchSeq.get(id) ?? 0;
+  // A wake whose prompt isn't taken (prompt() returns false when the push fails) is not a wake: back to
+  // rest as it was, so the wake's retry runs. A shutdown or archive that landed meanwhile bumped the
+  // launch generation (invalidateLaunch) and has the last word, so nothing is restored. Other callers
+  // keep the agent active, as before.
+  if (!(await prompt(a, text, 'unpause')) && wake) {
+    if (launchCurrent(id, gen)) db.updateAgent(id, { lifecycle: 'paused', paused_by: a.paused_by });
+    throw new Error(`${a.name} did not take the prompt`);
+  }
   db.addEvent(id, 'unpause');
-  await prompt(a, text, 'unpause');
   schedulePush(id);
   return 'active';
 }
@@ -621,21 +667,24 @@ export function isResting(a: db.Agent): boolean {
 
 // STAM_STANDING_IDLE_HOURS overrides the setting (tests use a fraction).
 function standingIdleMs(): number {
-  const env = Number(process.env.STAM_STANDING_IDLE_HOURS);
+  const env = Number(envVar('STANDING_IDLE_HOURS'));
   return (env > 0 ? env : settings().standing.idleHours) * 3_600_000;
 }
 
 // STAM_REST_AFTER_MINUTES and STAM_REST_GRACE_MINUTES override the settings (tests use fractions).
 function restMs(): { after: number; grace: number } {
   const r = settings().rest;
-  const env = (k: string, v: number) => (Number(process.env[k]) > 0 ? Number(process.env[k]) : v) * 60_000;
+  const env = (k: string, v: number) => {
+    const n = Number(envVar(k.slice('STAM_'.length)));
+    return (n > 0 ? n : v) * 60_000;
+  };
   return { after: env('STAM_REST_AFTER_MINUTES', r.afterMinutes), grace: env('STAM_REST_GRACE_MINUTES', r.graceMinutes) };
 }
 
 // STAM_REST_ENABLED (1 or 0) overrides rest.enabled: test daemons turn it off (test/lib.sh), so an agent
 // in an e2e test never rests mid-test; the standing rule is separate.
 function restEnabled(): boolean {
-  const env = process.env.STAM_REST_ENABLED;
+  const env = envVar('REST_ENABLED');
   return env === '1' ? true : env === '0' ? false : settings().rest.enabled;
 }
 
@@ -705,8 +754,9 @@ function restPlan(a: db.Agent, now = Date.now()): RestPlan | null {
   const waits = db.listWaits(a.id);
   // An open wake_me or wait_for keeps the activity 'waiting': its firing or answer is a notice or mail that wakes it. A wait the harness holds (a hook's) would die with the harness.
   if (waits.some((w) => w.source !== 'declared' && w.source !== 'stam')) return null;
-  // Mail or a notice that hasn't reached it yet means it has work.
-  if (db.hasPendingPermission(a.id) || db.unpushedCount(a.id) > 0 || queuedNoticeCount(a.id) > 0 || heldBy(a) !== null) return null;
+  // Mail or a notice that hasn't reached it yet means it has work. A passive notice (S-1744) is
+  // meant to wait for a real wake, so it doesn't count.
+  if (db.hasPendingPermission(a.id) || db.unpushedCount(a.id) > 0 || wakeableNoticeCount(a.id) > 0 || heldBy(a) !== null) return null;
   if (pushedTurnPending(a)) return null;
   if (settings().rest.types[restTypeKey(a)] === false) return null;
   const plan = restRule(a, waits, now);
@@ -831,6 +881,54 @@ export function restSweep(): void {
 
 const clock = (ms: number) => new Date(ms).toISOString().slice(11, 16);
 
+// S-2238: a resting agent's prompt cache expires with no harness to see it: the idle sweep compacts
+// it headless on its session while the cache is still warm, and it stays resting. In the agent's
+// serial queue, so a wake waits for the compaction rather than resuming the session under it. Claude
+// Code only (compactQuits): Codex's app server dies with its tmux session, and OpenCode's compaction
+// runs in its server and may set a resting agent working.
+export function compactResting(id: string, reason: string): Promise<string> {
+  return serial(id, async () => {
+    const a = db.getAgent(id);
+    if (!a || !isResting(a)) return 'not resting';
+    if (cacheCompactionHeld(a) || db.unpushedCount(id) > 0 || wakeableNoticeCount(id) > 0) return 'held';
+    if (compactionBusy(id) || !adapterFor(a).compactQuits || !adapterFor(a).compact || !a.session_id) return 'not compacting';
+    await clearInterruptedCompaction(a);
+    try {
+      await compactShutDown(a, undefined, reason);
+    } catch (e) {
+      // A failed or timed-out compactor may have cut the session's last row short: repaired before any resume.
+      await adapterFor(a).repairSession?.(a);
+      throw e;
+    }
+    // The size before the compaction no longer holds; the next report after the wake measures it.
+    db.updateAgent(id, { context_tokens: null });
+    return 'compacted';
+  });
+}
+
+// S-2238: a compaction a daemon restart cut off (its compactor survives a restart, KillMode=process)
+// on an agent that isn't active, so recoverOne never sees it: the leftover compactor is stopped and
+// confirmed gone, and the session repaired, before the agent is compacted again (compactResting) or its
+// harness resumed (resumeNowLocked: a wake, an unpause, a lifted cost blocker or probe).
+async function clearInterruptedCompaction(a: db.Agent): Promise<void> {
+  if (compactionRunning(a.id) || !a.session_id) return;
+  const op = compactionInterrupted(a);
+  if (op === null) return;
+  const left = compactorProcesses(a.id, a.session_id, a.cwd);
+  if (left.size) {
+    db.addEvent(a.id, 'compact:killed', { pids: [...left.keys()] });
+    await stopAndConfirm(left);
+  }
+  await adapterFor(a).repairSession?.(a);
+  db.addEvent(a.id, 'compact:failed', { op, error: 'cut off by a daemon restart' });
+}
+
+// What keeps the idle compaction off an agent (S-2238): woken this often lately (it would compact
+// again and again), or a push whose turn hasn't run.
+export function cacheCompactionHeld(a: db.Agent, now = Date.now()): boolean {
+  return churning(a.id, now) || (!!a.idle_since && pushedTurnPending(a));
+}
+
 export function rest(id: string): Promise<string> {
   return serial(id, async () => {
     const a = db.getAgent(id);
@@ -915,7 +1013,7 @@ export function wakeResting(id: string, why: string, timed = false, text?: strin
     }
     db.addEvent(id, 'standing:wake', { why });
     try {
-      const r = await resumeNow(id, text ?? render('standing-wake', { why, cwd: a.cwd }), text != null);
+      const r = await resumeNow(id, text ?? render('standing-wake', { why, cwd: a.cwd }), text != null, true);
       cancelWakeRetry(id);
       return r;
     } catch (e) {
@@ -927,7 +1025,8 @@ export function wakeResting(id: string, why: string, timed = false, text?: strin
       // nothing resting. Tell the parent instead.
       if (cur && cur.lifecycle !== 'paused') {
         cancelWakeRetry(id);
-        tellStopped(a, `${a.name} was woken but its wake prompt failed: ${e instanceof Error ? e.message : String(e)}. It is running; send it mail.`);
+        // Only an agent still running is said to be running: a shutdown or archive has already told the parent.
+        if (cur.lifecycle === 'active') tellStopped(a, `${a.name} was woken but its wake prompt failed: ${e instanceof Error ? e.message : String(e)}. It is running; send it mail.`);
         throw e;
       }
       retryWake(a, e);
@@ -949,6 +1048,13 @@ export function startRestWaking(): void {
     const a = db.getAgent(c.to);
     if (a && isResting(a)) queueNotice(a.id, `[stam] ${c.itsa.key} "${c.itsa.title}" was assigned to you.`);
   });
+}
+
+// The shutdown and kill actions of an agent: they end its cost fallbacks too (S-2458). The internal
+// stops (a take-over's own stop, the chief of staff's restart) call shutdown, which doesn't.
+export function explicitShutdown(a: db.Agent, now = false): Promise<string> {
+  costFallback.cancelPending(a.id, 'the agent was shut down');
+  return shutdown(a, now);
 }
 
 export function shutdown(a: db.Agent, now = false): Promise<string> {
@@ -1033,7 +1139,7 @@ export async function runPendingOnDead(a: db.Agent): Promise<void> {
   }
   db.updateAgent(a.id, { pending_action: null });
   if (p.type === 'archive') noteRoundSkipped(a, 'harness_gone');
-  if (p.type === 'archive') return archiveNow(db.getAgent(a.id)!, { force: p.force, discard: p.discard });
+  if (p.type === 'archive') return archiveNowPending(db.getAgent(a.id)!, p, 'because its harness is gone');
   quitHarness(db.getAgent(a.id)!, 'shut down');
 }
 
@@ -1102,14 +1208,19 @@ export async function recoverFirstPrompt(a: db.Agent): Promise<void> {
 // archive asks for it and waits for the agent's next turn end, at most
 // settings.archive.finalRoundMinutes, then archives regardless (runDueArchives). Only a stopped
 // agent, or one whose harness is already gone, archives at once.
-export async function archive(a: db.Agent, force = false, discard = force): Promise<string> {
+export async function archive(a: db.Agent, force = false, discard = force, forceUnpushed = false): Promise<string> {
   if (a.lifecycle === 'archived') throw new Error(`${a.name} is already archived`);
   assertNoTransition(a);
+  // S-2201: unpushed commits refuse the archive now, before the final round is asked for or anything is
+  // stopped, so the caller hears it at once and the agent keeps running and can push.
+  if (!forceUnpushed) unpushedGuard(a);
+  // S-2458: an archive ends the agent's pending cost fallbacks, even while its final round is still asked for.
+  costFallback.cancelPending(a.id, 'the agent was archived');
   // A stopped or paused agent can't take the wrap-up: archive it at once (S-1043 review). A paused
   // agent isn't running a step, so nothing is interrupted.
   if (a.lifecycle === 'shut_down' || a.lifecycle === 'paused') {
     noteRoundSkipped(a, a.lifecycle);
-    await archiveNow(a, { force, discard });
+    await archiveNow(a, { force, discard, forceUnpushed });
     return 'done';
   }
   // A workspaced agent whose harness is gone (no live pane, and the harness answered that no turn
@@ -1119,14 +1230,23 @@ export async function archive(a: db.Agent, force = false, discard = force): Prom
     const alive = await harnessAlive(a);
     if (alive === false) {
       noteRoundSkipped(a, 'harness_gone');
-      await archiveNow(a, { force, discard });
+      await archiveNow(a, { force, discard, forceUnpushed });
       return 'done';
     }
   }
   // Everything else asks for the final round: the wrap-up goes in now (queued by a working agent),
   // and the pending archive runs at the agent's next turn end or at its deadline. An agent whose
   // turn state can't be told (S-578) gets the deadline too, so it never waits forever.
-  return askFinalRound(a, { force, discard });
+  return askFinalRound(a, { force, discard, forceUnpushed });
+}
+
+// S-2201: throws the unpushed-commits refusal for an agent whose worktree would be removed by its archive. A
+// worktree another agent still works in stays (the last user removes it), so it has nothing to lose yet.
+function unpushedGuard(a: db.Agent): void {
+  const ws: Workspace | null = a.workspace ? JSON.parse(a.workspace) : null;
+  if (!ws?.worktree || worktreeUsers(ws.worktree.path, a.id).length) return;
+  const why = workspaceUnpushedRefusal(ws);
+  if (why) throw new Error(`can't archive ${a.name}: ${why}`);
 }
 
 // S-1373: archiving an agent with children archives each idle or shut-down child the same way,
@@ -1140,6 +1260,9 @@ export interface CascadeReport {
   archiving: string[];
   kept: string[];
   failed: string[];
+  // S-2452: standing children moved to their new parents, and standing children kept unarchived with the reason.
+  moved: string[];
+  stayed: string[];
   // Ids of the children archived or asked for their final round, so the cascade can follow their own children (S-1378).
   ids: string[];
 }
@@ -1148,11 +1271,11 @@ export interface CascadeReport {
 // (S-1378): a child lives in the DB of the machine it runs on, with its parent's id only.
 export type RemoteCascade = (parents: string[], fallback: string[]) => Promise<{ machine: string; report?: CascadeReport; error?: string }[]>;
 
-export async function archiveCascade(a: db.Agent, force = false, discard = force, remote?: RemoteCascade): Promise<string> {
-  const base = await archive(a, force, discard);
+export async function archiveCascade(a: db.Agent, force = false, discard = force, remote?: RemoteCascade, forceUnpushed = false): Promise<string> {
+  const base = await archive(a, force, discard, forceUnpushed);
   const live = db.parentsOf(a).filter((p) => db.getAgent(p)?.lifecycle !== 'archived');
   const fallback = live.length ? live : [chiefOfStaff()?.id].filter((p): p is string => Boolean(p) && p !== a.id);
-  const rep: CascadeReport = { archived: [], archiving: [], kept: [], failed: [], ids: [] };
+  const rep: CascadeReport = { archived: [], archiving: [], kept: [], failed: [], moved: [], stayed: [], ids: [] };
   // Each round cascades over the children of the ids archived in the last one, here and on every
   // peer, so a grandchild on another machine than its parent is reached too.
   const done = new Set<string>();
@@ -1168,7 +1291,7 @@ export async function archiveCascade(a: db.Agent, force = false, discard = force
     const answers: Awaited<ReturnType<RemoteCascade>> = remote ? await remote(ids, fallback).catch((e) => [{ machine: 'peers', error: e instanceof Error ? e.message : String(e) }]) : [];
     for (const r of answers) {
       if (r.report) {
-        for (const k of ['archived', 'archiving', 'kept', 'failed'] as const) rep[k].push(...r.report[k].map((x) => `${x} on ${r.machine}`));
+        for (const k of ['archived', 'archiving', 'kept', 'failed', 'moved', 'stayed'] as const) rep[k].push(...(r.report[k] ?? []).map((x) => `${x} on ${r.machine}`));
         next.push(...r.report.ids);
         rep.ids.push(...r.report.ids);
       } else rep.failed.push(`children on ${r.machine} (${r.error ?? 'no answer'}; it may still be running there)`);
@@ -1179,6 +1302,8 @@ export async function archiveCascade(a: db.Agent, force = false, discard = force
   if (rep.archived.length) notes.push(`also archived idle ${rep.archived.join(', ')}`);
   if (rep.archiving.length) notes.push(`asked idle ${rep.archiving.join(', ')} for their final round`);
   if (rep.kept.length) notes.push(`left alone, now reporting to ${fallback.map((p) => db.getAgent(p)?.name ?? p).join(', ') || 'nobody'}: ${rep.kept.join(', ')}`);
+  if (rep.moved.length) notes.push(`moved standing ${rep.moved.join(', ')}`);
+  if (rep.stayed.length) notes.push(`kept standing ${rep.stayed.join(', ')} unarchived`);
   if (rep.failed.length) notes.push(`couldn't archive ${rep.failed.join(', ')}`);
   return notes.length ? `${base}; ${notes.join('; ')}` : base;
 }
@@ -1187,7 +1312,7 @@ export async function archiveCascade(a: db.Agent, force = false, discard = force
 // holds of each parent id. A parent that is a live agent here is skipped: its own children were
 // cascaded when it was archived.
 export async function cascadeForPeer(parents: string[], fallback: string[]): Promise<CascadeReport> {
-  const rep: CascadeReport = { archived: [], archiving: [], kept: [], failed: [], ids: [] };
+  const rep: CascadeReport = { archived: [], archiving: [], kept: [], failed: [], moved: [], stayed: [], ids: [] };
   const seen = new Set(parents);
   for (const p of parents) {
     const here = db.getAgent(p);
@@ -1206,12 +1331,20 @@ function parentLive(id: string): boolean {
   return l !== undefined ? l !== 'archived' : Boolean(db.peerAgentById(id));
 }
 
+// S-2452: whether a parent may control a child on this machine. This is the rule daemon.ts's mayActAs applies
+// (it can't be imported here: daemon.ts imports this module): the chief of staff and the assistant act for any
+// agent, and any other parent acts for a child only when it is registered here. A parent on a peer machine
+// can't hold a child that lives here.
+function canControl(parentId: string): boolean {
+  return chiefOfStaff()?.id === parentId || isAssistant(parentId) || Boolean(db.getAgent(parentId));
+}
+
 export async function cascadeChildren(parentId: string, fallback: string[], rep: CascadeReport, seen: Set<string>): Promise<void> {
   // A child leaving later (final round pending) is reparented too: if its archive then fails it still has a live parent.
-  const reparent = (c: db.Agent, rest: string[]) => {
-    db.setParents(c.id, [...new Set([...rest, ...fallback])]);
+  const reparent = (c: db.Agent, rest: string[], parents = fallback) => {
+    db.setParents(c.id, [...new Set([...rest, ...parents])]);
     db.addEvent(c.id, 'parents', { parents: db.parentsOf(db.getAgent(c.id)!), by: parentId, reason: 'parent archived' });
-    for (const p of fallback) {
+    for (const p of parents) {
       const text = `[stam] ${c.name} now reports to you: its parent was archived and ${c.name} is still ${c.activity}.`;
       if (!db.getAgent(p)) {
         // A fallback parent on another machine: its daemon queues the notice.
@@ -1236,6 +1369,19 @@ export async function cascadeChildren(parentId: string, fallback: string[], rep:
       db.setParents(c.id, rest);
       db.addEvent(c.id, 'parents', { parents: rest, by: parentId, reason: 'parent archived' });
       rep.kept.push(`${c.name} (also reports to ${rest.map((p) => db.getAgent(p)?.name ?? p).join(', ')})`);
+      continue;
+    }
+    // S-2452: a standing child is never archived with its parent. It moves to the new parents that can control it
+    // here, or stays unarchived and is reported; its own children stay with it.
+    if (c.standing) {
+      const can = fallback.filter(canControl);
+      const names = (ps: string[]) => ps.map((p) => db.getAgent(p)?.name ?? p).join(', ');
+      if (can.length) {
+        reparent(c, rest, can);
+        rep.moved.push(`${c.name} to ${names(can)}`);
+      } else {
+        rep.stayed.push(`${c.name} (${fallback.length ? `${names(fallback)} can't control it on this machine` : 'no chief of staff or live parent to take it'})`);
+      }
       continue;
     }
     // A resting child with no wait is as idle as an idle one (S-1982).
@@ -1279,7 +1425,7 @@ function finalRoundMs(): number {
 
 // Sends the archive's wrap-up and stores the pending archive with its deadline. Idle or not, the
 // agent gets the same ask; the deadline bounds the wait (S-1043).
-async function askFinalRound(a: db.Agent, opts: { force?: boolean; discard?: boolean }): Promise<string> {
+async function askFinalRound(a: db.Agent, opts: { force?: boolean; discard?: boolean; forceUnpushed?: boolean }): Promise<string> {
   if (a.lifecycle !== 'active' && a.lifecycle !== 'paused') throw new Error(`${a.name} is ${a.lifecycle}`);
   const at = Date.now() + finalRoundMs();
   const pending: Pending = { type: 'archive', ...opts, at, midTurn: !isIdle(a) };
@@ -1329,7 +1475,7 @@ export async function runDueArchives(now = Date.now(), agents: db.Agent[] = db.l
     if (fresh?.type !== 'archive' || fresh.at !== p.at) continue;
     db.updateAgent(a.id, { pending_action: null });
     try {
-      await archiveNow(cur, { force: fresh.force, discard: fresh.discard });
+      await archiveNow(cur, { force: fresh.force, discard: fresh.discard, forceUnpushed: fresh.forceUnpushed });
       db.addEvent(a.id, 'archive:final-round-timeout', { at: fresh.at });
       noteRoundSkipped(cur, 'deadline_no_round');
     } catch (e) {
@@ -1341,16 +1487,7 @@ export async function runDueArchives(now = Date.now(), agents: db.Agent[] = db.l
         db.updateAgent(a.id, { pending_action: JSON.stringify({ ...fresh, tries, at: Date.now() + after }) });
       } else {
         // A cleanup failure (a dirty worktree without discard) needs a person, not a retry loop.
-        db.updateAgent(a.id, { activity_detail: `archive failed: ${msg}` });
-        // Nobody else sees a deadline failure: tell its parent, else the chief of staff.
-        // A parent may live on another machine: tellAnywhere reaches its daemon.
-        const who = db.parentsOf(a).filter((x) => { const o = db.getAgent(x); return !o || o.lifecycle === 'active'; });
-        const text = `[stam] The archive of ${a.name} failed at its final-round deadline: ${msg}. It is still ${a.lifecycle}.`;
-        // A parent that is forgotten or on a machine that is down can't be told: then the chief of staff is.
-        const cos = chiefOfStaff()?.id;
-        Promise.all(who.map((x) => tellAnywhere(x, text).catch(() => 'unreachable' as const))).then((r) => {
-          if (cos && !r.includes('told')) return tellAnywhere(cos, text);
-        }).catch(() => {});
+        archiveFailedNotice(a, msg, 'at its final-round deadline');
       }
     }
   }
@@ -1362,10 +1499,12 @@ export async function runDueArchives(now = Date.now(), agents: db.Agent[] = db.l
 // origin/main, is archived through the normal path. A check that can't be made (git or the home
 // failing) skips the agent, and each reason is logged once. Each daemon sweeps its own agents.
 const idleSkipLogged = new Set<string>();
-function idleSkip(a: db.Agent, why: string): void {
+function idleSkip(a: db.Agent, why: string, debug = false): void {
   const key = `${a.id}:${why}`;
   if (idleSkipLogged.has(key)) return;
   idleSkipLogged.add(key);
+  // S-908: a skip of the short-grace rule is expected and retried, so it logs only with STAM_DEBUG set.
+  if (debug && !envVar('DEBUG')) return;
   console.error(`idle shut-down ${a.name}: not archived: ${why}`);
 }
 
@@ -1401,51 +1540,113 @@ const IDLE_RECHECK_MS = 3_600_000;
 // Git and home checks per pass, at most: the rest wait for the next pass.
 export const IDLE_CHECKS_PER_PASS = 10;
 
+// S-908: the ITSA statuses of work approved and queued for merge, or merged and deploying. The
+// manager sets them only after the PR's review approved, so they stand for "approved and queued".
+const QUEUED_STATUSES = new Set(['ready_to_merge', 'merging', 'deploying']);
+
+// Clean, and every commit reachable from the worktree's HEAD is on some remote: archive()'s guard checks
+// the workspace's branch ref, so a detached HEAD or another branch would slip past it. Throws on a git error.
+const gitCleanAndPushed = async (path: string): Promise<boolean> => {
+  const git = async (...args: string[]) => (await execFileP('git', ['-C', path, ...args], { encoding: 'utf8', timeout: 10_000 })).stdout.trim();
+  return !(await git('status', '--porcelain')) && !(await git('rev-list', 'HEAD', '--not', '--remotes'));
+};
+
+// Whether nothing is owed to or from a shut-down agent right now: not resting or paused (only
+// shut_down passes), no open wait, no unread mail, no pending action or queued notice, no hold.
+// The agent's waits, less (with `staleBefore`) the ones a stale permission request put there: its ask wait
+// stays until the request is settled, so it would keep the agent for good.
+function openWaits(a: db.Agent, staleBefore?: string): db.Wait[] {
+  const waits = db.listWaits(a.id);
+  if (!staleBefore || !waits.length) return waits;
+  const stale = new Set(db.stalePendingPermissions(a.id, staleBefore).map((r) => r.id));
+  // The same waits clearRequestWaits deletes: the stam wait on the request, and the agent's wait_for on the human tied to it (S-3016).
+  return waits.filter((w) => !((w.source === 'stam' && ((w.target && stale.has(w.target)) || (w.data && stale.has(w.data)))) || (w.kind === 'human' && w.target && stale.has(w.target))));
+}
+
+// S-2885: `staleBefore` (the 12 h rule only) lets a permission request created at or before it stand aside:
+// a request stuck that long will not be answered, and must not keep the agent for good.
+function shutDownQuiet(a: db.Agent, staleBefore?: string): boolean {
+  return a.lifecycle === 'shut_down' && !a.pending_action && !openWaits(a, staleBefore).length && db.unreadCount(a.id) === 0 && !db.hasPendingPermission(a.id, staleBefore) && wakeableNoticeCount(a.id) === 0 && heldBy(a) === null;
+}
+
 export async function archiveIdleShutdowns(now = Date.now()): Promise<string[]> {
-  const { idleShutdownHours } = settings().archive;
+  const { idleShutdownHours, archiveWhenQueued, queuedShutdownMinutes } = settings().archive;
   const cosName = settings().chiefOfStaff;
   const cosId = cosName ? db.getAgent(cosName)?.id : undefined;
   const archived: string[] = [];
   let checks = 0;
   for (const a of db.listAgents()) {
     if (a.lifecycle !== 'shut_down' || a.pending_action) continue;
-    if (now - shutDownSince(a) <= idleShutdownHours * 3_600_000) continue;
+    const age = now - shutDownSince(a);
+    // After the idle hours, the S-1393 rule; after the short grace, the S-908 rule (merged, or approved and queued).
+    const idle = age > idleShutdownHours * 3_600_000;
+    if (!idle && !(archiveWhenQueued && age > queuedShutdownMinutes * 60_000)) continue;
     if (a.standing || a.kind === 'assistant' || a.id === cosId) continue;
     const seen = idleIneligible.get(a.id);
     if (seen && seen.updated_at === a.updated_at && now - seen.at < IDLE_RECHECK_MS) continue;
+    // A local check, free of git and the home, so it costs no slot of the pass.
+    const staleBefore = idle ? new Date(now - idleShutdownHours * 3_600_000).toISOString() : undefined;
+    if (!shutDownQuiet(a, staleBefore)) continue;
     if (checks >= IDLE_CHECKS_PER_PASS) break;
     checks++;
     const owned = await openOwnedItsas(a.id);
     if (!owned) {
-      idleSkip(a, "the home couldn't say which ITSAs it owns");
+      idleSkip(a, "the home couldn't say which ITSAs it owns", !idle);
       continue;
     }
-    if (owned.length) {
+    // Under the idle hours an owned ITSA must be queued for merge or later; after them, none may be open.
+    // The short grace also needs at least one queued ITSA: an agent that owns none (a reviewer, or a
+    // developer that hasn't committed yet) waits the idle hours.
+    if (idle ? owned.length : !owned.length || !owned.every((x) => QUEUED_STATUSES.has(x.status))) {
       idleIneligible.set(a.id, { updated_at: a.updated_at, at: now });
       continue;
     }
     const ws: Workspace | null = a.workspace ? JSON.parse(a.workspace) : null;
+    // The short grace is for developers with a branch; an agent without a worktree waits the idle hours.
+    if (!idle && !ws?.worktree) {
+      idleIneligible.set(a.id, { updated_at: a.updated_at, at: now });
+      continue;
+    }
     if (ws?.worktree) {
       try {
-        if (!(await worktreeMerged(ws.worktree.path, ws.worktree.repo))) {
+        // Merged into origin/main, or (queued only) clean with an owned queued ITSA; archive()'s
+        // unpushed guard then refuses a branch whose head isn't on a remote.
+        const ok = (await worktreeMerged(ws.worktree.path, ws.worktree.repo)) || (!idle && (await gitCleanAndPushed(ws.worktree.path)));
+        if (!ok) {
           idleIneligible.set(a.id, { updated_at: a.updated_at, at: now });
           continue;
         }
       } catch (e) {
-        idleSkip(a, `couldn't check its worktree: ${e instanceof Error ? e.message : e}`);
+        idleSkip(a, `couldn't check its worktree: ${e instanceof Error ? e.message : e}`, !idle);
         idleIneligible.set(a.id, { updated_at: a.updated_at, at: now });
         continue;
       }
     }
-    // Re-read: the agent may have changed while the ITSA home was asked.
+    // Re-read from the row the checks started from: a resume, a mail, a wait or any other change in
+    // between moves updated_at or fails the quiet test, and the agent is left for the next pass.
+    // archive() then runs with no await before it takes the archive lock, so nothing slips in.
     const cur = db.getAgent(a.id);
-    if (!cur || cur.lifecycle !== 'shut_down') continue;
+    if (!cur || cur.updated_at !== a.updated_at || !shutDownQuiet(cur, staleBefore)) continue;
     try {
-      db.addEvent(a.id, 'archive:idle-shutdown', { hours: idleShutdownHours });
       await archive(cur);
+      db.addEvent(a.id, 'archive:idle-shutdown', idle ? { hours: idleShutdownHours, rule: 'idle' } : { minutes: queuedShutdownMinutes, rule: 'queued' });
       archived.push(a.name);
+      // The agent is archived by now: a failure here only leaves a stale request, never undoes the archive.
+      if (staleBefore) {
+        try {
+          withdrawStaleRequests(cur, staleBefore, `the agent was archived after ${idleShutdownHours} h shut down`);
+        } catch (e) {
+          console.error(`idle shut-down ${a.name}: couldn't withdraw its stale permission requests: ${e instanceof Error ? e.message : e}`);
+        }
+      }
+      if (!idle) {
+        const parent = db.parentsOf(cur)[0];
+        if (parent) tellAnywhere(parent, `${cur.name} was archived automatically: shut down, its work merged or queued for merge, and its branch pushed.`).catch(() => {});
+      }
     } catch (e) {
-      idleSkip(a, `archive failed: ${e instanceof Error ? e.message : e}`);
+      // A refusal (the unpushed guard) is checked again in an hour, or when the row changes.
+      idleIneligible.set(a.id, { updated_at: a.updated_at, at: now });
+      idleSkip(a, `archive failed: ${e instanceof Error ? e.message : e}`, !idle);
     }
   }
   return archived;
@@ -1458,7 +1659,7 @@ const ARCHIVE_RETRY_MS = 30_000;
 const ARCHIVE_RETRY_MAX_MS = 10 * 60_000;
 const ARCHIVE_RETRY_TRIES = 5;
 
-async function archiveNow(a: db.Agent, opts: { force?: boolean; discard?: boolean } = {}): Promise<void> {
+async function archiveNow(a: db.Agent, opts: { force?: boolean; discard?: boolean; forceUnpushed?: boolean } = {}): Promise<void> {
   const release = acquire(a, 'archive');
   try {
     return await archiveLocked(a, opts);
@@ -1467,10 +1668,20 @@ async function archiveNow(a: db.Agent, opts: { force?: boolean; discard?: boolea
   }
 }
 
-async function archiveLocked(a: db.Agent, opts: { force?: boolean; discard?: boolean }): Promise<void> {
+async function archiveLocked(a: db.Agent, opts: { force?: boolean; discard?: boolean; forceUnpushed?: boolean }): Promise<void> {
   // S-1043: a second caller (the deadline sweep and the dead-harness path) that lost the race
   // must not archive an agent twice.
   if (db.getAgent(a.id)?.lifecycle === 'archived') return;
+  // S-2201: the backstop for the paths that reach here without archive() (a pending archive at a turn end
+  // or deadline). Before the harness is stopped, so a refusal leaves the agent running, not half-archived.
+  if (!opts.forceUnpushed) {
+    try {
+      unpushedGuard(a);
+    } catch (e) {
+      db.updateAgent(a.id, { activity_detail: `archive failed: ${e instanceof Error ? e.message : e}` });
+      throw e;
+    }
+  }
   // A launch in flight for this agent must not revive it once the archive is under way (S-578).
   invalidateLaunch(a.id);
   if (tmux.hasSession(a.id)) quitHarness(a, 'archiving');
@@ -1497,10 +1708,12 @@ async function archiveLocked(a: db.Agent, opts: { force?: boolean; discard?: boo
   if (ws?.worktree && !sharer) await stopAndConfirm(dirProcesses(ws.worktree.path, a.id)).catch((e) => console.error(`archive ${a.name}: ${e.message}`));
   try {
     if (sharer) result = `kept worktree ${ws!.worktree!.path}: ${sharer.name} still uses it`;
-    else if (ws) result = cleanupWorkspace(ws, Boolean(opts.discard));
+    else if (ws) result = cleanupWorkspace(ws, Boolean(opts.discard), Boolean(opts.forceUnpushed), branchIsBase(ws, db.listAgents().filter((b) => b.id !== a.id && b.lifecycle !== 'archived').map((b) => b.workspace)));
   } catch (e) {
     db.updateAgent(a.id, { activity_detail: `archive failed: ${e instanceof Error ? e.message : e}` });
-    throw new Error(`can't archive ${a.name}: ${e instanceof Error ? e.message : e}. Commit or discard its changes (archive with discard, or force).`);
+    const msg = e instanceof Error ? e.message : String(e);
+    // S-2201: the unpushed-commits refusal names its own way out; the dirty-tree hint would mislead.
+    throw new Error(`can't archive ${a.name}: ${msg}${/ is pushed|not on any remote/.test(msg) ? '' : '. Commit or discard its changes (archive with discard, or force).'}`);
   }
   // The pending unown is written with the lifecycle change, so a crash before it is sent
   // can't lose it; startup and a timer retry it.
@@ -1602,8 +1815,10 @@ async function resumeLocked(a: db.Agent, note: string): Promise<string> {
       db.updateAgent(a.id, { cwd });
     }
     const b = db.getAgent(a.id)!;
+    await restoreTranscript(b.id, b.transcript_path);
     ({ superseded = false } = await startHarness(b, render('respawn-archived', { cleanup: a.activity_detail ?? 'workspace removed', cwd: b.cwd, note }), true));
   } else {
+    await restoreTranscript(a.id, a.transcript_path);
     ({ superseded = false } = await startHarness(a, render('respawn', { cwd: a.cwd, note }), true));
   }
   // Active again, it keeps its ITSAs: a pending unown from its archive is void. Only once the
@@ -1643,8 +1858,6 @@ export function restart(a: db.Agent, reason: string, permission?: SwitchUndo): P
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // Between launches, so many harnesses don't start at once.
 const STAGGER_MS = 3000;
-// Any answer from one of these means the network is up; the harnesses need it to resume.
-const NETWORK_PROBES = ['https://api.anthropic.com', 'https://api.openai.com', 'https://openrouter.ai'];
 
 // An active agent whose terminal went down with the tmux server. It is marked shut down
 // with a pending recover action at once, so a daemon restart before recoverLost gets to
@@ -1804,8 +2017,7 @@ async function recoverOne(id: string): Promise<void> {
 async function waitForNetwork(): Promise<void> {
   const deadline = Date.now() + 600_000;
   while (Date.now() < deadline) {
-    const up = await Promise.any(NETWORK_PROBES.map((url) => fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) }))).then(() => true, () => false);
-    if (up) return;
+    if (await networkUp()) return;
     await sleep(5000);
   }
 }

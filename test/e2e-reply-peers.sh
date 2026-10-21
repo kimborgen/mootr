@@ -53,7 +53,7 @@ api() {
   curl -s -X "$2" -H "authorization: Bearer $_tok" -H 'content-type: application/json' ${4:+-d "$4"} "$_url$3"
 }
 # The web UI sends as the human: the daemon takes the x-stam-human header for that.
-kim() {
+as_human() {
   curl -s -X "$1" -H "authorization: Bearer $MAIN_TOKEN" -H 'x-stam-human: 1' -H 'content-type: application/json' -d "$3" "$MAIN_URL$2"
 }
 # An agent by its own token (minted at its launch and read from its tmux environment): agent_token DAEMON NAME.
@@ -113,7 +113,7 @@ printf "%s" "$OC_THREADS" | jget "isinstance(d, list)" | grep -qx True || fail "
 printf "%s" "$OC_THREADS" | jget "any(m['subject']=='Twin oc only' for t in d for m in t['mails'])" | grep -qx False || fail "oc reads the threads of twin's agent named oc through main"
 
 echo "-- Dana replies on main to the mail stored on twin"
-R=$(kim POST /api/mail "{\"from\":\"human\",\"to\":[\"far\"],\"reply_to\":\"$M1\",\"body\":\"Redis.\"}")
+R=$(as_human POST /api/mail "{\"from\":\"human\",\"to\":[\"far\"],\"reply_to\":\"$M1\",\"body\":\"Redis.\"}")
 M2=$(printf "%s" "$R" | jget "d['id']") || fail "the reply to a peer-stored mail failed (got: $R)"
 
 echo "-- far gets the reply in the thread on twin"
@@ -135,11 +135,11 @@ printf "%s" "$R6" | grep -q "new_thread: true" || fail "the non-participant erro
 api twin GET "/api/agents/far/inbox?unread=0&limit=20" | jget "any(m['from_id']=='$KID' for m in d)" | grep -qx False || fail "kid's refused reply still reached far"
 
 echo "-- a reply naming no mail on any daemon fails as before"
-R3=$(kim POST /api/mail '{"from":"human","to":["far"],"reply_to":"nope-nope","body":"x"}')
+R3=$(as_human POST /api/mail '{"from":"human","to":["far"],"reply_to":"nope-nope","body":"x"}')
 printf "%s" "$R3" | grep -q "no mail nope-nope to reply to\"" || fail "a reply to no mail didn't fail as before (got: $R3)"
 
 echo "-- with twin stopped, the same error says a peer was unreachable"
 daemon_stop twin
-R4=$(kim POST /api/mail '{"from":"human","to":["far"],"reply_to":"nope-nope","body":"x"}')
+R4=$(as_human POST /api/mail '{"from":"human","to":["far"],"reply_to":"nope-nope","body":"x"}')
 printf "%s" "$R4" | grep -q "no mail nope-nope to reply to (a peer was unreachable)" || fail "no unreachable note with twin down (got: $R4)"
 echo "PASS: a human reply to a peer-stored mail reaches the agent and threads"

@@ -59,6 +59,16 @@ export function FieldValue({ f, v }: { f: Field; v: unknown }): ReactNode {
   }
 }
 
+// A non-choice value as plain badge content: the text, the host, the day, or the check's icon.
+function chipContent(f: Field, v: unknown): ReactNode {
+  switch (f.type) {
+    case 'link': return linkHost(String(v))
+    case 'date': return fmtDay(String(v))
+    case 'check': return <span role="img" aria-label="Yes"><Icon name="check" size="xs" /></span>
+    default: return String(v)
+  }
+}
+
 // The text a field value stands for in a search, a values list, and a text filter: a choice's label.
 const textOf = (f: Field, v: unknown): string => {
   if (isEmpty(v)) return ''
@@ -96,6 +106,19 @@ export function fieldColumn(f: Field): WorkColumn {
     id: fieldColId(f), label: f.label, hint: f.hint ?? undefined, width: FIELD_WIDTH[f.width],
     align: f.align === 'end' || f.type === 'number' ? 'end' : undefined,
     render: (row) => <FieldValue f={f} v={valueOf(row.it, f)} />,
+    // A field shows on an issue card and on the agent card of the ITSA's owner; a blank value draws nothing.
+    card: {
+      where: ['issue', 'agent'],
+      inline: ({ it }) => (it ? <FieldValue f={f} v={valueOf(it, f)} /> : null),
+      // A choice is already a badge in its tone. Any other value gets a badge of plain content: the
+      // table cell's own element is never nested in it, so the cell's rules don't reach the badge.
+      chip: ({ it }) => {
+        const v = it ? valueOf(it, f) : undefined
+        if (!it || isEmpty(v)) return null
+        if (f.type === 'choice') return <FieldValue f={f} v={v} />
+        return <span className="badge" title={f.label}>{chipContent(f, v)}</span>
+      },
+    },
     ...fieldValues(f),
   }
 }

@@ -2,7 +2,7 @@
 // free type of its `fallbackChain`. Used by the spawn, the cost take-over, and the S-381 relaunch.
 import { agentTypes, fallbackChain, type AgentTarget } from './agent-types.ts';
 import { accountFor } from './accounts.ts';
-import { accountHeld } from './admission.ts';
+import { heldForFallback } from './admission.ts';
 
 // A type's own harness, model, and effort; null for a ring type (it has no harness).
 export function typeTarget(name: string): AgentTarget | null {
@@ -19,7 +19,7 @@ export function freeFallback(name: string, blocked?: string | null): { type: str
     if (!target) { reasons.push(`${n} is a ring type`); continue; }
     const account = accountFor(target);
     if (blocked && account === blocked) { reasons.push(`${n} bills to the same account (${blocked})`); continue; }
-    const held = accountHeld(target);
+    const held = heldForFallback(target);
     if (held) { reasons.push(`${n}: ${held.reason}`); continue; }
     return { type: n, target, reasons };
   }

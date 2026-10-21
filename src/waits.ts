@@ -9,6 +9,7 @@ import * as db from './db.ts';
 import { queueNotice, tellAnywhere } from './mail.ts';
 import { locateAgent, peerByName } from './peers.ts';
 import { render } from './templates.ts';
+import { waitingItsaOfThread } from './itsa-human.ts';
 import { sanitizeFilter, type EventFilter } from './watch.ts';
 
 const minutesFromNow = (n: number) => new Date(Date.now() + n * 60_000).toISOString();
@@ -62,7 +63,8 @@ export async function declare(agentId: string, body: any): Promise<db.Wait> {
   if (on === 'human') {
     const settled = thread ? undefined : settledNamed(agentId, note);
     if (settled) throw new Error(`request ${settled.id} is already ${settled.status}, so your user has nothing left to answer for it. To wait for their reply to a mail, pass that mail's thread`);
-    target = requestWaitedOn(agentId, note, thread)?.id ?? null;
+    // A wait in an ITSA's thread, while the ITSA waits on the human, is tied to that ITSA (S-3080).
+    target = requestWaitedOn(agentId, note, thread)?.id ?? itsaWaitedOn(thread) ?? null;
   }
   const detail = note || (on === 'human' ? "your user's reply" : `reply from ${targetName}`);
   const data: Record<string, unknown> = { on };
@@ -71,13 +73,38 @@ export async function declare(agentId: string, body: any): Promise<db.Wait> {
   if (timeout != null) data.timeout_minutes = timeout;
   if (expect != null) data.expect_at = minutesFromNow(expect);
   const w = db.addWait({ agent_id: agentId, kind: on, source: 'declared', target, detail, until, data: JSON.stringify(data) });
-  // The agent awaited gets one notice naming the thread to answer in.
-  if (on === 'agent' && target) {
+  // The agent awaited gets one notice naming the thread to answer in, and none for an ask it already has (S-2574).
+  const nudge = on === 'agent' && target ? nudgeDue(target, agentId, thread) : null;
+  if (nudge && target && db.claimNudge(target, agentId, nudge.thread ?? '', nudge.mail)) {
     const text = render('wait-for', { name: a.name, thread: thread ? ` (thread ${thread})` : '' });
+    db.addEvent(target, 'wait:nudged', { waiter: agentId, thread: nudge.thread, mail: nudge.mail });
     tellAnywhere(target, text).catch((e) => console.error(`wait_for notice for ${targetName}: ${e instanceof Error ? e.message : e}`));
   }
   db.addEvent(agentId, 'wait:declared', { id: w.id, kind: on, target, thread, timeout_minutes: timeout });
   return w;
+}
+
+// The nudge a wait_for due now sends the awaited agent, as the key of what it answers, or null for none. The ask is the
+// waiter's newest mail to the awaited agent (in the wait's thread, or in any thread when there is none) that has a
+// recipient row for it or is a sender's copy sent to it. The answer is the awaited agent's newest mail to the waiter.
+// Mail is the record, so a daemon restart changes nothing:
+// - an answer newer than the ask: no nudge;
+// - an ask nobody answered: one nudge for it (key: the ask's id);
+// - no ask, in a thread: one nudge for the thread, ever (key: 'declare:'), when the awaited agent has answered there (S-2663);
+// - no ask, no thread: one nudge per answer, keyed by the awaited agent's newest mail to the waiter (key: 'declare:' and
+//   that id, or 'declare:' alone when there is none), so it nudges again only after the awaited agent mails (S-2663);
+// - a key already nudged gets no second nudge: declare claims it in wait_nudges (db.claimNudge).
+function nudgeDue(target: string, waiter: string, thread: string | null): { mail: string; thread: string | null } | null {
+  // A mail id named as the thread resolves to its thread, so every mail id in the thread gives the same key.
+  const threadId = thread ? (db.mailThreadId(thread) ?? thread) : null;
+  const ask = db.latestMailBetween(waiter, target, threadId, true);
+  const answer = db.latestMailBetween(target, waiter, threadId, false);
+  if (!ask) {
+    if (threadId) return answer ? { mail: 'declare:', thread: threadId } : null;
+    return { mail: `declare:${answer?.id ?? ''}`, thread: null };
+  }
+  if (answer && answer.seq > ask.seq) return null;
+  return { mail: ask.id, thread: threadId };
 }
 
 const REQUEST_ID = /\bp[0-9a-f]{6}\b/g;
@@ -99,6 +126,11 @@ export function requestWaitedOn(agentId: string, note: string, thread: string | 
     return open.find((r) => r.id === id);
   }
   return open[0];
+}
+
+// The ITSA a wait on the human in this thread is about, while that ITSA waits on the human (S-3080).
+function itsaWaitedOn(thread: string | null): string | undefined {
+  return thread ? waitingItsaOfThread(db.mailThreadId(thread) ?? thread) : undefined;
 }
 
 // A settled request of the agent's that a new wait's note names, when it names none still pending.

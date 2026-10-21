@@ -75,8 +75,15 @@ for (const by of ['agent', 'itsa', 'model', 'type']) {
 test('the daemon call: a repeat reads the memo, one refresh runs at a time, and a stale report is served at once', async () => {
   stats.resetActivityMemo();
   const opts = { by: 'itsa', days: 3, now: fx.now };
+  // A run's slice count depends on timing; the slice that finishes a run (`done`) happens once per run.
   let slices = 0;
-  const count = (run) => (slices++, run());
+  let runs = 0;
+  const count = (run) => {
+    slices++;
+    const r = run();
+    if (r.done) runs++;
+    return r;
+  };
   const [a, b] = await Promise.all([stats.activityStatsCached(opts, count, 1_000), stats.activityStatsCached(opts, count, 1_000)]);
   assert.equal(a, b, 'two callers at once share one run');
   const runSlices = slices;
@@ -86,6 +93,7 @@ test('the daemon call: a repeat reads the memo, one refresh runs at a time, and 
   assert.ok(performance.now() - t0 < 10, 'a memo read is instant');
   assert.equal(again, a);
   assert.equal(slices, runSlices, 'a fresh memo runs nothing');
+  assert.equal(runs, 1, 'one run so far');
   // Past the fresh time the old report is returned at once and one refresh runs behind it.
   const late = 1_000 + stats.ACTIVITY_FRESH_MS + 1;
   const before = slices;
@@ -94,7 +102,7 @@ test('the daemon call: a repeat reads the memo, one refresh runs at a time, and 
   const second = await stats.activityStatsCached(opts, count, late);
   assert.equal(second, a, 'still the old one while the refresh runs');
   await stats.activityRefreshIdle();
-  assert.ok(slices - before >= runSlices - 1 && slices - before <= runSlices + 1, `exactly one refresh ran (${slices - before} slices, a run is ${runSlices})`);
+  assert.equal(runs, 2, `exactly one refresh ran (${slices - before} slices, a run is ${runSlices})`);
   const fresh = await stats.activityStatsCached(opts, count, late + 1);
   assert.notEqual(fresh, a, 'the memo was replaced');
   assert.deepEqual(fresh, a);

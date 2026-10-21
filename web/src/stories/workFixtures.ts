@@ -6,14 +6,20 @@ import { FIELDS } from './itsaFixtures'
 
 const ago = (min: number) => new Date(Date.now() - min * 60000).toISOString()
 
+// The Settings unit's values for the stories: API-equivalent dollars, as the daemon sends them.
+const apiCost = (own: number, total: number): NonNullable<IssueCosts['issues'][number]['cost']> => {
+  const part = (v: number) => ({ api: v, five_hour: null, seven_day: null, subscription: null, paid_usd: 0 })
+  return { mode: 'api', own: part(own), total: part(total) }
+}
+
 export const COSTS: IssueCosts = {
   note: 'Claude and Codex dollars are API-equivalent estimates, not what a subscription bills.',
   issues: [
-    { key: 'S-910', own: { cost_usd: 1.2 }, total: { cost_usd: 18.4 }, weekly_percent: 3.2 },
-    { key: 'S-911', own: { cost_usd: 6.1 }, total: { cost_usd: 11.7 }, weekly_percent: 1.8 },
-    { key: 'S-912', own: { cost_usd: 3.9 }, total: { cost_usd: 3.9 }, weekly_percent: 0.7 },
-    { key: 'S-915', own: { cost_usd: 0.004 }, total: { cost_usd: 0.004 }, weekly_percent: null },
-    { key: 'S-920', own: { cost_usd: 2.3 }, total: { cost_usd: 2.3 }, weekly_percent: 0.4 },
+    { key: 'S-910', own: { cost_usd: 1.2 }, total: { cost_usd: 18.4 }, weekly_percent: 3.2, cost: apiCost(1.2, 18.4) },
+    { key: 'S-911', own: { cost_usd: 6.1 }, total: { cost_usd: 11.7 }, weekly_percent: 1.8, cost: apiCost(6.1, 11.7) },
+    { key: 'S-912', own: { cost_usd: 3.9 }, total: { cost_usd: 3.9 }, weekly_percent: 0.7, cost: apiCost(3.9, 3.9) },
+    { key: 'S-915', own: { cost_usd: 0.004 }, total: { cost_usd: 0.004 }, weekly_percent: null, cost: apiCost(0.004, 0.004) },
+    { key: 'S-920', own: { cost_usd: 2.3 }, total: { cost_usd: 2.3 }, weekly_percent: 0.4, cost: apiCost(2.3, 2.3) },
   ],
 }
 

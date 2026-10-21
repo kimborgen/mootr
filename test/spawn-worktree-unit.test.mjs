@@ -8,13 +8,19 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tempHome } from './tmphome.mjs';
 
 const work = mkdtempSync(join(tmpdir(), 'stam-spawn-worktree-'));
+// git must not look above the test's folder for a repo: the gate's TMPDIR sits inside its own checkout, which would make
+// the non-git directory below a repo (S-2985).
+process.env.GIT_CEILING_DIRECTORIES = [work, realpathSync(work)].join(':');
 after(() => rmSync(work, { recursive: true, force: true }));
+// test-slot.sh puts TMPDIR inside the worktree's own git repo; stop git's upward search at `work`
+// so the not-a-repo fixture below is not one.
+process.env.GIT_CEILING_DIRECTORIES = work;
 
 // The live deploy checkout is named by STAM_DEPLOY_REPO here, so the test never reads (or writes)
 // the real one. `elsewhere` is a plain directory, and `inside` a linked worktree inside the
@@ -68,6 +74,12 @@ test('an explicit worktree: false still works for a directory that is not live',
   assert.equal(ws.spawnWorkspaceSpec({ workspace_instructions: 'make your own' }, developer(), elsewhere).kind, 'instructions');
 });
 
+test('a base on a spawn that makes no worktree is refused, not dropped (S-1278)', () => {
+  assert.throws(() => ws.spawnWorkspaceSpec({ base: 'origin/stam/x', worktree: false }, developer(), elsewhere), /base needs a worktree spawn/);
+  assert.throws(() => ws.spawnWorkspaceSpec({ base: 'origin/stam/x', workspace_script: 'printf %s ' + elsewhere }, developer(), elsewhere), /base needs a worktree spawn/);
+  assert.throws(() => ws.spawnWorkspaceSpec({ base: 'origin/stam/x' }, undefined, elsewhere), /base needs a worktree spawn/);
+});
+
 test('the developer default makes a real worktree on the repo, not just a spec', () => {
   const spec = ws.spawnWorkspaceSpec({}, developer(), checkout);
   const real = made(spec, 'dev-real');
@@ -95,6 +107,85 @@ test('a worktree made from another agent\'s worktree is removed after that agent
   assert.equal(ws.cleanupWorkspace(child, true).startsWith('removed worktree'), true);
   assert.equal(existsSync(child.cwd), false, 'the child worktree is removed');
   assert.equal(git('-C', checkout, 'worktree', 'list', '--porcelain').includes(child.cwd), false, 'git no longer lists the child');
+});
+
+test('archive deletes an empty worktree branch and keeps one with work, a checked-out one, or a base in use (S-994)', () => {
+  const branches = () => git('-C', checkout, 'branch', '--list', '--format=%(refname:short)').split('\n');
+  const fromMain = (name) => made({ kind: 'worktree', repo: checkout, base: 'main' }, name);
+  // Empty: nothing beyond the commit it was cut from, so the branch goes with the worktree.
+  const empty = fromMain('s994-empty');
+  assert.ok(branches().includes('stam/s994-empty'));
+  assert.match(ws.cleanupWorkspace(empty, true), /branch stam\/s994-empty deleted/);
+  assert.equal(branches().includes('stam/s994-empty'), false, 'the empty branch is deleted');
+  // Own commit: kept, with the reason.
+  const own = fromMain('s994-own');
+  git('-C', own.cwd, 'commit', '-q', '--allow-empty', '-m', 'own work');
+  assert.match(ws.cleanupWorkspace(own, true, true), /branch stam\/s994-own kept: it has commits of its own/);
+  assert.ok(branches().includes('stam/s994-own'));
+  // Checked out elsewhere: the branch stays.
+  const shared = fromMain('s994-shared');
+  git('-C', shared.cwd, 'checkout', '-q', '--detach');
+  const other = join(work, 's994-other');
+  git('-C', checkout, 'worktree', 'add', '-q', other, 'stam/s994-shared');
+  assert.match(ws.cleanupWorkspace(shared, true), /kept: it is checked out in another worktree/);
+  assert.ok(branches().includes('stam/s994-shared'));
+  git('-C', checkout, 'worktree', 'remove', '--force', other);
+  // Another live agent's worktree was cut from it (branchIsBase reads their stored workspaces): the branch stays.
+  const base = fromMain('s994-base');
+  const child = made({ kind: 'worktree', repo: base.cwd }, 's994-child');
+  const asBase = (others) => ws.branchIsBase(base, others.map((o) => JSON.stringify(o)));
+  assert.equal(asBase([]), false);
+  assert.equal(asBase([{ worktree: { repo: base.cwd, path: 'x', branch: 'y' } }]), true, 'cut from its worktree');
+  assert.equal(asBase([{ worktree: { repo: checkout, path: 'x', branch: 'y', base: 'stam/s994-base' } }]), true, 'cut from its branch');
+  assert.equal(asBase([{ worktree: { repo: checkout, path: 'x', branch: 'y', base: 'main' } }, {}]), false);
+  assert.match(ws.cleanupWorkspace(base, true, false, ws.branchIsBase(base, [JSON.stringify(child)])), /kept: another agent's worktree was cut from it/);
+  assert.ok(branches().includes('stam/s994-base'));
+  ws.cleanupWorkspace(child, true);
+  // A tip on origin/main that is not the recorded base is empty too, so it goes.
+  const onMain = fromMain('s994-onmain');
+  git('-C', checkout, 'update-ref', 'refs/remotes/origin/main', git('-C', onMain.cwd, 'rev-parse', 'HEAD').trim());
+  try {
+    onMain.baseUsed = { ...onMain.baseUsed, sha: '0'.repeat(40) };
+    assert.match(ws.cleanupWorkspace(onMain, true), /branch stam\/s994-onmain deleted/);
+    assert.equal(branches().includes('stam/s994-onmain'), false);
+  } finally {
+    git('-C', checkout, 'update-ref', '-d', 'refs/remotes/origin/main');
+  }
+  // `git branch -d` refuses a tip the repo's HEAD doesn't contain: the branch stays and the archive succeeds.
+  const unmerged = fromMain('s994-unmerged');
+  git('-C', unmerged.cwd, 'commit', '-q', '--allow-empty', '-m', 'unmerged');
+  unmerged.baseUsed = { ...unmerged.baseUsed, sha: git('-C', unmerged.cwd, 'rev-parse', 'HEAD').trim() };
+  assert.match(ws.cleanupWorkspace(unmerged, true, true), /branch stam\/s994-unmerged kept: git branch -d refused/);
+  assert.ok(branches().includes('stam/s994-unmerged'));
+});
+
+test('archive keeps the branch and succeeds when the empty-branch check throws (S-2740)', () => {
+  // dropEmptyBranch runs `git worktree list` unguarded; a git on PATH that fails that one call makes it throw
+  // after the worktree is already removed. cleanupWorkspace must report the branch as kept, not crash the archive.
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const shim = join(work, 'git-shim');
+  mkdirSync(shim, { recursive: true });
+  writeFileSync(join(shim, 'git'), `#!/bin/sh\ncase " $* " in *" worktree list "*) echo 'fatal: injected failure' >&2; exit 1 ;; esac\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+  const empty = made({ kind: 'worktree', repo: checkout, base: 'main' }, 's2740-throws');
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${shim}:${savedPath}`;
+  let out;
+  try {
+    out = ws.cleanupWorkspace(empty, true);
+  } finally {
+    process.env.PATH = savedPath;
+  }
+  assert.match(out, /^removed worktree .*; branch stam\/s2740-throws kept: couldn't check: /);
+  assert.equal(existsSync(empty.cwd), false, 'the worktree is removed');
+  assert.ok(git('-C', checkout, 'branch', '--list', 'stam/s2740-throws').includes('stam/s2740-throws'), 'the branch is kept');
+});
+
+test('archive of an agent without a worktree is a no-op, not a throw (S-2740)', () => {
+  // The archive asks branchIsBase for every workspace, including a plain directory with no worktree.
+  const plain = { kind: 'dir', path: elsewhere, cwd: elsewhere };
+  assert.equal(ws.branchIsBase(plain, [JSON.stringify({ worktree: { repo: checkout, path: 'x', branch: 'y' } })]), false);
+  assert.equal(ws.cleanupWorkspace(plain, true, false, false), 'nothing to clean up');
+  assert.equal(ws.workspaceUnpushedRefusal(plain), null);
 });
 
 test('a developer that ends up without a worktree in the live deploy checkout is refused', () => {

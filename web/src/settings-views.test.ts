@@ -151,3 +151,32 @@ describe('settings records', () => {
     expect(patches()).toHaveLength(0)
   })
 })
+
+describe('refresh', () => {
+  it('shows a view another page saved, and keeps this page\'s unsent edit', async () => {
+    const r = await record()
+    settings = { things: { a: { n: 2 }, b: { n: 3 } } }
+    r.save('c', { n: 9 })
+    await r.refresh()
+    expect(r.cached('a')).toEqual({ n: 2 })
+    expect(r.cached('c')).toEqual({ n: 9 })
+  })
+
+  it('a refresh made while a write is in flight waits for it, so it shows the write', async () => {
+    const r = await record()
+    // Holds the write's PATCH until released; the daemon applies it only then, as a slow daemon would.
+    let release!: () => void
+    const gate = new Promise<void>((res) => { release = res })
+    const inner = api.getMockImplementation()!
+    api.mockImplementation(async (method: string, path: string, body?: unknown) => {
+      if (method === 'PATCH') await gate
+      return inner(method, path, body)
+    })
+    r.save('a', { n: 5 })
+    await vi.advanceTimersByTimeAsync(500)
+    const refreshed = r.refresh()
+    release()
+    await refreshed
+    expect(r.cached('a')).toEqual({ n: 5 })
+  })
+})

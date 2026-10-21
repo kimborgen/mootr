@@ -122,7 +122,14 @@ export async function syncPrs(cfg: PrOpenConfig, log: (line: string) => void = c
       for (const r of [mine, theirs]) await git(cfg, ['update-ref', '-d', r]).catch(() => {});
     }
   }
+  // Merge at write time (S-675): a noteSynced that pr_open wrote since the read at the top of the tick is newer than this tick's view.
+  // Read and write are synchronous, as noteSynced's are, so none lands between them.
+  const latest = readSyncState(file);
+  for (const [branch, sha] of Object.entries(latest)) if (sha !== old[branch]) state[branch] = sha;
   writeSyncState(state, file);
+  // Conflicts of branches whose PR is no longer open are forgotten (S-675).
+  const openBranches = new Set(open.map((p) => p.headRefName));
+  for (const branch of conflictLogged.keys()) if (!openBranches.has(branch)) conflictLogged.delete(branch);
   return result;
 }
 

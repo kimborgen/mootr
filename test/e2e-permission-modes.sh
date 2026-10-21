@@ -91,10 +91,10 @@ R=$(trusted POST "/api/agents/$WID/permission-mode" '{"mode":"settings"}')
 [ "$(echo "$R" | field agent.permission_mode)" = default ] && [ "$(echo "$R" | field agent.permission_source)" = settings ] || fail "'settings' didn't hand w1 back: $R"
 
 # Each settings change is logged with its actor.
-EV=$(node -e 'const { DatabaseSync } = require("node:sqlite"); const d = new DatabaseSync(process.argv[1], { readOnly: true }); console.log(d.prepare("SELECT data FROM events WHERE agent_id = ? AND type = ?").all("human", "permission-modes").filter((r) => JSON.parse(r.data).by === "human").length)' "$STAM_HOME/stam.db" 2>/dev/null)
+EV=$(curl -sf -H "authorization: Bearer $TOKEN" "$STAM_URL/api/test/events?agent=human&type=permission-modes" | python3 -c 'import json,sys; print(sum(json.loads(e["data"]).get("by") == "human" for e in json.load(sys.stdin)))')
 [ "$EV" = 2 ] || fail "logged $EV settings changes, not 2"
 # Every switch of w1 names who made it: the failed one, apply, manual, and back to the settings.
-BY=$(node -e 'const { DatabaseSync } = require("node:sqlite"); const d = new DatabaseSync(process.argv[1], { readOnly: true }); console.log(d.prepare("SELECT type, data FROM events WHERE agent_id = ? AND type LIKE ? ORDER BY id").all(process.argv[2], "permission-mode%").map((r) => r.type + ":" + JSON.parse(r.data).by).join(" "))' "$STAM_HOME/stam.db" "$WID")
+BY=$(curl -sf -H "authorization: Bearer $TOKEN" "$STAM_URL/api/test/events?agent=$WID&type=permission-mode%25" | python3 -c 'import json,sys; print(" ".join(e["type"] + ":" + json.loads(e["data"])["by"] for e in json.load(sys.stdin)))')
 [ "$BY" = "permission-mode:human permission-mode:failed:human permission-mode:human permission-mode:applied:human permission-mode:human permission-mode:human" ] || fail "switch events and their actors: $BY"
 # A busy agent's switch waits for its step; a launch that fails then puts the old mode back too,
 # unless the human picked a mode for it meanwhile (b2), which stays.

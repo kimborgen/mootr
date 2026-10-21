@@ -17,6 +17,7 @@
 // The human runs the command in a terminal outside stam: sudo's per-terminal credential cache in a stam web
 // shell would let anything typing there act as root. A hard link that refreshes a file's ctime needs
 // protected_hardlinks off (Linux's default is on), and is no use without S anyway.
+import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -98,6 +99,18 @@ export function redeemCode(secret: unknown, now = Date.now(), startedAt = proces
   }
   used.add(name);
   return undefined;
+}
+
+// Whether this user has passwordless sudo (S-2121): there an agent is root, and this login keeps no agent out,
+// so the page warns. Asked once, the first time the page asks (`sudo -n true` runs only `true`, and fails at
+// once where sudo wants a password); a change to sudoers shows after a restart. A test sets the answer with
+// STAM_TEST_PASSWORDLESS_SUDO (1 or 0), in a marked test home only, so no test runs sudo.
+let sudoCheck: Promise<boolean> | undefined;
+export function passwordlessSudo(): Promise<boolean> {
+  const t = testOnlyEnv('STAM_TEST_PASSWORDLESS_SUDO');
+  if (t !== undefined) return Promise.resolve(t === '1');
+  sudoCheck ??= new Promise((resolve) => execFile('sudo', ['-n', 'true'], { timeout: 3000 }, (e) => resolve(!e)));
+  return sudoCheck;
 }
 
 const sessions = new Map<string, number>();

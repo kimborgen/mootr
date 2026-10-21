@@ -140,12 +140,15 @@ function Card({ m, place, selected, enter, jump, far }: Props) {
     // the panel; a click anywhere else on the card does the same (SystemView's click).
     <motion.div className={'sv-card' + (human ? ' human' : '') + (m.hit ? ' hit ' + m.hit : '') + (selected ? ' sel' : '') + (enter ? ' enter' : '') + (leaving ? ' leave' : '')} data-card={leaving ? undefined : m.id} data-tid={m.id} role="group"
       aria-label={label} aria-hidden={leaving || undefined} style={{ width: place.w }}
-      initial={enter ? at(enter, GROW_FROM) : false}
+      // A far chip is drawn at screen size and its name must never draw under 14 px (S-462), so it fades in
+      // without the grow, whose scale would shrink the name until the spring rests (S-1030).
+      initial={enter ? { ...at(enter, far ? 1 : GROW_FROM), opacity: 0 } : false}
       // The place on a spring; the fade on an ease-out tween, so a spawn shows from its first frame.
       // One that grows in place (the phone's) draws over the cards gliding from under it, so it is
       // solid within a quarter of the spring, rather than showing their text through it.
       animate={{ ...at(place), transition: jump ? { duration: 0 } : { ...spring(!enter ? SPRINGS.move : here ? SPRINGS.appear : SPRINGS.grow, slow), opacity: tween(here ? slow / 4 : slow, ease) } }}
-      variants={{ out: (c: Exit | undefined) => exitOf(c, m.id, place, slow, ease, at) }}
+      // A far chip leaves without the shrink too: it fades while it travels, its name never under 14 px (S-462).
+      variants={{ out: (c: Exit | undefined) => exitOf(c, m.id, place, slow, ease, far ? (p, k) => ({ ...at(p, 1), opacity: k === 1 ? 1 : 0 }) : at) }}
       exit="out">
       <div className="sv-r1">
         {far ? null : a ? <Glyph agent={a} /> : <PlainGlyph name="user" />}

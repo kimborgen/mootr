@@ -1,0 +1,20 @@
+#!/bin/sh
+# A tmux that records each call for go/internal/tmux's golden test (S-2804): its argv, NUL-separated, one call per
+# record in $FAKE_TMUX_LOG; the file a `source-file` names, copied beside the log as conf.N; and what reaches stdin
+# for `load-buffer -`, as stdin.N. list-windows prints two windows; other calls print nothing and succeed.
+log=$FAKE_TMUX_LOG
+n=$(cat "$log.n" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" >"$log.n"
+for a in "$@"; do printf '%s\0' "$a"; done >>"$log"
+printf '\n' >>"$log"
+prev=
+for a in "$@"; do
+  [ "$prev" = source-file ] && cp "$a" "$log.conf.$n" && stat -c %a "$a" >"$log.mode.$n" && stat -c %a "$(dirname "$a")" >"$log.dirmode.$n"
+  prev=$a
+done
+case " $* " in
+*" load-buffer "*) cat >"$log.stdin.$n" ;;
+*" list-windows "*) printf '0\n1\n' ;;
+esac
+exit 0

@@ -8,9 +8,11 @@ export STAM_AUTO_ARCHIVE_QUIET_MS=0 STAM_AUTO_ARCHIVE_FULL_DELAY_MS=0
 isolate
 TOKEN=$(cat "$STAM_HOME/token")
 api() { curl -s -X "$1" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' "$STAM_URL$2" ${3:+-d "$3"}; }
+# tapi: api for /api/test/* routes; -f fails at the call when the gate answers 404.
+tapi() { curl -sf -X "$1" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' "$STAM_URL$2" ${3:+-d "$3"}; }
 hapi() { curl -s -X "$1" -H "authorization: Bearer $TOKEN" -H 'x-stam-human: 1' -H 'content-type: application/json' "$STAM_URL$2" ${3:+-d "$3"}; }
 field() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
-kv() { python3 -c "import sqlite3,sys; r=sqlite3.connect(sys.argv[1]).execute('SELECT value FROM kv WHERE key=?',(sys.argv[2],)).fetchone(); print(r[0] if r else '')" "$STAM_HOME/stam.db" "$1"; }
+kv() { tapi GET "/api/test/kv?key=$1" | python3 -c "import json,sys; print(json.load(sys.stdin)['value'] or '')"; }
 done_flag() { [ -n "$(kv autoArchive.fullPassDone3)" ]; }
 runs() { grep -c 'auto-archive full pass:' "$TEST_TMP/main/daemon.log" || true; }
 archived() { hapi GET '/api/agents/human/threads?limit=100&archived=1' | grep -q "\"thread_id\":\"$1\""; }
@@ -26,7 +28,7 @@ KEY=$("$STAM" itsa new "Full pass e2e" --owner alice --status in_progress | awk 
 T=$(api POST /api/mail "{\"from\":\"alice\",\"to\":[\"human\"],\"subject\":\"Done\",\"body\":\"Shipped.\",\"itsa\":\"$KEY\",\"new_thread\":true}" | field '["id"]')
 hapi POST /api/agents/human/read "{\"ids\":[\"$T\"]}" >/dev/null
 api PATCH "/api/itsas/$KEY" "{\"status\":\"done\",\"by\":\"$A\"}" >/dev/null
-python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE kv SET value='99999999999999' WHERE key='autoArchive.since'\"); c.commit()" "$STAM_HOME/stam.db"
+tapi POST /api/test/kv '{"key":"autoArchive.since","value":"99999999999999"}' >/dev/null
 
 echo "-- a later start doesn't run it again"
 daemon_stop main
@@ -35,8 +37,8 @@ api POST /api/mail/resolved '{"dry":false}' >/dev/null
 archived "$T" && fail "a later start ran the full pass again, or the cutoff let $T in"
 
 echo "-- with the flag gone, the next start's full pass archives the thread from before the cutoff"
+tapi POST /api/test/kv '{"key":"autoArchive.fullPassDone3","value":null}' >/dev/null
 daemon_stop main
-python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"DELETE FROM kv WHERE key='autoArchive.fullPassDone3'\"); c.commit()" "$STAM_HOME/stam.db"
 daemon_up main
 wait_until done_flag
 wait_until archived "$T"

@@ -6,6 +6,10 @@ if (typeof Element !== 'undefined') {
   if (!Element.prototype.scrollTo) Element.prototype.scrollTo = () => {}
   if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
 }
+// The phone layout asks matchMedia on render (usePhone); jsdom has none, so a desktop-sized stub stands in.
+if (typeof window !== 'undefined' && !window.matchMedia) {
+  window.matchMedia = (q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }) as unknown as MediaQueryList
+}
 // CodeMirror measures text through ranges; jsdom has no layout, so give them empty rects.
 if (typeof Range !== 'undefined') {
   if (!Range.prototype.getClientRects) Range.prototype.getClientRects = () => ({ length: 0, item: () => null, [Symbol.iterator]: function* () {} }) as unknown as DOMRectList

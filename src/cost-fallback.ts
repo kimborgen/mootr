@@ -7,7 +7,11 @@
 // each records an ack on the notice (cost-notices.ack), and an acked notice's fallback never
 // runs. A take-over already under way re-checks inside lifecycle.serial right before it stops
 // the agent, and again before the move, and cancels if a manager acked, the blocker changed,
-// or someone new paused the agent since the claim.
+// someone new paused the agent since the claim, or an archive or shut-down is pending on it.
+// An explicit archive or shut-down cancels the agent's pending rows at once (cancelPending),
+// and the claim refuses an archived agent or one with an archive or shut-down pending, in the
+// same statement that claims the row, so a fallback never creates a successor for an agent
+// being archived (S-2458).
 //
 // Each blocker-set notice whose blocker kind has an action field gets a row in
 // cost_fallbacks with its due time and the blocker's generation (its `since`), so the timer
@@ -88,6 +92,8 @@ export interface FallbackRow {
   state: FallbackState;
   // Runs interrupted by a restart; one retry, then it gives up.
   attempts: number;
+  // Why an explicit archive or shut-down ended the agent's claimed or running fallback (S-2458); read by unwanted.
+  cancel: string | null;
   // At the claim, JSON: { lifecycle, owners }, what a cancel and a recovery compare against.
   prior: string | null;
   ran_at: string | null;
@@ -110,6 +116,10 @@ function table(): void {
     ran_at TEXT,
     result TEXT
   )`);
+  // A table made before the cancel column existed gets it on first use (S-2458).
+  if (!(db.open().prepare('PRAGMA table_info(cost_fallbacks)').all() as { name: string }[]).some((c) => c.name === 'cancel')) {
+    db.open().exec('ALTER TABLE cost_fallbacks ADD COLUMN cancel TEXT');
+  }
   ready = true;
 }
 
@@ -187,6 +197,20 @@ export function retire(agentId: string, kind: BlockerKind, account: string): voi
     .prepare("UPDATE cost_fallbacks SET state = 'done', result = 'skipped: the blocker cleared' WHERE agent_id = ? AND kind = ? AND account = ? AND state = 'pending'")
     .run(agentId, kind, account);
 }
+
+// An explicit archive or shut-down ends the agent's fallbacks (S-2458). A pending row is retired
+// now, so its timer finds nothing to run. A claimed or running row gets the reason, which unwanted
+// reads at its next check, so its take-over cancels before the stop. Called by lifecycle.archive
+// and lifecycle.explicitShutdown.
+export function cancelPending(agentId: string, why: string): void {
+  table();
+  const d = db.open();
+  d.prepare("UPDATE cost_fallbacks SET state = 'done', result = ? WHERE agent_id = ? AND state = 'pending'").run(`skipped: ${why}`, agentId);
+  d.prepare("UPDATE cost_fallbacks SET cancel = ? WHERE agent_id = ? AND state IN ('claimed', 'running')").run(why, agentId);
+}
+
+// An archive or shut-down is pending on the agent (its pending_action), so no fallback runs for it.
+const endingPending = (a: db.Agent): boolean => !!a.pending_action && ['archive', 'shutdown'].includes(JSON.parse(a.pending_action).type);
 
 // A manager acted on an agent (`via` names how): its open notices are acknowledged, which
 // stops their fallbacks. Returns the acknowledged notice ids.
@@ -361,11 +385,15 @@ function blockerState(r: FallbackRow): 'same' | 'replaced' | 'cleared' {
 function unwanted(r: FallbackRow): string | null {
   const n = costNotices.notice(r.notice_id);
   if (!n) return 'its notice is gone';
+  // An explicit archive or shut-down of the agent since the claim (S-2458). Read fresh: r may predate it.
+  const cancel = row(r.notice_id)?.cancel;
+  if (cancel) return cancel;
   if (n.acked_at) return `${n.acked_by === HUMAN ? 'the human' : (db.getAgent(n.acked_by ?? '')?.name ?? n.acked_by)} acted on it`;
+  const a = db.getAgent(r.agent_id);
+  if (a && endingPending(a)) return `${a.name} is being archived or shut down`;
   const b = blockerState(r);
   if (b !== 'same') return `the blocker ${b === 'cleared' ? 'cleared' : 'was replaced by a newer one'}`;
   if (!r.prior) return null; // not claimed yet: nothing to compare the pauses against
-  const a = db.getAgent(r.agent_id);
   const before: string[] = JSON.parse(r.prior).owners;
   const added = a ? pauseOwners(a).filter((o) => !before.includes(o)) : [];
   if (added.length) return `${added.map((o) => (o === HUMAN ? 'the human' : (db.getAgent(o)?.name ?? o))).join(', ')} paused it`;
@@ -375,8 +403,14 @@ function unwanted(r: FallbackRow): string | null {
 // Runs one due fallback. Claims the row first, so a second evaluate can't run it too.
 async function run(r: FallbackRow): Promise<void> {
   const d = db.open();
-  const claimed = d.prepare("UPDATE cost_fallbacks SET state = 'claimed', ran_at = ? WHERE notice_id = ? AND state = 'pending'").run(new Date().toISOString(), r.notice_id);
-  if (Number(claimed.changes) !== 1) return;
+  // The agent's archive or shut-down is checked in this same statement, so one that lands after the due scan stops the claim (S-2458).
+  const claimed = d.prepare(`UPDATE cost_fallbacks SET state = 'claimed', ran_at = ? WHERE notice_id = ? AND state = 'pending'
+    AND agent_id NOT IN (SELECT id FROM agents WHERE lifecycle = 'archived' OR json_extract(pending_action, '$.type') IN ('archive', 'shutdown'))`).run(new Date().toISOString(), r.notice_id);
+  if (Number(claimed.changes) !== 1) {
+    // Still pending: the claim refused it, so it is retired here. A row another run claimed is not pending and stays as it is.
+    d.prepare("UPDATE cost_fallbacks SET state = 'done', result = ? WHERE notice_id = ? AND state = 'pending'").run('skipped: the agent is archived, or its archive or shut-down is pending', r.notice_id);
+    return;
+  }
   const done = (result: string) => d.prepare("UPDATE cost_fallbacks SET state = 'done', result = ? WHERE notice_id = ?").run(result, r.notice_id);
   const a = db.getAgent(r.agent_id);
   if (!a || !db.isLive(a) || a.forwarded_to) return void done('skipped: the agent is gone or taken over');

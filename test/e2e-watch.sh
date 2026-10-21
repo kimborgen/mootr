@@ -33,9 +33,9 @@ ITSAID=$(api "$STAM_URL/api/itsas/$KEY" | jget "d['id']")
 api -X POST -d "{\"subscriber_kind\":\"itsa\",\"subscriber_id\":\"$ITSAID\",\"filter\":{\"source\":\"github\"},\"by\":\"$ALICE\",\"note\":\"repo watch\"}" "$STAM_URL/api/subscriptions" >/dev/null
 
 # Two matching events (one url each) and a duplicate of the first, then one outside the filter.
-event '{"source":"github","type":"pull_request.opened","subjects":["github:o/r#1"],"actor":"kim","url":"https://x/1","summary":"opened one","dedupe_key":"d1"}'
-event '{"source":"github","type":"pull_request.opened","subjects":["github:o/r#1"],"actor":"kim","url":"https://x/1","summary":"opened one","dedupe_key":"d1"}'
-event '{"source":"github","type":"pull_request.synchronize","subjects":["github:o/r#1"],"actor":"kim","url":"https://x/2","summary":"synced one","dedupe_key":"d2"}'
+event '{"source":"github","type":"pull_request.opened","subjects":["github:o/r#1"],"actor":"octocat","url":"https://x/1","summary":"opened one","dedupe_key":"d1"}'
+event '{"source":"github","type":"pull_request.opened","subjects":["github:o/r#1"],"actor":"octocat","url":"https://x/1","summary":"opened one","dedupe_key":"d1"}'
+event '{"source":"github","type":"pull_request.synchronize","subjects":["github:o/r#1"],"actor":"octocat","url":"https://x/2","summary":"synced one","dedupe_key":"d2"}'
 event '{"source":"github","type":"push","subjects":["github:other/r"],"summary":"elsewhere","dedupe_key":"d3"}'
 # Wait for the fold window to close and the folded mail to land: the agent's inbox holds one mail.
 inbox_has_one() { [ "$(api "$STAM_URL/api/agents/$ALICE/inbox" | jget "len(d)")" = 1 ]; }

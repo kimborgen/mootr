@@ -31,11 +31,13 @@ import { Board } from '../itsa/Board'
 import { StatusGlyph } from '../itsa/itsa'
 import { MailView } from './MailView'
 import { TerminalView } from './TerminalView'
-import { threadTitles, ThreadView } from './ThreadView'
+import { ThreadView } from './ThreadView'
+import { threadHead, threadOf } from '../mail/thread-chips'
 import { UsageView } from './UsageView'
 import { RapidView } from './RapidView'
 import { getUi, useUi } from '../ui/state'
 import { WorkView } from '../work/WorkView'
+import { AgentsPage } from '../AgentsPage'
 import { SwipeView } from '../mail/SwipeView'
 import { InboxView } from '../mail/InboxView'
 import { ReqView, reqTitles } from '../req/ReqView'
@@ -95,7 +97,7 @@ export function agentTooltip(a: Agent) {
 }
 
 export function validKey(key: string) {
-  return /^(agent|view|details|instructions|inventory|type|mail|thread|itsa|board|req|image):.+/.test(key) || /^shell:[^:]+:.+/.test(key) || key === 'config' || key === 'inventory' || key === 'usage' || key === 'work' || key === 'system' || key === 'process' || key === 'swipe' || key === 'inbox' || key === 'compliance' || key === 'files' || /^file:[^:/]+:\/.+/.test(key) || parseDiffKey(key) !== null || parsePatchKey(key) !== null
+  return /^(agent|view|details|instructions|inventory|type|mail|thread|itsa|board|req|image):.+/.test(key) || /^shell:[^:]+:.+/.test(key) || key === 'config' || key === 'inventory' || key === 'usage' || key === 'work' || key === 'system' || key === 'process' || key === 'swipe' || key === 'inbox' || key === 'agents' || key === 'compliance' || key === 'files' || /^file:[^:/]+:\/.+/.test(key) || parseDiffKey(key) !== null || parsePatchKey(key) !== null
 }
 
 // Whether a saved tab still has something to show after a reload.
@@ -140,8 +142,9 @@ export function viewMeta(key: string): Meta {
     return { title: human ? 'Your inbox' : `${byId(id)?.name ?? id}'s inbox`, icon: <Icon name="inbox" />, badge: human ? d.unread || '' : byId(id)?.unread || '' }
   }
   if (key.startsWith('thread:')) {
-    const t = d.humanThreads.find((x) => x.thread_id === id) ?? d.humanArchived.find((x) => x.thread_id === id) ?? d.humanDeferred.find((x) => x.thread_id === id)
-    return { title: threadTitles.get(id) || (t ? t.mails[0].subject?.replace(/^(re:\s*)+/i, '').replace(/`/g, '') : '') || 'Thread', icon: <Icon name="mail" /> }
+    // The short title (S-2311): the thread's model title, else its subject; the full subject and people go in the tooltip.
+    const head = threadHead(threadOf(id, d)?.mails ?? [], d.agents)
+    return { title: head.title || 'Thread', icon: <Icon name="mail" />, tooltip: head.tooltip || undefined }
   }
   if (key.startsWith('itsa:')) {
     const x = d.itsas.find((i) => i.id === id)
@@ -157,6 +160,7 @@ export function viewMeta(key: string): Meta {
   }
   if (key === 'compliance') return { title: 'Compliance', icon: <Icon name="grid-3x3" />, tooltip: 'Each requirement\'s latest check on each subject' }
   if (key === 'work') return { title: 'Work', icon: <Icon name="layout-list" />, tooltip: 'Every open issue, grouped by issue tree' }
+  if (key === 'agents') return { title: 'Agents', icon: <Icon name="users" />, tooltip: 'Every agent in its tree, live and stopped' }
   if (key === 'system') return { title: 'System', icon: <Icon name="network" />, tooltip: 'The whole system: every agent in its tree, with its work' }
   if (key === 'swipe') return { title: 'Swipe', icon: <Icon name="layers" />, tooltip: 'Your inbox as cards: left archives, right leaves, up defers' }
   if (key === 'inbox') return { title: 'Inbox', icon: <Icon name="inbox" />, tooltip: 'Your mail: filter, search, and open a thread beside the list', badge: d.unread || '' }
@@ -181,9 +185,9 @@ export function viewMeta(key: string): Meta {
 }
 
 // An agent's conversation: stam's own view of it, or its rapid-fire mode (S-1004) where this device picked that.
-function ConvView({ id }: { id: string }) {
+function ConvView({ id, viewKey }: { id: string; viewKey: string }) {
   const { rapid } = useUi()
-  return rapid?.[id] ? <RapidView id={id} /> : <Suspense fallback={null}><OwnView id={id} /></Suspense>
+  return rapid?.[id] ? <RapidView id={id} /> : <Suspense fallback={null}><OwnView id={id} viewKey={viewKey} /></Suspense>
 }
 
 function UsageHosted() {
@@ -208,7 +212,7 @@ function Content({ viewKey: key }: { viewKey: string }) {
     const sh = getData().shells.find((x) => x.id === sid) ?? { id: sid, machine: m, cwd: '' }
     return <TerminalView viewKey={key} id={sid} sh={{ ...sh, machine: m }} />
   }
-  if (key.startsWith('view:')) return <ConvView id={id} />
+  if (key.startsWith('view:')) return <ConvView id={id} viewKey={key} />
   if (key.startsWith('details:')) return <DetailsView id={id} />
   if (key.startsWith('instructions:')) return <InstructionsView id={id} />
   if (key.startsWith('inventory:')) return <InventoryView id={id} />
@@ -221,6 +225,7 @@ function Content({ viewKey: key }: { viewKey: string }) {
   if (key.startsWith('req:')) return <ReqView keyName={id} viewKey={key} />
   if (key === 'compliance') return <ComplianceView />
   if (key === 'work') return <WorkView viewKey={key} />
+  if (key === 'agents') return <AgentsPage />
   if (key === 'system') return systemView(key)
   if (key === 'process') return processView(key)
   if (key === 'files') return <Suspense fallback={null}><FilesView /></Suspense>

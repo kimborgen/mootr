@@ -10,10 +10,13 @@
 import './chromium-lock.mjs';
 import { chromiumLaunchOptions } from './chromium-launch.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { findPlaywright } from './find-playwright.mjs';
 import { PROCESSES } from './process-fixture.mjs';
 import { routeFiles } from './files-fixture.mjs';
 import { failureDetail } from './failure-detail.mjs';
+import { classify, describe, knownKey } from './hit-classify.mjs';
+import { OVERLAYS, sampleTargets } from './hit-sample.mjs';
 
 const [base, out, ...flags] = process.argv.slice(2);
 if (!base || !out) { console.error('usage: node phone.mjs BASE_URL OUT_DIR [--webkit] [--only=360-light]'); process.exit(2); }
@@ -43,6 +46,41 @@ const SIZES = [
 ];
 const results = [];
 let failed = 0;
+// Touch-target overlaps that exist today, tracked in S-2249. Each is the exact quadruple
+// step | target | edge | covering element, so a new overlap, or another edge or coverer on the
+// same target, still fails. A hit is reported as a `known` line; an entry that matches nothing
+// in a run of every viewport is reported as stale, so a fixed overlap leaves the list.
+const KNOWN_OVERLAPS = [
+  'instructions | {key#2}>…>details.fold:1>div.inst-actions>button.btn[Edit in Settings] | bottom | {key#2}>…>details.fold:3>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:1>div.inst-actions>button.btn[Edit in Settings] | centre | {key#2}>…>summary>span.inst-row>span.inst-label[Role]', // S-2249
+  'instructions | {key#2}>…>details.fold:1>div.inst-actions>button.btn[Edit in Settings] | left | {key#2}>…>details.fold:2>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:1>div.inst-actions>button.btn[Edit in Settings] | right | {key#2}>…>summary>span.inst-row>span.inst-label[Role]', // S-2249
+  'instructions | {key#2}>…>details.fold:1>div.inst-actions>button.btn[Edit in Settings] | top | {key#2}>…>details.fold:2>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:5>div.inst-actions>button.btn[Edit in Settings] | bottom | {key#2}>…>details.fold:7>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:5>div.inst-actions>button.btn[Edit in Settings] | centre | {key#2}>…>summary>span.inst-row>span.inst-label[Retros]', // S-2249
+  'instructions | {key#2}>…>details.fold:5>div.inst-actions>button.btn[Edit in Settings] | left | {key#2}>…>details.fold:6>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:5>div.inst-actions>button.btn[Edit in Settings] | right | {key#2}>…>summary>span.inst-row>span.inst-label[Retros]', // S-2249
+  'instructions | {key#2}>…>details.fold:5>div.inst-actions>button.btn[Edit in Settings] | top | {key#2}>…>details.fold:6>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:6>div.inst-actions>button.btn[Edit in Settings] | bottom | {key#2}>…>details.fold:8>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:6>div.inst-actions>button.btn[Edit in Settings] | centre | {key#2}>…>summary>span.inst-row>span.inst-label[ITSAs]', // S-2249
+  'instructions | {key#2}>…>details.fold:6>div.inst-actions>button.btn[Edit in Settings] | left | {key#2}>…>details.fold:7>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:6>div.inst-actions>button.btn[Edit in Settings] | right | {key#2}>…>summary>span.inst-row>span.inst-label[ITSAs]', // S-2249
+  'instructions | {key#2}>…>details.fold:6>div.inst-actions>button.btn[Edit in Settings] | top | {key#2}>…>details.fold:7>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:7>div.inst-actions>button.btn[Edit in Settings] | bottom | {key#2}>…>details.fold:9>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:7>div.inst-actions>button.btn[Edit in Settings] | centre | {key#2}>…>summary>span.inst-row>span.inst-label[Mail to your user]', // S-2249
+  'instructions | {key#2}>…>details.fold:7>div.inst-actions>button.btn[Edit in Settings] | left | {key#2}>…>details.fold:8>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:7>div.inst-actions>button.btn[Edit in Settings] | right | {key#2}>…>summary>span.inst-row>span.inst-label[Mail to your user]', // S-2249
+  'instructions | {key#2}>…>details.fold:7>div.inst-actions>button.btn[Edit in Settings] | top | {key#2}>…>details.fold:8>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:8>div.inst-actions>button.btn[Edit in Settings] | bottom | {key#2}>…>details.fold:9>summary>span.inst-path.mono[/path]', // S-2249
+  'instructions | {key#2}>…>details.fold:8>div.inst-actions>button.btn[Edit in Settings] | centre | {key#2}>…>summary>span.inst-row>span.inst-label[CLAUDE.md]', // S-2249
+  'instructions | {key#2}>…>details.fold:8>div.inst-actions>button.btn[Edit in Settings] | left | {key#2}>…>details.fold:9>summary>span.inst-row', // S-2249
+  'instructions | {key#2}>…>details.fold:8>div.inst-actions>button.btn[Edit in Settings] | right | {key#2}>…>summary>span.inst-row>span.inst-label[CLAUDE.md]', // S-2249
+  'instructions | {key#2}>…>details.fold:8>div.inst-actions>button.btn[Edit in Settings] | top | {key#2}>…>details.fold:9>summary>span.inst-row', // S-2249
+  'prompt input with keyboard | #w-bottom>…>div.cmp-files>div.cmp-file:1>button.cmp-open[Open pasted-#.png] | centre | #w-bottom>…>div.cmp-files>div.cmp-file:1>button.cmp-x[Remove pasted-#.png]', // S-2249
+  'prompt input with keyboard | #w-bottom>…>div.cmp-files>div.cmp-file:1>button.cmp-open[Open pasted-#.png] | right | #w-bottom>…>div.cmp-files>div.cmp-file:1>button.cmp-x[Remove pasted-#.png]', // S-2249
+  'prompt input with keyboard | #w-bottom>…>div.cmp-files>div.cmp-file:1>button.cmp-open[Open pasted-#.png] | top | #w-bottom>…>div.cmp-files>div.cmp-file:1>button.cmp-x[Remove pasted-#.png]', // S-2249
+];
+const knownSeen = new Set();
 const check = (tag, name, ok, detail = '') => {
   results.push({ tag, name, ok, detail });
   if (!ok) failed++;
@@ -138,18 +176,23 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
       const vis = (el) => { const s = getComputedStyle(el); const b = el.getBoundingClientRect(); return b.width > 0 && b.height > 0 && s.visibility !== 'hidden' && s.opacity !== '0' && !el.closest('[hidden]'); };
       const scrolls = (el) => { for (let a = el.parentElement; a; a = a.parentElement) { const o = getComputedStyle(a).overflowX; if (o === 'auto' || o === 'scroll' || o === 'hidden') return true; } return false; };
       const wide = [...document.querySelectorAll('body *')].filter((el) => vis(el) && el.getBoundingClientRect().right > W + 1 && !scrolls(el)).map((el) => el.tagName.toLowerCase() + '.' + [...el.classList].join('.')).slice(0, 5);
-      // Targets: controls a finger aims at. Links inside mail prose are text, exempt.
-      const inView = (b) => b.bottom > 0 && b.top < innerHeight && b.right > 0 && b.left < W;
-      // A prompt input's text box grows from one line; its whole box is the target.
-      const small = [...document.querySelectorAll('button, [role=button], [role=menuitem], input:not([type=hidden]):not([type=checkbox]):not([type=file]), select, textarea:not(.composer textarea), .cmp-box, .tab, .node, .mrow')]
-        .filter((el) => vis(el) && inView(el.getBoundingClientRect()) && !el.closest('.md .mb-table, .xterm, .mb-chart, .mb-code, .mb-diagram, .msg header'))
-        .map((el) => ({ el, b: el.getBoundingClientRect() }))
-        .filter(({ b }) => Math.min(b.width, b.height) < 43.5)
-        .map(({ el, b }) => `${el.tagName.toLowerCase()}.${[...el.classList].slice(0, 2).join('.')}${el.getAttribute('aria-label') ? '[' + el.getAttribute('aria-label') + ']' : ''} ${Math.round(b.width)}x${Math.round(b.height)}`);
-      return { scrollW: doc.scrollWidth, W, wide, small: [...new Set(small)].slice(0, 8) };
+      return { scrollW: doc.scrollWidth, W, wide };
     });
+    // Targets: controls a finger aims at. Links inside mail prose are text, exempt. A prompt input's
+    // text box grows from one line; its whole box is the target.
+    const sampled = await p.evaluate(sampleTargets, {
+      selector: 'button, [role=button], [role=menuitem], input:not([type=hidden]):not([type=checkbox]):not([type=file]), select, textarea:not(.composer textarea), .cmp-box, .tab, .node, .mrow',
+      exclude: '.md .mb-table, .xterm, .mb-chart, .mb-code, .mb-diagram, .msg header',
+      overlays: OVERLAYS, inset: 3,
+    });
+    r.small = [...new Set(sampled.filter((c) => Math.min(c.w, c.h) < 43.5).map((c) => `${c.t} ${Math.round(c.w)}x${Math.round(c.h)}`))].slice(0, 8);
     check(tag, `${where}: no sideways page scroll`, r.scrollW <= r.W && !r.wide.length, r.wide.join(', '));
     check(tag, `${where}: touch targets at least 44 px`, !r.small.length, r.small.join('; '));
+    const classes = sampled.filter((c) => c.samples.some((x) => !x.inside)).map((c) => classify(where, c.t, c.samples, KNOWN_OVERLAPS, knownSeen));
+    const fresh = [...new Map(classes.flatMap((c) => c.fresh).map((c) => [describe(c), c])).values()];
+    for (const c of classes.flatMap((c) => c.known)) console.log(`known [${tag}] ${where}: ${describe(c)} (S-2249)`);
+    for (const c of fresh) console.log(`overlap [${tag}] '${knownKey(where, c.target, c)}', // S-2249`);
+    check(tag, `${where}: touch targets are tappable across their whole box`, !fresh.length, fresh.slice(0, 8).map(describe).join('; '));
   };
   // The room a thread leaves its messages: the part of its scroller no pinned header covers.
   // At 360 px it must be at least half the visible viewport.
@@ -556,7 +599,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
   await step('issues', async () => {
     await p.locator('[data-nav="issues"]').tap();
     await p.waitForTimeout(400);
-    check(tag, 'the Issues tab shows the issues over main', await p.locator('#issues-side').isVisible() && !(await p.locator('#tree').isVisible()) && !(await p.locator('#mail-side').isVisible()));
+    check(tag, 'the Issues tab shows the issues over main', await p.locator('#issues-side').isVisible() && !(await p.locator('#tree').isVisible()) && !(await p.locator('#inbox-view').isVisible()));
     const all = await api('/api/itsas');
     const root = all.find((x) => x.title === 'Check: issue system');
     const first = all.find((x) => x.parent_id === root.id);
@@ -732,7 +775,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
   await step('mail list', async () => {
     await p.locator('[data-nav="mail"]').tap();
     await p.waitForTimeout(300);
-    check(tag, 'Mail shows the mail list alone', await p.locator('.mail-side').isVisible() && !(await p.locator('#tree').isVisible()));
+    check(tag, 'Mail shows the Inbox page alone', await p.locator('#inbox-view').isVisible() && !(await p.locator('#tree').isVisible()));
     await shot('mail');
     await layout('mail list');
   });
@@ -916,7 +959,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await touch('touchEnd', x - 60, y);
     await p.waitForTimeout(800);
     check(tag, 'archive: swiping a row left archives it', await row().count() === 0);
-    await p.locator('.mail-toggle').nth(1).tap();
+    await p.locator('[data-filter="archived"]').tap();
     await p.waitForTimeout(400);
     check(tag, 'archive: the Archived view lists it', await row().count() === 1);
     await shot('archived');
@@ -926,7 +969,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await drag(x2 + 60, y2, x2 - 60, y2);
     await p.waitForTimeout(800);
     check(tag, 'archive: swiping again unarchives it', await row().count() === 0);
-    await p.locator('.mail-toggle').nth(1).tap();
+    await p.locator('[data-filter="all"]').tap();
     await p.waitForTimeout(400);
     check(tag, 'archive: it is back in the mail list', await row().count() === 1);
     // The open thread's header and its menu offer Archive too.
@@ -957,12 +1000,12 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     // Restore it from the Archived view by swipe.
     await p.locator('[data-nav="mail"]').tap();
     await p.waitForTimeout(400);
-    await p.locator('.mail-toggle').nth(1).tap();
+    await p.locator('[data-filter="archived"]').tap();
     await p.waitForTimeout(400);
     const [x3, y3] = await center(row());
     await drag(x3 + 60, y3, x3 - 60, y3);
     await p.waitForTimeout(800);
-    await p.locator('.mail-toggle').nth(1).tap();
+    await p.locator('[data-filter="all"]').tap();
     await p.waitForTimeout(400);
     check(tag, 'archive: the thread is restored after menu archiving', await row().count() === 1);
   });
@@ -973,7 +1016,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.locator('[data-nav="mail"]').tap();
     await p.waitForTimeout(400);
     // Every thread row but a decision's: the decision row (S-352) is pinned above the mail, and leaving it out keeps the order these steps have always had.
-    const ids = await p.locator('#mail-side .mrow[data-thread]:not([data-decision])').evaluateAll((rs) => rs.map((r) => r.dataset.thread));
+    const ids = await p.locator('#inbox-view .mrow[data-thread]:not([data-decision]):not(.ask)').evaluateAll((rs) => rs.map((r) => r.dataset.thread));
     check(tag, 'advance: the inbox has four mails to move through', ids.length >= 4, `${ids.length}`);
     if (ids.length < 4) return;
     const open = async (tid) => {
@@ -1310,7 +1353,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.locator('.mrow[title*="Check: decisions and callouts"]').tap();
     await p.waitForSelector('.thread-view:visible .msg', { timeout: 10000 });
     await p.waitForTimeout(800);
-    check(tag, 'a thread opens in main', await p.locator('.thread-view:visible').isVisible() && !(await p.locator('.mail-side').isVisible()));
+    check(tag, 'a thread opens in main', await p.locator('.thread-view:visible').isVisible() && !(await p.locator('#inbox-view').isVisible()));
     if (await p.locator('.thread-view:visible .mb-decision.answered').count()) { check(tag, 'answers: already sent by an earlier run; restart daemon.sh to check them', false); return; }
     await p.locator('.thread-view:visible .mb-decision:not(.multi):not(.rank):not(.yesno) .mb-opt').nth(1).tap();
     await p.locator('.thread-view:visible .mb-decision.yesno .mb-opt').first().tap();
@@ -1428,17 +1471,19 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     const att = await api('/api/itsas/attention');
     const review = att.find((x) => x.title === 'Issues section in the sidebar');
     if (!review) { check(tag, 'attention: the seeded ITSA waits on the human (restart daemon.sh)', false); return; }
-    const rows = p.locator('#mail-side .mrow.att');
-    check(tag, 'attention: the Mail tab pins the ITSAs waiting on you', await rows.count() === att.length, `${await rows.count()} of ${att.length}`);
-    check(tag, 'attention: the header counts them', /waiting on you/.test(await p.locator('#mail-side .section').innerText()));
+    // The page lists each ITSA ask as its thread's row (an ask row with the ITSA's chip) or, with no thread, as its own
+    // row under Also waiting (keyed `i:`). Permission and decision asks are rows too, but not these.
+    const rows = p.locator('#inbox-view .mrow.ask:has([data-chip="itsa"]), #inbox-view .mrow[data-waiting^="i:"]');
+    check(tag, 'attention: the Mail page lists the ITSAs waiting on you', await rows.count() === att.length, `${await rows.count()} of ${att.length}`);
+    check(tag, 'attention: the header counts them', /to answer/.test(await p.locator('#inbox-view .inbox-count').innerText()));
     check(tag, 'attention: the Mail tab badge counts them', Number(await p.locator('[data-nav="mail"] .badge').innerText()) >= att.length);
     await shot('attention');
     await layout('attention list');
-    await p.locator(`#mail-side .mrow[data-att-itsa="${review.id}"]`).tap();
+    await p.locator(`#inbox-view .mrow:has([data-chip="itsa"]:text-is("${review.key}")), #inbox-view .mrow[data-waiting]:has-text("${review.title}")`).first().tap();
     await p.waitForSelector(`.itsa-view[data-itsa="${review.id}"] .itsa-ask`);
     await p.waitForTimeout(500);
     const view = p.locator(`.itsa-view[data-itsa="${review.id}"]`);
-    check(tag, 'attention: tapping a row opens the ITSA and closes the list', !(await p.locator('#mail-side').isVisible()) && await view.isVisible());
+    check(tag, 'attention: tapping a row opens the ITSA and closes the list', !(await p.locator('#inbox-view').isVisible()) && await view.isVisible());
     check(tag, 'attention: Approve and Request changes show in the header', (await view.locator('.itsa-ask .btn').allInnerTexts()).join('|') === 'Approve|Request changes');
     await shot('itsa-ask');
     await layout('itsa action bar');
@@ -1516,7 +1561,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     // its own that names who it is with, off the count of what waits on you.
     if (sentOn) {
       await p.locator('[data-nav="mail"]').tap();
-      const group = p.locator('#mail-side details.mail-delegated');
+      const group = p.locator('#inbox-view details.mail-delegated');
       await group.waitFor({ timeout: 10000 }).catch(() => {});
       check(tag, 'delegated dialog: the mail list shows it in the With group', await group.isVisible());
       if (await group.isVisible()) {
@@ -1532,7 +1577,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
         await layout('delegated dialog');
       }
       await api(`/api/permissions/${req.id}/answer`, 'POST', { decision: 'escalate', by: chief.id, note: 'helper needs the worktree to make the change' });
-      const left = await p.waitForFunction((id) => !document.querySelector(`#mail-side .mrow[data-delegated="${id}"]`), req.id, { timeout: 10000 }).then(() => true, () => false);
+      const left = await p.waitForFunction((id) => !document.querySelector(`#inbox-view .mrow[data-delegated="${id}"]`), req.id, { timeout: 10000 }).then(() => true, () => false);
       check(tag, 'delegated dialog: sent on, it leaves the With group', left);
     }
     // Poll until the dialog mail lands (S-689): it can arrive late, so wait on state, not the clock.
@@ -1715,11 +1760,11 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
       await keyboard(false);
       await p.locator('[data-nav="mail"]').tap();
       // A new thread from the human is archived on send: it shows in the Awaiting view, not the inbox.
-      await p.locator('.mail-toggle').nth(0).tap();
+      await p.locator('[data-filter="awaiting"]').tap();
       // A row shows only its topic chip (S-1075), so the full subject is matched on the row's title.
-      const row = p.locator(`.mail-side .mrow[title*="${w}"]`).first();
+      const row = p.locator(`#inbox-view .mrow[title*="${w}"]`).first();
       await row.waitFor({ timeout: 12000 }).catch(() => {});
-      check(tag, 'mail: it shows in the awaiting list', await row.count() === 1 && await row.evaluate((el) => el.classList.contains('awaiting')));
+      check(tag, 'mail: it shows in the awaiting list', await row.count() === 1);
       await shot('prompt-mail-sent');
       await p.locator('[data-nav="main"]').tap();
       await p.waitForTimeout(400);
@@ -1763,6 +1808,37 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await layout('settings-tiny-page');
     check(tag, 'tiny models page: instructions fit the screen', await p.locator('textarea.tiny-instr').evaluate((e) => e.getBoundingClientRect().right <= innerWidth + 1));
     await shot('settings-tiny-page');
+    // Prompt caching (S-2239): the timers, the agents table and the harness facts fit the screen. The timers and the
+    // harness settings passed on at launch are editable (S-2240): a choice saves to settings.json, then goes back.
+    await p.locator('.settings-nav .item:has-text("Prompt caching")').tap();
+    await p.waitForSelector('[data-cache-harness="opencode"]');
+    await p.waitForSelector('.cache-agents, .settings-inner p.muted:has-text("No Claude Code agents")');
+    await layout('settings-cache');
+    const timers = await p.locator('[data-cache-timers]').evaluate((e) => [...e.querySelectorAll('input')].map((i) => i.value).join(' ') + ' ' + e.textContent);
+    check(tag, 'prompt caching: the timers read the settings', /\d/.test(timers) || /Off/.test(timers), timers);
+    check(tag, 'prompt caching: the agents table scrolls in its box, not the page', await p.locator('.settings-inner').evaluate((e) => e.scrollWidth <= e.clientWidth + 1));
+    const ttl = p.locator('[data-harness-setting="harness.claude.promptCacheTtl"] .seg button');
+    check(tag, 'prompt caching: harness choices are touch height', await ttl.first().evaluate((e) => e.getBoundingClientRect().height >= 40));
+    check(tag, 'prompt caching: the next-launch note shows', await p.locator('[data-harness-next-launch]').isVisible());
+    await shot('settings-cache');
+    const savedTtl = async () => JSON.parse((await api('/api/config/settings')).text).harness?.claude?.promptCacheTtl ?? null;
+    await ttl.filter({ hasText: '1 hour' }).tap();
+    await p.waitForFunction(() => document.querySelector('[data-harness-setting="harness.claude.promptCacheTtl"] .seg button.on')?.textContent === '1 hour');
+    let saved = null;
+    for (let i = 0; i < 20 && saved !== '1h'; i++) { saved = await savedTtl(); if (saved !== '1h') await p.waitForTimeout(100); }
+    check(tag, 'prompt caching: a harness choice saves to settings.json', saved === '1h', String(saved));
+    await shot('settings-cache-set');
+    await ttl.filter({ hasText: 'Default' }).tap();
+    for (let i = 0; i < 20 && saved !== null; i++) { saved = await savedTtl(); if (saved !== null) await p.waitForTimeout(100); }
+    check(tag, 'prompt caching: Default clears it', saved === null, String(saved));
+    // Model providers (S-2115): the OpenRouter card and the add form fit, and the key buttons are touch height.
+    await p.locator('.settings-nav .item:has-text("Model providers")').tap();
+    await p.waitForSelector('.prov-card .prov-key');
+    await layout('settings-providers');
+    check(tag, 'providers: no sideways scroll', await p.locator('.settings-inner').evaluate((e) => e.scrollWidth <= e.clientWidth + 1));
+    check(tag, 'providers: key buttons are touch height', await p.locator('.prov-key .btn').first().evaluate((e) => e.getBoundingClientRect().height >= 40));
+    check(tag, 'providers: the add form fits the screen', await p.locator('.prov-add').evaluate((e) => e.getBoundingClientRect().right <= innerWidth + 1));
+    await shot('settings-providers');
     // Sidebar: the pane layout controls fit the screen and are touch height (S-1422).
     await p.locator('.settings-nav .item:has-text("Sidebar")').tap();
     await p.waitForSelector('.sidebar-set');
@@ -2222,7 +2298,8 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.waitForSelector('.codeview .cm-line');
     await p.waitForSelector('.codeview .cm-selectedLine');
     check(tag, 'entry links: a tap on a path opens the file view with its line marked', (await p.locator('.codeview .cm-selectedLine').first().innerText()).startsWith('const wide '));
-    await p.locator('text=Check: entry links').first().tap();
+    // The thread's tab shows its short title (S-2311: "entry links", not the full subject), so the tab is the target.
+    await p.locator(`.tab[data-key="thread:${tid}"]`).first().tap();
     await p.waitForSelector('.files a.att-file');
     check(tag, 'entry links: the attachment link and its Download button show', await p.locator('.files a.att-file').count() === 1 && await p.locator('.files .att-dl').count() === 1);
     check(tag, 'entry links: Download is a touch target', (await p.locator('.files .att-dl').first().boundingBox()).height >= 44);
@@ -2405,6 +2482,22 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     if (!realProc) check(tag, 'process: the sheet lists the node\'s ITSAs with their owners', await sheet.locator('.proc-itsa').count() === 3 && /S-101/.test(await sheet.locator('.proc-itsa').first().innerText()));
     await shot('process-sheet');
     await layout('process sheet');
+    check(tag, 'process: the sheet names the node\'s boundary event', (await sheet.locator('.proc-bounds').innerText()).includes('on cost → pause'));
+    // S-2249: the boundary events are text, not a tooltip. The node has one event in the fixture, so a long line of three is set in
+    // the open sheet as the sheet would draw it: it must wrap inside the 360 px sheet, not clip.
+    await sheet.evaluate((el) => {
+      const line = document.createElement('p');
+      line.className = 'proc-sub proc-bounds';
+      line.id = 'bounds-probe';
+      line.textContent = 'on cost → pause, timeout → notify_manager, deployment_health_check_failed → rollback';
+      el.append(line);
+    });
+    const probe = p.locator('#bounds-probe');
+    check(tag, 'process: a long boundary line wraps inside the sheet, none clipped', await probe.evaluate((e) => e.scrollWidth <= e.clientWidth + 1 && e.getBoundingClientRect().right <= innerWidth && e.scrollHeight > parseFloat(getComputedStyle(e).fontSize) * 2), await probe.evaluate((e) => `scroll ${e.scrollWidth} client ${e.clientWidth} height ${e.scrollHeight}`));
+    await layout('process boundary sheet');
+    await probe.evaluate((e) => e.remove());
+    await p.locator('.proc-node[data-node=code] .proc-hit').evaluate((el) => el.click());
+    await p.waitForSelector('.proc-sheet .proc-itsa');
     await sheet.locator('.proc-itsa').first().tap();
     await p.waitForSelector('.itsa-view');
     check(tag, 'process: a row opens the ITSA as the Work page does', await p.locator('.itsa-view').isVisible());
@@ -2497,6 +2590,35 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     check(tag, 'suggest: Go to closes the prompt', !(await p.locator('#suggest-modal').count()));
     check(tag, 'suggest: Go to leaves the text as a draft in the agent\'s box', (await p.locator('#w-bottom textarea').inputValue()).includes('hand this over'), await p.locator('#w-bottom textarea').inputValue());
     await p.evaluate(() => document.activeElement?.blur());
+    // Touch (S-2570, the scrim contract in docs/design-system.md): under pointer: coarse the prompt has no scrim
+    // (style.css hides #suggest-scrim), so a tap outside a preview lands on the prompt. That tap closes the preview
+    // only and presses nothing under it: the card beneath stays unpicked.
+    await p.locator('[data-pane-menu]').tap();
+    await p.locator('.menu [role=menuitem]:has-text("Write and pick where")').tap();
+    await p.waitForSelector('#suggest-modal');
+    await p.locator('#suggest-modal textarea').pressSequentially('tap outside ');
+    await p.waitForSelector('#suggest-modal .sg-card');
+    const [tx, ty] = await center(p.locator(`#suggest-modal [data-suggest="agent:${helper.id}"] .sg-pick`));
+    await longPress(tx, ty);
+    await p.waitForSelector('[data-preview]');
+    await p.locator('#suggest-modal [data-suggest="thread:nope"] .sg-pick').tap();
+    await p.waitForTimeout(400);
+    check(tag, 'suggest: a tap outside the preview closes only the preview', !(await p.locator('[data-preview]').count()) && await p.locator('#suggest-modal').isVisible());
+    check(tag, 'suggest: that tap picks nothing under the preview', await p.locator('#suggest-modal .sg-chip').count() === 0 && await p.locator('#suggest-modal .sg-card').count() === 2);
+    // Back onto a menu over the prompt (S-2020, driven with real events): Alt+A opens the prompt over the open pane
+    // menu, a tap outside the menu closes the menu, and the entry it leaves is the prompt over the menu's. One back
+    // press lands on that entry; the skip passes it, so the prompt does not reopen.
+    await p.goBack();
+    await p.waitForTimeout(500);
+    await p.locator('[data-pane-menu]').tap();
+    await p.waitForSelector('.menu');
+    await p.keyboard.press('Alt+a');
+    await p.waitForSelector('#suggest-modal');
+    await p.locator('#suggest-modal .sg-head').tap();
+    await p.waitForSelector('.menu', { state: 'detached' });
+    await p.goBack();
+    await p.waitForTimeout(500);
+    check(tag, 'suggest: one back onto a menu over the prompt does not reopen the prompt', !(await p.locator('#suggest-modal').count()));
     await p.unroute('**/api/suggest?*');
   });
 
@@ -2624,7 +2746,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
       proto.getSubscription = async () => sub;
       proto.subscribe = async (o) => (sub = { endpoint: `http://127.0.0.1:9/push/${tag}`, options: o, toJSON: () => ({ endpoint: `http://127.0.0.1:9/push/${tag}`, keys: { p256dh, auth } }), unsubscribe: async () => { sub = null; return true; } });
     }, tag);
-    const mine = async () => (await api('/api/push')).devices.find((d) => d.endpoint.endsWith('/push/' + tag));
+    const mine = async () => (await api('/api/push')).devices.find((d) => d.endpoint_hash === createHash('sha256').update(`http://127.0.0.1:9/push/${tag}`).digest('hex'));
     await p.locator('#push-on').tap();
     await p.waitForSelector(`.device-row:has-text("this device")`);
     const d = await mine();
@@ -3232,6 +3354,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
   await ctx.close();
 }
 await browser.close();
+if (!only) for (const k of KNOWN_OVERLAPS) if (!knownSeen.has(k)) console.log(`stale: no overlap matches known entry "${k}" (S-2249); drop it`);
 writeFileSync(`${out}/results-${engine}.json`, JSON.stringify(results, null, 1));
 console.log(`${engine}: ${results.length - failed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

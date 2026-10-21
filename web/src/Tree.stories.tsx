@@ -1,4 +1,4 @@
-import { Tree } from './Tree'
+import { Tree, TreeTools } from './Tree'
 import { setSidebarCols } from './sidebar-cols'
 import { applyLiveEvent } from './store'
 import { AGENTS, agent } from './stories/fixtures'
@@ -125,5 +125,16 @@ export const stories: Story[] = [{
     { name: 'No agents', data: { agents: [] }, setup: ui(), render: () => <Side><Tree /></Side> },
     { name: 'Loading', data: { agents: [], loaded: { agents: false, mail: true, itsas: true } }, setup: ui(), render: () => <Side><Tree /></Side> },
     { name: 'Daemon unreachable', data: { agents: [], error: 'fixture: the daemon did not answer' }, setup: ui(), render: () => <Side><Tree /></Side> },
+  ],
+},
+{
+  name: 'Tree header buttons',
+  group: 'Tree and shell',
+  what: "The two buttons at the tree's header: the columns on each row (a menu of the Work columns, up to the cap, with None for the role) and what the marks mean (the legend). The sidebar shows them on its Agents heading; the Agents page shows them at the right end of its header.",
+  when: "On the sidebar's Agents heading, and in the header of the Agents page (`w:agents`).",
+  code: ['web/src/Tree.tsx#TreeTools'],
+  rules: ['Both are `.icon-btn` in the heading with an `aria-label` each, and the columns button is `aria-haspopup="menu"`, the legend `aria-haspopup="dialog"`. A press on either opens its menu or legend where it is; neither changes the tree.'],
+  states: [
+    { name: 'In a heading', data: { agents: AGENTS }, setup: ui(), render: () => <Side><TreeTools /></Side> },
   ],
 }]

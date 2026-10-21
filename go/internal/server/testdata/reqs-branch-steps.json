@@ -1,0 +1,21 @@
+[
+  {"op": "create", "input": {"title": "Go files", "text": "Keep Go files clean", "verification": ["decision"], "scope": {"paths": ["**/*.go"]}, "mode": "enforce", "status": "in_force"}},
+  {"op": "create", "input": {"title": "Docs", "text": "Keep docs clean", "verification": ["decision"], "scope": {"paths": ["docs/**"]}, "mode": "observe", "status": "in_force"}},
+  {"op": "create", "input": {"title": "Rust files", "verification": ["decision"], "scope": {"paths": ["**/*.rs"]}, "status": "in_force"}},
+  {"op": "create", "input": {"title": "Any branch", "verification": ["decision"], "scope": {"subjects": ["branch"]}, "mode": "inform", "status": "in_force"}},
+  {"op": "check", "input": {"subject": "branch:r/feat"}},
+  {"op": "check", "input": {"subject": "branch:r/feat"}},
+  {"op": "check", "input": {"subject": "branch:r/feat", "keys": ["R-2"]}},
+  {"op": "check", "input": {"subject": "branch:r/zzz"}},
+  {"op": "check", "input": {"subject": "branch:nope/feat"}},
+  {"op": "check", "input": {"subject": "branch:oops"}},
+  {"op": "sql", "sql": "INSERT INTO itsas (id, key, title, status, created_by, created_at, updated_at) VALUES ('ibr', 'S-1', 'Branch work', 'in_progress', 'human', '2026-10-21T00:00:00.000Z', '2026-10-21T00:00:00.000Z')"},
+  {"op": "sql", "sql": "INSERT INTO itsa_links (itsa_id, n, system, external_id, url, meta) VALUES ('ibr', 1, 'branch', 'feat', '', '{\"repo\":\"r\"}')"},
+  {"op": "preview", "ref": "R-1", "input": {}},
+  {"op": "preview", "ref": "R-4", "input": {"n": 5}},
+  {"op": "preview", "ref": "R-3", "input": {"n": 0}},
+  {"op": "preview", "ref": "R-9", "input": {}},
+  {"op": "create", "input": {"title": "By test", "verification": ["test"], "status": "draft"}},
+  {"op": "preview", "ref": "R-5", "input": {"n": 999}},
+  {"op": "preview", "ref": "R-4", "input": {"n": "7"}}
+]

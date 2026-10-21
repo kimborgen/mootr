@@ -61,6 +61,48 @@ test('validate > two accounts that match the same harness and model are rejected
   assert.equal(accounts.validate(costWith({ a: { match: { harness: 'claude' } }, b: { match: { harness: 'opencode', model: 'openrouter/' } } })), null);
 });
 
+test('payPerTokenProvider > OpenRouter, an explicit provider, and an OpenCode match on a configured provider (S-2118)', () => {
+  const providers = { myazure: { kind: 'azure' } };
+  const p = (acct, name = 'x') => accounts.payPerTokenProvider(acct, name, providers);
+  assert.equal(p({ match: { harness: 'opencode', model: 'openrouter/' } }), 'openrouter');
+  assert.equal(p({ match: { harness: 'stam' } }, 'openrouter-system'), 'openrouter');
+  assert.equal(p({ match: { harness: 'opencode', model: 'myazure/' } }), 'myazure');
+  assert.equal(p({ match: { harness: 'opencode', model: 'myazure/gpt-prod' } }), 'myazure');
+  assert.equal(p({ match: { harness: 'opencode', model: 'myazure' } }), null, 'no slash: not a provider prefix');
+  assert.equal(p({ match: { harness: 'opencode', model: 'other/' } }), null, 'an unconfigured provider');
+  assert.equal(p({ match: { harness: 'codex', model: 'myazure/' } }), null, 'only OpenCode names providers by prefix');
+  assert.equal(p({ match: { harness: 'codex' }, provider: 'openai' }), 'openai');
+  assert.equal(p({ match: { harness: 'claude' }, paid: false }), null);
+});
+
+test('validate > a provider must be a non-empty string (S-2118)', () => {
+  assert.match(accounts.validate(costWith({ a: { match: { harness: 'opencode', model: 'x/' }, provider: 3 } })), /bad provider/);
+  assert.match(accounts.validate(costWith({ a: { match: { harness: 'opencode', model: 'x/' }, provider: '' } })), /bad provider/);
+  assert.equal(accounts.validate(costWith({ a: { match: { harness: 'opencode', model: 'x/' }, provider: 'x' } })), null);
+});
+
+test('kindResolver > a pay-per-token account on a configured provider is paid (S-2118)', async () => {
+  const { kindResolver } = await import('../src/cost-display.ts');
+  writeFileSync(
+    join(home, 'settings.json'),
+    JSON.stringify({
+      providers: { myazure: { kind: 'azure', endpoint: 'https://r.openai.azure.com', apiVersion: 'v1' } },
+      cost: costWith({
+        az: { match: { harness: 'opencode', model: 'myazure/' } },
+        claude: { match: { harness: 'claude' } },
+        gw: { match: { harness: 'codex' }, provider: 'gw' },
+        unpaid: { match: { harness: 'opencode', model: 'openrouter/' }, paid: false },
+      }),
+    }),
+  );
+  const kind = kindResolver();
+  assert.equal(kind('az'), 'paid');
+  assert.equal(kind('gw'), 'paid');
+  assert.equal(kind('claude'), 'subscription');
+  assert.equal(kind('unpaid'), 'subscription', 'an explicit paid: false wins');
+  assert.equal(kind('nobody'), 'none');
+});
+
 test('validate > a take-over target that resolves to the listing account is rejected', () => {
   // "standard" is a claude preset, so it resolves back to claude-max.
   const cost = costWith({ 'claude-max': { match: { harness: 'claude' }, onSubExhausted: { action: 'take-over', to: ['standard'], else: 'wait' } } });

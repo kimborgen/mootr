@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ItsaLink } from '../types'
-import { activityOf, costOf, costTitle, fmtDuration, fmtReviews, fmtTimeShare, fmtUsd, fmtWindow, githubSubject, isTestLink, linkKind, linkLabel, prState, reviewOf, testsOf, waitColor, waitingKinds, type IssueCosts } from './links'
+import { activityOf, costOf, fmtDuration, fmtIssueCost, fmtReviews, fmtTimeShare, fmtWindow, issueCostTitle, githubSubject, isTestLink, linkKind, linkLabel, prState, reviewOf, testsOf, waitColor, waitingKinds, type IssueCosts } from './links'
 
 const link = (over: Partial<ItsaLink>): ItsaLink => ({ n: 1, system: 'link', external_id: null, url: 'https://example.com/x', ...over })
 
@@ -54,18 +54,27 @@ describe('PR state, review, tests', () => {
 describe('cost lookup', () => {
   const report: IssueCosts = {
     note: 'API-equivalent',
-    issues: [{ key: 'S-136', own: { cost_usd: 0.4 }, total: { cost_usd: 1.23 }, weekly_percent: 3.2 }],
+    issues: [{ key: 'S-136', own: { cost_usd: 0.4 }, total: { cost_usd: 1.23 }, weekly_percent: 3.2,
+      cost: { mode: 'api', own: { api: 0.4, five_hour: null, seven_day: null, subscription: null, paid_usd: 0 }, total: { api: 1.23, five_hour: null, seven_day: null, subscription: null, paid_usd: 0 } } }],
   }
-  it('finds an issue by key and formats its total', () => {
+  it('finds an issue by key and formats its total the way the sidebar does', () => {
     const c = costOf(report, 'S-136')!
-    expect(fmtUsd(c.total.cost_usd)).toBe('$1.23')
-    expect(costTitle(c, report.note)).toContain('Own $0.40, total $1.23')
+    expect(fmtIssueCost(c, 'total')).toBe('$1.2')
+    expect(issueCostTitle(c)).toBe('own: $0.40 API-equivalent · tree: $1.23 API-equivalent')
     expect(fmtWindow(c)).toBe('3%')
   })
-  it('returns nothing for an unknown key, a null share, or a sub-cent amount', () => {
+  it('shows the Settings unit, a percent for a window', () => {
+    const c = { ...report.issues[0], cost: { mode: 'five_hour' as const, own: { api: null, five_hour: 3.4, seven_day: null, subscription: null, paid_usd: 0 }, total: { api: null, five_hour: 7, seven_day: null, subscription: null, paid_usd: 0 } } }
+    expect(fmtIssueCost(c, 'total')).toBe('7%')
+    expect(issueCostTitle(c)).toBe('own: 3% of the 5h window · tree: 7% of the 5h window')
+  })
+  it('returns nothing for an unknown key, a null share, a zero, or a row with no figure in the unit', () => {
     expect(costOf(report, 'S-1')).toBeNull()
     expect(fmtWindow({ ...report.issues[0], weekly_percent: null })).toBeNull()
-    expect(fmtUsd(0.004)).toBe('<$0.01')
+    expect(fmtIssueCost(null, 'total')).toBe('')
+    expect(fmtIssueCost({ ...report.issues[0], cost: null }, 'total')).toBe('–')
+    expect(fmtIssueCost({ ...report.issues[0], cost: { ...report.issues[0].cost!, total: { ...report.issues[0].cost!.total, api: 0 } } }, 'total')).toBe('')
+    expect(issueCostTitle({ ...report.issues[0], cost: null })).toBeUndefined()
   })
 })
 

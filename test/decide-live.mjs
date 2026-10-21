@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// One live call to the decision model (microsoft/microsoft-decision-1 through OpenRouter,
-// about $0.00001): decide() returns a noul probability. In --live only, through a throwaway
+// One live call to the decision model (settings.decisions.model, microsoft/microsoft-decision-1 through
+// OpenRouter, about $0.00001): decide() returns a probability. In --smoke only, through a throwaway
 // STAM_HOME with a real key (test/e2e-decide-live.sh sets it up).
 import { decide } from '../src/decide.ts';
 

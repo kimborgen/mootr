@@ -12,23 +12,15 @@ set -e
 ARCHIVED=200 LIVE=30
 MENU_TEXT='Teach auto mode about your environment?'
 daemon_home banners
-SEED="$TEST_TMP/seed-banners.mjs"
-cat >"$SEED" <<'JS'
-const db = await import(process.env.ROOT + '/src/db.ts');
-db.open();
-const agent = (id, lifecycle) => {
-  db.createAgent({ id, name: id, role: 'dev', machine: 'banners', harness: 'claude', model: null, effort: null, cwd: '/tmp', parent_id: null, session_id: null });
-  db.updateAgent(id, { lifecycle, activity: 'idle', workspace: '/tmp' });
-};
-if (process.env.ACT) db.updateAgent(process.env.ONE, { activity: process.env.ACT });
-else if (process.env.ONE) agent(process.env.ONE, 'active');
-else {
-  for (let i = 0; i < Number(process.env.ARCHIVED); i++) agent(`arch-${i}`, 'archived');
-  for (let i = 0; i < Number(process.env.LIVE); i++) agent(`live-${i}`, 'active');
-  for (const id of ['menu-1', 'theme-1', 'win-1']) agent(id, 'active');
-}
-JS
-ROOT="$ROOT" ARCHIVED=$ARCHIVED LIVE=$LIVE STAM_HOME="$TEST_TMP/banners" node "$SEED"
+# The agents are seeded before the daemon starts (test-seed.json, read once at startup by a test daemon).
+node -e '
+const [arch, live] = process.argv.slice(1).map(Number);
+const agent = (id, lifecycle) => ({ agent: id, create: { machine: "banners" }, lifecycle, activity: "idle", workspace: "/tmp" });
+const agents = [];
+for (let i = 0; i < arch; i++) agents.push(agent(`arch-${i}`, "archived"));
+for (let i = 0; i < live; i++) agents.push(agent(`live-${i}`, "active"));
+for (const id of ["menu-1", "theme-1", "win-1"]) agents.push(agent(id, "active"));
+console.log(JSON.stringify({ agents }));' $ARCHIVED $LIVE >"$TEST_TMP/banners/test-seed.json"
 # The wrapper logs each tmux call. While the hold file exists, a capture reads the screen, says so (the started file),
 # and answers only once the hold file is gone: a slow tmux, for a session replaced in between.
 REAL_TMUX=$(command -v tmux)
@@ -58,6 +50,8 @@ t new-session -d -s theme-1 "echo 'Pick a theme'; exec cat"
 t new-session -d -s win-1 'exec cat'
 t split-window -t =win-1: 'exec cat'
 PATH="$WRAP:$PATH" daemon_up banners
+# test_agent BODY: a test-route write to the running daemon (-f: a gate 404 fails here).
+test_agent() { curl -sf -X POST -H "authorization: Bearer $(cat "$STAM_HOME/token")" -H 'content-type: application/json' -d "$1" "$STAM_URL/api/test/agent" >/dev/null; }
 events_has() { "$STAM" events "$1" | grep -q "$2"; }
 dismissed() { events_has "$1" 'banner:dismissed'; }
 captures() { grep -c "capture-pane -p -t %" "$LOG" || true; }
@@ -104,7 +98,7 @@ wait_until dismissed win-1
 # answers with the old screen. The keys must not reach the new session.
 touch "$HOLD"
 t new-session -d -s menu-2 "echo '$MENU_TEXT'; exec cat"
-ROOT="$ROOT" ONE=menu-2 STAM_HOME="$TEST_TMP/banners" node "$SEED"
+test_agent '{"agent":"menu-2","create":{"machine":"banners"},"lifecycle":"active","activity":"idle","workspace":"/tmp"}'
 held() { test -e "$STARTED"; }
 wait_until held
 t kill-session -t =menu-2
@@ -118,13 +112,13 @@ dismissed menu-2 && { echo "FAIL: menu-2 dismissed though its session was replac
 # work-1 shows the menu; while its capture is held it starts working, so that look doesn't count.
 rm -f "$STARTED"; touch "$HOLD"
 t new-session -d -s work-1 "echo '$MENU_TEXT'; exec cat"
-ROOT="$ROOT" ONE=work-1 STAM_HOME="$TEST_TMP/banners" node "$SEED"
+test_agent '{"agent":"work-1","create":{"machine":"banners"},"lifecycle":"active","activity":"idle","workspace":"/tmp"}'
 wait_until held
-ROOT="$ROOT" ONE=work-1 ACT=working STAM_HOME="$TEST_TMP/banners" node "$SEED"
+test_agent '{"agent":"work-1","activity":"working"}'
 rm "$HOLD"
 seen=$(ticks)
 wait_until more
 dismissed work-1 && { echo "FAIL: work-1 dismissed while working"; exit 1; }
-ROOT="$ROOT" ONE=work-1 ACT=idle STAM_HOME="$TEST_TMP/banners" node "$SEED"
+test_agent '{"agent":"work-1","activity":"idle"}'
 wait_until dismissed work-1
 echo "PASS"

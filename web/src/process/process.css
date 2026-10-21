@@ -112,7 +112,8 @@
 .proc-badge { position: absolute; top: 0; right: 0; transform: translate(40%, -40%); min-width: var(--size-hit-min); padding: 0 var(--space-15); border-radius: var(--radius-lg); background: var(--status-neutral-bg); color: var(--status-neutral-fg); font-size: var(--type-chrome-xs); font-weight: var(--weight-semibold); text-align: center; line-height: var(--space-5); }
 .proc-badge.zero { background: var(--surface-sunken); color: var(--text-muted); }
 /* A task's edge markers: a boundary event dot, and the ⊞ of a sub-process call. */
-.proc-boundary { position: absolute; right: 0; top: 50%; transform: translate(50%, -50%); width: var(--space-2); height: var(--space-2); border: var(--stroke-card) solid var(--surface-pane); border-radius: 50%; background: var(--status-warning-fg); }
+/* A decorative marker on the node's edge: taps pass through to the node's button (S-2249). */
+.proc-boundary { position: absolute; right: 0; top: 50%; transform: translate(50%, -50%); pointer-events: none; width: var(--space-2); height: var(--space-2); border: var(--stroke-card) solid var(--surface-pane); border-radius: 50%; background: var(--status-warning-fg); }
 .proc-call { position: absolute; left: 0; top: 0; transform: translate(-50%, -50%); display: grid; place-items: center; width: var(--space-3); height: var(--space-3); border: var(--stroke-card) solid var(--border-default); border-radius: var(--radius-xs); background: var(--surface-pane); color: var(--text-secondary); font-size: var(--type-chrome-xs); line-height: 1; }
 
 /* ---- The node's ITSAs: a side sheet on a desktop, a bottom sheet on a narrow pane ---- */
@@ -122,6 +123,8 @@
 .proc-ph h3 { margin: 0; font-size: var(--type-chrome-xl); line-height: var(--leading-chrome-xl); font-weight: var(--weight-semibold); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proc-close { margin-left: auto; }
 .proc-sheet .proc-sub { margin: calc(-1 * var(--space-2)) 0 0; color: var(--text-secondary); font-size: var(--type-chrome-sm); }
+/* The boundary events wrap rather than clip: they are the only text here a reader can't do without (S-2249). */
+.proc-sheet .proc-sub.proc-bounds { flex: none; white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
 .proc-itsas { display: flex; flex-direction: column; gap: var(--space-05); }
 .proc-itsa { display: flex; align-items: center; gap: var(--space-2); text-align: left; padding: var(--space-1) var(--space-2); border: var(--stroke-card) solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-page); color: var(--text-primary); font: inherit; }
 .proc-itsa:hover { border-color: var(--border-strong); }

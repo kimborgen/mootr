@@ -16,7 +16,7 @@ export function revertKeys(cur: Obj, base: Obj, keys: string[]): void {
 }
 
 // The view records the daemon merges per id (S-293): a removed view must go as a null for its id.
-const VIEW_RECORDS = ['boardViews', 'workViews', 'sidebarCols', 'sidebarPanes', 'motion']
+const VIEW_RECORDS = ['boardViews', 'workViews', 'sidebarCols', 'sidebarPanes', 'motion', 'cardLayouts', 'agentsTableCols']
 const isRec = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v)
 
 // The patch for what changed from base to cur, and the top-level keys cur dropped. A view record

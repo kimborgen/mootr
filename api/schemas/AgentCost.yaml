@@ -1,0 +1,12 @@
+type: object
+additionalProperties: false
+description: Own and tree cost in every display unit (src/agent-costs.ts).
+required: [mode, own, tree]
+properties:
+  mode:
+    type: string
+    enum: [api, five_hour, seven_day, subscription]
+  own:
+    $ref: '#/components/schemas/AgentCostModes'
+  tree:
+    $ref: '#/components/schemas/AgentCostModes'

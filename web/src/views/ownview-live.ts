@@ -7,24 +7,31 @@ import { useSyncExternalStore } from 'react'
 
 export interface Live { running: boolean; asking: boolean; stop: (() => void) | null; stopError: string }
 
-const live = new Map<string, Live>()
+// Each open view of an agent keeps its own word, keyed by its owner (one per OwnView mount), so
+// the same agent open in two worlds doesn't lose its Stop when one of them closes (S-1774).
+const live = new Map<string, Map<object, Live>>()
 const ls = new Set<() => void>()
 const changed = () => { for (const f of ls) f() }
 
-export function setLive(id: string, v: Live) {
-  const was = live.get(id)
+export function setLive(id: string, owner: object, v: Live) {
+  const views = live.get(id) ?? new Map<object, Live>()
+  const was = views.get(owner)
   if (was && was.running === v.running && was.asking === v.asking && was.stop === v.stop && was.stopError === v.stopError) return
-  live.set(id, v)
+  // Re-inserted, so the view that spoke last is the one the agent shows.
+  views.delete(owner)
+  views.set(owner, v)
+  live.set(id, views)
   changed()
 }
-export function clearLive(id: string) {
-  if (!live.has(id)) return
-  live.delete(id)
+export function clearLive(id: string, owner: object) {
+  const views = live.get(id)
+  if (!views?.delete(owner)) return
+  if (!views.size) live.delete(id)
   changed()
 }
-export const getLive = (id: string) => live.get(id)
+export const getLive = (id: string) => { let last: Live | undefined; for (const v of live.get(id)?.values() ?? []) last = v; return last }
 const subscribe = (f: () => void) => { ls.add(f); return () => { ls.delete(f) } }
-export const useLive = (id: string | undefined) => useSyncExternalStore(subscribe, () => (id ? live.get(id) : undefined))
+export const useLive = (id: string | undefined) => useSyncExternalStore(subscribe, () => (id ? getLive(id) : undefined))
 
 // An agent's state with the open view's word on top: a running turn is working, a waiting
 // permission blocked; otherwise the agent list's state stands.

@@ -4,7 +4,7 @@
 # checkout or switch before it happens. Other ref updates (the watcher's fast-forward of main, fetch,
 # update-ref) and linked worktrees are left alone. STAM_ALLOW_LIVE_CHECKOUT=1 bypasses it.
 # stam-live-head-guard (the deploy watcher overwrites only a hook that carries this marker)
-[ "${STAM_ALLOW_LIVE_CHECKOUT:-}" = 1 ] && { cat >/dev/null; exit 0; }
+[ "${MOOTR_ALLOW_LIVE_CHECKOUT:-${STAM_ALLOW_LIVE_CHECKOUT:-}}" = 1 ] && { cat >/dev/null; exit 0; }
 [ "$1" = prepared ] || { cat >/dev/null; exit 0; }
 # A linked worktree has its own git dir apart from the common one.
 gd=$(git rev-parse --absolute-git-dir 2>/dev/null)

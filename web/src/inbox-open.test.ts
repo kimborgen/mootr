@@ -181,6 +181,59 @@ describe('openInboxThread', () => {
     expect(shell.currentWorld()).toBe('t:t3')
     phone = false
   })
+  it('on a phone, Mail opens the Inbox page full width, and a thread pushes over it', async () => {
+    const { openMail, openInboxThread } = await import('./actions')
+    await fresh()
+    phone = true
+    shell.phoneShow('left')
+    openMail()
+    await tick()
+    expect(shell.phoneShows()).toBeNull()
+    expect(shell.currentWorld()).toBe('w:inbox')
+    openInboxThread('t4')
+    await tick()
+    expect(shell.currentWorld()).toBe('t:t4')
+    phone = false
+  })
+  it('on a phone, Main brings back the world Mail covered', async () => {
+    const { openMail, leaveMail } = await import('./actions')
+    await fresh()
+    shell.showAgentWorld('t:t6')
+    phone = true
+    openMail()
+    await tick()
+    leaveMail()
+    await tick()
+    expect(shell.currentWorld()).toBe('t:t6')
+    phone = false
+  })
+  it('on a phone, Main with no world remembered goes to the home world, not back onto the page', async () => {
+    const { leaveMail } = await import('./actions')
+    await fresh()
+    phone = true
+    leaveMail()
+    await tick()
+    expect(shell.currentWorld()).not.toBe('w:inbox')
+    phone = false
+  })
+  it('on a phone, an archive under Unread advances in the list as it was when the thread opened', async () => {
+    const { openMail, openInboxThread, archiveThreadAndAdvance } = await import('./actions')
+    const { setInboxOrder } = await import('./mail/inbox-order')
+    await fresh()
+    phone = true
+    openMail()
+    await tick()
+    // Own thread ids: an archive leaves an optimistic overlay that would show in the next test.
+    setInboxOrder(['pa', 'pc', 'pe'])
+    openInboxThread('pc')
+    await tick()
+    // Reading pc drops it from the Unread list, so the page no longer lists it.
+    setInboxOrder(['pa', 'pe'])
+    void archiveThreadAndAdvance('pc').catch(() => {})
+    await tick()
+    expect(shell.currentWorld()).toBe('t:pe')
+    phone = false
+  })
 })
 
 describe('Inbox page keys: step, triage, undo', () => {

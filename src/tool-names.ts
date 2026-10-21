@@ -16,10 +16,12 @@ import { settings, onSettingsChange } from './settings.ts';
 import { apiKey } from './credits.ts';
 import { recordSpend } from './decide.ts';
 import { systemHeld } from './budgets.ts';
+import { checkCredential, send } from './llm/http.ts';
 import { toolNameConfig, TOOL_NAME_INSTRUCTIONS, TOOL_NAME_MAX_WORDS } from './tiny-models.ts';
 import { splitTool, seededLabel } from './tool-name-labels.ts';
+import { envVar } from './env.ts';
 
-const base = () => process.env.STAM_OPENROUTER_URL ?? 'https://openrouter.ai/api/v1';
+const base = () => envVar('OPENROUTER_URL') ?? 'https://openrouter.ai/api/v1';
 const PURPOSE = 'tool-name';
 const TIMEOUT_MS = 15_000;
 const CONCURRENCY = 3;
@@ -147,9 +149,10 @@ async function name(j: Job, signal: AbortSignal): Promise<void> {
   if (systemHeld() || !key) return;
   let data: any;
   try {
-    const res = await fetch(`${base()}/chat/completions`, {
+    // checkCredential refuses a key that isn't a plain header value, with text that names no key (S-2117).
+    const res = await send(`${base()}/chat/completions`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${checkCredential(key, 'API key')}`, 'content-type': 'application/json' },
       body: JSON.stringify({
         model: j.model,
         messages: [

@@ -4,15 +4,16 @@
 // poll, into its cache (settings.shared.json), keeping the last good copy while the home is down.
 // Nothing here runs on a request's path or blocks boot.
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { STAM_HOME } from './config.ts';
+import { ROOT, STAM_HOME } from './config.ts';
 import { GLOBAL_INSTRUCTIONS } from './instructions.ts';
 import { isSettingsHome, onSettingsChange, readSettingsText, readSharedCache, settings, sharedPart, writeSharedCache } from './settings.ts';
 import { peers, peerByName, peerCall, peerNotify } from './peers.ts';
 import { originOf } from './web-origins.ts';
+import { envVar } from './env.ts';
 
-const POLL_MS = Number(process.env.STAM_SETTINGS_SYNC_MS) || 60_000;
+const POLL_MS = Number(envVar('SETTINGS_SYNC_MS')) || 60_000;
 const FETCH_MS = 5000;
 const PUSH_MS = 3000;
 
@@ -20,7 +21,7 @@ const PUSH_MS = 3000;
 
 // The home's shared settings as peers get them: the raw shared part of its file, not normalised
 // (the peer normalises it), with its user registry (registry.json, or {}) and its instructions for
-// all agents (instructions.md, or ''), S-387, and the sha256 of all three as one rev. Null when the
+// all agents (instructions.md, or ''), S-387, and its type templates (S-417), and the sha256 of all four as one rev. Null when the
 // settings file isn't valid JSON, so a peer keeps its cache rather than take the defaults. A registry
 // that isn't valid JSON goes as {}, as the home itself reads it. Kept until a file's text changes.
 export interface SharedPayload {
@@ -28,6 +29,9 @@ export interface SharedPayload {
   settings: Record<string, any>;
   registry: Record<string, any>;
   instructions: string;
+  // The overridden type templates (S-417): STAM_HOME/templates/type-NAME.md as { 'type-NAME': text }.
+  // Only those files go, never the rest of the folder.
+  templates: Record<string, string>;
 }
 let served: { key: string; payload: SharedPayload | null } | null = null;
 const readText = (path: string): string => {
@@ -37,11 +41,25 @@ const readText = (path: string): string => {
     return '';
   }
 };
+export const TYPE_TEMPLATE_FILE = /^(type-[\w-]+)\.md$/;
+function readTypeTemplates(): Record<string, string> {
+  const out: Record<string, string> = {};
+  let names: string[] = [];
+  try {
+    names = readdirSync(join(STAM_HOME, 'templates')).sort();
+  } catch {}
+  for (const f of names) {
+    const m = TYPE_TEMPLATE_FILE.exec(f);
+    if (m) out[m[1]] = readText(join(STAM_HOME, 'templates', f));
+  }
+  return out;
+}
 export function sharedPayload(): SharedPayload | null {
   const text = readSettingsText();
   const registryText = readText(join(STAM_HOME, 'registry.json'));
   const instructions = readText(GLOBAL_INSTRUCTIONS);
-  const key = JSON.stringify([text, registryText, instructions]);
+  const templates = readTypeTemplates();
+  const key = JSON.stringify([text, registryText, instructions, templates]);
   if (served?.key === key) return served.payload;
   let payload = null;
   try {
@@ -51,8 +69,8 @@ export function sharedPayload(): SharedPayload | null {
       registry = JSON.parse(registryText);
     } catch {}
     if (!registry || typeof registry !== 'object' || Array.isArray(registry)) registry = {};
-    const json = JSON.stringify({ settings: shared, registry, instructions });
-    payload = { rev: createHash('sha256').update(json).digest('hex'), settings: shared, registry, instructions };
+    const json = JSON.stringify({ settings: shared, registry, instructions, templates });
+    payload = { rev: createHash('sha256').update(json).digest('hex'), settings: shared, registry, instructions, templates };
   } catch {}
   served = { key, payload };
   return payload;
@@ -62,7 +80,8 @@ export function sharedPayload(): SharedPayload | null {
 // down peer catches up on its poll. Deferred off the write path, coalesced, and skipped when the
 // shared part didn't change (a local key, or a cache write on a peer). The home also pushes once at
 // boot, so a change made while a peer was out of reach, or by hand, doesn't wait for the poll.
-// stam's own writes to registry.json and instructions.md (agent types, the config page) call
+// stam's own writes to registry.json, instructions.md and type templates (agent types, the config
+// page, the template editor) call
 // sharedFilesChanged to push the same way; a hand edit to either reaches peers on their poll, which
 // asks the home for its current rev, or on the home's next boot.
 let pushedRev: string | null = null;
@@ -152,9 +171,14 @@ async function fetchOnce(): Promise<void> {
       const cache: Record<string, unknown> = { rev: r.data.rev, settings: next };
       if (reg && typeof reg === 'object' && !Array.isArray(reg)) cache.registry = reg;
       if (typeof r.data.instructions === 'string') cache.instructions = r.data.instructions;
+      // A home from before S-417 sends no templates: the cache has none, and this daemon keeps
+      // reading its own type templates. Its old local files stay until pruneTypeFiles finds the home's registry shows the type gone.
+      const tpl = r.data.templates;
+      if (tpl && typeof tpl === 'object' && !Array.isArray(tpl)) cache.templates = Object.fromEntries(Object.entries(tpl).filter(([k, v]) => /^type-[\w-]+$/.test(k) && typeof v === 'string'));
       if (web) cache.web = web;
       if (r.data.rev !== rev || web !== homeWeb) writeSharedCache(JSON.stringify(cache, null, 2) + '\n');
       rev = r.data.rev;
+      void pruneTypeFiles(r.data.registry ?? null);
     }
     // A home that starts or stops serving its page with no settings change: the cache keeps the new
     // origin too, so a restart doesn't bring back the old one.
@@ -185,11 +209,70 @@ export function homeChanged(pushed: unknown): void {
   void syncShared();
 }
 
+// The type templates a peer keeps from before the home kept them (S-417): STAM_HOME/templates/type-NAME.md,
+// which nothing reads once the home's cache has its templates. `names` are the template names (type-NAME).
+// One goes once the home's registry shows its type gone: masked with null, or named by neither the home's
+// user types nor the shipped defaults (`shipped`, registry/defaults.json's types).
+export function typeFilesGone(registry: unknown, names: string[], shipped: Record<string, unknown>): string[] {
+  const types = registry && typeof registry === 'object' ? (registry as { types?: unknown }).types : undefined;
+  // A registry the home can't read comes as {} (see sharedPayload): no `types` means nothing is proven gone.
+  if (!types || typeof types !== 'object' || Array.isArray(types)) return [];
+  const t = types as Record<string, unknown>;
+  return names.filter((n) => {
+    const type = n.slice('type-'.length);
+    return t[type] === null || (!Object.hasOwn(t, type) && !Object.hasOwn(shipped, type));
+  });
+}
+function shippedTypes(): Record<string, unknown> | null {
+  try {
+    return JSON.parse(readFileSync(join(ROOT, 'registry', 'defaults.json'), 'utf8')).types ?? {};
+  } catch {
+    return null;
+  }
+}
+function localTypeFileNames(): string[] {
+  let files: string[] = [];
+  try {
+    files = readdirSync(join(STAM_HOME, 'templates'));
+  } catch {}
+  const out: string[] = [];
+  for (const f of files) {
+    const m = TYPE_TEMPLATE_FILE.exec(f);
+    if (m) out.push(m[1]);
+  }
+  return out;
+}
+// Removes the local type files the home has confirmed gone. `registry` is the home's registry as it sent it
+// (null when it sent none, so nothing is removed); undefined asks the home now. Any failure, an
+// unreachable home included, keeps every file.
+export async function pruneTypeFiles(registry?: unknown): Promise<void> {
+  if (isSettingsHome()) return;
+  const names = localTypeFileNames();
+  if (!names.length) return;
+  // Without the shipped types the home's registry proves nothing: keep every file.
+  const shipped = shippedTypes();
+  if (!shipped) return;
+  try {
+    let reg = registry;
+    if (reg === undefined) {
+      const peer = peerByName(settings().home);
+      if (!peer) return;
+      const r = await peerCall(peer, 'GET', '/api/config/settings/shared', undefined, FETCH_MS);
+      if (r.status !== 200) return;
+      reg = r.data?.registry ?? null;
+    }
+    for (const n of typeFilesGone(reg, names, shipped)) rmSync(join(STAM_HOME, 'templates', `${n}.md`), { force: true });
+  } catch (e) {
+    console.error(`settings sync: can't tidy the type templates: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 // Started once the daemon is up, never awaited: a sync now, then every POLL_MS.
 export function startSettingsSync(): void {
   const c = readSharedCache();
   rev = typeof c?.rev === 'string' ? c.rev : null;
   homeWeb = c?.web && originOf(c.web) === c.web ? c.web : null;
   void syncShared();
+  void pruneTypeFiles();
   setInterval(() => void syncShared(), POLL_MS);
 }

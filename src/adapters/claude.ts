@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 import { readFileSync, writeFileSync, statSync, openSync, readSync, closeSync, existsSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { STAM_BIN, agentDir, testTmpBase } from '../config.ts';
+import { settings as stamSettings } from '../settings.ts';
 import { allowRules, denyRules } from './claude-permissions.ts';
 import * as db from '../db.ts';
 import { ttlOf, markCold, setTurnReader } from '../cache-cold.ts';
@@ -27,10 +28,11 @@ import { hookWaits, replaceHookWaits } from './hook-waits.ts';
 import { dialogDetails, dialogKey, dialogNames, dialogTarget } from './claude-dialog.ts';
 import { inputBox, inputShows, aroundBox, sameAround, menuUnderBox, boxRows } from './claude-input.ts';
 import { promptInBox } from './claude-ghost.ts';
+import { envVar, setEnvVar } from '../env.ts';
 
 const execFileAsync = promisify(execFile);
 // Tests point this at a scripted fake (test/fake-claude), so no model runs.
-const BIN = process.env.STAM_CLAUDE_BIN ?? 'claude';
+const BIN = envVar('CLAUDE_BIN') ?? 'claude';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // Whether Claude Code runs with vim keys (editorMode in the user's settings or config). In normal
@@ -435,6 +437,12 @@ export const claude: Adapter = {
       // stops the agent on a dialog even in auto mode (S-276).
       // Read-only commands are pre-approved and secrets denied (S-570, claude-permissions.ts).
       permissions: { allow: ['mcp__stam', ...allowRules()], deny: denyRules(), ...(extraDirs.length ? { additionalDirectories: extraDirs } : {}) },
+      // stam compacts idle agents itself, before the cache expires (settings.idleCompaction, S-2238); Claude
+      // Code's own idle compaction at about 54 minutes would race it.
+      idleCompaction: false,
+      // settings.harness.claude (S-2240): the cache and compaction keys the human set, over stam's; none set
+      // writes the file as before.
+      ...stamSettings().harness.claude,
     };
     const settingsFile = join(dir, 'claude-settings.json');
     writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
@@ -482,7 +490,7 @@ export const claude: Adapter = {
     argv.push('--permission-mode', agent.permission_mode === 'bypass' ? 'bypassPermissions' : agent.permission_mode === 'default' ? 'default' : 'auto');
     const env: Record<string, string> = {};
     const usl = userStatusLine();
-    if (usl) env.STAM_USER_STATUSLINE = usl;
+    if (usl) setEnvVar('USER_STATUSLINE', usl, env);
     return { argv, env };
   },
 
@@ -559,7 +567,7 @@ export const claude: Adapter = {
     // The command goes in on stdin: instructions on a command line would show in `ps`.
     const args = ['-p', '--resume', agent.session_id!, '--output-format', 'json'];
     if (agent.model) args.push('--model', agent.model);
-    const run = execFileAsync(BIN, args, { cwd: agent.cwd, timeout: 600_000, env: { ...process.env, STAM_AGENT_ID: '', STAM_COMPACTOR: `${agent.id}:${opts?.op ?? ''}` } });
+    const run = execFileAsync(BIN, args, { cwd: agent.cwd, timeout: 600_000, env: { ...process.env, ...{ STAM_AGENT_ID: '', STAM_COMPACTOR: `${agent.id}:${opts?.op ?? ''}` } } });
     // A compactor that exits before reading stdin fails this write with EPIPE. Unhandled, that
     // took the daemon down (S-2040); the run's own rejection reports the failure.
     run.child.stdin!.on('error', () => {});

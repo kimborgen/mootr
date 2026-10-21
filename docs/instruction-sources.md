@@ -51,10 +51,11 @@ the trim; S-1280's trim dropped one and the rule read as its opposite (S-1307).
 | `blocks/type-reviewer/20-reviewer-checks.md` | Read files at the reviewed sha | S-1954 | S-2077 | 2026-10-19 |
 | `blocks/type-reviewer/20-reviewer-checks.md` | `git diff MAINTIP HEAD --stat` | S-1733 | S-2077 | 2026-10-19 |
 | `blocks/type-manager/30-manager-mail-wait.md` | Brief a reviewer with the PR, branch and full head only | S-1870, S-1998, S-1954 | S-2077 | 2026-10-19 |
-| `blocks/type-manager/30-manager-mail-wait.md` | one consistent view (one fd for `fstat` and read) | S-1952, S-2017 | S-2077 | 2026-10-19 |
-| `blocks/type-manager/30-manager-mail-wait.md` | require fail-closed parsing | S-1846 | S-2077 | 2026-10-19 |
-| `blocks/type-manager/30-manager-mail-wait.md` | names `test/run.sh export` | S-1901 | S-2077 | 2026-10-19 |
-| `blocks/type-manager/30-manager-mail-wait.md` | Archive a developer only after its own done mail | S-1787 | S-2077 | 2026-10-19 |
+| `blocks/type-manager/31-manager-briefs.md` | one consistent view (one fd for `fstat` and read) | S-1952, S-2017 | S-2077 | 2026-10-19 |
+| `blocks/type-manager/31-manager-briefs.md` | require fail-closed parsing | S-1846 | S-2077 | 2026-10-19 |
+| `blocks/type-manager/31-manager-briefs.md` | names `test/run.sh export` | S-1901 | S-2077 | 2026-10-19 |
+| `blocks/type-manager/31-manager-briefs.md` | Archive a developer only after its own done mail | S-1787 | S-2077 | 2026-10-19 |
+| `blocks/type-manager/31-manager-briefs.md` | Put each required check (a real-app run, a phone viewport) in the brief's When-done list with the proof to report | S-2483 | S-2587 | 2026-10-20 |
 | `blocks/type-developer/40-developer-before-report.md` | Before you call a change local | S-2009, S-1798, S-1821, S-2000 | S-2077 | 2026-10-19 |
 | `blocks/type-developer/40-developer-before-report.md` | builds aside, renames, and gitignores each temp name | S-1782, S-1783 | S-2077 | 2026-10-19 |
 | `blocks/type-developer/40-developer-before-report.md` | push nothing unless your manager asks | S-1804 | S-2077 | 2026-10-19 |

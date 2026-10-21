@@ -32,7 +32,7 @@ printf "export STAM_GITHUB_API=%s\n" "$GITHUB" >>"$TEST_TMP/main/test.env"
 
 # PR #1 is open on sha1, its one gate a pending status.
 control() { curl -s -X POST -H 'content-type: application/json' -d "$1" "$GITHUB/_control" >/dev/null; }
-control '{"issues":{"o/r#1":{"number":1,"title":"PR one","state":"open","html_url":"https://github.com/o/r/pull/1","user":{"login":"kim"},"pull_request":{"url":"x"}}},"pulls":{"o/r#1":{"number":1,"title":"PR one","state":"open","merged":false,"draft":false,"html_url":"https://github.com/o/r/pull/1","user":{"login":"kim"},"head":{"sha":"sha1","ref":"feature"},"base":{"ref":"main"}}},"statuses":{"o/r@sha1":{"state":"pending","statuses":[{"context":"stam/gates","state":"pending","updated_at":"2026-10-13T10:00:00Z","created_at":"2026-10-13T10:00:00Z"}]}}}'
+control '{"issues":{"o/r#1":{"number":1,"title":"PR one","state":"open","html_url":"https://github.com/o/r/pull/1","user":{"login":"octocat"},"pull_request":{"url":"x"}}},"pulls":{"o/r#1":{"number":1,"title":"PR one","state":"open","merged":false,"draft":false,"html_url":"https://github.com/o/r/pull/1","user":{"login":"octocat"},"head":{"sha":"sha1","ref":"feature"},"base":{"ref":"main"}}},"statuses":{"o/r@sha1":{"state":"pending","statuses":[{"context":"stam/gates","state":"pending","updated_at":"2026-10-13T10:00:00Z","created_at":"2026-10-13T10:00:00Z"}]}}}'
 
 use main
 daemon_up main
@@ -49,11 +49,8 @@ A=$(reg alice)
 hook "$A" '{"hook_event_name":"UserPromptSubmit"}'; hook "$A" '{"hook_event_name":"Stop","last_assistant_message":"ready"}'
 
 echo "-- the watch_pr tool makes one subscription on PR #1, ending on the merge"
-# The tool runs as alice would call it: in-process, against this daemon.
-(cd "$ROOT" && STAM_AGENT_ID="$A" node --input-type=module -e "
-  const m = await import('$ROOT/src/mcp.ts');
-  console.log(JSON.stringify(await m.callTool('watch_pr', { self: '$A', pr: 'o/r#1' })));
-") >"$TEST_TMP/watch.out" || fail "watch_pr failed: $(cat "$TEST_TMP/watch.out")"
+# The tool runs as alice would call it: over stdio, through `stam mcp`, against this daemon.
+STAM_BIN="$STAM" STAM_AGENT_ID="$A" node "$ROOT/test/mcp-call.mjs" "$(python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"watch_pr","arguments":{"self":sys.argv[1],"pr":"o/r#1"}}}))' "$A")" >"$TEST_TMP/watch.out" || fail "watch_pr failed: $(cat "$TEST_TMP/watch.out")"
 [ "$(api GET "/api/subscriptions?by=$A" | count)" = 1 ] || fail "watch_pr made no single subscription"
 api GET "/api/subscriptions?by=$A" | python3 -c "
 import json,sys

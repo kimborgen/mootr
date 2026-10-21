@@ -18,6 +18,7 @@ const file = join(home, 'settings.json');
 const backup = `${file}.pre-S380`;
 const s = await import('../src/settings.ts');
 const { runMigrate } = await import('../src/settings-migrate.ts');
+const { derivedRepos } = await import('../src/default-repo.ts');
 const save = (o) => { writeFileSync(file, typeof o === 'string' ? o : JSON.stringify(o)); s.settingsChanged(); };
 const cache = (settings) => s.writeSharedCache(JSON.stringify({ rev: 1, settings }));
 const disk = () => JSON.parse(readFileSync(file, 'utf8'));
@@ -103,7 +104,8 @@ test('--apply backs up, strips to exactly the local keys, effective settings agr
   const after = s.settings();
   assert.equal(after.cost.mode, 'shared');
   assert.equal(after.context.warnTokens, 5);
-  assert.deepEqual(after.itsa.repos, { stam2: '/r' });
+  // The checkout this runs from is a derived repo keyed by its folder name (S-2083); the user's entry wins.
+  assert.deepEqual(after.itsa.repos, { ...derivedRepos(), stam2: '/r' });
   assert.equal(after.retro.lastDigest, '2026-10-12');
 });
 

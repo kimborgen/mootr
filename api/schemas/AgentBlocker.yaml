@@ -1,0 +1,22 @@
+type: object
+additionalProperties: false
+required: [agent_id, kind, account, reason, since, clear]
+properties:
+  agent_id:
+    type: string
+  kind:
+    type: string
+    enum: [window, paid-forbidden, budget, credits-out, billing-unknown, error, taken-over, manual]
+  account:
+    type: string
+    description: The account or budget scope it applies to; empty when none.
+  reason:
+    type: string
+  since:
+    type: string
+  clear:
+    type: object
+    nullable: true
+    description: What clears it, such as `{resets_at}`.
+    additionalProperties: true
+    x-legacy: a free map whose keys depend on the kind

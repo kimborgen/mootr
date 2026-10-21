@@ -1,7 +1,7 @@
 // The daemon's token and API. `stam web` links carry the token in the URL's hash; it is
 // kept per browser. Through `tailscale serve`, the owner's login authenticates instead.
 
-import { dropToken, onLoopback } from './local-login'
+import { dropToken, offerLogin, onLoopback } from './local-login'
 
 export const hash = new URLSearchParams(location.hash.slice(1))
 
@@ -69,6 +69,8 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   const d = await r.json().catch(() => ({}))
   // A refused token on 127.0.0.1 (an expired local login, S-613) is dropped, and the page loads again to ask anew.
   if (r.status === 401 && token && onLoopback()) { dropToken(); location.reload() }
+  // A human action refused on 127.0.0.1 while a local login is there (a `stam web` token link, S-2121): offer it.
+  if (r.status === 403 && (d as { localLogin?: unknown }).localLogin === true && onLoopback()) offerLogin()
   if (r.status === 409 && method !== 'GET') {
     const to = machineRefusal(d)
     if (to) {

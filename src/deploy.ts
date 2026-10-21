@@ -3,7 +3,7 @@
 // down. `stam deploy` builds a committed ref into releases/SHA, checks it on a scratch
 // daemon, switches `current`, restarts the service, and switches back if the restarted
 // daemon doesn't answer.
-import { spawn, spawnSync, type SpawnSyncOptions } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type SpawnSyncOptions } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, writeFileSync, closeSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -12,9 +12,12 @@ import { dirname, join } from 'node:path';
 import { RELEASES, ROOT, STAM_HOME } from './config.ts';
 import { lockHolder, tryLock } from './release-lock.ts';
 import { api } from './client.ts';
+import { migrateUnit } from './unit.ts';
+import { checkRoot, sweepCheckHomes, writeOwner } from '../scripts/check-homes.mjs';
 import { GONE, NODEPS, linkLocked, linkLockedAsync, tryExclusive } from '../scripts/deps-lock.mjs';
+import { envVar, entryValue } from './env.ts';
 
-export const SERVICE = process.env.STAM_SERVICE ?? 'stamd';
+export const SERVICE = envVar('SERVICE') ?? 'stamd';
 export const UNIT = join(homedir(), '.config', 'systemd', 'user', `${SERVICE}.service`);
 export const systemctl = (...args: string[]) => spawnSync('systemctl', ['--user', ...args], { stdio: 'inherit' }).status === 0;
 
@@ -315,7 +318,7 @@ export async function fillDeps(dir: string, dev: boolean, label?: string): Promi
   try {
     cpSync(join(dir, 'package.json'), join(tmp, 'package.json'));
     cpSync(join(dir, 'package-lock.json'), join(tmp, 'package-lock.json'));
-    await runAsync(process.env.STAM_NPM ?? 'npm', ['ci', '--no-audit', '--no-fund', ...(dev ? [] : ['--omit=dev'])], tmp);
+    await runAsync(envVar('NPM') ?? 'npm', ['ci', '--no-audit', '--no-fund', ...(dev ? [] : ['--omit=dev'])], tmp);
     // Native modules must load with this Node, or the release is no good.
     const names = Object.keys(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).dependencies ?? {});
     if (!dev && existsSync(join(tmp, 'node_modules'))) await runAsync(process.execPath, ['--input-type=module', '-e', `for (const d of ${JSON.stringify(names)}) await import(d);`], tmp);
@@ -403,13 +406,29 @@ function freePort(): Promise<number> {
   });
 }
 
+// Kills every process whose environment has STAM_HOME set to `home`: the scratch daemon and whatever it
+// started, orphans included. Only this check's unique home matches, never the live daemon or the watcher.
+function killHomeProcesses(home: string): void {
+  for (const name of readdirSync('/proc')) {
+    if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
+    try {
+      if (readFileSync(`/proc/${name}/environ`, 'utf8').split('\0').includes(`STAM_HOME=${home}`)) process.kill(Number(name), 'SIGKILL');
+    } catch {}
+  }
+}
+
 // Every module loads, the CLI runs, and the daemon answers HTTP from a scratch home on
 // scratch ports, with no harness started.
-async function check(dir: string): Promise<void> {
-  const home = mkdtempSync(join(tmpdir(), 'stam-check-'));
+export async function check(dir: string): Promise<void> {
+  // Leaked homes go first, so a full disk can't stop the check that carries the fix (S-2573).
+  sweepCheckHomes();
+  mkdirSync(checkRoot(), { recursive: true });
+  const home = mkdtempSync(join(checkRoot(), 'stam-check-'));
+  // The sweep keeps a home whose check still runs, however old.
+  writeOwner(home);
   const socket = `stam-check-${process.pid}`;
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('STAM_') && v !== undefined) env[k] = v;
+  for (const [k, v] of Object.entries(process.env)) if (!/^(STAM|MOOTR)_/.test(k) && v !== undefined) env[k] = v;
   const port = await freePort();
   Object.assign(env, {
     STAM_HOME: home,
@@ -420,20 +439,23 @@ async function check(dir: string): Promise<void> {
     STAM_OPENCODE_PORT: String(await freePort()),
     STAM_OPENCODE_BIN: '/bin/false',
     STAM_CODEX_BIN: '/bin/false',
+    // No model install or download into the scratch home: an npm child of it can outlive the daemon.
+    STAM_EMBEDDER: 'off',
   });
-  const modules = (readdirSync(join(dir, 'src'), { recursive: true }) as string[])
-    .filter((f) => f.endsWith('.ts') && f !== 'cli.ts' && f !== 'embed-worker.ts' && !f.startsWith('adapters/opencode-plugin'))
-    .map((f) => `./src/${f}`);
-  run(process.execPath, ['--no-warnings', '--input-type=module', '-e', `for (const m of ${JSON.stringify(modules)}) await import(m); process.exit(0);`], { cwd: dir, env }, 'loading every module');
-  run(join(dir, 'bin', 'stam'), [], { cwd: dir, env }, 'running the CLI');
-
   const log = join(home, 'check.log');
-  const fd = openSync(log, 'a');
-  const child = spawn(process.execPath, ['--no-warnings', join(dir, 'src', 'cli.ts'), 'daemon', 'run'], { cwd: home, env, stdio: ['ignore', fd, fd] });
-  closeSync(fd);
+  let child: ChildProcess | undefined;
   let exited = false;
-  child.on('exit', () => (exited = true));
   try {
+    const modules = (readdirSync(join(dir, 'src'), { recursive: true }) as string[])
+      .filter((f) => f.endsWith('.ts') && f !== 'cli.ts' && f !== 'embed-worker.ts' && !f.startsWith('adapters/opencode-plugin'))
+      .map((f) => `./src/${f}`);
+    run(process.execPath, ['--no-warnings', '--input-type=module', '-e', `for (const m of ${JSON.stringify(modules)}) await import(m); process.exit(0);`], { cwd: dir, env }, 'loading every module');
+    run(join(dir, 'bin', 'stam'), [], { cwd: dir, env }, 'running the CLI');
+
+    const fd = openSync(log, 'a');
+    child = spawn(process.execPath, ['--no-warnings', join(dir, 'src', 'cli.ts'), 'daemon', 'run'], { cwd: home, env, stdio: ['ignore', fd, fd] });
+    closeSync(fd);
+    child.on('exit', () => (exited = true));
     const get = async (path: string) => {
       const token = readFileSync(join(home, 'token'), 'utf8').trim();
       return fetch(`http://127.0.0.1:${port}${path}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(1000) });
@@ -452,9 +474,14 @@ async function check(dir: string): Promise<void> {
     const tail = existsSync(log) ? readFileSync(log, 'utf8').split('\n').slice(-30).join('\n') : '';
     throw new Error(`check failed: ${(e as Error).message}\n${tail}`);
   } finally {
-    child.kill('SIGTERM');
-    for (let i = 0; i < 20 && !exited; i++) await sleep(100);
-    if (!exited) child.kill('SIGKILL');
+    // Whatever the daemon started (an installer, a worker) can outlive it and write into the home
+    // after the rm below, so everything holding this home is killed first. The daemon stays in the
+    // build's group, which the canary reads to reap a killed build's check home.
+    if (child) {
+      child.kill('SIGTERM');
+      for (let i = 0; i < 20 && !exited; i++) await sleep(100);
+    }
+    killHomeProcesses(home);
     spawnSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' });
     rmSync(home, { recursive: true, force: true });
   }
@@ -475,6 +502,8 @@ function meta(name: string): Meta | undefined {
 
 // Builds REF into releases/SHA, unless that release exists already.
 async function build(repo: string, ref: string): Promise<string> {
+  // Before the install and the web build, which a full temp dir can stop (S-2573).
+  sweepCheckHomes();
   const commit = run('git', ['-C', repo, 'rev-parse', '--verify', `${ref}^{commit}`]);
   const name = commit.slice(0, 10);
   if (meta(name)) return name;
@@ -526,6 +555,25 @@ function serviceRunsReleases(): boolean {
   }
 }
 
+// An older unit (one that runs node on releases/current/src/cli.ts) is rewritten to start through
+// bin/stamd with the fallback for releases without it (src/unit.ts), before the restart that uses it. The
+// fallback is why a rollback to a release without the wrapper still starts, so a rollback never has to
+// rewrite the unit back. A unit already in the new form is left alone.
+function migrateServiceUnit(): void {
+  try {
+    const next = migrateUnit(readFileSync(UNIT, 'utf8'), join(RELEASES, 'current'));
+    if (next === undefined) return;
+    // Rename, not rewrite, so an interrupted deploy never leaves a half-written unit.
+    const tmp = `${UNIT}.tmp-${process.pid}`;
+    writeFileSync(tmp, next);
+    renameSync(tmp, UNIT);
+    systemctl('daemon-reload');
+    console.log(`${UNIT} now starts ${SERVICE} through bin/stamd`);
+  } catch (e) {
+    console.error(`couldn't rewrite ${UNIT}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 // Restarts the service and waits for `release` to answer (`awaitRestart`).
 async function restartAndWait(release: string): Promise<'answering' | 'crashed' | 'timeout'> {
   restart();
@@ -542,6 +590,7 @@ async function activate(target: string): Promise<boolean> {
     console.log(`current -> ${target}. The ${SERVICE} service doesn't run from releases/current; install it with: ${join(RELEASES, 'current', 'bin', 'stam')} daemon install`);
     return true;
   }
+  migrateServiceUnit();
   const up = await restartAndWait(target);
   if (up === 'answering') {
     console.log(`current -> ${target}; ${SERVICE} restarted and answering`);
@@ -574,8 +623,7 @@ function pinnedProcesses(): { release: string; pid: number }[] {
 // The agent a process belongs to: its harness launches the MCP shim with STAM_AGENT_ID.
 function agentIdOf(pid: number): string | undefined {
   try {
-    const kv = readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').find((e) => e.startsWith('STAM_AGENT_ID='));
-    return kv?.slice('STAM_AGENT_ID='.length);
+    return entryValue(readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0'), 'AGENT_ID');
   } catch {
     return undefined;
   }

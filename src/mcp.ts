@@ -9,13 +9,15 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MACHINE, RELEASES, ROOT, STAM_URL, readToken } from './config.ts';
+import { extraTools } from './test-faults.ts';
 import { template } from './templates.ts';
 import { FEEDBACK_KINDS } from './feedback.ts';
 import { blendHits } from './hit-blend.ts';
 import { activityInfoOf, type Mode } from './activity-info.ts';
 import { EFFORT_KEYS, EVIDENCE_KINDS, RETRO_KINDS, STAM_ISSUE_KIND, runRetro } from './retro.ts';
+import { envVar, setEnvVar } from './env.ts';
 
-let agentId = process.env.STAM_AGENT_ID;
+let agentId = envVar('AGENT_ID');
 // The read_mail batch each agent last got a reply to (S-357). The daemon keeps the mail of a batch
 // owed until the next read acknowledges it, so a read whose reply never arrived loses nothing.
 // Keyed by agent: some harnesses share one MCP process between agents. Kept in the environment, so
@@ -216,9 +218,9 @@ export const tools: Tool[] = [
       const r = await api('POST', '/api/register', { ...a, cwd: process.cwd(), token: true });
       agentId = r.id;
       // The agent's own token, for every later call (the shared token can't name an agent).
-      if (r.token) process.env.STAM_TOKEN = r.token;
+      if (r.token) setEnvVar('TOKEN', r.token);
       // A newer release's tools, loaded after a deploy, read the id from the environment.
-      process.env.STAM_AGENT_ID = r.id;
+      setEnvVar('AGENT_ID', r.id);
       startStream();
       const { token: _t, ...shown } = r;
       return json(shown);
@@ -505,7 +507,7 @@ export const tools: Tool[] = [
     name: 'spawn_agent',
     group: 'agents',
     description:
-      'Start a new agent as your child: it is registered under you, you get its status and blockers, and you can control it with agent_control. Any model name works, even one stam does not know yet. The executive assistant can also start it under any parent or none, or as chief of staff. A developer spawn when the machine already runs developerCap developers (settings, default 6) is not refused but queued: you get "queued, place N" with the holders, the agent starts by itself when a slot frees (first come first served), and you get a notice when it does or fails. Keep working meanwhile; do not spawn it again. Reviewers and other types are never queued.',
+      'Start a new agent as your child: it is registered under you, you get its status and blockers, and you can control it with agent_control. Any model name works, even one stam does not know yet. The executive assistant can also start it under any parent or none, or as chief of staff. A developer spawn when the machine already runs developerCap developers (settings, default 6) is not refused but queued: you get "queued, place N" with the holders, the agent starts by itself when a slot frees (first come first served), and you get a notice when it does or fails. Keep working meanwhile; do not spawn it again. Reviewers and other types are never queued. To let the child comment on or join an ITSA without owning it, pass participate with its ids or keys; the spawn is refused before anything starts if you may not add participants to one.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -522,7 +524,8 @@ export const tools: Tool[] = [
         cwd: { type: 'string', description: 'Directory to work in, or the repo for a worktree. Defaults to yours.' },
         machine: { type: 'string', description: 'Machine to run it on, from the machine field in find_agents. Defaults to yours.' },
         worktree: { type: 'boolean', description: 'Give it its own git worktree and branch, removed when it is archived. Defaults to the type\'s worktree default (the developer type is true). A developer that ends up without one in the live deploy checkout is refused, since its commits there would hold every deploy.' },
-        base: { type: 'string', description: 'A git ref to cut the worktree\'s branch from, such as origin/stam/x for a stacked PR (fetched first; a local branch works too). The spawn fails if it does not resolve. Without it, a repo with an origin remote is cut from a freshly fetched origin/main (falling back to the checkout\'s HEAD if the fetch fails; the spawn\'s workspace:base event says which). Only with a worktree.' },
+        base: { type: 'string', description: 'A git ref to cut the worktree\'s branch from, such as origin/stam/x (fetched first; a local branch works too). The spawn fails if it does not resolve. Without it, a repo with an origin remote is cut from a freshly fetched origin/main (falling back to the checkout\'s HEAD if the fetch fails; the spawn\'s workspace:base event says which). A base of origin/stam/X (or storage/stam/X) continues that PR: the worktree goes on stam/X itself at the base\'s commit, so pr_open updates the PR with no fast-forward (the spawn result and the workspace:base event say so). The spawn is refused when stam/X is checked out in another worktree (archive its holder) or a local stam/X has commits the base lacks. To stack a NEW PR on stam/X instead, pass branch: "new" (a reviewer type always gets its own branch). Only with a worktree.' },
+        branch: { type: 'string', description: 'The worktree\'s branch name. Defaults to stam/NAME, or to the PR branch itself when base is origin/stam/X. Pass a new name, or "new" for stam/NAME, to cut a new branch (a stacked PR) from that base instead of continuing it. A name that already exists is refused. Only with a worktree.' },
         workspace_script: { type: 'string', description: 'Shell command that prints the directory to work in.' },
         workspace_instructions: { type: 'string', description: 'Tell it to create its own workspace this way.' },
         standing: { type: 'boolean', description: 'A long-lived specialist, kept as a standing agent rather than one for a single task. A standing agent idle for standing.idleHours (default 4) rests, harness stopped, and mail, a fired wake_me or an assigned ITSA wakes it.' },
@@ -533,8 +536,9 @@ export const tools: Tool[] = [
           properties: { reach: { type: 'string', enum: ['all', 'tree', 'parent'] }, siblings: { type: 'boolean' }, registry: { type: 'boolean' } },
         },
         child_notices: { type: 'string', enum: ['turn', 'tree-idle', 'none'], description: "How much this child hears about its own children's finished turns: 'tree-idle' (default), 'turn', or 'none'. Blocked and errored agents always reach their parents." },
-        urgent: { type: 'string', enum: ['red-main', 'deploy-hold', 'approved-pr'], description: 'Only for a developer spawn that has to queue because the slots are full: the reason it should go ahead of normal spawns (first come first served within each class). red-main: a fix for a red main; deploy-hold: a fix that clears a deploy hold; approved-pr: a fix on an approved PR. Not for anything else.' },
+        urgent: { type: 'string', enum: ['red-main', 'deploy-hold', 'approved-pr', 'incident'], description: 'Only for a developer spawn that has to queue because the slots are full: the reason it should go ahead of normal spawns (first come first served within each class). red-main: a fix for a red main; deploy-hold: a fix that clears a deploy hold; approved-pr: a fix on an approved PR; incident: a fix for an incident, which goes ahead like red-main only when its itsa (or one of that ITSA\'s parents) is marked an incident by the chief of staff or the human (itsa_set incident=true), and is refused otherwise. On another machine the ITSA home is asked for the mark, and the spawn is refused unless it says yes. Not for anything else.' },
         itsa: { type: 'string', description: 'An ITSA id or key: the new agent becomes its owner (a reviewer type joins as a participant instead, and the owner stays), and its first prompt carries the ITSA (key, title, summary, body, parent chain, links). With no prompt, that block is the prompt.' },
+        participate: { type: 'array', items: { type: 'string' }, description: 'ITSA ids or keys the new agent joins as a participant, without owning them: it can comment and change them, and the owner stays. You must be allowed to add participants to each (an owner, a participant, or an owner of a parent ITSA). If you are not, the spawn is refused and nothing starts.' },
         parent: { type: 'string', description: 'Executive assistant only: the parent agent, or "none" for a top-level agent. Defaults to you.' },
         chief_of_staff: { type: 'boolean', description: 'Executive assistant only: make it the chief of staff.' },
       },
@@ -555,14 +559,22 @@ export const tools: Tool[] = [
           `Queued ${r.name}: place ${r.place} of ${r.queue_length}${r.urgent ? ` (urgent: ${r.urgent})` : ''} for a developer slot on ${r.machine}, all ${r.cap} in use. Holders: ${r.holders.join(', ')}. It starts by itself when a slot frees, and you get a notice then (or if it fails to start). Do not spawn it again.`,
         );
       }
-      return text(`Spawned ${r.name} (${r.id}) in ${r.cwd}.${r.warning ? `\nWarning: ${r.warning}` : ''}`);
+      const wt = (() => {
+        try {
+          return r.workspace ? (JSON.parse(r.workspace) as { worktree?: { branch: string; continues?: boolean }; baseUsed?: { sha: string } }) : undefined;
+        } catch {
+          return undefined;
+        }
+      })();
+      const onPr = wt?.worktree?.continues ? ` On the existing PR branch ${wt.worktree.branch} at ${wt.baseUsed?.sha.slice(0, 8)}.` : '';
+      return text(`Spawned ${r.name} (${r.id}) in ${r.cwd}.${onPr}${r.warning ? `\nWarning: ${r.warning}` : ''}`);
     },
   },
   {
     name: 'agent_control',
     group: 'agents',
     description:
-      'Control yourself or one of your children: pause, unpause, shutdown, archive (shut down and remove its worktree), resume, restart, reconnect-mcp, set-visibility, set-child-notices (how much you hear about your children\'s finished turns: "turn", "tree-idle", or "none"; blocked and errored children always reach you). cancel removes a developer spawn that is still queued for a slot, by its name in agent (not an agent yet, so no agent id): its caller, the caller\'s parents, and the chief of staff may cancel it; a spawn already granted a slot is refused, and a name that isn\'t queued is a 404. Cancel runs on the machine that queued it. The chief of staff can also adopt any agent as its parent. Shutdown, archive, and restart wait until the agent finishes its current step. Every archive asks the agent for its final retro round and waits for its next turn end, bounded by settings.archive.finalRoundMinutes (default 3); a wrap-up pushed while the agent runs a step can get one more turn, with a fresh finalRoundMinutes deadline, because the harness may hold it for the next turn; archive with force only skips the turn-alive check for an agent whose harness is gone, and archive with discard removes uncommitted worktree changes. The executive assistant controls every agent, and alone can also set-parent (parent: an agent, or "none" for top-level), rename (name), make one chief-of-staff, kill (stop now), and forget (remove a stopped agent from the registry).',
+      'Control yourself or one of your children: pause, unpause, shutdown, archive (shut down and remove its worktree), resume, restart, reconnect-mcp, set-visibility, set-child-notices (how much you hear about your children\'s finished turns: "turn", "tree-idle", or "none"; blocked and errored children always reach you). cancel removes a developer spawn that is still queued for a slot, by its name in agent (not an agent yet, so no agent id): its caller, the caller\'s parents, and the chief of staff may cancel it; a spawn already granted a slot is refused, and a name that isn\'t queued is a 404. Cancel finds the spawn on whichever machine queued it and forwards to that machine; there, the caller\'s parents can cancel only when that machine knows the caller (otherwise only the caller and the chief of staff can), and an unreachable machine gives a 502, not a 404. The chief of staff can also adopt any agent as its parent. Shutdown, archive, and restart wait until the agent finishes its current step. Every archive asks the agent for its final retro round and waits for its next turn end, bounded by settings.archive.finalRoundMinutes (default 3); a wrap-up pushed while the agent runs a step can get one more turn, with a fresh finalRoundMinutes deadline, because the harness may hold it for the next turn; archive with force only skips the turn-alive check for an agent whose harness is gone, and archive with discard removes uncommitted worktree changes. The executive assistant controls every agent, and alone can also set-parent (parent: an agent, or "none" for top-level), rename (name), make one chief-of-staff, kill (stop now), and forget (remove a stopped agent from the registry).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -571,6 +583,7 @@ export const tools: Tool[] = [
         action: { type: 'string', enum: ['pause', 'unpause', 'shutdown', 'archive', 'resume', 'restart', 'reconnect-mcp', 'adopt', 'set-visibility', 'set-child-notices', 'set-parent', 'rename', 'chief-of-staff', 'kill', 'forget', 'cancel'] },
         note: { type: 'string', description: 'For resume and restart: a note the agent receives.' },
         force: { type: 'boolean', description: 'For archive: do not wait for the agent\'s current step. A forced pending archive whose harness is gone runs at once, skipping the turn-alive check; it still asks the agent for its final round, bounded by settings.archive.finalRoundMinutes, and a forced archive of a live agent waits for that extra turn too. It also discards uncommitted worktree changes. For unpause: clear its cost blockers too.' },
+        force_unpushed: { type: 'boolean', description: 'For archive: archive although the branch has commits that are on no remote (the archive is refused otherwise, naming the branch, the count and the head; push it or pr_open first). The commits stay on the local branch, which the archive keeps.' },
         discard: { type: 'boolean', description: 'For archive: discard the agent\'s uncommitted worktree changes. Every archive asks the agent for its final retro round and waits for its next turn end, at most settings.archive.finalRoundMinutes (default 3), before archiving.' },
         visibility: { type: 'object', description: 'For set-visibility: same shape as in spawn_agent.' },
         child_notices: { type: 'string', enum: ['turn', 'tree-idle', 'none'], description: 'For set-child-notices: how much you hear about your children\'s finished turns.' },
@@ -585,7 +598,7 @@ export const tools: Tool[] = [
         const r = await api('POST', `/api/slot-queue/${a.agent}/cancel`, { by: me(a) });
         return text(`${r.name}: queued spawn cancelled on ${r.machine}`);
       }
-      const r = await api('POST', `/api/agents/${a.agent}/${a.action}`, { by: me(a), note: a.note, reason: a.note, force: a.force, discard: a.discard, visibility: a.visibility, child_notices: a.child_notices, parent: a.parent, name: a.name });
+      const r = await api('POST', `/api/agents/${a.agent}/${a.action}`, { by: me(a), note: a.note, reason: a.note, force: a.force, discard: a.discard, force_unpushed: a.force_unpushed, visibility: a.visibility, child_notices: a.child_notices, parent: a.parent, name: a.name });
       return text(`${r.agent.name}: ${r.result}`);
     },
   },
@@ -707,15 +720,17 @@ export const tools: Tool[] = [
         text: { type: 'string' },
         agree: { type: 'boolean' },
         verdict: { type: 'string', enum: ['approve', 'request_changes'], description: 'Your verdict on the PR, in a ring that reviews one. Left out, stam reads it from your text.' },
+        round: { type: 'number', description: 'The round your turn prompt shows ("round N of at most M"). A submit for a round the ring has moved past is refused and writes nothing. Left out, it goes to the ring\'s current round.' },
+        seat: { type: 'string', description: 'The member the text is for, by the name your turn prompt shows ("You are NAME"). Required when you hold two or more open seats in the ring, such as your own and a predecessor\'s; a seat you don\'t hold, or one already filled this round, is refused. Left out, the text goes to your one open seat.' },
       },
       required: ['ring', 'text', 'agree'],
     },
     // A parameter this schema lacks (`body`, say) would post an empty verdict with no findings (S-1919): name it, and the expected `text`.
     run: async (a) => {
-      const unknown = Object.keys(a).filter((k) => !['self', 'ring', 'text', 'agree', 'verdict'].includes(k));
+      const unknown = Object.keys(a).filter((k) => !['self', 'ring', 'text', 'agree', 'verdict', 'round', 'seat'].includes(k));
       if (unknown.length) throw new Error(`ring_submit has no parameter ${unknown.join(', ')}: put your findings in text`);
       if (typeof a.text !== 'string' || !a.text.trim()) throw new Error('text is required: your findings for the ring, as a non-empty string');
-      return text((await api('POST', `/api/rings/${a.ring}/submit`, { by: me(a), text: a.text, agree: a.agree, verdict: a.verdict })).result);
+      return text((await api('POST', `/api/rings/${a.ring}/submit`, { by: me(a), text: a.text, agree: a.agree, verdict: a.verdict, round: a.round, seat: a.seat })).result);
     },
   },
   {
@@ -826,7 +841,7 @@ export const tools: Tool[] = [
       if (unknown.length) throw new Error(`wait_for has no parameter ${unknown.map((k) => `'${k}'`).join(', ')}; its parameters are on, target (the agent to wait for, an id or name), thread, filter, timeout_minutes, expect_minutes, note, rest`);
       if (a.on === 'agent' && !a.target) throw new Error("wait_for on 'agent' needs target (an agent id or name)");
       const w = await api<any>('POST', `/api/agents/${me(a)}/waits/declared`, { on: a.on, target: a.target, thread: a.thread, filter: a.filter, timeout_minutes: a.timeout_minutes, expect_minutes: a.expect_minutes, note: a.note, rest: a.rest, by: me(a) });
-      return text(`Waiting (${w.id}) for ${w.detail}${w.until ? `, timing out at ${w.until}` : ''}.${w.kind === 'human' && w.target ? ` It is about your request ${w.target}, so it clears when that request is answered or closed.` : ''} Clear it with wait_done ${w.id}.`);
+      return text(`Waiting (${w.id}) for ${w.detail}${w.until ? `, timing out at ${w.until}` : ''}.${w.kind === 'human' && w.target ? ` It is tied to ${w.target}, so it clears when that is answered or closed.` : ''} Clear it with wait_done ${w.id}.`);
     },
   },
   {
@@ -1344,6 +1359,7 @@ export const tools: Tool[] = [
         parent: { type: 'string', description: 'Move it under this ITSA, or "root" to free it.' },
         participants: { type: 'array', items: { type: 'string' }, description: 'Replace the participant list (the owner stays one).' },
         fields: { type: 'object', description: 'Values for Work page columns, by field key (see itsa_fields list); null clears one. For example {"stage": "dev"}.' },
+        incident: { type: 'boolean', description: 'Mark the ITSA an incident (true) or clear the mark (false). Only the chief of staff or your user may set it; a developer spawn with urgent incident then goes ahead under it or its child ITSAs. Closing the ITSA clears the mark.' },
       },
       required: ['ref'],
     },
@@ -1352,6 +1368,7 @@ export const tools: Tool[] = [
       for (const k of ['title', 'summary', 'body', 'kind', 'status', 'owner', 'parent'] as const) if (a[k] !== undefined) patch[k] = a[k];
       if (a.participants !== undefined) patch.participants = a.participants;
       if (a.fields !== undefined) patch.fields = a.fields;
+      if (a.incident !== undefined) patch.incident = a.incident;
       const ref = itsaRef(a);
       if (!Object.keys(patch).length) throw new Error('nothing to set: pass at least one field (status, owner, title, ...)');
       const r = await api<any>('PATCH', `/api/itsas/${encodeURIComponent(ref)}`, { ...patch, by: me(a) });
@@ -1475,27 +1492,84 @@ export const tools: Tool[] = [
     name: 'pr_open',
     group: 'itsas',
     description:
-      'Open a branch\'s pull request on GitHub, from any machine (S-514). It runs on the ITSA home, where gh is: it fetches the branch from storage, pushes it to origin, and opens the PR, or replaces the body of the open PR for that branch. The body is the docs/pull-requests.md body: its ITSA, Gates, and Deploy lines first. With itsa, the ITSA gets the PR and branch links. Returns the PR number and url; then watch_pr it.',
+      'Open a branch\'s pull request on GitHub, from any machine (S-514). It runs on the ITSA home, where gh is: it fetches the branch from storage (or, on the home, from your own worktree), pushes it to origin, and opens the PR, or replaces the body of the open PR for that branch. The body is the docs/pull-requests.md body: its ITSA, Gates, and Deploy lines first. With itsa, the ITSA gets the PR and branch links, and a branch you own that is not yet linked is linked to it. Returns the PR number and url; then watch_pr it. Every later push to the branch needs pr_open again: a push to origin reaches storage only, not GitHub, so pr_open is what updates the PR.',
     inputSchema: {
       type: 'object',
       properties: {
         self,
         branch: { type: 'string', description: 'The branch you pushed to storage.' },
         title: { type: 'string', description: 'One line.' },
-        body: { type: 'string', description: 'The PR body, in the docs/pull-requests.md format.' },
+        body: { type: 'string', description: 'The PR body, in the docs/pull-requests.md format. Exactly one of body and body_file.' },
+        body_file: { type: 'string', description: 'The path of a file holding the PR body, in your worktree or your scratch dir (read on your machine, at most 256 KiB). Exactly one of body and body_file.' },
         itsa: { type: 'string', description: 'The ITSA the branch delivers (id or key), to link the PR and branch to.' },
       },
-      required: ['branch', 'title', 'body'],
+      required: ['branch', 'title'],
     },
     run: async (a) => {
       const by = me(a);
+      const unknown = Object.keys(a).filter((k) => !PR_OPEN_PARAMS.includes(k));
+      if (unknown.length) throw new Error(`pr_open has no parameter ${unknown.join(', ')}: its parameters are ${PR_OPEN_PARAMS.join(', ')}`);
       try {
-        const r = await api<any>('POST', '/api/pr/open', { branch: a.branch, title: a.title, body: a.body, itsa: a.itsa, by }, PR_OPEN_CALL_MS);
-        return text(`${r.created ? 'Opened' : 'Updated'} PR #${r.number} for ${r.branch}: ${r.url}${r.warning ? `\nWARNING: ${r.warning}` : ''}`);
+        const r = await api<any>('POST', '/api/pr/open', { branch: a.branch, title: a.title, body: a.body, body_file: a.body_file, itsa: a.itsa, by }, PR_OPEN_CALL_MS);
+        return text(`${r.created ? 'Opened' : 'Updated'} PR #${r.number} for ${r.branch}: ${r.url}\nEvery later push to ${r.branch} needs pr_open again: a push to origin reaches storage only, not GitHub.${r.warning ? `\nWARNING: ${r.warning}` : ''}${r.advisory?.length ? `\nADVISORY (LIGHT tests, not a refusal): ${r.advisory.join('; ')}` : ''}`);
       } catch (e) {
         if (!isTimeout(e)) throw e;
         return text(await prOpenTimedOut(a, by, e));
       }
+    },
+  },
+  {
+    name: 'pr_merge',
+    group: 'itsas',
+    description:
+      'Merge an approved pull request, from any machine (S-2279). The ITSA home starts the merge script for it, detached from your shell (a build without the merge scripts refuses, and you merge with gh pr merge), and mails you the outcome when it ends: the merge sha, a refusal with its reason, or "not merged" with the script\'s last lines (call again to retry). Only the tree that owns the PR\'s ITSA (its body\'s ITSA: line) or its branch, or the chief of staff, may merge it. A call while a merge of the PR runs returns that run. With status, it starts nothing and returns the run\'s state and queue place. With cancel (S-2709), it takes the PR out of the merge queue without closing it: the ITSA home stops the PR\'s merge run and worker by recorded pid and drops its queue ticket, on the same tree rules; you and the run\'s requester get a "merge cancelled" mail. If a train holds the gate lock the cancel is refused with "retry after it" and nothing changes; a PR with no run is an error.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        self,
+        pr: { type: ['string', 'number'], description: 'The PR number.' },
+        status: { type: 'boolean', description: 'Only report the run\'s state, queue place, and last log lines. Default false.' },
+        cancel: { type: 'boolean', description: 'Take the PR out of the merge queue: stop its merge run and drop its ticket, without closing the PR. Default false.' },
+      },
+      required: ['pr'],
+    },
+    run: async (a) => {
+      const by = me(a);
+      if (a.status) {
+        const s = await api<any>('POST', '/api/pr/merge-status', { pr: a.pr, by }, 30_000);
+        const r = s.run;
+        const head = s.note ? `PR #${s.pr}: ${s.note}.` : !r ? `No pr_merge run for PR #${s.pr}.` :`PR #${s.pr}: ${r.state}${r.sha ? ` (${r.sha})` : ''}, started ${r.started} by ${r.by}${r.reason ? `\n${r.reason}` : ''}`;
+        const place = s.queue ? `\nQueue place ${s.queue.rank} (first: PR #${s.queue.first}).` : r?.state === 'running' ? '\nNot in the merge queue yet, or holding the gate lock.' : '';
+        const train = s.train ? `\n${s.train.text}.` : '';
+        return text(`${head}${place}${train}${s.tail.length ? `\nLast log lines:\n${s.tail.join('\n')}` : ''}`);
+      }
+      if (a.cancel) {
+        const c = await api<any>('POST', '/api/pr/merge-cancel', { pr: a.pr, by }, 120_000);
+        return text(`Cancelled the merge of PR #${c.pr}: stopped ${[c.stopped.shell && 'the run', c.stopped.worker && 'the merge worker'].filter(Boolean).join(' and ') || 'nothing running'}, dropped ${c.stopped.tickets} queue ticket(s). The PR is still open; pr_merge queues it again.`);
+      }
+      const r = await api<any>('POST', '/api/pr/merge', { pr: a.pr, by }, 120_000);
+      // A previous run whose mail failed: its outcome reaches this caller instead.
+      const p = r.previous ? `\nThe previous run (by ${r.previous.by}) ended ${r.previous.state}${r.previous.sha ? `: ${r.previous.sha}` : r.previous.reason ? `:\n${r.previous.reason}` : ''}` : '';
+      return text(`${r.already ? 'A merge of' : 'Started merging'} PR #${r.pr} (${r.branch})${r.already ? ` is already running, since ${r.started}` : ''}. You get mail when it ends; pr_merge with status shows its queue place.${p}`);
+    },
+  },
+  {
+    name: 'pr_close',
+    group: 'itsas',
+    description:
+      'Close a pull request with a comment, from any machine (S-2279), such as one a later PR superseded. It runs on the ITSA home, where gh is, on pr_merge\'s terms: only the tree that owns the PR\'s ITSA or its branch, or the chief of staff, may close it. A PR that is already closed or merged is left as it is.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        self,
+        pr: { type: ['string', 'number'], description: 'The PR number.' },
+        comment: { type: 'string', description: 'Why it is closed, such as "Superseded by #728."' },
+      },
+      required: ['pr', 'comment'],
+    },
+    run: async (a) => {
+      const r = await api<any>('POST', '/api/pr/close', { pr: a.pr, comment: a.comment, by: me(a) }, 120_000);
+      return text(r.closed ? `Closed PR #${r.pr}.` : `PR #${r.pr} is already ${String(r.state).toLowerCase()}; nothing was done.`);
     },
   },
   {
@@ -1691,6 +1765,10 @@ export const tools: Tool[] = [
     },
   },
 ];
+// Test-only (S-2596): tools a test home's test-faults.json adds to this release (src/test-faults.ts).
+for (const t of extraTools()) {
+  tools.push({ name: t.name, group: t.group as Tool['group'], description: t.description, inputSchema: { type: 'object', properties: {} }, run: async () => text(t.text) });
+}
 
 // The MCP tool catalogue, for the human's Settings › Tools view and for the decision-steps
 // UI that will pick a trigger from it. The daemon serves it at GET /api/tools; importing
@@ -1716,6 +1794,8 @@ export function toolCatalog(opts: { requirements?: boolean } = {}): {
 // pr_open's wait for the daemon: longer than the push it makes on this machine plus the home's whole call (pr-open.ts
 // PR_OPEN_PEER_MS), so a slow storage fetch doesn't end the wait while the PR is still being made (S-1332).
 const PR_OPEN_CALL_MS = 360_000;
+// pr_open's parameters (S-2677): any other key is refused by name, so a misspelt one (body-file) isn't taken as no body.
+const PR_OPEN_PARAMS = ['self', 'branch', 'title', 'body', 'body_file', 'itsa'];
 
 // Whether a call gave up waiting (the client's or a peer's timeout), not a refusal.
 const isTimeout = (e: unknown): boolean => e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError' || /aborted due to timeout/.test(e.message));
@@ -1923,7 +2003,7 @@ function canary(bin: string): Promise<boolean> {
       child.kill();
       resolve(ok);
     };
-    const timer = setTimeout(() => done(false), Number(process.env.STAM_MCP_CANARY_MS) || 10_000);
+    const timer = setTimeout(() => done(false), Number(envVar('MCP_CANARY_MS')) || 10_000);
     child.on('error', () => done(false));
     child.on('exit', () => done(false));
     child.stdout.on('data', (d) => {
@@ -2008,5 +2088,5 @@ export function runMcp(): void {
     }
   });
   process.stdin.on('end', () => process.exit(0));
-  if (liveRoot && !isCanary) setInterval(reexecWhenIdle, Number(process.env.STAM_MCP_REEXEC_MS) || 60_000).unref();
+  if (liveRoot && !isCanary) setInterval(reexecWhenIdle, Number(envVar('MCP_REEXEC_MS')) || 60_000).unref();
 }

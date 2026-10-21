@@ -95,18 +95,15 @@ check(a2.length === 0, "A's acknowledgement retires the mail, even though B was 
 const b2 = await http('POST', `/api/agents/${reader.id}/read`, { batch: 'client-b-2', ack: 'client-b-1' });
 check(b2.length === 0, 'nothing is handed out again to B after A acknowledged');
 
-// 4. A failure part-way through a read leaves no half state: a trigger makes the delivery insert fail after
+// 4. A failure part-way through a read leaves no half state: a test route makes the delivery insert fail after
 // the read state was written, so the read is refused and the mail stays unread, owed to nobody.
-const { DatabaseSync } = await import('node:sqlite');
-const dbFile = new DatabaseSync(join(home, 'stam.db'));
 const injected = await send(reader.name, `Injected ${stamp}`);
-dbFile.exec("CREATE TRIGGER fail_delivery BEFORE INSERT ON mail_deliveries BEGIN SELECT RAISE(ABORT, 'injected'); END");
+await http('POST', '/api/test/delivery-fail', { fail: true });
 const refused = await http('POST', `/api/agents/${reader.id}/read`, { ids: [injected], batch: 'injected-1' }).then(
   () => null,
   (e) => e,
 );
 check(refused && /injected/.test(refused.message), 'a read whose delivery fails is refused');
 check((await unreadIds(reader.id)).includes(injected), 'the mail stays unread after the refused read');
-dbFile.exec('DROP TRIGGER fail_delivery');
-dbFile.close();
+await http('POST', '/api/test/delivery-fail', { fail: false });
 check(idsIn(await readMail({ ids: [injected] })).join() === injected, 'once the failure is gone, the mail is read and handed out');

@@ -13,7 +13,9 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { testOnlyEnv } from './test-env.ts';
-import { settings, REDACTED, patchedSettingsText, patchTouchedText, writeSettingsText, costProblem, redactSettingsText, effectiveSettingsText, isSettingsHome, splitSettingsPatch, patchLocalKeys, withLocalKeys } from './settings.ts';
+import { parseProviderConfig } from './llm/openai.ts';
+import { bedrockBase, parseBedrockConfig } from './llm/bedrock.ts';
+import { settings, REDACTED, SECRET_NAME, patchedSettingsText, patchTouchedText, writeSettingsText, fileProblem, redactSettingsText, effectiveSettingsText, isSettingsHome, splitSettingsPatch, patchLocalKeys, withLocalKeys } from './settings.ts';
 import { noteInvalid } from './accounts.ts';
 import { STAM_HOME } from './config.ts';
 import { sharedFilesChanged } from './settings-sync.ts';
@@ -186,11 +188,25 @@ export function dialogClosed(a: db.Agent): void {
   if (r) withdrawDialog(a, r, 'closed outside stam');
 }
 
+// S-2885: closes the agent's requests pending since `before` or earlier, ask mails and waits included, as an
+// answered one is. Returns how many.
+export function withdrawStaleRequests(a: db.Agent, before: string, note: string): number {
+  const stale = db.stalePendingPermissions(a.id, before);
+  for (const r of stale) withdrawDialog(a, r, note);
+  return stale.length;
+}
+
 function withdrawDialog(a: db.Agent, r: db.PermissionRequest, note: string): void {
   db.withdrawPermissionRequest(r.id, note);
   withdrawQuietly(db.permissionMailIds(r.id), 'stam', `Withdrawn: ${note}`);
   db.addEvent(a.id, 'permission:withdrawn', { id: r.id, note });
-  db.clearRequestWaits(a.id, r.id);
+  // Its own try: a failed clear leaves the wait, but the withdrawal and the other requests still go on (S-3016).
+  try {
+    db.clearRequestWaits(a.id, r.id);
+  } catch (e) {
+    console.error(`withdraw ${r.id}: couldn't clear its waits: ${e instanceof Error ? e.message : e}`);
+    db.addEvent(a.id, 'permission:wait-clear-failed', { id: r.id, error: String(e) });
+  }
   syncChildrenWaits(a.id);
   announceTreeIdle(a);
 }
@@ -444,12 +460,68 @@ function resultOf(change: SettingsChange, current: string): { text: string } | {
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   }
-  const problem = costProblem(parsed);
+  const problem = fileProblem(parsed);
   if (problem) {
-    noteInvalid(problem);
-    return { error: `cost config rejected: ${problem}` };
+    if (problem.field === 'cost') noteInvalid(problem.problem);
+    return { error: `${problem.field} config rejected: ${problem.problem}` };
   }
   return { text };
+}
+
+// Where each provider in a settings value sends its key (S-2115): the provider, the key's source (a
+// stored secret, an environment variable, or a Bedrock provider's AWS credentials), and the origin. An agent that pairs a key with an origin of
+// its choosing would have stam send the key there, so a change that adds or moves one is spelled out.
+// The destination is read by kind, as the adapters read it (src/llm/openai.ts, src/llm/bedrock.ts); an unknown kind's raw
+// fields are shown, so nothing is left out. Every name is checked before it is quoted: the line is
+// Markdown, and a name with a backtick or `**` in it could change what it says.
+const PLAIN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
+const quote = (x: string, ok: RegExp, otherwise: string) => (ok.test(x) ? `\`${x}\`` : otherwise);
+function destinationOf(p: any): [shown: string, raw: string] {
+  const cfg = parseProviderConfig(p);
+  const br = cfg ? null : parseBedrockConfig(p);
+  const raw = cfg ? (cfg.kind === 'azure' ? cfg.endpoint : cfg.baseUrl) : br ? bedrockBase(br) : p?.kind === 'azure' ? p.endpoint : p?.kind === 'bedrock' ? (p.endpoint ?? (typeof p.region === 'string' ? `https://bedrock-runtime.${p.region}.amazonaws.com` : undefined)) : (p?.baseUrl ?? p?.endpoint);
+  if (typeof raw !== 'string' || !raw.trim()) return ['an unset address', ''];
+  try {
+    const u = new URL(raw);
+    if (u.origin !== 'null' && /^[a-z0-9.:/\[\]-]+$/i.test(u.origin)) return [`\`${u.origin}\``, u.origin];
+  } catch {}
+  return ['an address that is not a URL', raw];
+}
+const hasKeyRef = (ref: any) => (typeof ref?.secret === 'string' && ref.secret) || (typeof ref?.env === 'string' && ref.env);
+// `sig` is the raw provider, key and destination, so two names shown alike are still told apart.
+export function keyDestinations(s: any): { provider: string; key: string; to: string; sig: string }[] {
+  const out: { provider: string; key: string; to: string; sig: string }[] = [];
+  const providers = s?.providers && typeof s.providers === 'object' ? s.providers : {};
+  for (const [id, p] of Object.entries<any>(providers)) {
+    // A `providers.openrouter` entry never replaces the built-in adapter (sync() in src/llm), so its key goes nowhere.
+    if (id === 'openrouter') continue;
+    const ref = p?.apiKey;
+    const keys: [string, string][] = [
+      ...(typeof ref?.secret === 'string' && ref.secret ? [[`secret:${ref.secret}`, SECRET_NAME.test(ref.secret) ? `the stored secret \`${ref.secret}\`` : 'a stored value'] as [string, string]] : []),
+      ...(typeof ref?.env === 'string' && ref.env ? [[`env:${ref.env}`, `the environment variable ${quote(ref.env, ENV_NAME, 'with an unusual name')}`] as [string, string]] : []),
+      // Bedrock with no apiKey signs with the AWS credentials from the chain (S-2117): those go there instead.
+      ...(p?.kind === 'bedrock' && !hasKeyRef(ref) ? [[`aws:${typeof p.profile === 'string' ? p.profile : ''}`, typeof p.profile === 'string' && p.profile ? `the AWS credentials of profile ${quote(p.profile, PLAIN, 'with an unusual name')}` : 'the AWS credentials'] as [string, string]] : []),
+    ];
+    if (!keys.length) continue;
+    const [to, dest] = destinationOf(p);
+    for (const [raw, key] of keys) out.push({ provider: quote(id, PLAIN, 'with an unusual name'), key, to, sig: JSON.stringify([id, raw, dest]) });
+  }
+  return out;
+}
+
+// The lines that name each key a change would newly send to an origin (S-2115).
+export function keyDestinationNotes(current: string, next: string): string {
+  const parse = (t: string) => {
+    try {
+      return JSON.parse(t);
+    } catch {
+      return {};
+    }
+  };
+  const before = new Set(keyDestinations(parse(current)).map((d) => d.sig));
+  const added = keyDestinations(parse(next)).filter((d) => !before.has(d.sig));
+  return added.map((d) => `\n\nKey destination: provider ${d.provider} would send ${d.key} to ${d.to}.`).join('');
 }
 
 // Validates the change and asks the human. Returns the request, or the reason the change is invalid (a 400).
@@ -473,7 +545,7 @@ export async function requestSettingsChange(a: db.Agent, change: SettingsChange)
   // Secrets are redacted on both sides, so the mail never carries one.
   const diff = unifiedDiff(redactSettingsText(current), redactedForDiff(current, next), 'settings now', 'settings if approved') || 'No visible change (only redacted values differ, or none).';
   const payload = settingsPayload(change, current);
-  const request = await requestPermission(a, 'Change stam settings', `${a.name} wants to change stam's settings (secrets hidden in the diff below)`, diff, false, { payload: JSON.stringify(payload), fence: 'diff' });
+  const request = await requestPermission(a, 'Change stam settings', `${a.name} wants to change stam's settings (secrets hidden in the diff below)${keyDestinationNotes(current, next)}`, diff, false, { payload: JSON.stringify(payload), fence: 'diff' });
   return { request };
 }
 

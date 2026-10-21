@@ -108,6 +108,37 @@ describe('groupByAgent', () => {
     expect(shape(groupByAgent(owned, agents, opts({ text: 'x6' })))).toEqual([['s', ['x6@0']]])
   })
 
+  it('lists an ITSA once per agent tree: at its owner when the owner is in that tree, else under a participant there', () => {
+    // r1a (the owner) and r0 (a participant) are both in r's tree, so the row sits at the owner, not at r0.
+    const xs = [mk('p1', null, 'todo', { owner: 'r1a', participants: ['human', 'r0', 'r1a', 's'] })]
+    const gs = groupByAgent(xs, agents, opts())
+    expect(shape(gs)).toEqual([
+      ['r', ['p1@2']],
+      ['s', ['p1@0']],
+    ])
+    expect(gs[0].rows[0].role).toBe('owner')
+    expect(gs[1].rows[0].role).toBe('participant')
+  })
+
+  it('lists an ITSA once when its participant is the owner\'s parent', () => {
+    const xs = [mk('p4', null, 'todo', { owner: 'r1a', participants: ['r'] })]
+    expect(shape(groupByAgent(xs, agents, opts()))).toEqual([['r', ['p4@2']]])
+  })
+
+  it('counts an agent that is both owner and participant once, and never lists the human', () => {
+    const xs = [mk('p2', null, 'todo', { owner: 's', participants: ['s', 'human', 'human'] })]
+    expect(shape(groupByAgent(xs, agents, opts()))).toEqual([['s', ['p2@0']]])
+  })
+
+  it('keeps an ITSA with no known owner under Unowned, and under each known participant', () => {
+    // t sits under r in the agent tree, so its participant row is at r's depth 1.
+    const xs = [mk('p3', null, 'todo', { owner: 'ghost', participants: ['t'] })]
+    expect(shape(groupByAgent(xs, agents, opts()))).toEqual([
+      ['r', ['p3@1']],
+      [UNOWNED, ['p3@0']],
+    ])
+  })
+
   it('survives a parent cycle', () => {
     const cyc: AgentNode[] = [{ id: 'a', name: 'A', harness: 'codex', parents: ['b'] }, { id: 'b', name: 'B', harness: 'codex', parents: ['a'] }]
     expect(groupByAgent([mk('y', null, 'todo', { owner: 'b' })], cyc, opts())).toEqual([])

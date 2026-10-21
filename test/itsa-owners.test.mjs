@@ -468,3 +468,150 @@ test('a spawn with itsa: a reviewer joins as a participant and the owner stays, 
   assert.equal(await owners.attachSpawned(x.id, 'd1', false, db_.owner, 'l1'), 'l1');
   assert.equal(itsa.find(x.id).owner, 'd1');
 });
+
+test('a spawn with participate: an owner or participant may add the child, which joins without owning; a stranger is refused (S-2424)', async () => {
+  agent('st1', 'stranger');
+  agent('kd1', 'kid');
+  const x = await itsa.create({ title: 'Joinable', by: 'human', owner: 'lead', participants: ['worker'] });
+  await assert.doesNotReject(owners.mayParticipate([x.key], { agent: 'w1', boss: false }));
+  await assert.doesNotReject(owners.mayParticipate([x.key], { agent: 'l1', boss: false }));
+  await assert.rejects(owners.mayParticipate([x.key], { agent: 'st1', boss: false }), (e) => e instanceof itsa.ForbiddenError && /stranger can't change/.test(e.message));
+  await assert.rejects(owners.mayParticipate(['NOPE-99'], { agent: 'w1', boss: false }));
+  await owners.joinItsa(x.key, 'kd1', 'w1', { agent: 'w1', boss: false });
+  assert.ok(itsa.participants(x.id).includes('kd1'));
+  assert.equal(itsa.find(x.id).owner, 'l1');
+});
+
+test('a failed spawn undoes its joins, and a row present before it, or added by someone else in the meantime, stays (S-2441)', async () => {
+  agent('fn1', 'failed-new');
+  agent('ot1', 'other');
+  active('fn1');
+  active('ot1');
+  const x = await itsa.create({ title: 'Rolled back', by: 'human', owner: 'lead', participants: ['worker'] });
+  const y = await itsa.create({ title: 'Joined too', by: 'human', owner: 'lead' });
+  const spawn = { agent: 'l1', boss: false };
+  // The spawn joins both, then fails: another agent joins x while the spawn is in flight.
+  await owners.joinItsa(x.key, 'fn1', 'l1', spawn);
+  await owners.joinItsa(y.key, 'fn1', 'l1', spawn);
+  await itsa.addParticipant(x.key, 'ot1', 'human');
+  assert.ok(itsa.participants(x.id).includes('fn1') && itsa.participants(y.id).includes('fn1'));
+  await owners.leaveItsa(x.key, 'fn1', 'l1', spawn);
+  await owners.leaveItsa(y.key, 'fn1', 'l1', spawn);
+  assert.ok(!itsa.participants(x.id).includes('fn1'));
+  assert.ok(itsa.participants(x.id).includes('w1') && itsa.participants(x.id).includes('ot1'), JSON.stringify(itsa.participants(x.id)));
+  assert.ok(!itsa.participants(y.id).includes('fn1'));
+  assert.equal(itsa.find(x.id).owner, 'l1');
+});
+
+test('removeParticipant on a row that is not there changes nothing and records no event', async () => {
+  const x = await itsa.create({ title: 'Nobody extra', by: 'human', owner: 'lead' });
+  const before = itsa.events(x.key).length;
+  const r = await itsa.removeParticipant(x.key, 'w1', 'human');
+  assert.equal(r.removed, false);
+  assert.equal(itsa.events(x.key).length, before);
+});
+
+test('a failed spawn that took an ITSA as owner hands it back and undoes the owner row (S-2441)', async () => {
+  agent('fo1', 'failed-owner');
+  active('fo1');
+  const x = await itsa.create({ title: 'Taken then failed', by: 'human', owner: 'lead' });
+  await owners.attachSpawned(x.id, 'fo1', false, 'l1', 'l1');
+  assert.equal(itsa.find(x.id).owner, 'fo1');
+  assert.ok(itsa.participants(x.id).includes('fo1'));
+  assert.equal(await owners.restoreOwner(x.key, 'fo1', 'l1', 'l1'), true);
+  await owners.leaveItsa(x.key, 'fo1', 'l1');
+  assert.equal(itsa.find(x.id).owner, 'l1');
+  assert.ok(!itsa.participants(x.id).includes('fo1'));
+});
+
+// S-3015: a reviewer leaves the ITSAs it joined when its review ends or it is archived. The owner's row, and every
+// other participant's, stays; an agent that isn't a reviewer type is never removed.
+test('a reviewer whose review ended leaves the ITSAs it joined, keeping the owner and the other participants', async () => {
+  agent('rv1', 'reviewer-one');
+  db.updateAgent('rv1', { type: 'reviewer' });
+  const x = await itsa.create({ title: 'Reviewed', by: 'human', owner: 'lead', participants: ['rv1', 'worker'] });
+  const removed = await owners.releaseReviewer('rv1', 'rv1');
+  assert.equal(removed, 1);
+  const got = itsa.participants(x.id);
+  assert.ok(!got.includes('rv1'), JSON.stringify(got));
+  assert.ok(got.includes('l1') && got.includes('w1'), JSON.stringify(got));
+  assert.ok(itsa.events(x.key).some((e) => e.type === 'participants'));
+});
+
+test('a reviewer keeps the ITSA it still owns', async () => {
+  agent('rv2', 'reviewer-two');
+  db.updateAgent('rv2', { type: 'reviewer' });
+  const x = await itsa.create({ title: 'Owned by reviewer', by: 'human', owner: 'rv2', participants: ['rv2'] });
+  await owners.releaseReviewer('rv2', 'rv2');
+  assert.ok(itsa.participants(x.id).includes('rv2'));
+});
+
+test('archiving a reviewer removes its participation; a non-reviewer participant is kept', async () => {
+  agent('rv3', 'reviewer-three');
+  db.updateAgent('rv3', { type: 'reviewer' });
+  agent('dv3', 'dev-three');
+  db.updateAgent('dv3', { type: 'developer' });
+  const x = await itsa.create({ title: 'Archived reviewer', by: 'human', owner: 'lead', participants: ['rv3', 'dv3'] });
+  await owners.unownAgent({ ...db.getAgent('rv3'), type: 'reviewer' }, 'archived');
+  assert.ok(!itsa.participants(x.id).includes('rv3'));
+  assert.equal(itsa.find(x.id).owner, 'l1');
+  await owners.unownAgent({ ...db.getAgent('dv3'), type: 'developer' }, 'archived');
+  assert.ok(itsa.participants(x.id).includes('dv3'));
+});
+
+test('a reviewer that fails to leave its ITSAs still archives: the unown goes through and the error is only logged', async () => {
+  agent('rv4', 'reviewer-four');
+  db.updateAgent('rv4', { type: 'reviewer' });
+  const x = await itsa.create({ title: 'Stuck reviewer row', by: 'human', owner: 'lead', participants: ['rv4'], status: 'in_progress' });
+  const own = await itsa.create({ title: 'Stuck reviewer owned', by: 'human', owner: 'rv4', status: 'in_progress' });
+  const sql = db.open();
+  sql.exec("CREATE TRIGGER rv4_stuck BEFORE UPDATE OF left_at ON itsa_participants WHEN NEW.agent_id = 'rv4' BEGIN SELECT RAISE(ABORT, 'row locked'); END");
+  try {
+    await owners.unownAgent({ ...db.getAgent('rv4'), type: 'reviewer' }, 'archived');
+  } finally {
+    sql.exec('DROP TRIGGER rv4_stuck');
+  }
+  assert.ok(itsa.participants(x.id).includes('rv4'));
+  assert.equal(itsa.find(x.id).owner, 'l1');
+  assert.equal(itsa.must(own.key).owner, null);
+});
+
+// S-3015: a leave keeps the row for the spend and reviewer counts; a join makes the reviewer a member again; an unown
+// queued with its type sends that type even after the agent's row is gone.
+test('a leave keeps the row for the spend, and a join makes the reviewer a member again (S-3015)', async () => {
+  agent('rv6', 'reviewer-six');
+  db.updateAgent('rv6', { type: 'reviewer' });
+  const x = await itsa.create({ title: 'Left kept', by: 'human', owner: 'lead', participants: ['rv6'] });
+  await owners.releaseReviewer('rv6', 'rv6');
+  assert.ok(!itsa.participants(x.id).includes('rv6'));
+  const { readAttributionData } = await import('../src/issue-costs.ts');
+  assert.ok(readAttributionData(false).participants.some((p) => p.itsa_id === x.id && p.agent_id === 'rv6'));
+  assert.ok(!(await itsa.list()).find((y) => y.id === x.id).participants.includes('rv6'), 'the list leaves out a reviewer that left');
+  await itsa.addParticipant(x.id, 'rv6', 'human');
+  assert.ok(itsa.participants(x.id).includes('rv6'));
+  assert.ok((await itsa.list()).find((y) => y.id === x.id).participants.includes('rv6'));
+});
+
+test('an unown queued with its type sends that type after the agent is gone (S-3015)', async () => {
+  const { createServer } = await import('node:http');
+  const seen = [];
+  const server = createServer((req, res) => {
+    let b = '';
+    req.on('data', (c) => (b += c));
+    req.on('end', () => {
+      if (b) seen.push(JSON.parse(b));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  writeFileSync(join(home, 'settings.json'), JSON.stringify({ itsa: { home: 'far' }, peers: [{ name: 'far', url: `http://127.0.0.1:${server.address().port}`, token: 't' }] }));
+  try {
+    owners.queueUnown({ id: 'fg1', name: 'forgotten-one', type: 'reviewer' }, 'forgotten');
+    await owners.unownAgent({ id: 'fg1', name: 'forgotten-one' }, 'forgotten');
+    assert.equal(seen.at(-1).type, 'reviewer');
+  } finally {
+    server.close();
+    writeFileSync(join(home, 'settings.json'), '{}');
+  }
+});

@@ -88,6 +88,8 @@ export function loadOf(a: db.Agent): AgentLoad {
 // for LOAD_TTL_MS. An archived agent has none.
 export const LOAD_TTL_MS = 60_000;
 const cache = new Map<string, { at: number; load: AgentLoad }>();
+// The agents with a cached load, for tests of the expiry sweep.
+export const cachedAgentIds = (): string[] => [...cache.keys()];
 
 export function cachedLoadOf(a: db.Agent, now = Date.now()): AgentLoad | null {
   if (a.lifecycle === 'archived') {

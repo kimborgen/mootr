@@ -3,7 +3,7 @@ import { Row } from './stories/helpers'
 import { ds, type Story } from './stories/types'
 import type { Resting, Wait } from './types'
 import { Tab } from './shell/Tab'
-import { ItsaChips, RestBadge, WaitBadges, WaitMark, WaitThinBar } from './waits'
+import { ItsaChips, RestBadge, ThreadChips, WaitBadges, WaitMark, WaitThinBar } from './waits'
 import { itsa, STATUSES } from './stories/itsaFixtures'
 
 const w = (kind: string, o: Partial<Wait> = {}): Wait => ({ id: 'sw-' + kind, kind, since: '2026-10-01T09:00:00.000Z', source: 'wait_for', ...o })
@@ -73,7 +73,7 @@ stories.push({
   rules: [
     'Which ITSAs: owned, not closed, with no owned open ancestor; a closed ancestor hides nothing.',
     'A chip is the tree\'s `.ichip` (`--text-secondary` on `--status-neutral-bg`, the warning colours for a status that waits on you) at `--type-chrome-xs`; its tooltip and `aria-label` read `key title · status`.',
-    'A click, a press, a middle click and a menu on a chip never reach the tab: no select, no close. The pill opens the same popover as the folded wait badge (Escape or a press outside closes it, and Escape returns focus to the pill); a lone ITSA is always a chip.',
+    'A click, a press, a middle click and a menu on a chip never reach the tab: no select, no close. A drag that starts on a chip does not drag the tab; one that starts on the name does (S-1872). The pill opens the same popover as the folded wait badge (Escape or a press outside closes it, and Escape returns focus to the pill); a lone ITSA is always a chip.',
     'The chips give way: they fold when the name would fall under `--size-tab-name-min`, and when even the pill does not fit they go to the active tab\'s thin bar, with the waits there.',
     'On a phone the chip fills the tab bar\'s height (44 px, `--size-hit-touch`) so it is a touch target; the pill takes a tap and opens the same popover, where the wait badges only inform.',
   ],
@@ -85,5 +85,48 @@ stories.push({
     { name: 'Several, folded into the pill', data: owned(...MANY), render: () => <ChipTab width={190} k="agent:wx#pill" /> },
     { name: 'Beside wait badges', data: { ...owned(...MANY), agents: [...AGENTS, waiter(KINDS.slice(1, 4), { lifecycle: 'active' })] }, render: () => <ChipTab width={400} waits k="agent:wx#waits" /> },
     { name: 'On a phone', data: owned(...MANY), render: () => <div style={{ width: 360 }}><ChipTab width={360} k="agent:wx#phone" /></div> },
+  ],
+})
+
+// A mail thread's tab (S-2311): its chips are the wait mark, the linked ITSAs and the agents in it.
+const threadWith = (agents: string[], itsaIds: string[], o: { deferred?: boolean } = {}) => ({
+  agents: AGENTS,
+  itsas: [...MANY, PROJECT],
+  itsaStatuses: STATUSES,
+  humanThreads: o.deferred ? [] : [THREAD(agents, itsaIds)],
+  humanDeferred: o.deferred ? [THREAD(agents, itsaIds)] : [],
+})
+const THREAD = (agents: string[], itsaIds: string[]) => ({
+  thread_id: 'tf1',
+  mails: [{ id: 'tf-m1', from_id: agents[0], subject: 'Re: `Deploy` plan for the staging gate', body: '', created_at: '2026-10-19T09:00:00Z', title: 'Deploy plan',
+    recipients: [{ id: 'human', read_at: null }, ...agents.slice(1).map((id) => ({ id, read_at: null }))],
+    itsas: itsaIds.map((id) => ({ id, key: 'S-' + id.replace('fx-i-', ''), title: '', status: 'in_progress', source: 'itsa' })), agents: [] }],
+}) as never
+const ThreadTab = ({ width, k = 'thread:tf1', tid = 'tf1' }: { width?: number; k?: string; tid?: string }) => (
+  <div className="tabs" style={{ width }}><Tab id={k} active title="Deploy plan" glyph={null} chips={<ThreadChips tid={tid} tabKey={k} />} onSelect={() => {}} /></div>
+)
+const AGENT_IDS = AGENTS.slice(0, 4).map((a) => a.id)
+const ITSA_IDS = [...MANY, PROJECT].map((x) => x.id)
+
+stories.push({
+  name: 'Mail thread tab chips',
+  group: 'Mail',
+  what: "The chips in a mail thread's tab (S-1471, S-2311): one wait mark (a pending permission, a wait on your answer, the unread count, deferred, or archived), the ITSAs the thread's mail is linked to, and the agents in the thread as their state glyphs. The title is the thread's short title; the full subject and people are in the tooltip.",
+  when: "On a `thread:` tab, in the Inbox's pane or in main. The chips fit the tab as the agent tab's do: the agents fold first to one mark and `+N`, then the ITSAs fold to a pill, then the agents go to the thin bar, then the ITSAs, and the wait mark goes last.",
+  code: ['web/src/waits.tsx#ThreadChips', 'web/src/waits.tsx#ItsaFold', 'web/src/waits.tsx#ItsaFoldView', 'web/src/waits.tsx#WaitThinBar', 'web/src/mail/thread-chips.ts#threadChips', 'web/src/mail/thread-chips.ts#threadWaitMark'],
+  rules: [
+    'One wait mark at a time, by priority: `--status-warning-bg` for a wait on you, muted figures otherwise (the wait badge\'s own styles).',
+    'Agent marks are the agents\' state glyphs; two show, then `+N`, whose popover lists every agent by name. The human is never a mark.',
+    'A phone\'s thread tab only informs: the chips show, the thin bar stays as it is.',
+    'A click on an ITSA chip opens its ITSA beside the thread on a desktop, in the thread\'s right split, as a key in the thread\'s body does (S-93); an agent tab\'s chip opens it in place. On a phone it is the pushed view.',
+    'An ITSA the thread\'s mail links to but the store doesn\'t hold has its chip from the link\'s own key, title and status, as the thread\'s head builds it.',
+  ],
+  states: [
+    { name: 'Roomy', data: threadWith(AGENT_IDS, ITSA_IDS), render: () => <ThreadTab width={560} k="thread:tf1#roomy" /> },
+    { name: 'Agents folded to +N', data: threadWith(AGENT_IDS, ITSA_IDS), render: () => <ThreadTab width={330} k="thread:tf1#folded" /> },
+    { name: 'ITSAs folded to the pill', data: threadWith(AGENT_IDS, ITSA_IDS), render: () => <ThreadTab width={230} k="thread:tf1#pill" /> },
+    { name: 'Chips in the thin bar', data: threadWith(AGENT_IDS, ITSA_IDS), render: () => <><ThreadTab width={120} k="thread:tf1#thin" /><WaitThinBar k="thread:tf1#thin" /></> },
+    { name: 'Deferred', data: threadWith(AGENT_IDS, ITSA_IDS, { deferred: true }), render: () => <ThreadTab width={560} k="thread:tf1#deferred" /> },
+    { name: 'On a phone', data: threadWith(AGENT_IDS, ITSA_IDS), render: () => <div style={{ width: 360 }}><ThreadTab width={360} k="thread:tf1#phone" /></div> },
   ],
 })

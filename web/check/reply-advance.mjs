@@ -35,7 +35,7 @@ async function freshPage() {
 async function openThread(p, index) {
   await p.locator('[data-nav="mail"]').tap();
   await p.waitForTimeout(400);
-  const tid = await p.locator('#mail-side .mrow[data-thread]:not([data-decision])').nth(index).getAttribute('data-thread');
+  const tid = await p.locator('#inbox-view .mrow[data-thread]:not([data-decision]):not(.ask)').nth(index).getAttribute('data-thread');
   await p.locator(`.mrow[data-thread="${tid}"]`).tap();
   await p.waitForSelector('.thread-view:visible .msg', { timeout: 10000 });
   await p.waitForTimeout(400);

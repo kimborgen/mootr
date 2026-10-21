@@ -15,9 +15,10 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { MACHINE } from './config.ts';
 import { settings, storageRemoteFallback } from './settings.ts';
+import { envVar } from './env.ts';
 
 // A job's whole deadline. STAM_MIRROR_TIMEOUT_MS overrides it (tests).
-const budgetMs = (): number => Number(process.env.STAM_MIRROR_TIMEOUT_MS) || 30_000;
+const budgetMs = (): number => Number(envVar('MIRROR_TIMEOUT_MS')) || 30_000;
 // After the deadline's TERM, a process group gets KILL this long later.
 const KILL_GRACE_MS = 2_000;
 

@@ -10,6 +10,12 @@ const SILENT: Account = {
 }
 // A paid account with no window and no credit: only the month's spend is known.
 const PAID: Account = { ...ACCOUNT_OPENCODE, account: 'fixture-paid-only', windows: {}, balance: null, budget: null, shares: null }
+// A pay-per-token provider other than OpenRouter (S-2119): no balance, its spend priced from tokens, with a budget.
+const PROVIDER: Account = {
+  ...ACCOUNT_OPENCODE, account: 'fixture-azure', match: { harness: 'opencode', model: 'fixture-azure/' }, provider: 'fixture-azure', balance: null, shares: null,
+  paid: { today: { usd: 0.62, source: 'estimate' }, week: { usd: 3.4, source: 'estimate' }, month: { usd: 8.1, source: 'estimate' } },
+  budget: { usd: 10, per: 'month', spent: 8.1, remaining: 1.9 },
+}
 const MORE: Account[] = [
   { ...ACCOUNT_CLAUDE, account: 'fixture-claude-two' },
   { ...ACCOUNT_OPENCODE, account: 'fixture-openrouter-two', budget: null },
@@ -38,6 +44,7 @@ export const stories: Story[] = [{
     'A window\'s `.lim-meter` is `--space-2` tall with `--radius-xs` corners on a `--status-neutral-bg` track; it fills with `--accent`, turns `--status-warning-fg` when the forecast reaches 100% before the reset and `--status-error-fg` at 100%, and the forecast is a hatched `--lim-ink` stripe from the used percent to the projected one',
     'Under a window\'s meter are two lines, \'7-day pace\' and \'24h pace\', each the window\'s average rate over that span and where it ends at reset at that rate (or \'100% ≈ HH:MM\' in `--status-warning-fg` when it reaches 100% first); each also draws a thin tick on the meter at its percent at reset, both full-height `--text-primary` ticks ringed by a `--surface-raised` gap so they show inside the hatch, the 7-day one twice as wide as the 24h one, each kept whole at the right edge of the meter when its pace reaches 100%; a pace with too little history is left out, and the hatch and the \'/h now\' figure stay the last 30 minutes\' rate. The compact line names the pace that reaches 100%',
     'The cards are a grid of at least `--space-12` × 4 each, `--radius-sm` corners, a `--border-subtle` hairline and a `--surface-raised` fill; a percent is `--type-chrome-xl` at `--weight-semibold` in tabular figures (' + ds('Surfaces and elevation') + ')',
+    'A pay-per-token provider other than OpenRouter (`provider` set) names it after the harness ("Opencode · ID, per token"), has no credit line, and says its spend is priced from its tokens at the registry\'s prices; its spend is an estimate',
     'A paid amount reads exact, or "≈" for an estimate; an unknown amount is none, never "$0.00", and a subscription account with windows has no paid spend at all (' + ds('Status') + ')',
     'A stale reading takes a `warn` badge with its age and forecasts nothing; an allocation at 80% used or more takes warning ink; a budget meter uses the same 80% and 100% thresholds as a window',
     'With no accounts the band says "No accounts configured."; an account with no reading of any kind says "No reading for this account yet." (' + ds('Empty, loading, and error') + ')',
@@ -54,6 +61,7 @@ export const stories: Story[] = [{
     { name: 'A credit and a budget', render: cards(ACCOUNT_OPENCODE) },
     { name: 'Paid, with no window or credit', render: cards(PAID) },
     { name: 'No reading for the account', render: cards(SILENT) },
+    { name: 'A provider billed per token, with a budget', render: cards(PROVIDER) },
     { name: 'Six accounts', render: band([ACCOUNT_CLAUDE, ACCOUNT_CODEX, ACCOUNT_OPENCODE, ...MORE]) },
     { name: 'Agents and System budgets', render: () => <div className="pad usage"><BudgetSplit accounts={[ACCOUNT_OR_AGENTS, ACCOUNT_OR_SYSTEM_UNSET]} reserve={{ reserve: 1, remaining: 12.5 }} /></div> },
     { name: 'Credit within the system reserve', render: () => <div className="pad usage"><BudgetSplit accounts={[ACCOUNT_OR_AGENTS, ACCOUNT_OR_SYSTEM_UNSET]} reserve={{ reserve: 1, remaining: 0.8 }} /></div> },

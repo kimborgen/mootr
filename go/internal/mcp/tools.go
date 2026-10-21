@@ -1,0 +1,164 @@
+package mcp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/url"
+	"sort"
+	"sync"
+
+	"stam/internal/jsfmt"
+)
+
+// tool is one MCP tool. listing is its entry in tools/list, the JSON src/mcp.ts's JSON.stringify gives
+// {name, group, description, inputSchema}, byte for byte (mcp_test.go compares it with the TS module's).
+type tool struct {
+	name    string
+	listing string
+	run     func(ctx context.Context, s *Server, args jsfmt.Value) (string, error)
+}
+
+var tools = []tool{
+	{
+		name:    "whoami",
+		listing: `{"name":"whoami","group":"registry","description":"Your own stam registry entry: id, name, role, state, and the path to your conversation history file.","inputSchema":{"type":"object","properties":{"self":{"type":"string","description":"Your stam agent id. Needed only when your system prompt asks for it."}}}}`,
+		run:     whoami,
+	},
+	{
+		name:    "register",
+		listing: `{"name":"register","group":"registry","description":"Join the stam registry, for an agent that stam did not spawn. Gives you an id so others can find and mail you.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Unique lowercase name with dashes, for example \"docs-writer\"."},"role":{"type":"string","description":"One or two sentences on what you work on."},"harness":{"type":"string","description":"Your harness, for example \"claude\", \"codex\", or \"opencode\"."},"model":{"type":"string"}},"required":["name","role"]}}`,
+		run:     register,
+	},
+}
+
+// toolOrder is the order src/mcp.ts defines the tools in; tools/list keeps it for the tools ported.
+var toolOrder = []string{"whoami", "register", "send_mail", "list_inbox", "read_mail", "read_thread",
+	"itsa_create", "itsa_get", "itsa_list", "itsa_set", "itsa_fields", "itsa_link", "itsa_post"}
+
+var (
+	orderOnce sync.Once
+	ordered   []tool
+)
+
+// orderedTools is tools in toolOrder, built once on first use as a copy: the init functions that fill tools have all run by
+// then, and neither tools nor the copy changes while requests are served.
+func orderedTools() []tool {
+	orderOnce.Do(func() {
+		rank := func(name string) int {
+			for i, n := range toolOrder {
+				if n == name {
+					return i
+				}
+			}
+			return len(toolOrder)
+		}
+		ordered = append([]tool(nil), tools...)
+		sort.SliceStable(ordered, func(i, j int) bool { return rank(ordered[i].name) < rank(ordered[j].name) })
+	})
+	return ordered
+}
+
+func findTool(name string) *tool {
+	list := orderedTools()
+	for i := range list {
+		if list[i].name == name {
+			return &list[i]
+		}
+	}
+	return nil
+}
+
+// toolList is the tools/list array.
+func toolList() string {
+	out := "["
+	for i, t := range orderedTools() {
+		if i > 0 {
+			out += ","
+		}
+		out += t.listing
+	}
+	return out + "]"
+}
+
+// me is src/mcp.ts me: the agent's id, else the `self` argument of a harness that shares one MCP process between agents.
+func (s *Server) me(args jsfmt.Value) (string, error) {
+	if id := s.id(); id != "" {
+		return id, nil
+	}
+	if id := args.Text("self"); id != "" {
+		return id, nil
+	}
+	return "", errors.New("Pass your stam id as `self`, or call `register` first if you have none.")
+}
+
+func whoami(ctx context.Context, s *Server, args jsfmt.Value) (string, error) {
+	id, err := s.me(args)
+	if err != nil {
+		return "", err
+	}
+	raw, err := s.api.Do(ctx, "GET", "/api/agents/"+url.PathEscape(id), nil, 0)
+	if err != nil {
+		return "", err
+	}
+	v, err := jsfmt.Parse(raw)
+	if err != nil {
+		return "", errors.New("the daemon's reply isn't JSON")
+	}
+	return jsfmt.Stringify(v), nil
+}
+
+// register joins the registry for an agent stam didn't spawn. The agent's own token, which the reply carries, is used
+// for every later call (the shared token can't name an agent) and never shown.
+func register(ctx context.Context, s *Server, args jsfmt.Value) (string, error) {
+	if id := s.id(); id != "" {
+		return "Already registered as " + id + ".", nil
+	}
+	cwd, err := s.cwd()
+	if err != nil {
+		return "", err
+	}
+	// {...args, cwd, token: true}: the arguments in their order, cwd and token set in place or appended.
+	body := jsfmt.Value{Kind: jsfmt.Object}
+	set := func(k string, v jsfmt.Value) {
+		for i, key := range body.Keys {
+			if key == k {
+				body.Items[i] = v
+				return
+			}
+		}
+		body.Keys, body.Items = append(body.Keys, k), append(body.Items, v)
+	}
+	for i, k := range args.Keys {
+		set(k, args.Items[i])
+	}
+	set("cwd", jsfmt.Value{Kind: jsfmt.String, Str: cwd})
+	set("token", jsfmt.Value{Kind: jsfmt.Bool, Bool: true})
+	raw, err := s.api.Do(ctx, "POST", "/api/register", raw(body), 0)
+	if err != nil {
+		return "", err
+	}
+	r, err := jsfmt.Parse(raw)
+	if err != nil {
+		return "", errors.New("the daemon's reply isn't JSON")
+	}
+	id := r.Text("id")
+	if id == "" {
+		return "", fmt.Errorf("the daemon registered no id")
+	}
+	s.mu.Lock()
+	s.agentID = id
+	s.overlay["STAM_AGENT_ID"] = id
+	if tok := r.Text("token"); tok != "" {
+		s.overlay["STAM_TOKEN"] = tok
+	}
+	s.mu.Unlock()
+	s.startStream()
+	shown := jsfmt.Value{Kind: jsfmt.Object}
+	for i, k := range r.Keys {
+		if k != "token" {
+			shown.Keys, shown.Items = append(shown.Keys, k), append(shown.Items, r.Items[i])
+		}
+	}
+	return jsfmt.Stringify(shown), nil
+}

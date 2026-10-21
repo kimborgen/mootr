@@ -1,0 +1,16 @@
+type: object
+additionalProperties: false
+description: The 409 refusal of a human-only write that belongs to another machine's UI.
+required: [error, refusal, machine, origin]
+properties:
+  error:
+    type: string
+  refusal:
+    type: string
+    enum: [human-on-machine]
+  machine:
+    type: string
+  origin:
+    type: string
+    nullable: true
+    description: The serve origin of that machine, or null when it has none.

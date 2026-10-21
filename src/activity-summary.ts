@@ -45,6 +45,7 @@ import { sweep, reviewersByItsa, reviewerNames, costCtx, modesOf, spread, modesS
 import { CLOCK_GROUPS, FRICTION_KINDS, SLOW_WORK_KINDS, clockGroup, activityLabel, CATEGORY_LABELS, type ClockGroup } from './activity-categories.ts';
 import { onTouched } from './activity-changes.ts';
 import type { Ctx, Modes } from './cost-display.ts';
+import { envVar } from './env.ts';
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
@@ -53,7 +54,7 @@ export const SLICE_MS = 8;
 const CACHE_MS = 30_000;
 // After a daemon start, a request waits this long for the first refresh to finish; then it answers with the
 // digests built so far, marked `warming: true` (S-1206), instead of waiting until it times out.
-const WARM_WAIT_MS = Number(process.env.STAM_ACTIVITY_WARM_MS) || 1_500;
+const WARM_WAIT_MS = Number(envVar('ACTIVITY_WARM_MS')) || 1_500;
 export const MAX_DAYS = 400;
 
 export const SUMMARY_NOTE =
@@ -527,8 +528,8 @@ async function refreshNow(): Promise<void> {
 
 // ---- machines (S-1079) --------------------------------------------------------------------------
 
-const REMOTE_TTL_MS = Number(process.env.STAM_ACTIVITY_REMOTE_MS) || 10_000;
-const PEER_TTL_MS = Number(process.env.STAM_ACTIVITY_PEER_MS) || 15_000;
+const REMOTE_TTL_MS = Number(envVar('ACTIVITY_REMOTE_MS')) || 10_000;
+const PEER_TTL_MS = Number(envVar('ACTIVITY_PEER_MS')) || 15_000;
 // After a failed read, a peer is not asked again for this long (peers.ts also skips a peer it knows is down).
 const PEER_RETRY_MS = 5_000;
 const PEER_TIMEOUT_MS = 8_000;

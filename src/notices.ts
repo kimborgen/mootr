@@ -8,10 +8,11 @@
 import * as db from './db.ts';
 import { find as findItsa, isClosedStatus } from './itsa.ts';
 import { liveSubscriptionNotes } from './watch.ts';
+import { envVar } from './env.ts';
 
 // A notice from an agent archived more than this ago counts as handled, once it was pushed to the
 // recipient. A test sets STAM_NOTICE_ARCHIVED_MS, so it waits on state, not on a real day.
-export const ARCHIVED_MS = Number(process.env.STAM_NOTICE_ARCHIVED_MS ?? 24 * 60 * 60_000);
+export const ARCHIVED_MS = Number(envVar('NOTICE_ARCHIVED_MS') ?? 24 * 60 * 60_000);
 export const EVERY_MS = 10 * 60_000;
 // A watch_pr relay: subjectFor makes the subject `[stam] N PR #<number> watch events`.
 const RELAY = /^\[stam\] \d+ PR #(\d+) watch events?$/;

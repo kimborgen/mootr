@@ -14,7 +14,7 @@ const RUN: ToolCallItem[] = [
 const AGENT = 'fixture-dev'
 const MCP: ToolCallItem[] = [
   { id: 'm1', name: 'mcp__stam__send_mail', input: { to: 'convo-mgr', subject: 'Branch ready' }, result: 'sent', status: 'done' },
-  { id: 'm2', name: 'mcp__claude_ai_Gmail__search_threads', input: { query: 'from:kim' }, result: '3 threads', status: 'done' },
+  { id: 'm2', name: 'mcp__claude_ai_Gmail__search_threads', input: { query: 'from:octocat' }, result: '3 threads', status: 'done' },
 ]
 // Both tools named: the label of the tool part, the server in front.
 const named = () => { resetToolNames(); resetToolSummaries(); seedEnabled(false); seedNamesEnabled(true); seedToolName(AGENT, 'send_mail', { label: 'Send mail' }); seedToolName(AGENT, 'search_threads', { label: 'Search threads' }) }

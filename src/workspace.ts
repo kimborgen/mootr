@@ -8,6 +8,7 @@ import { storageRemoteFallback } from './settings.ts';
 import { derivedRepoPath } from './default-repo.ts';
 import { depsCachePath, depsKey, ensureCacheReadOnly, fillDeps, linkDepsOutcome, linkDepsOutcomeAsync, type LinkOutcome, retireDamagedCache, touchDepsUsed, warmDeps } from './deploy.ts';
 import type { AgentType } from './agent-types.ts';
+import { envVar } from './env.ts';
 
 // What linking a worktree's dependencies did (S-1044), for the spawn to log as an agent event.
 // `warm` starts nothing: it hands the background fill's promise to a caller that wants to await
@@ -35,7 +36,7 @@ export interface Workspace {
   spec: WorkspaceSpec;
   cwd: string;
   // Set for worktrees the agent owns.
-  worktree?: { repo: string; path: string; branch: string; base?: string };
+  worktree?: { repo: string; path: string; branch: string; base?: string; continues?: boolean };
   // The worktree's dependency linking (S-1044): one entry per package folder.
   deps?: DepsEvent[];
   // Where the branch was cut from and how the fetch went (S-1666), so a stale fallback is visible.
@@ -89,10 +90,12 @@ export interface BaseUsed {
   error?: string;
   // True when the spawn gave no base and the default origin/main was tried.
   defaulted?: boolean;
+  // The PR branch the worktree sits on, reset to `sha` (S-3113): the base was origin/stam/X.
+  continued?: string;
 }
 
 // A fetch that hangs (a stopped `storage` remote) must not hold a spawn.
-const fetchTimeoutMs = (): number => Number(process.env.STAM_FETCH_TIMEOUT_MS) || 15_000;
+const fetchTimeoutMs = (): number => Number(envVar('FETCH_TIMEOUT_MS')) || 15_000;
 
 const gitIn = (repo: string, ...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim();
 
@@ -203,6 +206,49 @@ export function reusedBranchRefusal(repo: string, branch: string, remotes: strin
   return `${branch} already exists here (${out.split('\n')[0]}): an earlier agent used that name. Pick another agent name, or pass an explicit branch.`;
 }
 
+// The PR branch a spawn continues (S-3113): `base: origin/stam/X` (or storage/stam/X) puts the worktree on stam/X itself,
+// so the agent's commits go to the PR's branch and pr_open needs no hand-made fast-forward. null for any other base.
+export function continuedBranch(base: string | undefined, remotes: string[]): string | null {
+  if (!base) return null;
+  for (const r of remotes) if (base.startsWith(`${r}/stam/`) && base.length > r.length + 6) return base.slice(r.length + 1);
+  return null;
+}
+
+// Why the local branch `branch` can't be reset to `start` for a continuing spawn (S-3113), or null when it can. Fails
+// closed: a worktree holding the branch, a local tip that is not an ancestor of `start` (resetting would lose commits),
+// and any git error other than "no such branch" all refuse. Returns the refusal, or the tip it inspected (the zero oid when
+// absent); the caller takes the branch with `git worktree add`, which re-checks the holder at the act.
+const ZERO_OID = '0'.repeat(40);
+function continuedBranchRefusal(repo: string, branch: string, start: string): { why: string } | { tip: string } {
+  const run = (args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: 'pipe', timeout: 15000 }).trim();
+  const fix = `pass branch (a new name, or "new" for stam/AGENT) to stack a new branch on ${branch}`;
+  let holders: string[];
+  try {
+    holders = run(['worktree', 'list', '--porcelain']).split('\n');
+  } catch (e) {
+    return { why: `couldn't list worktrees to check whether ${branch} is free: ${(e as Error).message.split('\n')[0]}; ${fix}` };
+  }
+  const at = holders.indexOf(`branch refs/heads/${branch}`);
+  if (at >= 0) {
+    const where = holders.slice(0, at).reverse().find((l) => l.startsWith('worktree '))?.slice(9) ?? 'another worktree';
+    return { why: `${branch} is checked out in ${where}: archive its agent (or free that worktree), or ${fix}` };
+  }
+  let tip: string;
+  try {
+    tip = run(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+  } catch (e) {
+    if ((e as { status?: number }).status === 1) return { tip: ZERO_OID }; // no local branch: it is made at `start`
+    return { why: `couldn't check local ${branch}: ${(e as Error).message.split('\n')[0]}; ${fix}` };
+  }
+  try {
+    run(['merge-base', '--is-ancestor', tip, start]);
+    return { tip };
+  } catch (e) {
+    if ((e as { status?: number }).status === 1) return { why: `local ${branch} (${tip.slice(0, 8)}) has commits that are not in ${start.slice(0, 8)}, so resetting it would lose them: push or merge them first, or ${fix}` };
+    return { why: `couldn't check local ${branch}: ${(e as Error).message.split('\n')[0]}; ${fix}` };
+  }
+}
+
 // createWorkspace after an async, bounded fetch of its base (S-1666): what the daemon runs, so a slow or
 // stopped remote never blocks its event loop. A worktree with no base is cut from the fresh origin/main.
 export async function createWorkspaceFetched(spec: WorkspaceSpec, agentName: string): Promise<Workspace> {
@@ -217,9 +263,14 @@ export function createWorkspace(spec: WorkspaceSpec, agentName: string, fetched?
     case 'worktree': {
       const repo = execFileSync('git', ['-C', spec.repo, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
       const path = join(STAM_HOME, 'worktrees', `${basename(repo)}-${agentName}`);
-      const branch = spec.branch ?? `stam/${agentName}`;
-      if (!spec.branch) {
-        const why = reusedBranchRefusal(repo, branch, ['origin', storageRemoteFallback(['storage'])].filter(Boolean));
+      const remotes = ['origin', storageRemoteFallback(['storage'])].filter(Boolean);
+      // `branch: "new"` asks for the agent's own stam/NAME branch even on a PR branch's base: a new stacked PR (S-964).
+      const asked = spec.branch === 'new' ? undefined : spec.branch;
+      // A base of origin/stam/X continues that PR's branch (S-3113), unless a branch was asked for.
+      const continues = !spec.branch ? continuedBranch(spec.base, remotes) : null;
+      const branch = continues ?? asked ?? `stam/${agentName}`;
+      if (!asked && !continues) {
+        const why = reusedBranchRefusal(repo, branch, remotes);
         if (why) throw new Error(why);
       }
       // A base that doesn't resolve fails here, before any worktree exists.
@@ -240,13 +291,49 @@ export function createWorkspace(spec: WorkspaceSpec, agentName: string, fetched?
         }
       }
       mkdirSync(join(STAM_HOME, 'worktrees'), { recursive: true });
-      execFileSync('git', ['-C', repo, 'worktree', 'add', '-b', branch, path, ...(start ? [start] : [])], { encoding: 'utf8', stdio: 'pipe' });
+      if (continues) {
+        const seen = continuedBranchRefusal(repo, continues, start!);
+        if ('why' in seen) throw new Error(seen.why);
+        // Take the branch first, then move it: git refuses a branch another worktree holds at the moment of taking it, so
+        // two spawns on one base can't both take it and another holder's HEAD is never moved under its files. An absent
+        // branch is made at start (`-b` refuses if it appears meanwhile); an existing one (an ancestor of start, checked
+        // above) is checked out and fast-forwarded to start, which refuses if it moved somewhere start doesn't descend from.
+        const fix = 'pass branch (a new name, or "new") to stack a new branch on it';
+        const fail = (e: unknown) => ((e as { stderr?: string }).stderr || (e as Error).message).trim().split('\n')[0];
+        const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: 'pipe' });
+        try {
+          if (seen.tip === ZERO_OID) git('worktree', 'add', '-b', continues, path, start!);
+          else git('worktree', 'add', path, continues);
+        } catch (e) {
+          throw new Error(`couldn't put the worktree on ${continues}: ${fail(e)}; ${fix}`);
+        }
+        if (seen.tip !== ZERO_OID) {
+          try {
+            execFileSync('git', ['-C', path, 'merge', '--ff-only', '-q', start!], { encoding: 'utf8', stdio: 'pipe' });
+            // "Already up to date" when the branch moved ahead of start: the worktree must be exactly at start.
+            const head = execFileSync('git', ['-C', path, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: 'pipe' }).trim();
+            if (head !== start) throw new Error(`it is at ${head.slice(0, 8)}, not ${start!.slice(0, 8)}`);
+          } catch (e) {
+            // Only our own, just-made worktree is removed; the branch stays where it moved.
+            let removed = '';
+            try {
+              git('worktree', 'remove', '--force', path);
+            } catch (r) {
+              removed = ` (and removing ${path} failed: ${fail(r)})`;
+            }
+            throw new Error(`${continues} moved while the spawn was starting and is not at ${start!.slice(0, 8)}, so it was not reset: ${fail(e)}${removed}; retry, or ${fix}`);
+          }
+        }
+        baseUsed = { ...baseUsed!, continued: continues };
+      } else {
+        execFileSync('git', ['-C', repo, 'worktree', 'add', '-b', branch, path, ...(start ? [start] : [])], { encoding: 'utf8', stdio: 'pipe' });
+      }
       const deps = DEPS_FOLDERS.map((rel) => linkDeps(path, rel)).filter((d): d is DepsEvent => Boolean(d));
-      return { spec, cwd: path, worktree: { repo, path, branch, ...(spec.base ? { base: spec.base } : {}) }, deps, ...(baseUsed ? { baseUsed } : {}) };
+      return { spec, cwd: path, worktree: { repo, path, branch, ...(spec.base ? { base: spec.base } : {}), ...(continues ? { continues: true } : {}) }, deps, ...(baseUsed ? { baseUsed } : {}) };
     }
     case 'script': {
       // The script prints the directory to use on its last line of output.
-      const out = execFileSync('sh', ['-c', spec.command], { cwd: spec.cwd, encoding: 'utf8', env: { ...process.env, STAM_AGENT_NAME: agentName } });
+      const out = execFileSync('sh', ['-c', spec.command], { cwd: spec.cwd, encoding: 'utf8', env: { ...process.env, ...{ STAM_AGENT_NAME: agentName } } });
       const dir = out.trim().split('\n').pop() ?? '';
       if (!dir || !existsSync(dir)) throw new Error(`workspace script printed no existing directory: ${dir}`);
       return { spec, cwd: resolve(spec.cwd, dir) };
@@ -278,7 +365,10 @@ export function spawnWorkspaceSpec(body: any, type: AgentType | undefined, base:
   // A reviewer type's default worktree falls back to a plain dir outside a git repo; an explicit
   // `worktree: true` keeps the error, and the developer type is unchanged.
   const worktree = given ?? (body?.workspace_script || body?.workspace_instructions ? false : typeWantsWorktree(type) && (!type?.review || inGitRepo(base)));
-  if (worktree) return { kind: 'worktree', repo: base, branch: body.branch ? String(body.branch) : undefined, ...(body.base ? { base: String(body.base) } : {}) };
+  // A reviewer keeps its own branch (S-3113): it is cut from the developer's PR branch while the developer still holds it.
+  if (worktree) return { kind: 'worktree', repo: base, branch: body.branch ? String(body.branch) : type?.review ? 'new' : undefined, ...(body.base ? { base: String(body.base) } : {}) };
+  // A base cuts the worktree's branch, so a spawn that makes no worktree is refused, not silently run without it (S-1278).
+  if (body.base) throw new Error('base needs a worktree spawn');
   if (body.workspace_script) return { kind: 'script', command: String(body.workspace_script), cwd: base };
   if (body.workspace_instructions) return { kind: 'instructions', text: String(body.workspace_instructions), cwd: base };
   return { kind: 'dir', path: base };
@@ -298,7 +388,8 @@ const isLinkedWorktree = (dir: string): boolean => {
 // names it with STAM_DEPLOY_REPO; else the release source (a release records the checkout it came from,
 // and a checkout is its own), whatever settings or pr_open target; else ~/projects/stam2.
 export function deployCheckout(): string {
-  if (process.env.STAM_DEPLOY_REPO) return resolve(process.env.STAM_DEPLOY_REPO);
+  const repo = envVar('DEPLOY_REPO');
+  if (repo) return resolve(repo);
   try {
   } catch {}
   return derivedRepoPath() || join(homedir(), 'projects', 'stam2');
@@ -336,20 +427,133 @@ export function liveCheckoutRefusal(dir: string): string | null {
   if (top !== checkout) return null;
   // A linked worktree isn't the checkout (S-1863) unless STAM_DEPLOY_REPO names it: the repo settings
   // default for a CLI or daemon run from a worktree's own copy is that worktree ("a checkout is its own").
-  if (!process.env.STAM_DEPLOY_REPO && isLinkedWorktree(top)) return null;
+  if (!envVar('DEPLOY_REPO') && isLinkedWorktree(top)) return null;
   return `${dir} is in the live deploy checkout ${top}, the repo the deploy watcher deploys from, so an agent that works there without its own worktree would block every deploy. Pass worktree: true, or a cwd outside it.`;
 }
 
-// Removes what the agent owns. Throws if a worktree has uncommitted changes, unless forced.
-export function cleanupWorkspace(ws: Workspace, force = false): string {
+// S-2201: why the branch of a worktree can't be left behind, or null when it can: it holds commits that no
+// remote-tracking ref reaches (a pushed branch, origin's or storage's, counts as pushed), so removing the
+// worktree would leave work only a local branch name points to. A branch that is gone has nothing to lose,
+// and a repo with no remote has nothing to push to (the archive keeps its local branch). Any git failure
+// throws: a check that can't be made refuses, never passes.
+export function unpushedRefusal(git: string[], branch: string): string | null {
+  const run = (args: string[]) => execFileSync('git', [...git, ...args], { encoding: 'utf8', stdio: 'pipe', timeout: 15000 }).trim();
+  let remotes: string;
+  try {
+    remotes = run(['remote']);
+  } catch (e) {
+    throw new Error(`couldn't check whether ${branch} is pushed: ${(e as Error).message}`);
+  }
+  if (!remotes) return null;
+  try {
+    run(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+  } catch (e) {
+    // Exit 1 with --quiet means the branch doesn't exist; anything else is a failed check.
+    if ((e as { status?: number }).status === 1) return null;
+    throw new Error(`couldn't check whether ${branch} is pushed: ${(e as Error).message}`);
+  }
+  let commits: string[];
+  try {
+    commits = run(['rev-list', `refs/heads/${branch}`, '--not', '--remotes']).split('\n').filter(Boolean);
+  } catch (e) {
+    throw new Error(`couldn't check whether ${branch} is pushed: ${(e as Error).message}`);
+  }
+  if (!commits.length) return null;
+  return `branch ${branch} has ${commits.length} commit${commits.length === 1 ? '' : 's'} not on any remote (head ${commits[0]}): push it or open its PR (pr_open) first, or archive with force_unpushed to leave it only local`;
+}
+
+// The git arguments that reach the repo a worktree was made from. That repo can be another agent's worktree,
+// archived since (S-1049); then git runs against the repo's shared git dir, read from the worktree itself,
+// which still exists.
+function repoGitArgs(ws: Workspace): string[] {
+  const { repo, path } = ws.worktree!;
+  if (existsSync(repo)) return ['-C', repo];
+  try {
+    return ['--git-dir', execFileSync('git', ['-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: 'pipe', timeout: 15000 }).trim()];
+  } catch (e) {
+    throw new Error(`couldn't find the git dir of ${path} (its repo ${repo} is gone): ${(e as Error).message}`);
+  }
+}
+
+// S-2201: unpushedRefusal for a workspace's worktree branch; null when it has none, or its folder is gone.
+export function workspaceUnpushedRefusal(ws: Workspace): string | null {
+  if (!ws.worktree || !existsSync(ws.worktree.path)) return null;
+  return unpushedRefusal(repoGitArgs(ws), ws.worktree.branch);
+}
+
+// S-994: deletes the worktree branch an archive leaves behind, only when it holds nothing of its own: its tip
+// is the commit it was cut from (`start`, the recorded base sha) or lies on a remote-tracking origin/main, it
+// isn't checked out in any other worktree, and `git branch -d` (never -D) agrees. Returns why it was kept, or
+// null when deleted. Only local refs are read: no fetch and no checkout, so the live checkout is untouched.
+function dropEmptyBranch(git: string[], branch: string, start?: string, baseInUse = false, continues = false): string | null {
+  const run = (args: string[]) => execFileSync('git', [...git, ...args], { encoding: 'utf8', stdio: 'pipe', timeout: 15000 }).trim();
+  const ok = (args: string[]) => {
+    try {
+      run(args);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  let tip: string;
+  try {
+    tip = run(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+  } catch {
+    return null; // already gone
+  }
+  if (continues) return 'it is the branch of the PR this agent continued'; // S-3113: never deleted, even when empty
+  if (baseInUse) return 'another agent\'s worktree was cut from it';
+  const own = tip !== start && !ok(['merge-base', '--is-ancestor', tip, 'refs/remotes/origin/main']);
+  if (own) return 'it has commits of its own';
+  const checkedOut = run(['worktree', 'list', '--porcelain']).split('\n').some((l) => l === `branch refs/heads/${branch}`);
+  if (checkedOut) return 'it is checked out in another worktree';
+  try {
+    run(['branch', '-d', branch]);
+  } catch (e) {
+    return `git branch -d refused: ${((e as { stderr?: string }).stderr || (e as Error).message).trim().split('\n')[0]}`;
+  }
+  return null;
+}
+
+// S-994: true when another live agent's worktree (OTHERS: their stored workspace JSON) was cut from this
+// workspace's worktree or branch, so the branch stays.
+export function branchIsBase(ws: Workspace, others: (string | null | undefined)[]): boolean {
+  // No worktree, no branch to keep: the archive calls this for every workspace, including ones without one.
+  if (!ws.worktree) return false;
+  const { path, branch } = ws.worktree;
+  return others.some((o) => {
+    if (!o) return false;
+    try {
+      const w = (JSON.parse(o) as Workspace).worktree;
+      return Boolean(w) && (w!.repo === path || w!.base === branch || w!.base === `refs/heads/${branch}`);
+    } catch {
+      return false;
+    }
+  });
+}
+
+// Removes what the agent owns. Throws if a worktree has uncommitted changes, unless forced, or if its branch
+// has unpushed commits, unless `allowUnpushed` (S-2201; callers that discard a fresh branch pass it). The
+// branch is deleted when it is empty (S-994) and kept otherwise, with the reason in the result;
+// `baseInUse` is true when another live agent's worktree was cut from this one.
+export function cleanupWorkspace(ws: Workspace, force = false, allowUnpushed = false, baseInUse = false): string {
   if (!ws.worktree) return 'nothing to clean up';
-  const { repo, path } = ws.worktree;
+  const { path } = ws.worktree;
   if (!existsSync(path)) return 'worktree already gone';
-  // The repo it was made from can be another agent's worktree, archived since (S-1049). Then git runs
-  // against the repo's shared git dir, read from the worktree itself, which still exists.
-  const git = existsSync(repo) ? ['-C', repo] : ['--git-dir', execFileSync('git', ['-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: 'pipe' }).trim()];
+  const git = repoGitArgs(ws);
+  if (!allowUnpushed) {
+    const why = unpushedRefusal(git, ws.worktree.branch);
+    if (why) throw new Error(why);
+  }
   execFileSync('git', [...git, 'worktree', 'remove', ...(force ? ['--force'] : []), path], { encoding: 'utf8', stdio: 'pipe' });
-  return `removed worktree ${path}; branch ${ws.worktree.branch} kept`;
+  let kept: string | null;
+  try {
+    kept = dropEmptyBranch(git, ws.worktree.branch, ws.baseUsed?.sha, baseInUse, ws.worktree.continues);
+  } catch (e) {
+    // The worktree is already gone, so a failed check keeps the branch and the archive still succeeds.
+    kept = `couldn't check: ${(e as Error).message.split('\n')[0]}`;
+  }
+  return `removed worktree ${path}; ${kept ? `branch ${ws.worktree.branch} kept: ${kept}` : `branch ${ws.worktree.branch} deleted (empty)`}`;
 }
 
 // A personal workspace (S-894): a folder an agent owns for its own notes and files, at

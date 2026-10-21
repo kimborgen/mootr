@@ -17,9 +17,10 @@
 //      `Motion check: none, REASON` (S-1281). Runs in the per-PR modes only, since it needs the PR's body.
 // Stories, tests, and web/src/stories/** are never components.
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { isMain } from './main-guard.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = 'web/src/';
@@ -191,22 +192,29 @@ function git(args, cwd) {
   return r.stdout;
 }
 
-// The merge base of BASE and HEAD (BASE itself when they have none in common), so the diff below is the PR's own (S-1818).
+// What the diffs below start from, so they show the PR's own changes (S-1818): the merge base of BASE and HEAD
+// (BASE itself when they have none in common). With several merge bases (a criss-cross) `git merge-base` picks
+// one and blames HEAD for BASE's files (S-1338), so the diff is BASE against the tree of merging HEAD into BASE,
+// when git can merge cleanly; a diff accepts that tree as a side. HEAD's own paths are read from HEAD.
 function mergeBase(base, head, cwd) {
+  const all = spawnSync('git', ['merge-base', '--all', base, head], { cwd, encoding: 'utf8' });
+  const t = all.status === 0 && all.stdout.trim().split('\n').length > 1 ? spawnSync('git', ['merge-tree', '--write-tree', '--no-messages', base, head], { cwd, encoding: 'utf8' }) : { status: 1, stdout: '' };
+  const tree = t.stdout.split('\n')[0].trim();
+  if (t.status === 0 && /^[0-9a-f]{40,64}$/.test(tree)) return { from: base, to: tree };
   const r = spawnSync('git', ['merge-base', base, head], { cwd, encoding: 'utf8' });
-  return r.status === 0 ? r.stdout.trim() : base;
+  return { from: r.status === 0 ? r.stdout.trim() : base, to: head };
 }
 
 // Reads HEAD's web/src sources and the paths changed from the merge base of BASE and HEAD to HEAD, in the repo at CWD.
 export function checkRange(base, head, { cwd = ROOT, body = '', mode = 'full' } = {}) {
   const names = (a) => git(a, cwd).split('\n').filter(Boolean);
-  const from = mergeBase(base, head, cwd);
+  const { from, to } = mergeBase(base, head, cwd);
   const paths = names(['ls-tree', '-r', '--name-only', head, '--', SRC]).filter((p) => /\.tsx?$/.test(p));
   const files = {};
   for (const p of paths) files[p] = git(['show', `${head}:${p}`], cwd);
-  const changed = names(['diff', '--name-only', '--no-renames', '--diff-filter=AM', from, head]);
+  const changed = names(['diff', '--name-only', '--no-renames', '--diff-filter=AM', from, to]);
   const renames = {};
-  for (const l of names(['diff', '--name-status', '-M', '--diff-filter=R', from, head])) {
+  for (const l of names(['diff', '--name-status', '-M', '--diff-filter=R', from, to])) {
     const [, from, to] = l.split('\t');
     renames[to] = from;
   }
@@ -259,13 +267,22 @@ function blobsOf(buf, paths) {
 export async function checkRangeAsync(base, head, { cwd = ROOT, body = '', mode = 'full', timeoutMs = 30_000 } = {}) {
   const text = (args, input) => gitAsync(args, { cwd, input, timeoutMs }).then((b) => b.toString('utf8'));
   const names = async (a) => (await text(a)).split('\n').filter(Boolean);
-  // As mergeBase: BASE itself when the two share no history (S-1818).
-  const from = await text(['merge-base', base, head]).then((s) => s.trim() || base, (e) => { if (e.timedOut) throw e; return base; });
+  // As mergeBase: the merge-tree result, else the merge base (BASE itself when the two share no history, S-1818).
+  let from;
+  let to = head;
+  const bases = await names(['merge-base', '--all', base, head]).catch((e) => { if (e.timedOut) throw e; return []; });
+  const mt = bases.length > 1 ? await text(['merge-tree', '--write-tree', '--no-messages', base, head]).then((s) => s.split('\n')[0].trim(), (e) => { if (e.timedOut) throw e; return ''; }) : '';
+  if (/^[0-9a-f]{40,64}$/.test(mt)) {
+    from = base;
+    to = mt;
+  } else {
+    from = await text(['merge-base', base, head]).then((s) => s.trim() || base, (e) => { if (e.timedOut) throw e; return base; });
+  }
   const paths = (await names(['ls-tree', '-r', '--name-only', head, '--', SRC])).filter((p) => /\.tsx?$/.test(p));
   const files = blobsOf(await gitAsync(['cat-file', '--batch'], { cwd, input: paths.map((p) => `${head}:${p}\n`).join(''), timeoutMs }), paths);
-  const changed = await names(['diff', '--name-only', '--no-renames', '--diff-filter=AM', from, head]);
+  const changed = await names(['diff', '--name-only', '--no-renames', '--diff-filter=AM', from, to]);
   const renames = {};
-  for (const l of await names(['diff', '--name-status', '-M', '--diff-filter=R', from, head])) {
+  for (const l of await names(['diff', '--name-status', '-M', '--diff-filter=R', from, to])) {
     const [, old, now] = l.split('\t');
     renames[now] = old;
   }
@@ -299,13 +316,4 @@ function cli(args) {
   console.log('story-check: ok');
 }
 
-if (isMain()) cli(process.argv.slice(2));
-
-function isMain() {
-  if (!process.argv[1]) return false;
-  try {
-    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
-  } catch {
-    return false;
-  }
-}
+if (isMain(import.meta.url)) cli(process.argv.slice(2));

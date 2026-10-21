@@ -1,0 +1,34 @@
+type: object
+nullable: true
+additionalProperties: false
+description: What a resting agent rests for, and when it is expected to wake.
+required: [reason, waits, expected_wake]
+properties:
+  reason:
+    type: string
+    enum: [idle, wait]
+  waits:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [id, kind, target, detail, since, until]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+        target:
+          type: string
+          nullable: true
+        detail:
+          type: string
+          nullable: true
+        since:
+          type: string
+        until:
+          type: string
+          nullable: true
+  expected_wake:
+    type: string
+    nullable: true

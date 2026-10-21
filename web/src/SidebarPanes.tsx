@@ -20,7 +20,7 @@ interface TabDef { label: string; icon: IconName; page?: () => void; render: (le
 
 // The requirements list sits under the issues, in the issues tab: both are the work agents track.
 export const TABS: Record<string, TabDef> = {
-  agents: { label: 'Agents', icon: 'users', render: () => <Tree /> },
+  agents: { label: 'Agents', icon: 'users', page: () => openWorld('agents'), render: () => <Tree /> },
   issues: { label: 'Issues', icon: 'list-checks', page: () => openWorld('work'), render: (left) => <><IssuesSide leftRef={left} pane /><ReqSide /></> },
   mail: { label: 'Mail', icon: 'mail', page: () => openWorld('inbox'), render: (left) => <MailSide leftRef={left} pane /> },
   history: { label: 'History', icon: 'clock', render: () => <HistorySide /> },
@@ -40,8 +40,8 @@ const GROW = [3, 2, 1]
 export function SidebarPanes({ left }: { left: RefObject<HTMLElement | null> }) {
   const { panes, tabBar } = useSidebarPanes(KNOWN)
   const strips = useRef<Record<number, HTMLDivElement | null>>({})
-  // A tab that isn't showing switches to it; the showing tab opens its page.
-  const click = (i: number, id: string) => { if (panes[i].active === id) openTabPage(id); else pick(i, id) }
+  // A click shows the tab in its pane, and opens the tab's page when it has one (S-1428). The sidebar keeps its panes while the page is open.
+  const click = (i: number, id: string) => { pick(i, id); openTabPage(id) }
   const pick = (i: number, id: string) => setSidebarPanes(activate(panes, i, id))
   const key = (i: number, e: KeyboardEvent) => {
     const cur = (e.target as HTMLElement).closest<HTMLElement>('[role=tab]')?.dataset.tab

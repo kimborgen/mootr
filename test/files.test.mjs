@@ -137,6 +137,19 @@ test('a file in a worktree reads, and the deny list still holds inside it', asyn
   assert.equal(code(join(stamHome, 'token')), 403);
 });
 
+test('a symlink into or out of a worktree follows the same roots and deny rules', async () => {
+  // A link from the checkout into a worktree file reads: its target is in a root.
+  symlinkSync(join(wt, 'wt.txt'), join(proj, 'app', 'into-wt.txt'));
+  assert.equal(code(join(proj, 'app', 'into-wt.txt')), 200);
+  assert.equal(await (await get(join(proj, 'app', 'into-wt.txt'))).text(), 'worktree file');
+  // A link in the worktree to the checkout's .env is denied at its target.
+  symlinkSync(join(proj, 'app', '.env'), join(wt, 'wt-env-link.txt'));
+  assert.equal(code(join(wt, 'wt-env-link.txt')), 403);
+  // A link in the worktree to a STAM_HOME folder outside the roots (a token) stays shut.
+  symlinkSync(join(stamHome, 'token'), join(wt, 'tokenlink'));
+  assert.equal(code(join(wt, 'tokenlink')), 403);
+});
+
 test('a listing has name, kind, size and mtime, and leaves out denied entries', () => {
   const entries = files.listDir(files.resolveIn(join(proj, 'app'), roots));
   const names = entries.map((e) => e.name);

@@ -23,6 +23,8 @@
   --size-work-col-min: 32px;
   --work-depth-max: 5;
   --size-work-fold: var(--space-5);
+  /* The Agents page's detail pane beside its table (S-3048): the width the pane keeps. */
+  --size-agents-pane: 420px;
   /* Agent state, on the status vocabulary. Working borrows indigo, as in-progress does. */
   --st-working: var(--accent);
   --st-idle: var(--status-success-fg);
@@ -154,6 +156,11 @@
 /* How long a touch holds a control before it counts as a long press (S-610). Not built on
    duration-slow: it is a threshold, not motion, so reduced motion must not zero it. */
 :root { --duration-hold: 400ms; }
+
+/* The OS default double-click interval (about 500 ms): how long after a send the button stays Send,
+   so a second click on the emptied box doesn't Stop the turn (S-1774). A threshold, not motion, so
+   reduced motion must not zero it. */
+:root { --duration-double-click: 500ms; }
 
 /* How long a tool call waits for its summary before it shows raw (S-1481): read by
    web/src/mail/tool-summaries.ts. A threshold, not motion, so reduced motion must not zero it. */

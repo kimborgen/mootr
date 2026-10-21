@@ -11,6 +11,7 @@ beforeEach(() => {
   answers = []
   urls = []
   localStorage.clear()
+  sessionStorage.clear()
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     urls.push(url)
     const next = answers.shift()
@@ -27,7 +28,7 @@ describe('needsLocalLogin', () => {
     localStorage.setItem('stamToken', 'old')
     localStorage.setItem('stamTokenKind', 'local-human')
     answers.push(reply(401), reply(200, { enabled: true, dir: '/run/stam-human/1000' }))
-    expect(await needsLocalLogin('old')).toBe('/run/stam-human/1000')
+    expect(await needsLocalLogin('old')).toEqual({ dir: '/run/stam-human/1000', passwordlessSudo: false })
     expect(urls).toEqual(['/api/health', '/api/human/login'])
     expect(localStorage.getItem('stamToken')).toBeNull()
     expect(isLocalSession()).toBe(false)
@@ -38,6 +39,18 @@ describe('needsLocalLogin', () => {
     expect(await needsLocalLogin('good')).toBeNull()
     answers.push(reply(401), reply(200, { enabled: false }))
     expect(await needsLocalLogin('')).toBeNull()
+  })
+  it('asks for a code when the human asked to log in (LoginOffer), keeping the token until the login replaces it', async () => {
+    at('127.0.0.1')
+    localStorage.setItem('stamToken', 'shared')
+    sessionStorage.setItem('stamLoginWanted', '1')
+    answers.push(reply(200, { enabled: true, dir: '/run/stam-human/1000', passwordlessSudo: true }))
+    expect(await needsLocalLogin('shared')).toEqual({ dir: '/run/stam-human/1000', passwordlessSudo: true })
+    expect(urls).toEqual(['/api/human/login'])
+    expect(localStorage.getItem('stamToken')).toBe('shared')
+    // Asked once: the next load is the app again.
+    answers.push(reply(200))
+    expect(await needsLocalLogin('shared')).toBeNull()
   })
   it('never asks on a non-loopback host (tailscale serve)', async () => {
     at('box.example.com')

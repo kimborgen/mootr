@@ -7,12 +7,14 @@
 // STAM_CHROMIUM_PRIORITY=gate (set by scripts/gate.mjs, S-1594) puts a check ahead of other waiters: while it
 // waits it keeps a marker `$LOCK.gate.<pid>`, and a waiting check without it holds off until no live marker is
 // left (76 is reserved for that; a holder is never pre-empted; one that got the lock first and finds a marker exits 76 and waits again).
+// The marker goes to a `$LOCK.gate.<pid>.tmp-<pid>` file first and is renamed onto its name (S-1692), so a waiter
+// never reads it empty and never deletes one it can't read.
 // STAM_CHROMIUM_TIMEOUT=SECONDS limits the check itself, counted from when it gets the lock (waiting
 // doesn't count); on expiry it exits 124, like `timeout`. Use it, not `timeout N`, around a check,
 // which would count the wait too. Unset means no limit.
 import { spawn, spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
-import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 // A check run by hand takes a test slot first (scripts/test-slot.sh, S-692); web/check/run.sh already holds one.
@@ -52,17 +54,41 @@ function startOf(pid) {
 }
 
 // Whether a gate check other than WAITER (a pid) is waiting: a marker `$LOCK.gate.<pid>` whose pid is alive.
+// A marker is written to `${marker}.tmp-<pid>` and renamed onto it (S-1692), so one that reads empty, or that
+// can't be read at all, is a write in progress: it counts as live, never as a marker to delete. A tmp file whose
+// writer is gone is swept, like a stale marker.
 function gateWaiting(except) {
+  const dir = dirname(LOCK);
+  const prefix = basename(MARKER);
   try {
-    return readdirSync(dirname(LOCK)).some((f) => {
-      if (!f.startsWith(basename(MARKER))) return false;
-      const pid = Number(f.slice(basename(MARKER).length));
-      if (!pid || pid === except) return false;
+    return readdirSync(dir).some((f) => {
+      if (!f.startsWith(prefix)) return false;
+      const rest = f.slice(prefix.length);
+      const pid = Number(rest);
+      if (!pid) {
+        // `$LOCK.gate.<pid>.tmp-<pid>`: a marker mid-write. Leave a live writer's alone: its rename needs it.
+        const writer = rest.includes('.tmp-') ? Number(rest.split('.tmp-')[1]) : 0;
+        if (writer && writer !== except) {
+          try {
+            process.kill(writer, 0);
+          } catch {
+            rmSync(`${dir}/${f}`, { force: true });
+          }
+        }
+        return false;
+      }
+      if (pid === except) return false;
       try {
         process.kill(pid, 0);
-        if (readFileSync(`${dirname(LOCK)}/${f}`, 'utf8') === startOf(pid)) return true;
+        let start;
+        try {
+          start = readFileSync(`${dir}/${f}`, 'utf8');
+        } catch {
+          return true; // mid-write, or just gone: either way never delete a marker we can't read
+        }
+        if (!start || start === startOf(pid)) return true;
       } catch {}
-      rmSync(`${dirname(LOCK)}/${f}`, { force: true }); // a dead or reused pid left it
+      rmSync(`${dir}/${f}`, { force: true }); // a dead or reused pid left it
       return false;
     });
   } catch {
@@ -82,8 +108,17 @@ if (!NOLOCK && process.env.STAM_CHROMIUM_LOCKED !== '1') {
   // -E 75: exit 75 when the lock is busy, so a check that itself exits 1 isn't mistaken.
   // A gate check marks itself before its first try, so it never loses a round to a plain check in between.
   const marker = `${MARKER}${process.pid}`;
-  if (GATE) writeFileSync(marker, startOf(process.pid));
-  process.on('exit', () => rmSync(marker, { force: true }));
+  const tmpMarker = `${marker}.tmp-${process.pid}`;
+  // Write the tmp file and rename it onto the marker: a waiter that runs gateWaiting as the marker appears
+  // must never read it empty, which it would take for a stale marker and delete (S-1692).
+  if (GATE) {
+    writeFileSync(tmpMarker, startOf(process.pid));
+    renameSync(tmpMarker, marker);
+  }
+  process.on('exit', () => {
+    rmSync(marker, { force: true });
+    rmSync(tmpMarker, { force: true });
+  });
   let r = flock(['-n', '-E', '75', LOCK, process.execPath, ...argv]);
   if (r.status === 75 || r.status === 76) {
     const started = Date.now();

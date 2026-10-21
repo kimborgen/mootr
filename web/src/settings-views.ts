@@ -19,6 +19,11 @@ export interface SettingsRecord<T> {
   save(key: string, value: T): void
   // Deletes one view, the same way.
   remove(key: string): void
+  // Writes one view now only where settings lack its id (the daemon keeps an id it has), then reads what
+  // settings hold, so this page's copy matches. For a seed that must not overwrite an edit.
+  fill(key: string, value: T): Promise<void>
+  // Reads the views again, so a change another page made shows here; a change this page has not sent yet stays.
+  refresh(): Promise<void>
 }
 
 export interface SettingsRecordOptions<T> {
@@ -26,8 +31,8 @@ export interface SettingsRecordOptions<T> {
   field: string
   // The localStorage key of this browser's copy from before settings held the views.
   legacy: string
-  // Turns a stored value into a T; anything it can't read takes its defaults.
-  clean: (x: unknown) => T
+  // Turns a stored value into a T; anything it can't read takes its defaults. `key` is the view's id, for a record whose defaults differ by id.
+  clean: (x: unknown, key: string) => T
   // Turns the browser's copy into a record of raw values; the default reads it as one.
   fromLegacy?: (raw: unknown) => Record<string, unknown>
   // Called once the browser's copy has moved in, with the copy as stored (for what stays on this device).
@@ -55,7 +60,7 @@ export function settingsRecord<T>(o: SettingsRecordOptions<T>): SettingsRecord<T
   const valuesIn = (settings: Record<string, unknown>): Record<string, T> => {
     const v = settings[o.field]
     if (!v || typeof v !== 'object' || Array.isArray(v)) return {}
-    return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, o.clean(x)]))
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, o.clean(x, k)]))
   }
 
   // This browser's storage can refuse access (private windows, blocked site data); then nothing is moved.
@@ -76,7 +81,7 @@ export function settingsRecord<T>(o: SettingsRecordOptions<T>): SettingsRecord<T
     const legacy = legacyRecord(raw)
     const keys = Object.keys(legacy)
     if (keys.length) {
-      const values = Object.fromEntries(keys.map((k) => [k, o.clean(legacy[k])]))
+      const values = Object.fromEntries(keys.map((k) => [k, o.clean(legacy[k], k)]))
       try {
         await patch({ patch: { [o.field]: values }, fill: true })
       } catch (e) {
@@ -84,12 +89,12 @@ export function settingsRecord<T>(o: SettingsRecordOptions<T>): SettingsRecord<T
         // retried on every load, and this browser keeps its copy and shows it.
         if ((e as { status?: number }).status !== 409) throw e
         try { localStorage.setItem(movedKey, '1') } catch {}
-        return { ...Object.fromEntries(keys.map((k) => [k, o.clean(legacy[k])])), ...server }
+        return { ...Object.fromEntries(keys.map((k) => [k, o.clean(legacy[k], k)])), ...server }
       }
     }
     try { localStorage.setItem(movedKey, '1'); localStorage.removeItem(o.legacy) } catch {}
     if (raw) o.migrated?.(raw)
-    return { ...Object.fromEntries(keys.map((k) => [k, o.clean(legacy[k])])), ...server }
+    return { ...Object.fromEntries(keys.map((k) => [k, o.clean(legacy[k], k)])), ...server }
   }
 
   async function fetchRecord(): Promise<Record<string, T>> {
@@ -98,6 +103,13 @@ export function settingsRecord<T>(o: SettingsRecordOptions<T>): SettingsRecord<T
     sent.clear()
     holds(new Map(Object.entries(merged)))
     return merged
+  }
+
+  // A read queued behind the writes in flight, so its reply reflects them and can't rebuild the views from before them.
+  function readQueued(): Promise<Record<string, T>> {
+    const done = queue.then(fetchRecord)
+    queue = done.then(() => {}, () => {})
+    return done
   }
 
   // Sends what is waiting, as one patch of the view record.
@@ -144,13 +156,19 @@ export function settingsRecord<T>(o: SettingsRecordOptions<T>): SettingsRecord<T
 
   return {
     load() {
-      reading ??= fetchRecord().then((v) => {
+      reading ??= readQueued().then((v) => {
         // Changes made before the load finished stay on top of what settings had.
         views = { ...v }
         for (const [k, x] of dirty) { if (x === null) delete views[k]; else views[k] = x }
         return views
       }, (e) => { reading = null; throw e })
       return reading
+    },
+    async refresh() {
+      const v = await readQueued()
+      // Like load: what this page has not sent yet stays on top of what settings hold.
+      views = { ...v }
+      for (const [k, x] of dirty) { if (x === null) delete views[k]; else views[k] = x }
     },
     cached(key) {
       return views?.[key] ?? null;
@@ -163,6 +181,28 @@ export function settingsRecord<T>(o: SettingsRecordOptions<T>): SettingsRecord<T
     },
     remove(key) {
       change(key, null);
+    },
+    fill(key, value) {
+      // Queued behind the writes in flight, so the reply reflects them: a debounced batch still waiting
+      // can't be lost by rebuilding the views from a reply that misses it.
+      const done = queue.then(async () => {
+        let reply: { text?: string } | undefined;
+        try {
+          reply = await patch({ patch: { [o.field]: { [key]: value } }, fill: true }) as { text?: string } | undefined;
+        } catch (e) {
+          // A peer daemon refuses until the home daemon has seeded (S-398): this page keeps what it has.
+          if ((e as { status?: number }).status === 409) return;
+          throw e;
+        }
+        if (!reply?.text) return;
+        const now = valuesIn(JSON.parse(reply.text));
+        sent.clear();
+        holds(new Map(Object.entries(now)));
+        views = { ...now };
+        for (const [k, x] of dirty) { if (x === null) delete views[k]; else views[k] = x; }
+      });
+      queue = done.catch(() => {});
+      return done;
     },
   };
 }

@@ -15,6 +15,7 @@
 // stop at definite turn boundaries, so a cursor never sits inside a turn or a message, and
 // they hand items over in slices so a large backfill never holds the daemon's event loop.
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
+import { gzippedOnly } from './transcript-gz.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -97,6 +98,9 @@ const readers = new Map<string, TranscriptReader>();
 export function registerReader(r: TranscriptReader): void {
   readers.set(r.harness, r);
 }
+
+// The reader registered for a harness, for tests.
+export const readerFor = (harness: string): TranscriptReader | undefined => readers.get(harness);
 
 const SUMMARY_MAX = 300;
 const SHORT_MS = 5_000;
@@ -366,6 +370,8 @@ registerReader({
   harness: 'claude',
   read(agent, cursor, opts) {
     if (!agent.transcript_path) return null;
+    // Gzipped only: archived and fully ingested (the janitor gzips nothing else), so nothing is new.
+    if (gzippedOnly(agent.transcript_path)) return null;
     try {
       statSync(agent.transcript_path);
     } catch {
@@ -771,6 +777,8 @@ registerReader({
   harness: 'codex',
   read(agent, cursor, opts) {
     if (!agent.transcript_path) return null;
+    // Gzipped only: archived and fully ingested (the janitor gzips nothing else), so nothing is new.
+    if (gzippedOnly(agent.transcript_path)) return null;
     try {
       statSync(agent.transcript_path);
     } catch {
@@ -921,13 +929,13 @@ function turnEnded(agentId: string, from: number, to?: number): boolean {
 // Reads what is new in one agent's transcript into activity_items, one transaction per slice
 // with the cursor, yielding to the event loop between slices; then rescales its days. Returns
 // how many items it added; 0 when the agent's harness has no reader or no turn has ended.
-async function ingestNow(agent: db.Agent): Promise<IngestResult> {
+async function ingestNow(agent: db.Agent, final = false): Promise<IngestResult> {
   const reader = readers.get(agent.harness);
   if (!reader) return { agent: agent.id, items: 0 };
   const d = db.open();
   const row = d.prepare('SELECT source, offset, state FROM activity_cursors WHERE agent_id = ?').get(agent.id) as { source: string; offset: number; state: string } | undefined;
   const cursor: Cursor | null = row ? { source: row.source, offset: row.offset, state: JSON.parse(row.state) } : null;
-  const slices = reader.read(agent, cursor, { turnEnded: (from, to) => turnEnded(agent.id, from, to) });
+  const slices = reader.read(agent, cursor, { turnEnded: final ? (from, to) => to === undefined || turnEnded(agent.id, from, to) : (from, to) => turnEnded(agent.id, from, to) });
   if (!slices) return { agent: agent.id, items: 0 };
   let ctx: GapContext | null = null;
   let added = 0;
@@ -1075,13 +1083,28 @@ export function rescale(agentId: string): void {
 // agent never read the same cursor at once.
 let queue: Promise<unknown> = Promise.resolve();
 
-export function ingest(agent: db.Agent): Promise<IngestResult> {
+export function ingest(agent: db.Agent, final = false): Promise<IngestResult> {
   const run = queue.then(() => {
     const a = db.getAgent(agent.id);
-    return a ? ingestNow(a) : { agent: agent.id, items: 0 };
+    return a ? ingestNow(a, final) : { agent: agent.id, items: 0 };
   });
   queue = run.catch(() => {});
   return run;
+}
+
+// The janitor's ingest of an archived agent's transcript (S-2359): nothing runs in it any more, so
+// the turn open at the file's end counts as ended (mid-file notices still follow stam's own record)
+// and the cursor reaches the file's end. True when the ingest ran
+// without an error, so the file holds nothing unread (rows that never form a turn stay unread by
+// design). The agent's harness must have a reader.
+export async function ingestComplete(agent: db.Agent): Promise<boolean> {
+  if (!readers.has(agent.harness)) return false;
+  try {
+    const r = await ingest(agent, true);
+    return !r.error;
+  } catch {
+    return false;
+  }
 }
 
 // Ingests one agent by id or name, or every agent with a reader, in turn. Errors are per agent.

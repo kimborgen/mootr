@@ -21,7 +21,7 @@ import { useCellPress } from './long-press'
 import { cardFields, FieldValue } from './field-columns'
 import type { WorkExtras } from './data'
 import { costIndex, glance, LOOSE, type GlanceGroup } from './glance'
-import { fmtUsd, LINK_KINDS, linkKind } from './links'
+import { fmtIssueCost, LINK_KINDS, linkKind, type IssueCost } from './links'
 import { agentIdsOf, since } from './model'
 import type { NeedsRow } from './needs'
 import { openNeeds } from './openNeeds'
@@ -38,7 +38,7 @@ export const NEEDS_SHOWN = 3
 
 // The agents by id and the costs by issue key, built once per change so a card's lookups are
 // map hits, not scans.
-interface Index { agents: Map<string, Agent>; costs: Map<string, number> }
+interface Index { agents: Map<string, Agent>; costs: Map<string, IssueCost> }
 
 function Section({ id, icon, title, count, children }: { id: string; icon: IconName; title: string; count: number; children: ReactNode }) {
   return <section className="wg-sec" data-sec={id} aria-label={title}>
@@ -74,7 +74,7 @@ function Links({ it }: { it: Itsa }) {
 
 // A moving or ready-to-try ITSA: title and status, then its agents and cost, then its links.
 function ItemCard({ it, ix, fields, sub, live }: { it: Itsa; ix: Index; fields: Field[]; sub?: boolean; live?: HeaderLive }) {
-  const cost = ix.costs.get(it.key) ?? 0
+  const cost = fmtIssueCost(ix.costs.get(it.key), 'total')
   const health = it.health && it.health !== 'on_track' ? HEALTH[it.health] : null
   const row = { it, depth: 0, context: false }
   const agents = agentIdsOf(it).map((id) => ix.agents.get(id)).filter((a): a is Agent => !!a)
@@ -89,11 +89,11 @@ function ItemCard({ it, ix, fields, sub, live }: { it: Itsa; ix: Index; fields: 
       <span className="wg-title"><span className="ikey">{it.key}</span>{it.title}</span>
       <span className="w-status" data-cell="status" style={{ color: toneVar(it.status) }}><StatusGlyph status={it.status} />{statusLabel(it.status)}</span>
     </div>
-    {hasAgents || cost > 0 || health || chips.length ? <div className="wg-meta">
+    {hasAgents || cost || health || chips.length ? <div className="wg-meta">
       {hasAgents ? <Agents row={row} list={agents} /> : null}
       {health ? <span className="w-health" data-cell="health" style={{ color: health.tone }}><span className="w-dot" aria-hidden="true" />{health.label}</span> : null}
       {chips.map(({ f, v }) => <span key={f.id} className="wg-field" data-field={f.key} data-cell={fieldColId(f)}><FieldValue f={f} v={v} /></span>)}
-      {cost > 0 ? <span className="w-cost" data-cell="cost">{fmtUsd(cost)}</span> : null}
+      {cost ? <span className="w-cost" data-cell="cost">{cost}</span> : null}
     </div> : null}
     {meta.length ? <div className="wg-fields">{meta.map(({ f, v }) => <span key={f.id} className="wg-field" data-field={f.key} data-cell={fieldColId(f)}><span className="wg-flabel">{f.label}</span><FieldValue f={f} v={v} /></span>)}</div> : null}
     <Links it={it} />

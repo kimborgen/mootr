@@ -126,10 +126,9 @@ echo "-- the peer token, not the shared token, proves a peer (S-545)"
 python3 - "$TEST_TMP/twin/settings.json" <<'PY'
 import json, sys
 s = json.load(open(sys.argv[1]))
-s.setdefault("auth", {})["legacyPeerToken"] = False
 json.dump(s, open(sys.argv[1], "w"), indent=2)
 PY
-# auth.legacyPeerToken no longer matters (S-1064): turned off or not, the shared token with the peer headers is refused.
+# The shared token with the peer headers is refused (S-1064).
 [ "$(status "$SHARED_TWIN" GET "$TWIN_URL$INBOX" -H 'x-stam-local: 1' -H "x-stam-agent: $STRANGER")" = 403 ] || fail "the shared token with x-stam-agent still acted as stranger"
 [ "$(status "$SHARED_TWIN" GET "$TWIN_URL/api/config/settings/shared" -H 'x-stam-local: 1')" = 403 ] || fail "the shared token with x-stam-local reached a peer-only route"
 [ "$(status "$PEER_TWIN" GET "$TWIN_URL$INBOX" -H 'x-stam-local: 1' -H "x-stam-agent: $STRANGER")" = 403 ] || fail "the peer token lost its forwarding with the legacy path off"

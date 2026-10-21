@@ -100,9 +100,7 @@ tmux -L "$YOUNG" ls >/dev/null 2>&1 || fail "the sweep stopped the active owner'
 "$STAM" daemon status | grep -q "machine: 'main'" || fail "the sweep stopped the live test daemon"
 
 echo "== the sweep logged a janitor event"
-node --no-warnings --input-type=module -e \
-  "import { DatabaseSync } from 'node:sqlite'; const d = new DatabaseSync(process.argv[1], { readOnly: true }); console.log(d.prepare(\"SELECT count(*) AS c FROM events WHERE type='janitor'\").get().c)" \
-  "$STAM_HOME/stam.db" | grep -qx '[1-9][0-9]*' || fail "no janitor event was logged"
+curl -sf -m 5 -H "authorization: Bearer $(cat "$STAM_HOME/token")" "$STAM_URL/api/test/events?type=janitor" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' | grep -qx '[1-9][0-9]*' || fail "no janitor event was logged"
 
 echo "== a tmux server that never answers is skipped: the sweep finishes, the daemon answers meanwhile"
 # A dead owner's folder whose test server is stopped (SIGSTOP): every tmux call to it hangs.
@@ -187,9 +185,7 @@ assert b["actions"] == [], f"the dry run after a real sweep still reported {b['a
 EOF
 [ ! -e "$YDIR" ] || fail "the leftover folder survived the real sweep"
 tmux -L "$YSOCK" ls >/dev/null 2>&1 && fail "the leftover server still runs"
-node --no-warnings --input-type=module -e \
-  "import { DatabaseSync } from 'node:sqlite'; const d = new DatabaseSync(process.argv[1], { readOnly: true }); console.log(d.prepare(\"SELECT count(*) AS c FROM events WHERE type='janitor' AND data LIKE ?\").get('%' + process.argv[2] + '%').c)" \
-  "$STAM_HOME/stam.db" "$YSOCK" | grep -qx 1 || fail "the leftover was logged other than once"
+curl -sf -m 5 -H "$AUTH" "$STAM_URL/api/test/events?type=janitor" | python3 -c 'import json,sys; print(sum(sys.argv[1] in (e["data"] or "") for e in json.load(sys.stdin)))' "$YSOCK" | grep -qx 1 || fail "the leftover was logged other than once"
 kill -CONT "$XPID" 2>/dev/null
 XPID=
 

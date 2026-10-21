@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FileDiff, FAR_MARGIN } from './FileDiff'
+import { downloadPrSide, loadPrFile, type FileSides } from './fileSides'
 import type { DiffFileItem } from './diffModel'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -32,6 +33,9 @@ const FAR = `${FAR_MARGIN}px 0px`, NEAR = '800px 0px'
 
 const refs = { repo: 'stam2', pr: 7, head: 'a'.repeat(40), base: 'b'.repeat(40) }
 const f: DiffFileItem = { path: 'a.ts', status: 'modified', additions: 2, deletions: 1, binary: false, class: null, headBlob: 'h', baseBlob: 'b' }
+// The sides a PR's file loads: both fetched, with the list's shas.
+const load = (signal?: AbortSignal): Promise<FileSides> => loadPrFile(f, refs, signal)
+const download = () => downloadPrSide(refs, f)
 
 let root: Root | undefined
 let host: HTMLDivElement
@@ -55,7 +59,7 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); act(() => root?.unmount()); root = undefined; document.body.innerHTML = ''; vi.unstubAllGlobals() })
 
 const mount = async (extra: Partial<React.ComponentProps<typeof FileDiff>> = {}) => {
-  act(() => root!.render(<FileDiff file={f} refs={refs} mode="split" wrap={false} viewed={false} onViewed={() => {}} onHide={() => {}} onEditor={onEditor} {...extra} />))
+  act(() => root!.render(<FileDiff file={f} load={load} loadKey="stam2#7" download={download} mode="split" wrap={false} viewed={false} onViewed={() => {}} onHide={() => {}} onEditor={onEditor} {...extra} />))
   fire(NEAR, true)
   await vi.waitFor(() => expect(host.querySelector('.fake-editor')).not.toBeNull(), { timeout: 5000 })
 }
@@ -150,7 +154,7 @@ describe('far teardown', () => {
     Object.defineProperty(section(), 'offsetHeight', { configurable: true, value: 640 })
     fire(FAR, false)
     await vi.waitFor(() => expect(section().style.minHeight).toBe('640px'))
-    act(() => root!.render(<FileDiff file={f} refs={refs} mode="split" wrap={false} viewed onViewed={() => {}} onHide={() => {}} onEditor={onEditor} />))
+    act(() => root!.render(<FileDiff file={f} load={load} loadKey="stam2#7" download={download} mode="split" wrap={false} viewed onViewed={() => {}} onHide={() => {}} onEditor={onEditor} />))
     expect(section().style.minHeight).toBe('')
   })
 })

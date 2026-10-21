@@ -23,7 +23,7 @@ def save(name, s):
     except Exception: cur = {}
     cur.update(s)
     json.dump(cur, open(path, "w"), indent=2)
-save("main", {"peers": [peer("alpha"), peer("beta")], "auth": {"humanStrict": True, "legacyPeerToken": False}})
+save("main", {"peers": [peer("alpha"), peer("beta")], "auth": {"humanStrict": True}})
 save("alpha", {"peers": [peer("main")]})
 save("beta", {"peers": [peer("main")]})
 PY

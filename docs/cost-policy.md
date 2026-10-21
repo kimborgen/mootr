@@ -5,8 +5,9 @@ Design, 2026-10-11, third revision. The brief: "The key here is that managers ca
 ## Terms
 
 - **Account**: one provider login or key that agents bill to (Claude Max, Codex Plus, OpenRouter). Each agent matches at most one, by harness and model prefix (`src/accounts.ts`). An agent that matches none is **unmanaged**: tracked and shown, never gated.
+- **Pay-per-token account**: an account a provider bills per token: OpenRouter, an account with `provider` naming a `settings.providers` id, or an OpenCode account whose `match.model` is `ID/` for a configured provider `ID` (`payPerTokenProvider` in `src/accounts.ts`). It counts as paid spend.
 - **Window**: a subscription limit the provider reports as a percentage: Claude `five_hour`, `seven_day` and model windows; Codex primary and secondary.
-- **Paid spend**: real dollars: exact (OpenRouter `usage` and `limit_remaining`, Codex `credits.balance`), estimate (Claude extra usage, shown as "≈"), or unknown (no reading in 15 minutes).
+- **Paid spend**: real dollars: exact (OpenRouter `usage` and `limit_remaining`, Codex `credits.balance`), estimate (Claude extra usage, shown as "≈"; a pay-per-token provider other than OpenRouter, which has no balance endpoint: its ledger tokens at the registry's per-provider prices, or the harness's cost for a model with no price), or unknown (no reading in 15 minutes).
 - **API-equivalent cost**: what tokens would cost at API prices. Stats and attribution weights only.
 - **Tree**: an agent and its descendants. Its **manager** is the root's parents; a root without one is managed by the chief of staff.
 
@@ -77,7 +78,7 @@ Each cost event goes to the responsible manager through `queueNotice` (in-turn n
 
 Every notice carries the user's instructions, the tree's usage and estimate, the options it has (the tools below), and the fallback that runs if nobody acts. The agent itself gets `cost-warning.md` or `cost-prepare.md` (keep `HANDOVER.md` current).
 
-**Fallback**: when a notice about a blocked or exhausted agent goes `fallbackMinutes` without its manager acting on that agent (any tool below, or `cost_ack`), mootr applies the account's `onSubExhausted`, `onBudgetExhausted`, `onCreditsOut` or `onError` action, and tells the chief of staff. If the chief of staff is itself unavailable or blocked, mootr mails the human. Without a configured action the fallback is `wait`.
+**Fallback**: when a notice about a blocked or exhausted agent goes `fallbackMinutes` without its manager acting on that agent (any tool below, or `cost_ack`), mootr applies the account's `onSubExhausted`, `onBudgetExhausted`, `onCreditsOut` or `onError` action, and tells the chief of staff. If the chief of staff is itself unavailable or blocked, mootr mails the human. Without a configured action the fallback is `wait`. An explicit archive or shut-down of the agent cancels its pending fallbacks, so none creates a successor later (S-2458).
 
 ## Manager tools
 
@@ -110,6 +111,17 @@ Mootr runs an agent only when its blocker set is empty and no human, parent or c
 ### Budgets across machines
 
 A budget counts every machine's paid spend (S-395). Each daemon serves its own totals at `GET /api/usage/spend` and keeps its peers' last answers (`src/peer-spend.ts`, refreshed every 30 seconds); a budget evaluation adds them to the local ledger. Every machine blocks its own agents, but only the settings home mails the human and sends the 90% notice. A peer that stops answering counts at its last total for 10 minutes, then as zero, so it never holds a spawn. `usage_info` carries `paid_spend_by_machine`. Subscription readings and warnings are still per machine.
+
+### Subscription readings across machines (S-2367)
+
+A window's wait, and a cost pause's `until=reset`, clear on a fresh reading of the same account taken on any machine. Each daemon serves its own windows per configured account at `GET /api/usage/readings`, and keeps its peers' last answers (`src/peer-readings.ts`, refreshed every 30 seconds, as `peer-spend.ts`). With every agent on an account paused on one machine, nothing there reports a reading, so without this its window blockers wait for the timer, even after a reset another machine has read.
+
+- **Identity**: a peer's account counts only when it has the same name and the same `match` here.
+- **Freshness**: each reading is judged by its own `at`, against 15 minutes (`STALE_MS`). A peer whose last answer is that old counts for nothing.
+- **Clears**: a window (and a paid-forbidden or cost pause on it) reads at its newest reading on any machine, so a newer peer reading below 100% clears it here.
+- **Sets**: only this machine's own readings set a blocker. A peer's reading never does, so a 100% on a peer sets nothing here. A local reading that a peer's reading below 100% has overtaken (taken before it) never sets the window again, even after a later peer reading at 100%: the table `window_resets` keeps the newest such peer time per window, and only a local reading taken after it sets.
+- **Ties**: the newer reading wins; equal times favour this machine.
+- `usage_info` and the usage notices still show this machine's readings only.
 
 ### System vs agent budget (S-1077)
 

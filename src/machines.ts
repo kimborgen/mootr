@@ -8,6 +8,7 @@ import { MACHINE } from './config.ts';
 import { peers, peerCall } from './peers.ts';
 import { settings, setSetting, type Settings } from './settings.ts';
 import * as db from './db.ts';
+import { envVar } from './env.ts';
 
 export interface CpuCounters {
   // Busy and total jiffies since boot; the difference between two reads is the load.
@@ -167,7 +168,7 @@ let buffer: Sample[] = [];
 
 // STAM_PROC_DIR reads the /proc files from another folder: the web checks seed a fixed reading
 // this way (web/check/daemon.sh), so no check depends on this machine's live load. Unset, /proc.
-const PROC = process.env.STAM_PROC_DIR || '/proc';
+const PROC = envVar('PROC_DIR') || '/proc';
 
 // statfs is injected by the tests; the daemon reads the real root filesystem.
 export function tick(now = Date.now(), statfs: (path: string) => { blocks: number; bfree: number; bavail: number } = statfsSync): Sample | null {

@@ -30,6 +30,8 @@ import { clock } from '../waits'
 import { clearLive, setLive } from './ownview-live'
 import { activity, applyEvent, elapsed, loosePermissions, MAIL_NOTICE_LINE, mailNoticeSplit, plainText, prependOlder, readingOrder, toolRuns, turnKind, turns, type Activity, type PermissionDecision, type ToolPart, type Turn, type ViewEvent, type ViewMessage, type ViewPage, type ViewPart, type ViewPermission, type ViewState } from './ownview-model'
 import { Loading } from '../Loading'
+import { registerView } from '../shell/layout'
+import { takeOpenFocus } from '../mail/diffOpen'
 
 const PAGE = 50
 const RETRY_MS = 2000
@@ -255,13 +257,15 @@ function useOlder(id: string, state: ViewState | null, setState: (f: (s: ViewSta
 
 // onGone: what to do when the view stream is gone; the default swaps the terminal in for it in
 // every world that shows it (the top world has no such tab, so it passes its own).
-export function OwnView({ id, onGone }: { id: string; onGone?: () => void }) {
+export function OwnView({ id, onGone, viewKey }: { id: string; onGone?: () => void; viewKey?: string }) {
   useData()
   const { state, setState, error, gone } = useViewStream(id)
   // The terminal stays the fallback: a view the daemon can't give shows the terminal in its
   // place (S-82), in whichever world has it; the note below shows until it does.
   useEffect(() => { if (gone && !state) (onGone ?? (() => fallBackToTerminal(id)))() }, [gone, state, id])
   const viewport = useRef<HTMLDivElement>(null)
+  // The Open button in a diff block takes focus back on return, as in a thread (S-2105 review): only one from this view.
+  useEffect(() => (viewKey ? registerView(viewKey, { focus: () => takeOpenFocus(viewport.current)?.focus() }) : undefined), [viewKey])
   const older = useOlder(id, state, setState, viewport)
   const [stopErr, setStopErr] = useState('')
   const stop = useCallback(async () => { setStopErr(''); try { await api('POST', `/api/agents/${id}/view/interrupt`) } catch (e) { setStopErr((e as Error).message) } }, [id])
@@ -284,8 +288,9 @@ export function OwnView({ id, onGone }: { id: string; onGone?: () => void }) {
   // A stop error shows under the prompt input while the turn runs, where the send button was Stop.
   // A failed stop belongs to the turn it failed in: the next turn starts with no error.
   useEffect(() => { if (!running) setStopErr('') }, [running])
-  useEffect(() => { setLive(id, { running, asking, stop: canStop ? stop : null, stopError: running ? stopErr : '' }) }, [id, running, asking, canStop, stop, stopErr])
-  useEffect(() => () => clearLive(id), [id])
+  const [owner] = useState(() => ({}))
+  useEffect(() => { setLive(id, owner, { running, asking, stop: canStop ? stop : null, stopError: running ? stopErr : '' }) }, [id, owner, running, asking, canStop, stop, stopErr])
+  useEffect(() => () => clearLive(id, owner), [id, owner])
   // What a Part reads, memoized so a stream event doesn't redraw the parts of unchanged turns (S-1566).
   const canApprove = here && !!state?.capabilities.can_approve
   const permissions = state?.permissions

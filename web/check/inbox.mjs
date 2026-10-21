@@ -60,7 +60,7 @@ for (const size of sizes) {
   await p.waitForSelector('#tree .node', { timeout: 20000 });
 
   if (!size.phone) {
-    // The Mail tab opens the page when it is showing and clicked again.
+    // A click on the Mail tab shows it in the sidebar and opens the Inbox page (S-1428); a second click keeps the page.
     const tab = p.locator('#pane-tab-mail');
     if (await tab.count()) { if ((await tab.getAttribute('aria-selected')) !== 'true') await tab.click(); await tab.click(); }
     else await p.evaluate(() => { location.hash = 'view=inbox'; });
@@ -141,10 +141,14 @@ for (const size of sizes) {
     const chips = await p.locator('#inbox-view:visible .inbox-chips').evaluate((e) => ({ s: e.scrollWidth, c: e.clientWidth, ov: getComputedStyle(e).overflowX }));
     check(tag, chips.ov === 'auto' && chips.s >= chips.c, 'the chips row scrolls sideways', chips);
     // Scroll the list, tap a row: the thread is pushed; back returns with the scroll kept.
-    const top = await p.locator('#inbox-view:visible .inbox-list').evaluate((e) => { e.scrollTop = 420; return e.scrollTop; });
-    check(tag, top > 100, 'the list scrolls', top);
+    const list = p.locator('#inbox-view:visible .inbox-list');
+    const scrolled = await list.evaluate((e) => { e.scrollTop = 420; return e.scrollTop; });
+    check(tag, scrolled > 100, 'the list scrolls', scrolled);
     await p.waitForTimeout(200);
     const row = p.locator('#inbox-view:visible [data-inbox-row]').filter({ hasText: 'Inbox check number' }).nth(8);
+    // Bring the row wholly into the list first: a tap on a partly visible row scrolls the list, and the scroll kept is then the tap's.
+    await row.scrollIntoViewIfNeeded();
+    const top = await list.evaluate((e) => e.scrollTop);
     const tid = await row.getAttribute('data-thread');
     await row.tap();
     await p.waitForFunction((t) => window.stamDebug.shell.currentWorld() === 't:' + t, tid);

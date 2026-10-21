@@ -9,6 +9,7 @@
 // serves runs as the human anyway on its own machine.
 import { execFileSync } from 'node:child_process';
 import { testOnlyEnv } from './test-env.ts';
+import { hasTailscale } from './tailscale.ts';
 
 // The cross-origin writes a peer's UI may make on the home, and nothing else.
 export const PEER_UI_ROUTES: [string, RegExp][] = [
@@ -16,6 +17,8 @@ export const PEER_UI_ROUTES: [string, RegExp][] = [
   ['POST', /^\/api\/config\/instructions$/],
   ['POST', /^\/api\/types\/[\w-]+$/],
   ['DELETE', /^\/api\/types\/[\w-]+$/],
+  // A type's template is the home's (S-417, S-3079): a peer that knows the home's page saves it there.
+  ['POST', /^\/api\/templates\/type-[\w-]+$/],
 ];
 // The human's writes on a machine other than the one the page came from (S-544, C3b): the browser sends them
 // straight to the machine that holds the agent, permission request or ITSA, at its serve origin, and that
@@ -49,7 +52,7 @@ let nodes: { at: number; list: Node[] } | null = null;
 function tailnetNodes(): Node[] {
   if (nodes && Date.now() - nodes.at < 60_000) return nodes.list;
   let list: Node[] = [];
-  try {
+  if (hasTailscale()) try {
     const s = JSON.parse(execFileSync('tailscale', ['status', '--json'], { encoding: 'utf8', timeout: 3000 }));
     // Only this tailnet's own nodes: a node shared in from another tailnet could share a short name.
     const suffix = String(s.Self?.DNSName ?? '').toLowerCase().replace(/\.$/, '').split('.').slice(1).join('.');

@@ -22,10 +22,14 @@ else
   command -v jq >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 || node_cli "$@"
 fi
 
-url=${STAM_URL:-http://127.0.0.1:${STAM_PORT:-7878}}
-# env STAM_TOKEN wins, then the daemon's token file, as src/config.ts readToken does.
-token=${STAM_TOKEN:-$(cat "${STAM_HOME:-$HOME/.local/share/stam}/token" 2>/dev/null)}
-id=${STAM_AGENT_ID:-}
+url=${MOOTR_URL:-${STAM_URL:-http://127.0.0.1:${MOOTR_PORT:-${STAM_PORT:-7878}}}}
+# env MOOTR_TOKEN (or STAM_TOKEN) wins, then the daemon's token file, as src/config.ts readToken does.
+# The home is the MOOTR_HOME or STAM_HOME override, else the stam folder, or the mootr folder when only that exists (config.ts).
+home=${MOOTR_HOME:-${STAM_HOME:-}}
+[ -n "$home" ] || { home="$HOME/.local/share/stam"; [ -e "$home" ] || [ ! -e "$HOME/.local/share/mootr" ] || home="$HOME/.local/share/mootr"; }
+token=${MOOTR_TOKEN:-${STAM_TOKEN:-$(cat "$home/token" 2>/dev/null)}}
+id=${MOOTR_AGENT_ID:-${STAM_AGENT_ID:-}}
+usl=${MOOTR_USER_STATUSLINE:-${STAM_USER_STATUSLINE:-}}
 
 # The exact payload, kept in a stam-hook.* file (the prefix names a leftover from a hook killed
 # hard, where no trap runs; S-668): the daemon's route reads a JSON body, and a tool-call
@@ -78,8 +82,8 @@ statusline)
   # The user's status line runs at most once per ttl per agent (30 s; src/statusline-cache.ts,
   # S-171, S-274). An agent nobody views never runs again once it has saved output (S-1055), and
   # a refresh inside the ttl prints the saved output: the file's first line is the time.
-  if [ -n "${STAM_USER_STATUSLINE:-}" ]; then
-    cache="${STAM_HOME:-$HOME/.local/share/stam}/statusline-$id.out"
+  if [ -n "$usl" ]; then
+    cache="$home/statusline-$id.out"
     now=$(date +%s)
     at=$(head -n 1 "$cache" 2>/dev/null)
     case "$at" in ''|*[!0-9]*) at= ;; esac
@@ -87,7 +91,7 @@ statusline)
       tail -n +2 "$cache"
     else
       # printf x keeps the output's trailing newlines through the command substitution.
-      out=$(timeout 5 sh -c "$STAM_USER_STATUSLINE" <"$in" 2>/dev/null; printf x)
+      out=$(timeout 5 sh -c "$usl" <"$in" 2>/dev/null; printf x)
       out=${out%x}
       if [ -n "$id" ]; then
         mkdir -p "${cache%/*}" && printf '%s\n%s' "$now" "$out" >"$cache.tmp" && mv "$cache.tmp" "$cache"

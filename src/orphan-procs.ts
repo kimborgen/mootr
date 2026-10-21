@@ -9,6 +9,7 @@ import { dirname, posix } from 'node:path';
 import { readdir, readFile, readlink, stat } from 'node:fs/promises';
 import { DEFAULT_STAM_HOME } from './config.ts';
 import { procStart, stopProcesses } from './proctree.ts';
+import { envVar, entryValue } from './env.ts';
 import { testHome } from './test-env.ts';
 import { promisify } from 'node:util';
 
@@ -105,9 +106,9 @@ export async function listProcs(): Promise<ProcInfo[]> {
     }
     p.cwd = await readlink(`/proc/${p.pid}/cwd`).catch(() => undefined);
     const env = await readFile(`/proc/${p.pid}/environ`, 'utf8').catch(() => '');
-    const get = (k: string) => env.split('\0').find((e) => e.startsWith(k + '='))?.slice(k.length + 1);
-    p.home = get('STAM_HOME');
-    p.env = { tmuxSocket: get('STAM_TMUX_SOCKET'), testTmpdir: get('STAM_TEST_TMPDIR'), claudeBin: get('STAM_CLAUDE_BIN') };
+    const entries = env.split('\0');
+    p.home = entryValue(entries, 'HOME');
+    p.env = { tmuxSocket: entryValue(entries, 'TMUX_SOCKET'), testTmpdir: entryValue(entries, 'TEST_TMPDIR'), claudeBin: entryValue(entries, 'CLAUDE_BIN') };
     p.testHome = Boolean(p.home) && testHome(p.home!);
     if (p.testHome) p.owner = await readOwner(p.home!);
     else if (p.home) p.legacy = await legacyHome(p.home);
@@ -170,7 +171,7 @@ const deleted = (cwd?: string) => Boolean(cwd?.endsWith(' (deleted)'));
 // The folders a test's home can sit in: STAM_TEST_TMPDIR, the cache folder test/tmpdir.sh picks when /tmp is RAM, and /tmp.
 export function testRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const cache = `${env.XDG_CACHE_HOME || `${homedir()}/.cache`}/stam-test`;
-  return [env.STAM_TEST_TMPDIR, cache, '/tmp', tmpdir()].filter((d): d is string => Boolean(d)).map((d) => d.replace(/\/+$/, ''));
+  return [envVar('TEST_TMPDIR', env), cache, '/tmp', tmpdir()].filter((d): d is string => Boolean(d)).map((d) => d.replace(/\/+$/, ''));
 }
 
 // A home is a test home when it sits in `stam-test.*/` directly under a test root, is a marked test home, and isn't the live one.

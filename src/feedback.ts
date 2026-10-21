@@ -1,7 +1,10 @@
 // The `feedback` MCP tool (S-156): an agent reports a problem with stam or its MCP tools. Each
 // report becomes a backlog ITSA under a standing "Feedback" parent, or a comment on an open
 // report with the same tool and summary. The chief of staff gets one quiet mail for a new
-// report. The API is passed in, so the unit test runs against a fake without a daemon.
+// report. A report that names a screen event carries that screen (feedback-screen.ts, S-2679).
+// The API is passed in, so the unit test runs against a fake without a daemon.
+import { screenSection } from './feedback-screen.ts';
+
 export type Api = (method: string, path: string, body?: unknown, timeoutMs?: number) => Promise<any>;
 
 export const FEEDBACK_KINDS = ['bug', 'inconsistency', 'missing_param', 'missing_feature', 'other'] as const;
@@ -59,7 +62,9 @@ export async function report(
     return `Already reported as ${row.key} "${row.title}"; added your report there as a comment.`;
   }
 
-  const body = [`Kind: ${a.kind}`, `Tool: ${tool}`, `Reporter: ${by}`, '', a.details].join('\n');
+  // The screen a named screen event carries (S-2679), read before filing: a read that fails files the report without it.
+  const screens = await screenSection(api, a.details);
+  const body = [`Kind: ${a.kind}`, `Tool: ${tool}`, `Reporter: ${by}`, '', a.details, ...(screens ? ['', screens] : [])].join('\n');
   const x = await api('POST', '/api/itsas', {
     title,
     summary,

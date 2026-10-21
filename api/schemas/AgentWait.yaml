@@ -1,0 +1,33 @@
+type: object
+additionalProperties: false
+description: A web wait (src/waits.ts webWaitsByAgent).
+required: [id, agent_id, kind, target, detail, since, until, source, data, thread]
+properties:
+  id:
+    type: string
+  agent_id:
+    type: string
+  kind:
+    type: string
+  target:
+    type: string
+    nullable: true
+  detail:
+    type: string
+    nullable: true
+  since:
+    type: string
+  until:
+    type: string
+    nullable: true
+  source:
+    type: string
+    enum: [stam, hook, declared]
+  data:
+    type: string
+    nullable: true
+    x-legacy: a JSON document inside a string column
+  thread:
+    type: string
+    nullable: true
+    description: The mail thread a human wait is tied to.

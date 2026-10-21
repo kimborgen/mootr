@@ -119,14 +119,14 @@ W=$(api main GET "/api/agents/$BOSS/threads?limit=50")
 [ "$(count "$M1" "$W")" = 1 ] || fail "boss's world shows the first mail $(count "$M1" "$W") times"
 T=$(api main GET "/api/threads/$TID")
 [ "$(count "$M1" "$T")" = 1 ] || fail "the thread opened on main shows the first mail $(count "$M1" "$T") times"
-R=$(curl -s -X POST -H "authorization: Bearer $MAIN_TOKEN" -H 'content-type: application/json' -H 'x-stam-human: 1' -d "{\"from\":\"human\",\"to\":[\"far\"],\"subject\":\"kim note\",\"body\":\"hello from kim about the sent copy\"}" "$MAIN_URL/api/mail")
+R=$(curl -s -X POST -H "authorization: Bearer $MAIN_TOKEN" -H 'content-type: application/json' -H 'x-stam-human: 1' -d "{\"from\":\"human\",\"to\":[\"far\"],\"subject\":\"octocat note\",\"body\":\"hello from octocat about the sent copy\"}" "$MAIN_URL/api/mail")
 HN=$(printf "%s" "$R" | jget "d['id']") || fail "the human's mail to far failed (got: $R)"
 HT=$(printf "%s" "$R" | jget "d['thread_id']")
-HS=$(api main GET "/api/mail/search?box=human&q=kim%20note&limit=20")
+HS=$(api main GET "/api/mail/search?box=human&q=octocat%20note&limit=20")
 [ "$(countt "$HT" "$HS")" = 1 ] || fail "the human's mail search shows its thread $(countt "$HT" "$HS") times (got: $HS)"
 HL=$(api main GET "/api/agents/human/threads?limit=50")
 [ "$(countt "$HT" "$HL")" = 1 ] || fail "the human's thread list shows its thread $(countt "$HT" "$HL") times"
-A=$(api main GET "/api/search?q=kim%20note&limit=20")
+A=$(api main GET "/api/search?q=octocat%20note&limit=20")
 [ "$(printf "%s" "$A" | python3 -c "import json,sys; print(sum(1 for x in json.load(sys.stdin) if x.get('kind')=='thread' and x.get('id')=='$HT'))")" = 1 ] || fail "search shows the human's thread other than once (got: $A)"
 echo "-- a refused send leaves no copy on main"
 R=$(api main POST /api/mail "{\"from\":\"$BOSS\",\"to\":[\"fxa\"],\"subject\":\"refused one\",\"body\":\"x\"}")

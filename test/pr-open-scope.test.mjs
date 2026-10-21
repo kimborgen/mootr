@@ -204,3 +204,27 @@ test('the status lookup answers for the caller\'s own branch, and a routed call 
     rmSync(join(ghDir, 'list.json'), { force: true });
   }
 });
+
+test('a branch outside the caller\'s worktree metadata is refused naming itsa_link, and opens once linked to an ITSA the caller owns (S-2269)', async () => {
+  git(seed, ['push', '-q', join(base, 'repos', 'storage.git'), 'feature/x:refs/heads/stam/second']);
+  await assert.rejects(push('stam/second', as('aaaa2')), /rule 2\). Run itsa_link .*"stam\/second"/s);
+  const x = await itsa.create({ title: 'Second', owner: 'aaaa2', by: 'human' });
+  assert.equal((await openPrHere({ branch: 'stam/second', title: 't', body: BODY, itsa: x.key, by: 'aaaa2' }, as('aaaa2'), cfg)).branch, 'stam/second');
+  assert.ok(itsa.links(x.key).some((l) => l.system === 'branch' && l.external_id === 'stam/second'));
+  // Only the owner links (S-2390): a participant or a creator who isn't the owner is refused, with no link and no push.
+  git(seed, ['push', '-q', join(base, 'repos', 'storage.git'), 'feature/x:refs/heads/stam/part']);
+  git(seed, ['push', '-q', join(base, 'repos', 'storage.git'), 'feature/x:refs/heads/stam/made']);
+  const part = await itsa.create({ title: 'Shared part', owner: 'aaaa4', participants: ['aaaa2'], by: 'human' });
+  const made = await itsa.create({ title: 'Made by', owner: 'aaaa4', by: 'aaaa2' });
+  clearCalls();
+  for (const [branch, ref] of [['stam/part', part.key], ['stam/made', made.key]]) {
+    await assert.rejects(openPrHere({ branch, title: 't', body: BODY, itsa: ref, by: 'aaaa2' }, as('aaaa2'), cfg), /rule 2/);
+    assert.equal(itsa.links(ref).some((l) => l.external_id === branch), false, `${branch} is not linked`);
+    assert.equal(originSha(branch), '', `${branch} is not pushed`);
+  }
+  assert.equal(existsSync(callsFile), false, 'gh never ran');
+  // A branch that another agent's worktree holds stays refused, even when the caller names an ITSA it owns (rule 1 is not linked away).
+  const y = await itsa.create({ title: 'Grab second', owner: 'aaaa2', by: 'human' });
+  await assert.rejects(openPrHere({ branch: 'stam/gone', title: 't', body: BODY, itsa: y.key, by: 'aaaa2' }, as('aaaa2'), cfg), /rule 1/);
+  assert.equal(itsa.links(y.key).some((l) => l.external_id === 'stam/gone'), false);
+});

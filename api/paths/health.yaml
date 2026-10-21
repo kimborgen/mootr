@@ -1,0 +1,13 @@
+get:
+  operationId: getHealth
+  tags: [health]
+  summary: Daemon health, polled by peers and the deploy watcher.
+  responses:
+    '200':
+      description: The daemon is up.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Health'
+    default:
+      $ref: '#/components/responses/Error'

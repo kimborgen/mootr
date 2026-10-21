@@ -75,7 +75,8 @@ for (const size of [{ n: 'phone', w: 360, h: 780, phone: true }, { n: 'desktop',
 
   // 2. An ITSA waiting on the human, on far.
   if (size.phone) await p.locator('[data-nav="mail"]').tap();
-  const row = p.locator(`#mail-side .mrow[data-att-itsa="${i1.id}"]`);
+  // On the phone the Inbox page lists the ask as its thread's row, with the ITSA's chip.
+  const row = size.phone ? p.locator(`#inbox-view .mrow:has([data-chip="itsa"][title="${i1.title}"])`).first() : p.locator(`#mail-side .mrow[data-att-itsa="${i1.id}"]`);
   await row.waitFor({ timeout: 20000 }).catch(() => {});
   await tap(row);
   const view = p.locator(`.itsa-view[data-itsa="${i1.id}"]`);

@@ -46,7 +46,7 @@ api() {
   curl -s -X "$2" -H "authorization: Bearer $_tok" -H 'content-type: application/json' ${4:+-d "$4"} "$_url$3"
 }
 # The web UI sends as the human: the daemon takes the x-stam-human header for that.
-kim() {
+as_human() {
   curl -s -X "$1" -H "authorization: Bearer $MAIN_TOKEN" -H 'x-stam-human: 1' -H 'content-type: application/json' -d "$3" "$MAIN_URL$2"
 }
 
@@ -64,9 +64,9 @@ GONE=$(api twin GET /api/agents/gone | jget "d['id']")
 GONE_TOKEN=$(on twin sh -c 'tmux -L "$STAM_TMUX_SOCKET" show-environment -t "$1" STAM_TOKEN | cut -d= -f2-' _ "$GONE")
 
 echo "-- an ITSA on main with boss, far, and gone; the human posts in it"
-KEY=$(kim POST /api/itsas "{\"title\":\"Reply past the gone\",\"owner\":\"$BOSS\",\"participants\":[\"$FAR\",\"$GONE\"]}" | jget "d['key']")
-kim GET "/api/itsas/$KEY" | jget "sorted(d['participants'])==sorted(['$BOSS','$FAR','$GONE'])" | grep -qx True || fail "$KEY lacks its participants"
-M1=$(kim POST "/api/itsas/$KEY/post" '{"by":"human","body":"Where are we?"}' | jget "d['id']") || fail "the human's post in $KEY failed"
+KEY=$(as_human POST /api/itsas "{\"title\":\"Reply past the gone\",\"owner\":\"$BOSS\",\"participants\":[\"$FAR\",\"$GONE\"]}" | jget "d['key']")
+as_human GET "/api/itsas/$KEY" | jget "sorted(d['participants'])==sorted(['$BOSS','$FAR','$GONE'])" | grep -qx True || fail "$KEY lacks its participants"
+M1=$(as_human POST "/api/itsas/$KEY/post" '{"by":"human","body":"Where are we?"}' | jget "d['id']") || fail "the human's post in $KEY failed"
 echo "-- gone starts a plain thread with far and boss on twin"
 R=$(curl -s -X POST -H "authorization: Bearer $GONE_TOKEN" -H 'content-type: application/json' -d "{\"from\":\"$GONE\",\"to\":[\"$FAR\",\"$BOSS\"],\"subject\":\"Gone soon\",\"body\":\"Any last words?\",\"new_thread\":true}" "$TWIN_URL/api/mail")
 P1=$(printf "%s" "$R" | jget "d['id']") || fail "gone's mail failed (got: $R)"
@@ -81,29 +81,29 @@ daemon_stop twin
 R=$(boss_mail "{\"from\":\"$BOSS\",\"to\":[\"human\"],\"reply_to\":\"$M1\",\"body\":\"On it.\"}")
 printf "%s" "$R" | grep -q "no agent" && fail "boss's reply failed on gone (got: $R)"
 B1=$(printf "%s" "$R" | jget "d['id']") || fail "boss's reply failed (got: $R)"
-T=$(kim GET "/api/itsas/$KEY/thread")
+T=$(as_human GET "/api/itsas/$KEY/thread")
 printf "%s" "$T" | jget "any(i.get('mail',{}).get('id')=='$B1' for i in d['items'])" | grep -qx True || fail "boss's reply isn't in $KEY's thread (reply: $R; thread: $T)"
 
 echo "-- with twin down, the human's web reply in $KEY (to the thread's people, inferred) skips gone"
-R=$(kim POST /api/mail "{\"from\":\"human\",\"to\":[\"$GONE\",\"$FAR\"],\"inferred\":[\"$GONE\",\"$FAR\"],\"reply_to\":\"$M1\",\"body\":\"Thanks, all.\"}")
+R=$(as_human POST /api/mail "{\"from\":\"human\",\"to\":[\"$GONE\",\"$FAR\"],\"inferred\":[\"$GONE\",\"$FAR\"],\"reply_to\":\"$M1\",\"body\":\"Thanks, all.\"}")
 H1=$(printf "%s" "$R" | jget "d['id']") || fail "the human's web reply in $KEY failed (got: $R)"
-kim GET "/api/itsas/$KEY/thread" | jget "any(i.get('mail',{}).get('id')=='$H1' for i in d['items'])" | grep -qx True || fail "the human's reply isn't in $KEY's thread"
+as_human GET "/api/itsas/$KEY/thread" | jget "any(i.get('mail',{}).get('id')=='$H1' for i in d['items'])" | grep -qx True || fail "the human's reply isn't in $KEY's thread"
 
 echo "-- with twin up and gone forgotten there, the human's web reply in gone's thread reaches far"
 daemon_up twin
 on twin "$STAM" forget gone >/dev/null
-R=$(kim POST /api/mail "{\"from\":\"human\",\"to\":[\"$GONE\",\"$FAR\"],\"inferred\":[\"$GONE\",\"$FAR\"],\"reply_to\":\"$P1\",\"body\":\"Bye, gone.\"}")
+R=$(as_human POST /api/mail "{\"from\":\"human\",\"to\":[\"$GONE\",\"$FAR\"],\"inferred\":[\"$GONE\",\"$FAR\"],\"reply_to\":\"$P1\",\"body\":\"Bye, gone.\"}")
 H2=$(printf "%s" "$R" | jget "d['id']") || fail "the human's web reply in gone's thread failed (got: $R)"
 printf "%s" "$R" | jget "d.get('skipped')" | grep -q "gone" || fail "the reply doesn't say it skipped gone (got: $R)"
 wait_until sh -c "curl -s -H 'authorization: Bearer $TWIN_TOKEN' '$TWIN_URL/api/agents/far/inbox?limit=20' | grep -q '$H2'"
 
 echo "-- the human's web reply to only gone (inferred) is refused in the outbox's words, not 'Name someone in to'"
-R=$(kim POST /api/mail "{\"from\":\"human\",\"to\":[\"$GONE\"],\"inferred\":[\"$GONE\"],\"reply_to\":\"$P1\",\"body\":\"Only gone.\"}")
+R=$(as_human POST /api/mail "{\"from\":\"human\",\"to\":[\"$GONE\"],\"inferred\":[\"$GONE\"],\"reply_to\":\"$P1\",\"body\":\"Only gone.\"}")
 printf "%s" "$R" | grep -qF "gone no longer exists. Reply to someone else, or copy your text." || fail "the human's inferred-only reply wasn't refused in S-542's words (got: $R)"
 printf "%s" "$R" | grep -q "Name someone in" && fail "the human is told to name someone in (got: $R)"
 
 echo "-- a recipient the sender names, whom nobody has, is still refused by name"
-R=$(kim POST /api/mail "{\"from\":\"human\",\"to\":[\"$GONE\"],\"reply_to\":\"$P1\",\"body\":\"Named.\"}")
+R=$(as_human POST /api/mail "{\"from\":\"human\",\"to\":[\"$GONE\"],\"reply_to\":\"$P1\",\"body\":\"Named.\"}")
 printf "%s" "$R" | grep -q "gone no longer exists" || fail "the human's reply naming gone wasn't refused by name (got: $R)"
 R=$(boss_mail "{\"from\":\"$BOSS\",\"to\":[\"nobody-here\"],\"reply_to\":\"$M1\",\"body\":\"Named.\"}")
 printf "%s" "$R" | grep -q "nobody-here" || fail "boss's reply naming nobody-here wasn't refused by name (got: $R)"

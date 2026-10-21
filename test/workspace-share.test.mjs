@@ -15,7 +15,7 @@ process.env.STAM_HOME = home;
 process.env.STAM_TMUX_SOCKET = `ws-share-test-${process.pid}`;
 for (const k of ['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT']) delete process.env[k];
 
-let db, share, prompt, claude, codex, lifecycle;
+let db, share, prompt, claude, codex, lifecycle, secretPaths;
 before(async () => {
   await import('../src/adapters/index.ts');
   db = await import('../src/db.ts');
@@ -24,8 +24,15 @@ before(async () => {
   claude = (await import('../src/adapters/claude.ts')).claude;
   codex = await import('../src/adapters/codex.ts');
   lifecycle = await import('../src/lifecycle.ts');
+  secretPaths = (await import('../src/secret-files.ts')).secretPaths;
 });
 after(() => rmSync(home, { recursive: true, force: true }));
+
+// The Codex profile of a default or auto agent: its writable roots, and every secret file denied (S-1888).
+const profile = (roots) => ({
+  'permissions.stam.extends': ':workspace',
+  'permissions.stam.filesystem': { ...Object.fromEntries(roots.map((p) => [p, 'write'])), ...Object.fromEntries(secretPaths().map((p) => [p, 'none'])) },
+});
 
 let n = 0;
 function agent(extra = {}, harness = 'claude') {
@@ -91,10 +98,10 @@ test('Claude settings list the granted paths; Codex gets write grants as writabl
   const dirs = JSON.parse(readFileSync(join(home, 'agents', g.id, 'claude-settings.json'), 'utf8')).permissions.additionalDirectories;
   assert.ok(dirs.includes(owner.personal_workspace) && dirs.includes(readR.personal_workspace));
   const cx = agent({}, 'codex');
-  assert.deepEqual(codex.agentSandbox(cx), {});
+  assert.deepEqual(codex.agentSandbox(cx), profile([]));
   share.share(owner.id, cx.id, 'write');
   share.share(readR.id, cx.id, 'read');
-  assert.deepEqual(codex.agentSandbox(cx), { 'sandbox_workspace_write.writable_roots': [owner.personal_workspace] });
+  assert.deepEqual(codex.agentSandbox(cx), profile([owner.personal_workspace]));
 });
 
 test('the owner\'s own folder is allowed for Claude and writable for Codex, and its block lists who it shares with', async () => {
@@ -103,7 +110,7 @@ test('the owner\'s own folder is allowed for Claude and writable for Codex, and 
   const dirs = JSON.parse(readFileSync(join(home, 'agents', owner.id, 'claude-settings.json'), 'utf8')).permissions.additionalDirectories;
   assert.ok(dirs.includes(owner.personal_workspace));
   const cx = agent({ personal_workspace: owner.personal_workspace }, 'codex');
-  assert.deepEqual(codex.agentSandbox(cx), { 'sandbox_workspace_write.writable_roots': [owner.personal_workspace] });
+  assert.deepEqual(codex.agentSandbox(cx), profile([owner.personal_workspace]));
   share.share(owner.id, g.id, 'write');
   assert.match(prompt.workspacePrompt(db.getAgent(owner.id)), new RegExp(`You share this folder with: ${g.name} \\(write\\)`));
 });

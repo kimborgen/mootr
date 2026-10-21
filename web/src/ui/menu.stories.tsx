@@ -4,6 +4,7 @@ import { byName } from '../stories/fixtures'
 import { holdTimers, OnMount } from '../stories/helpers'
 import { ds, type Story } from '../stories/types'
 import { showMenu, toast, type MenuItem } from './menu'
+import { offerLogin } from '../local-login'
 
 const AGENT_MENU: MenuItem[] = [
   { section: 'fixture-dev' },
@@ -47,15 +48,18 @@ export const stories: Story[] = [{
   group: 'Primitives',
   what: "The one transient notice: a single bar at the top centre for a result that has no place of its own on screen, such as a menu action's. A newer notice replaces it; notices never stack.",
   when: "After an action whose result has no source on screen: a copied branch, a menu action's failure, a new permission request. It stays 3.5 s, or 7 s for an error.",
-  code: ['web/src/ui/menu.tsx#toast', 'web/src/ui/menu.tsx#MenuLayer'],
+  code: ['web/src/ui/menu.tsx#toast', 'web/src/ui/menu.tsx#setStanding', 'web/src/ui/menu.tsx#MenuLayer'],
   rules: [
     'The persona rules ban toasts; this is the one exception they allow, and only for what has no source on screen (' + ds('Persona rules') + ').',
     'It is `--surface-raised` with a `--border-default` hairline, `--radius-sm`, and `--shadow-float`; an error takes `--status-error-fg` ink only.',
     'An error is announced as an alert, any other notice as status.',
+    'One standing notice may hold the bar: a state to act on, not a notification (the local login offer, S-2121, its own story). A transient notice covers it while it shows, then it comes back; the two never stack (' + ds('Persona rules') + ').',
   ],
   states: [
     { name: 'Status', height: 96, render: () => <OnMount run={() => holdTimers(() => toast('Copied stam/fixture-branch.'))} /> },
     { name: 'Error', height: 96, render: () => <OnMount run={() => holdTimers(() => toast("Couldn't pause fixture-dev: the daemon refused it.", true))} /> },
+    { name: 'Standing: the login offer', height: 96, render: () => <OnMount run={() => offerLogin()} /> },
+    { name: 'A notice over the standing one', height: 96, render: () => <OnMount run={() => { offerLogin(); holdTimers(() => toast('Copied stam/fixture-branch.')) }} /> },
     { name: 'Long', height: 120, render: () => <OnMount run={() => holdTimers(() => toast('fixture-ops asks for permission. It\'s at the top of your mail, under the thread about the fixture branch at example.com.'))} /> },
   ],
 }]

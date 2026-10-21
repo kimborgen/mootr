@@ -1,0 +1,22 @@
+type: object
+additionalProperties: false
+required: [api, five_hour, seven_day, subscription, paid_usd]
+properties:
+  api:
+    type: number
+    format: double
+  five_hour:
+    type: number
+    format: double
+    nullable: true
+  seven_day:
+    type: number
+    format: double
+    nullable: true
+  subscription:
+    type: number
+    format: double
+    nullable: true
+  paid_usd:
+    type: number
+    format: double

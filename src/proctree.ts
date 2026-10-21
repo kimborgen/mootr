@@ -1,14 +1,15 @@
-import { readdirSync, readFileSync, realpathSync, rmSync, readlinkSync, lstatSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, rmSync, readlinkSync, lstatSync, mkdirSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { rm } from 'node:fs/promises';
+import { mkdir, readdir, rename, rm } from 'node:fs/promises';
 import { STAM_HOME } from './config.ts';
 import { derivedRepoParent, derivedRepoPath } from './default-repo.ts';
+import { envVar, entryValue } from './env.ts';
 import { testHome } from './test-env.ts';
 
 const execFileAsync = promisify(execFile);
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 
 // The processes an agent started, so archive and shutdown can stop them (S-323): the tree
 // under its pane, and every process that carries its STAM_AGENT_ID. A sandbox's children
@@ -37,10 +38,7 @@ export const procStart = (pid: number): string | undefined => stat(pid)?.start;
 
 function agentIdOf(pid: number): string | undefined {
   try {
-    const kv = readFileSync(`/proc/${pid}/environ`, 'utf8')
-      .split('\0')
-      .find((e) => e.startsWith('STAM_AGENT_ID='));
-    return kv?.slice('STAM_AGENT_ID='.length);
+    return entryValue(readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0'), 'AGENT_ID');
   } catch {
     return undefined;
   }
@@ -170,8 +168,8 @@ export function dirProcesses(dir: string, id: string): Map<number, string> {
       hit = hit || argv.some((a) => inside(a) || a.includes(`=${root}/`) || a.includes(` ${root}/`) || a.includes(`'${root}/`));
       if (!hit) continue;
       const env = readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0');
-      const owner = env.find((e) => e.startsWith('STAM_AGENT_ID='))?.slice('STAM_AGENT_ID='.length);
-      const home = env.find((e) => e.startsWith('STAM_HOME='))?.slice('STAM_HOME='.length) ?? '';
+      const owner = entryValue(env, 'AGENT_ID');
+      const home = entryValue(env, 'HOME') ?? '';
       if (owner ? owner !== id : !/(^|\/)stam-[^/]*/.test(home)) continue;
       if (readFileSync(`/proc/${pid}/comm`, 'utf8').trim() === 'tmux: server' && !argv.some((a) => a.startsWith('stam-test-'))) continue;
       const s = stat(pid);
@@ -219,10 +217,8 @@ export function compactorProcesses(id: string, session: string, cwd: string): Ma
       const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
       const r = argv.indexOf('--resume');
       if (r < 0 || argv[r + 1] !== session || !argv.includes('-p')) continue;
-      const marker = readFileSync(`/proc/${pid}/environ`, 'utf8')
-        .split('\0')
-        .find((e) => e.startsWith('STAM_COMPACTOR='));
-      const mine = marker ? marker.slice('STAM_COMPACTOR='.length).split(':')[0] === id : realpathSync(`/proc/${pid}/cwd`) === realpathSync(cwd);
+      const marker = entryValue(readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0'), 'COMPACTOR');
+      const mine = marker ? marker.split(':')[0] === id : realpathSync(`/proc/${pid}/cwd`) === realpathSync(cwd);
       const s = mine && stat(pid);
       if (s) out.set(pid, s.start);
     } catch {}
@@ -254,7 +250,7 @@ export async function stopAndConfirm(pids: Map<number, string>, graceMs = 5000):
 // S-604: Claude Code keeps a scratch dir per cwd under /tmp/claude-<uid>/, named after the cwd with
 // every non-alphanumeric character turned into '-'. It is the base `STAM_CLAUDE_TMP` overrides.
 export const claudeSlug = (cwd: string): string => cwd.replace(/[^A-Za-z0-9]/g, '-');
-const claudeTmpBase = (): string => process.env.STAM_CLAUDE_TMP ?? `/tmp/claude-${process.getuid?.() ?? 0}`;
+export const claudeTmpBase = (): string => envVar('CLAUDE_TMP') ?? `/tmp/claude-${process.getuid?.() ?? 0}`;
 
 // True when a process has its cwd or an open file inside `dir` (a /proc scan).
 export function dirInUse(dir: string): boolean {
@@ -285,7 +281,8 @@ export function dirInUse(dir: string): boolean {
 // settings pulls in the adapters and their npm deps, which a first deploy hasn't installed), else
 // the checkout this code runs from (default-repo.ts), else ~/projects/stam2.
 function mainCheckout(settingsRepo?: string): string {
-  if (process.env.STAM_REPO) return process.env.STAM_REPO;
+  const repo = envVar('REPO');
+  if (repo) return repo;
   if (settingsRepo) return settingsRepo;
   return derivedRepoPath() || join(homedir(), 'projects', 'stam2');
 }
@@ -316,10 +313,70 @@ export function removeClaudeScratch(cwd: string, liveCwds: string[], settingsRep
   }
 }
 
+// S-2298: the git repos (a `.git` dir or file) in `dir` and up to 3 levels below it, found without following
+// symlinks. Throws when a dir can't be read, so the caller keeps `dir` (fail closed).
+async function gitRepos(dir: string, depth = 0): Promise<string[]> {
+  const found: string[] = [];
+  try {
+    lstatSync(join(dir, '.git'));
+    found.push(dir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  }
+  if (depth >= 3) return found;
+  for (const e of await readdir(dir, { withFileTypes: true })) {
+    if (e.isDirectory() && e.name !== '.git' && e.name !== 'node_modules') found.push(...(await gitRepos(join(dir, e.name), depth + 1)));
+  }
+  return found;
+}
+
+// S-2298: why one git repo must not be deleted, or null when it may be: it holds commits that no remote-tracking
+// ref reaches, or its state can't be read, which counts as unpushed. A clone's refs are all its own, so every one
+// counts (a detached HEAD or a stash too). A linked worktree shares its main repo's refs, so only its own HEAD is
+// its work (S-2201's per-branch rule). A repo with no remote keeps its commits for the same reason: deleting the
+// clone would lose them.
+async function unpushedIn(repo: string): Promise<string | null> {
+  try {
+    const refs = lstatSync(join(repo, '.git')).isFile() ? ['HEAD'] : ['--all'];
+    const commits = (await execFileAsync('git', ['-C', repo, 'rev-list', ...refs, '--not', '--remotes'], { timeout: 60000 })).stdout.split('\n').filter(Boolean);
+    if (!commits.length) return null;
+    return `has ${commits.length} commit${commits.length === 1 ? '' : 's'} on no remote (head ${commits[0]})`;
+  } catch (e) {
+    return `its git state can't be read (${e instanceof Error ? e.message.split('\n')[0] : e})`;
+  }
+}
+
+// S-2298: why the dir `dir` (a scratch clone, or a folder holding one) must not be deleted, or null when no repo
+// in it has unpushed commits. A plain folder has no repo to check. A nested repo is named by its path under `dir`.
+async function unpushedKeep(dir: string): Promise<string | null> {
+  let repos: string[];
+  try {
+    repos = await gitRepos(dir);
+  } catch (e) {
+    return `its contents can't be read (${e instanceof Error ? e.message.split('\n')[0] : e})`;
+  }
+  for (const repo of repos) {
+    const why = await unpushedIn(repo);
+    if (why) return repo === dir ? why : `nested repo ${relative(dir, repo)} ${why}`;
+  }
+  return null;
+}
+
+// S-2298: moves a kept dir to <parent of base>/stam-kept/DAY/NAME.TIME (~/.cache/stam-kept/ for the real
+// bases), so nothing is overwritten and nothing is deleted. Returns where it went; throws if it can't move.
+async function moveAside(dir: string, base: string): Promise<string> {
+  const to = join(dirname(base), 'stam-kept', new Date().toISOString().slice(0, 10), `${basename(dir)}.${Date.now()}`);
+  await mkdir(dirname(to), { recursive: true });
+  await rename(dir, to);
+  return to;
+}
+
 // S-733: reviewers and managers make git worktrees of the main checkout under ~/.cache/stam-wt/NAME
 // and scratch clones under ~/.cache/stam-test/NAME (NAME is the agent's name), and test homes named
 // stam-test.AGENT_ID.RAND. Removes those an archived agent made: a worktree through `git worktree
-// remove --force` from its main repo (the metadata goes too), a plain clone with rm -rf. Never
+// remove --force` from its main repo (the metadata goes too), a plain clone with rm -rf. S-2298: a git
+// repo with unpushed commits (or one whose state can't be read) is moved aside to ~/.cache/stam-kept
+// instead, and the message says where. Never
 // another agent's dir (exact name match only), a dir a live agent's cwd or workspace lies in
 // (`liveDirs`), a dir a process uses, a symlink, or anything outside the two base folders.
 // Returns one line per dir; never throws. Async, so a slow git or a big rm doesn't block the daemon.
@@ -361,6 +418,12 @@ export async function removeAgentScratchDirs(agent: { id: string; name: string }
           out.push(`${dir}: kept, a process uses it`);
           continue;
         }
+        // A test home (stam-test.ID.RAND) is the test suites' own: deleted as before, never moved aside.
+        const unpushed = n === agent.name ? await unpushedKeep(dir) : null;
+        if (unpushed) {
+          out.push(`${dir}: kept, ${unpushed}; moved to ${await moveAside(dir, base)}`);
+          continue;
+        }
         let removedByGit = false;
         try {
           if (lstatSync(join(dir, '.git')).isFile()) {
@@ -387,6 +450,15 @@ export function reviewDirOf(name: string): string | null {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return null;
   const dir = join(reviewRoot(), name);
   return dirname(dir) === reviewRoot() ? dir : null;
+}
+
+// The reviewer's clone folder, made before the launch so STAM_REVIEW_DIR names a directory the agent
+// can work in (S-2165). A sandboxed reviewer can't make it, and it's inside the root by reviewDirOf.
+// A test home makes none, so a test launch leaves nothing in the real root (as reviewTmpForSpawn).
+export function reviewDirForLaunch(name: string, home = STAM_HOME): string | null {
+  const dir = reviewDirOf(name);
+  if (dir && !testHome(home)) mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 // The checks a reviewer's clone and its test folder share before removal (S-912, S-1330): refuse a path
@@ -445,7 +517,7 @@ export const reviewTmpDirOf = (name: string): string | null => {
 // The test folder to create and export at spawn, or null: none when the spec already sets
 // STAM_TEST_TMPDIR, or in a test home, where a test daemon would leak `.tmp-NAME` into the real root.
 export function reviewTmpForSpawn(name: string, env: Record<string, string>, home = STAM_HOME): string | null {
-  if (env.STAM_TEST_TMPDIR || testHome(home)) return null;
+  if (envVar('TEST_TMPDIR', env) || testHome(home)) return null;
   return reviewTmpDirOf(name);
 }
 

@@ -4,7 +4,7 @@
 import { HEALTH, statusInfo, statusLabel, CATEGORIES } from '../itsa/itsa'
 import { byId } from '../store'
 import type { Itsa, ItsaLink } from '../types'
-import { activityOf, costOf, fmtTimeShare, fmtUsd, fmtWindow, githubSubject, linkKind, linkLabel, reviewOf, testsOf, type LinkKind, type WatchState } from './links'
+import { activityOf, costOf, fmtIssueCost, fmtTimeShare, fmtWindow, issueCost, githubSubject, linkKind, linkLabel, reviewOf, testsOf, type LinkKind, type WatchState } from './links'
 import type { CellContext } from './columns'
 import { agentIdsOf, type WorkRow } from './model'
 import { BLANK, countValues, type SortFilterCol } from './sortfilter'
@@ -92,7 +92,7 @@ export const COLUMN_VALUES: Record<string, Meta> = {
   cost: {
     // The cell shows nothing at 0, so it is blank here too.
     sortValue: (r, cx) => costValue(r, cx),
-    text: (r, cx) => { const c = costValue(r, cx); return c === null ? '' : fmtUsd(c) },
+    text: (r, cx) => fmtIssueCost(costOf(cx.extras.costs, r.it.key), 'total'),
     filter: { kind: 'range', valueOf: (r, cx) => (cx.extras.costs ? costValue(r, cx) : undefined) },
   },
   window: {
@@ -139,5 +139,6 @@ export const COLUMN_VALUES: Record<string, Meta> = {
 
 function costValue(r: WorkRow, cx: CellContext): number | null {
   const c = costOf(cx.extras.costs, r.it.key)
-  return c && c.total.cost_usd > 0 ? c.total.cost_usd : null
+  const v = issueCost(c, 'total')
+  return v && v > 0 ? v : null
 }

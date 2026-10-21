@@ -1,19 +1,22 @@
 import { parseArgs } from 'node:util';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, openSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, openSync, readFileSync, writeFileSync, rmSync, existsSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname } from 'node:path';
 import { join } from 'node:path';
-import { MACHINE, RELEASES, ROOT, STAM_HOME } from './config.ts';
+import { MACHINE, PORT, RELEASES, ROOT, STAM_HOME } from './config.ts';
 import { api } from './client.ts';
 import { statuslineTtl, throttled } from './statusline-cache.ts';
 import * as tmux from './tmux.ts';
 import { SERVICE, UNIT, systemctl, waitHealthy } from './deploy.ts';
+import { unitText } from './unit.ts';
+import { envVar, setEnvVar, withMootrTwins } from './env.ts';
+import { serviceEnv } from './test-env.ts';
 
 // The name the user invoked (bin/mootr or bin/stam sets it); help and usage text print it.
-const CLI = process.env.STAM_CLI_NAME === 'stam' ? 'stam' : 'mootr';
+const CLI = envVar('CLI_NAME') === 'stam' ? 'stam' : 'mootr';
 // Not passed on: the daemon, its tmux server and every agent pane would inherit it (the CLI they run says its own name).
-delete process.env.STAM_CLI_NAME;
+setEnvVar('CLI_NAME', undefined);
 // Rewrites the `stam` command name in usage text to the invoked name.
 const named = (text: string) => text.replace(/^( *)stam /gm, `$1${CLI} `).replace(/(\| |usage: |see: |with: |run |: )stam (?=[a-z])/g, `$1${CLI} `);
 
@@ -21,10 +24,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // `stam janitor` waits this long for the daemon's sweep: a sweep walks every test folder on the
 // machine, so the CLI's own 10 s default is too short on a busy machine (S-764).
-const JANITOR_TIMEOUT_MS = Number(process.env.STAM_JANITOR_TIMEOUT_MS) || 2 * 60_000;
+const JANITOR_TIMEOUT_MS = Number(envVar('JANITOR_TIMEOUT_MS')) || 2 * 60_000;
 
 // The spawn lines of USAGE, printed alone when spawn gets no NAME or --help.
-const SPAWN_USAGE = named(`  stam spawn NAME [--type T] [--var KEY=VALUE]... [--role TEXT] [--preset P | --harness claude|opencode|codex --model M --effort E] [--cwd DIR] [--parent AGENT] [--itsa ID|KEY] [--machine M] [--urgent red-main|deploy-hold|approved-pr]
+const SPAWN_USAGE = named(`  stam spawn NAME [--type T] [--var KEY=VALUE]... [--role TEXT] [--preset P | --harness claude|opencode|codex --model M --effort E] [--cwd DIR] [--parent AGENT] [--itsa ID|KEY] [--machine M] [--urgent red-main|deploy-hold|approved-pr|incident]
              [--worktree [--branch B] [--base REF] | --workspace-script CMD | --workspace-instructions TEXT] [--standing] [--workspace[=NAME]  (the name only with "=", never a separate word)] [PROMPT]
 `);
 
@@ -39,15 +42,17 @@ const USAGE = named(`${CLI}: run and coordinate coding agents
   stam deps relink [--force]        relink this worktree's node_modules from the lockfile cache (after a rebase changes package-lock.json); deps check only reports
 ${SPAWN_USAGE}  stam ls
   stam registry                     agent types, presets, harnesses, and models
+  stam doctor [--json]              check this machine for a first run (Node, tmux, git, a harness, STAM_HOME, the port), with no daemon needed; a fix line per problem; exits 1 on a failure
+  stam onboarding                   what a fresh install still lacks, as JSON: harness logins, keys, network mode, repos, chief of staff
   stam registry migrate-reviewers [--apply]   turn the old reviewer settings into agent types (dry run by default)
   stam show AGENT
-  stam events AGENT
+  stam events AGENT [--type GLOB] [--limit N]   the latest 50 events, or the latest N of a type (e.g. input:screen), however old
   stam wait AGENT [--until idle,blocked] [--timeout SECONDS]
   stam attach AGENT
   stam web [serve]                  print the web UI links; serve: HTTPS on the tailnet
   stam pause|unpause AGENT
   stam shutdown AGENT [--now]       quit the harness when the agent finishes its step
-  stam archive AGENT [--force] [--discard]  shut down and remove the agent's worktree (--discard throws away uncommitted changes; --force also skips the wait for its current step)
+  stam archive AGENT [--force] [--discard] [--force-unpushed]  shut down and remove the agent's worktree (--discard throws away uncommitted changes; --force also skips the wait for its current step; --force-unpushed archives although its branch has commits on no remote)
   stam resume AGENT [NOTE]          bring a shut-down or archived agent back
   stam restart AGENT [REASON]       quit and resume when the agent finishes its step
   stam reconnect-mcp AGENT
@@ -64,6 +69,7 @@ ${SPAWN_USAGE}  stam ls
   stam pr open BRANCH --title T --body-file FILE [--itsa REF]   open or update a branch's PR on the ITSA home (gh runs there)
   stam itsa ls [--parent REF|root] [--subtree REF] [--status S] [--category C] [--owner REF] [--participant REF] [TEXT]
   stam itsa mails REF               JSON of the mails in an ITSA's own thread on this daemon
+  stam itsa about-mails REF         JSON of the mails about an ITSA in other threads on this daemon
   stam itsa show REF                an ITSA: parent chain, children with roll-ups, links, participants
   stam itsa new TITLE [--parent REF] [--kind K] [--status S] [--owner REF] [--participant REF] [--summary T] [--body T] [--link URL]
   stam itsa set REF [--title T] [--summary T] [--body T] [--kind K] [--status S] [--owner REF] [--participant REF] [--parent REF] [--field key=value]... [--system NAME]
@@ -213,26 +219,10 @@ async function installService() {
   const current = join(RELEASES, 'current');
   const deployed = existsSync(current);
   if (!deployed) console.log(`no release yet, so ${SERVICE} runs this checkout; run stam deploy to switch it to a release`);
-  const env = SERVICE_ENV.filter((k) => process.env[k]).map((k) => `Environment=${k}=${process.env[k]}\n`).join('');
-  writeFileSync(
-    UNIT,
-    `[Unit]
-Description=stam daemon: runs and coordinates coding agents
-After=network-online.target
-
-[Service]
-ExecStart=${process.execPath} --no-warnings ${join(deployed ? current : ROOT, 'src', 'cli.ts')} daemon run
-Environment=PATH=${path}
-${env}Restart=always
-RestartSec=2
-KillMode=process
-StandardOutput=append:${join(STAM_HOME, 'daemon.log')}
-StandardError=append:${join(STAM_HOME, 'daemon.log')}
-
-[Install]
-WantedBy=default.target
-`,
-  );
+  const env = serviceEnv(SERVICE_ENV, process.env);
+  const tmp = `${UNIT}.tmp-${process.pid}`;
+  writeFileSync(tmp, unitText({ dir: deployed ? current : ROOT, node: process.execPath, path, env, log: join(STAM_HOME, 'daemon.log') }));
+  renameSync(tmp, UNIT);
   // Without linger, user services stop when the user's last login ends.
   spawnSync('loginctl', ['enable-linger', process.env.USER ?? ''], { stdio: 'ignore' });
   try {
@@ -251,7 +241,7 @@ async function daemon(sub = 'run') {
   if (sub === 'install') return installService();
   // A daemon with its own home or port (a test instance) never touches the user's service,
   // unless it names its own service (STAM_SERVICE).
-  const own = Boolean(process.env.STAM_SERVICE) || (!process.env.STAM_HOME && !process.env.STAM_PORT);
+  const own = Boolean(envVar('SERVICE')) || (!envVar('HOME') && !envVar('PORT'));
   if (own && existsSync(UNIT) && ['start', 'stop', 'restart'].includes(sub)) {
     systemctl(sub, SERVICE);
     if (sub !== 'stop' && !(await waitHealthy())) throw new Error(`${SERVICE} not answering; see daemon.log`);
@@ -267,7 +257,7 @@ async function daemon(sub = 'run') {
     // A daemon an agent starts is no agent's: without its identity, an archive's sweep
     // (src/proctree.ts) never takes it for the agent's own, nor do its tmux server and agents.
     const env = { ...process.env };
-    for (const k of ['STAM_AGENT_ID', 'STAM_AGENT_NAME', 'STAM_TOKEN']) delete env[k];
+    for (const k of withMootrTwins(['STAM_AGENT_ID', 'STAM_AGENT_NAME', 'STAM_TOKEN'])) delete env[k];
     const child = spawn(process.execPath, ['--no-warnings', process.argv[1], 'daemon', 'run'], {
       detached: true,
       stdio: ['ignore', log, log],
@@ -312,7 +302,7 @@ async function daemon(sub = 'run') {
 async function hook(harness: string) {
   try {
     const input = await readStdin();
-    const id = process.env.STAM_AGENT_ID;
+    const id = envVar('AGENT_ID');
     if (!id) return;
     for (let deadline = Date.now() + 30_000; ; ) {
       try {
@@ -330,10 +320,10 @@ async function hook(harness: string) {
 // Reports context size to the daemon, then runs the user's own statusline, if any.
 async function statusline(harness: string) {
   const input = await readStdin();
-  const id = process.env.STAM_AGENT_ID;
+  const id = envVar('AGENT_ID');
   const reply = id ? await api('POST', `/api/statusline/${harness}/${id}`, JSON.parse(input), 1000).catch(() => undefined) : undefined;
   // The user's status line runs at most once per 30 s per agent, and never again while nobody views it (statusline-cache.ts, S-171, S-274, S-1055).
-  const user = process.env.STAM_USER_STATUSLINE;
+  const user = envVar('USER_STATUSLINE');
   const run = () => (user ? spawnSync(user, { input, shell: true, encoding: 'utf8', timeout: 5000 }).stdout ?? '' : '');
   const own = user && id ? throttled(join(STAM_HOME, `statusline-${id}.out`), run, Date.now(), statuslineTtl(reply?.viewed)) : run();
   process.stdout.write(`[stam ${id ?? '?'}] ${own}`);
@@ -435,7 +425,7 @@ async function main() {
         return console.log(r.sent ? `Mailed the retro digest to ${r.to}.` : `No retro digest sent: ${r.reason}.`);
       }
       // A retro item is the agent's own, so the CLI runs as the agent it is inside (STAM_AGENT_ID).
-      const by = process.env.STAM_AGENT_ID;
+      const by = envVar('AGENT_ID');
       if (!by) throw new Error('stam retro files as an agent: run it inside one (STAM_AGENT_ID is not set)');
       const { runRetro } = await import('./retro.ts');
       // --effort reading=50,implementing=30 for the final round (--final).
@@ -559,9 +549,20 @@ async function main() {
     }
     case 'show':
       return console.log(JSON.stringify(await api('GET', `/api/agents/${rest[0]}`), null, 2));
-    case 'events':
-      for (const e of await api<any[]>('GET', `/api/agents/${rest[0]}/events`)) console.log(e.ts, e.type, e.data ?? '');
+    case 'events': {
+      // `stam events AGENT --type 'input:*' --limit 20`: the latest events of that type (a GLOB), else the latest 50 (S-2451).
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: { type: { type: 'string' }, limit: { type: 'string' } },
+      });
+      const query = new URLSearchParams();
+      if (values.type) query.set('type', values.type);
+      if (values.limit) query.set('limit', values.limit);
+      const qs = query.size ? `?${query}` : '';
+      for (const e of await api<any[]>('GET', `/api/agents/${positionals[0]}/events${qs}`)) console.log(e.ts, e.type, e.data ?? '');
       return;
+    }
     case 'wait': {
       // Polls until the agent's state matches one of the given states, for example
       // `stam wait worker --until idle,blocked --timeout 120`.
@@ -585,17 +586,29 @@ async function main() {
     case 'web': {
       const { bindAddresses } = await import('./daemon.ts');
       const { readToken, PORT } = await import('./config.ts');
+      const { hasTailscale } = await import('./tailscale.ts');
+      const tailscale = hasTailscale();
+      if (rest[0] === 'serve' && !tailscale) {
+        console.error('stam web serve needs tailscale on PATH (https://tailscale.com/download); without it, use the addresses `stam web` prints');
+        process.exitCode = 1;
+        return;
+      }
       if (rest[0] === 'serve') {
         // HTTPS on the tailnet through `tailscale serve`; the owner's devices need no token.
         const args = ['serve', '--bg', '--https=443', `http://127.0.0.1:${PORT}`];
         if (spawnSync('tailscale', args, { stdio: 'inherit' }).status !== 0) spawnSync('sudo', ['tailscale', ...args], { stdio: 'inherit' });
       }
-      try {
+      // With local login on (S-2121), the token-less page on this machine logs in as the human, so it is the
+      // first address; a token link isn't the human, so it can look but not approve.
+      const { settings } = await import('./settings.ts');
+      const local = settings().auth.localHuman && process.platform === 'linux';
+      if (local) console.log(`http://127.0.0.1:${PORT}/   (this machine: log in as the human with a one-time command)`);
+      if (tailscale) try {
         const s = JSON.parse(spawnSync('tailscale', ['serve', 'status', '--json'], { encoding: 'utf8' }).stdout);
         for (const host of Object.keys(s.Web ?? {}))
           if (JSON.stringify(s.Web[host]).includes(`127.0.0.1:${PORT}`)) console.log(`https://${host.replace(/:443$/, '')}/   (your Tailscale devices, no token)`);
       } catch {}
-      for (const addr of bindAddresses()) console.log(`http://${addr}:${PORT}/#token=${readToken()}`);
+      for (const addr of bindAddresses()) console.log(`http://${addr}:${PORT}/#token=${readToken()}${local ? '   (token link: not the human, so approvals and settings are refused)' : ''}`);
       return;
     }
     case 'attach': {
@@ -619,11 +632,11 @@ async function main() {
       const { values, positionals } = parseArgs({
         args: rest,
         allowPositionals: true,
-        options: { now: { type: 'boolean' }, force: { type: 'boolean' }, discard: { type: 'boolean' } },
+        options: { now: { type: 'boolean' }, force: { type: 'boolean' }, discard: { type: 'boolean' }, 'force-unpushed': { type: 'boolean' } },
       });
       const [ref, ...words] = positionals;
       const text = words.join(' ') || undefined;
-      const r = await api('POST', `/api/agents/${ref}/${cmd}`, { ...values, note: text, reason: text, instructions: text });
+      const r = await api('POST', `/api/agents/${ref}/${cmd}`, { ...values, force_unpushed: values['force-unpushed'], note: text, reason: text, instructions: text });
       return console.log(`${r.agent.name}: ${r.result}`);
     }
     case 'rename':
@@ -639,6 +652,16 @@ async function main() {
       const r = await api('POST', `/api/agents/${ref}/set-child-notices`, { child_notices: value });
       return console.log(`${r.agent?.name ?? ref}: ${r.result}`);
     }
+    case 'doctor': {
+      const { values: v } = parseArgs({ args: rest, options: { json: { type: 'boolean' } } });
+      const { doctor, formatReport } = await import('./doctor.ts');
+      const report = await doctor({ stamHome: STAM_HOME, port: PORT, packageJson: join(ROOT, 'package.json'), health: () => api('GET', '/api/health', undefined, 3000), onboarding: () => api('GET', '/api/onboarding') });
+      console.log(v.json ? JSON.stringify(report, null, 2) : formatReport(report));
+      if (!report.ok) process.exitCode = 1;
+      return;
+    }
+    case 'onboarding':
+      return console.log(JSON.stringify(await api('GET', '/api/onboarding'), null, 2));
     case 'registry': {
       if (rest[0] === 'migrate-reviewers') {
         const { values: v } = parseArgs({ args: rest.slice(1), options: { apply: { type: 'boolean' } } });
@@ -666,7 +689,7 @@ async function main() {
       return console.log(r.agents.length ? `restarting when idle: ${r.agents.join(', ')}` : 'no running agents to restart');
     }
     case 'archive-resolved': {
-      if (process.env.STAM_AGENT_ID) throw new Error("only the human, or cos with approval, archives the human's threads from the CLI");
+      if (envVar('AGENT_ID')) throw new Error("only the human, or cos with approval, archives the human's threads from the CLI");
       const r = await api<{ dry: boolean; count: number; threads: { thread_id: string; subject: string }[] }>('POST', '/api/mail/resolved', { dry: !rest.includes('--apply'), all: rest.includes('--all') });
       console.log(`${r.count} thread(s) ${r.dry ? 'would be archived (dry run; --apply archives them)' : 'archived'}:`);
       for (const t of r.threads) console.log(`${t.thread_id}  ${t.subject}`);
@@ -684,7 +707,7 @@ async function main() {
     }
     case 'authorize':
     case 'deny': {
-      if (process.env.STAM_AGENT_ID) throw new Error('only the human answers permission requests from the CLI');
+      if (envVar('AGENT_ID')) throw new Error('only the human answers permission requests from the CLI');
       const [id, ...note] = rest;
       const r = await api('POST', `/api/permissions/${id}/answer`, { approve: cmd === 'authorize', note: note.join(' ') });
       return console.log(`${r.id}: ${r.status}${r.typed ? ', typed into the agent\'s input as yours' : r.status === 'approved' ? '; the agent was busy or had a draft, so it got a notice instead' : ''}`);
@@ -737,12 +760,12 @@ async function main() {
         const { values: rv, positionals: rp } = parseArgs({ args, allowPositionals: true, options: { head: { type: 'string' } } });
         if (rp.length !== 3 || !rv.head) throw new Error('usage: stam pr review N approve|request_changes "SUMMARY" --head SHA');
         const [pr, verdict, summary] = rp;
-        const r = await api<any>('POST', '/api/pr/review', { pr, verdict, summary, head: rv.head, by: process.env.STAM_AGENT_ID });
+        const r = await api<any>('POST', '/api/pr/review', { pr, verdict, summary, head: rv.head, by: envVar('AGENT_ID') });
         return console.log(`Posted ${r.verdict} on PR #${r.pr} at ${String(r.head).slice(0, 7)}: ${r.line}`);
       }
       const { values: v, positionals } = parseArgs({ args, allowPositionals: true, options: { title: { type: 'string' }, 'body-file': { type: 'string' }, itsa: { type: 'string' } } });
       if (sub !== 'open' || positionals.length !== 1 || !v.title || !v['body-file']) throw new Error('usage: stam pr open BRANCH --title "TITLE" --body-file FILE [--itsa REF]');
-      const r = await api<any>('POST', '/api/pr/open', { branch: positionals[0], title: v.title, body: readFileSync(v['body-file'], 'utf8'), itsa: v.itsa, by: process.env.STAM_AGENT_ID });
+      const r = await api<any>('POST', '/api/pr/open', { branch: positionals[0], title: v.title, body: readFileSync(v['body-file'], 'utf8'), itsa: v.itsa, by: envVar('AGENT_ID') });
       console.log(`${r.created ? 'Opened' : 'Updated'} PR #${r.number}: ${r.url}`);
       return r.warning ? console.log(`WARNING: ${r.warning}`) : undefined;
     }
@@ -782,7 +805,7 @@ async function main() {
       });
       // An ITSA action is the agent's own when the CLI runs inside one (STAM_AGENT_ID);
       // otherwise it is the human's. The daemon resolves `by`, local or on a peer.
-      const by = process.env.STAM_AGENT_ID;
+      const by = envVar('AGENT_ID');
       if (sub === 'ls') {
         const q = new URLSearchParams();
         for (const key of ['parent', 'subtree', 'status', 'category', 'owner', 'kind'] as const) if (v[key]) q.set(key, String(v[key]));
@@ -895,6 +918,11 @@ async function main() {
         const pick = (m: any) => ({ id: m.id, thread_id: m.thread_id, from_id: m.from_id, kind: m.kind ?? null, created_at: m.created_at, reply_to: m.reply_to ?? null, subject: m.subject, body: m.body });
         return console.log(JSON.stringify(t.items.filter((i: any) => i.type === 'mail').map((i: any) => pick(i.mail))));
       }
+      // The mails about an ITSA from other threads (its chip asks) on this daemon, as JSON: scripts/merge-pr.mjs counts a yes to one (S-1819).
+      if (sub === 'about-mails') {
+        if (!positionals[0]) throw new Error('usage: stam itsa about-mails REF');
+        return console.log(JSON.stringify(await api<any>('GET', `/api/itsas/${positionals[0]}/about-mails`)));
+      }
       if (sub === 'link') {
         const ref = positionals[0];
         if (!ref) throw new Error('usage: stam itsa link REF URL | stam itsa link REF --system branch --external-id BRANCH --repo REPO | stam itsa link REF --remove N');
@@ -923,7 +951,7 @@ async function main() {
         },
       });
       // As for itsa: the CLI acts as the agent when run inside one (STAM_AGENT_ID), else the human.
-      const by = process.env.STAM_AGENT_ID;
+      const by = envVar('AGENT_ID');
       // `--verify test:npm test` -> {method, detail}; a bare `pattern` -> {method}.
       const verifications = v.verify?.map((s) => {
         const i = s.indexOf(':');
@@ -1017,7 +1045,7 @@ async function main() {
         },
       });
       // Run inside an agent the subscription is its own; otherwise it is the human's.
-      const by = process.env.STAM_AGENT_ID;
+      const by = envVar('AGENT_ID');
       const kind = values.itsa ? 'itsa' : values.for === 'human' || (!values.for && !by) ? 'human' : 'agent';
       const id = values.itsa ?? (kind === 'human' ? 'human' : values.for ?? by);
       const r = await api<any>('POST', '/api/subscriptions', {
@@ -1033,11 +1061,11 @@ async function main() {
     case 'unsubscribe': {
       const id = rest[0];
       if (!id) throw new Error('usage: stam unsubscribe ID');
-      await api('DELETE', `/api/subscriptions/${id}`, { by: process.env.STAM_AGENT_ID });
+      await api('DELETE', `/api/subscriptions/${id}`, { by: envVar('AGENT_ID') });
       return console.log(`removed ${id}`);
     }
     case 'subscriptions': {
-      const by = process.env.STAM_AGENT_ID ?? 'human';
+      const by = envVar('AGENT_ID') ?? 'human';
       for (const s of await api<any[]>('GET', `/api/subscriptions?by=${encodeURIComponent(by)}`))
         console.log(`${s.id}  ${s.subscriber_kind}:${s.subscriber_id}  ${JSON.stringify(s.filter)}${s.note ? '  ' + s.note : ''}`);
       return;
@@ -1053,7 +1081,7 @@ async function main() {
         },
       });
       // Run inside an agent (STAM_AGENT_ID) the allocation is its own; otherwise it is the human's.
-      const by = process.env.STAM_AGENT_ID;
+      const by = envVar('AGENT_ID');
       const tree = positionals[0] ?? values.tree;
       if (!tree && !values.id) {
         const r = await api<{ allocations: any[] }>('GET', '/api/cost/allocations');
@@ -1133,7 +1161,7 @@ async function main() {
       const [tree, maybeUntil] = positionals;
       if (!tree) throw new Error('usage: stam cost-pause TREE [--until reset|ISO] [--account A] [--window W] [--reason R] | TREE --clear');
       // The CLI runs inside an agent (STAM_AGENT_ID); outside, the daemon sees the human.
-      const r = await api('POST', '/api/cost/pause', { tree, until: values.until ?? maybeUntil, account: values.account, window: values.window, clear: values.clear, reason: values.reason, by: process.env.STAM_AGENT_ID });
+      const r = await api('POST', '/api/cost/pause', { tree, until: values.until ?? maybeUntil, account: values.account, window: values.window, clear: values.clear, reason: values.reason, by: envVar('AGENT_ID') });
       const acked = r.acked?.length ? `; acknowledged ${r.acked.length} notice(s)` : '';
       if (r.action === 'cleared') return console.log(`cleared the cost pause on ${r.root}'s tree (${r.agents.length} agents${acked})`);
       return console.log(`${r.root}'s tree paused: ${r.until} (${r.agents.length} agents${acked})`);
@@ -1143,7 +1171,7 @@ async function main() {
       const [agent, preset] = positionals;
       if (!agent || !preset) throw new Error('usage: stam cost-switch AGENT PRESET [--soft-stop-minutes N]');
       const m = values['soft-stop-minutes'];
-      const r = await api('POST', '/api/cost/switch', { agent, preset, soft_stop_minutes: m != null ? Number(m) : undefined, by: process.env.STAM_AGENT_ID });
+      const r = await api('POST', '/api/cost/switch', { agent, preset, soft_stop_minutes: m != null ? Number(m) : undefined, by: envVar('AGENT_ID') });
       if (r.status === 'quiescing') return console.log(`${r.from} is finishing its step (up to ${r.minutes} min); then it continues as ${r.to} on ${r.preset}`);
       return console.log(`${r.from} now continues as ${r.to} on ${r.preset}${r.interrupted ? ' (interrupted)' : ''}; moved ${r.moved.children.length} children, ${r.moved.threads} threads, ${r.moved.unread} unread`);
     }
@@ -1188,6 +1216,7 @@ async function main() {
       }
       for (const a of r.actions) console.log(`${dryRun ? 'would clean' : 'cleaned'} ${a.kind} ${a.target}${a.detail ? ` (${a.detail})` : ''}`);
       for (const k of r.kept) console.log(`kept ${k.path}: ${k.why}`);
+      if (r.disk) console.log(`${dryRun ? 'would free' : 'freed'} ${r.disk.freed_bytes} bytes: ${r.disk.gzipped.length} transcript(s) gzipped, ${r.disk.compile_cache.removed.length} compile cache folder(s)`);
       return console.log(`${dryRun ? 'dry run: ' : ''}${r.actions.length} cleaned, ${r.kept.length} kept, ${r.dirs} test folder(s)`);
     }
     case 'forget': {

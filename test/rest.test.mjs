@@ -477,7 +477,7 @@ test('a rest predicted past the cache lifetime compacts first when the idle comp
 test('the cache lifetime counts from when it went idle, not from now', async () => {
   const a = agent();
   waits.wake(a.id, { note: 'in 40 minutes', in_minutes: 40 });
-  idleFor(a, 20); // 20 min idle + 40 min to the wake: past the 55 min cache
+  idleFor(a, 20); // 20 min idle + 40 min to the wake: past the 50 min cache
   db.updateAgent(a.id, { context_tokens: 200_000 });
   lifecycle.restSweep();
   await settled(() => events(a.id, 'context:idle-compaction').length === 1);
@@ -608,7 +608,7 @@ test('a delayed turn start: the push holds the rest until the turn has run', asy
   await rests(a);
 });
 
-test('the compaction boundary: 10 min idle plus a wake 50 min out passes the 55 min cache, 44 min out does not', async () => {
+test('the compaction boundary: 10 min idle plus a wake 50 min out passes the 50 min cache, 39 min out does not', async () => {
   const past = agent();
   waits.wake(past.id, { note: 'later', in_minutes: 50 });
   idleFor(past, 10);
@@ -617,7 +617,7 @@ test('the compaction boundary: 10 min idle plus a wake 50 min out passes the 55 
   await settled(() => events(past.id, 'context:idle-compaction').length === 1);
   assert.equal(events(past.id, 'standing:rest').length, 0);
   const within = agent();
-  waits.wake(within.id, { note: 'sooner', in_minutes: 44 });
+  waits.wake(within.id, { note: 'sooner', in_minutes: 39 });
   idleFor(within, 10);
   db.updateAgent(within.id, { context_tokens: 200_000 });
   await rests(within);
@@ -813,15 +813,180 @@ test('a second pause owner on a resting agent with a wait keeps it busy for fres
   assert.equal(db.busyDescendantCount(m.id), 1);
 });
 
-test('the idle compaction skips a resting agent', async () => {
-  const context = await import('../src/context.ts');
+// S-2238: the idle sweep compacts a resting agent headless while its cache is warm, and it stays resting.
+// The fake harness compacts only inside these tests (`compacting`); elsewhere it can't, as before.
+const compacting = async (fn) => {
+  const { adapters } = await import('../src/adapters/index.ts');
+  const runs = [];
+  const repaired = [];
+  let release = () => {};
+  const gate = { hold: false, fail: false };
+  adapters.fake.compactQuits = true;
+  adapters.fake.repairSession = async (a) => void repaired.push(a.id);
+  adapters.fake.compact = async (a) => {
+    runs.push(a.id);
+    if (gate.hold) await new Promise((r) => (release = r));
+    if (gate.fail) throw new Error('compactor timed out');
+    return { relaunch: true };
+  };
+  try {
+    await fn({ runs, repaired, gate, release: () => release() });
+  } finally {
+    delete adapters.fake.compact;
+    delete adapters.fake.compactQuits;
+    delete adapters.fake.repairSession;
+  }
+};
+const restingFor = async (min, tokens = 300_000) => {
   const a = agent();
   waits.wake(a.id, { note: 'later', in_minutes: 45 });
   idleFor(a, 3);
   await rests(a);
-  db.updateAgent(a.id, { idle_since: ago(120), context_tokens: 300_000 });
-  context.idleSweep();
-  assert.equal(events(a.id, 'context:idle-compaction').length, 0);
+  db.updateAgent(a.id, { idle_since: ago(min), context_tokens: tokens });
+  return a;
+};
+const compacted = (a) => events(a.id, 'compact:done').length;
+
+test('the idle sweep compacts a resting agent headless past 50 minutes, and it stays resting', async () => {
+  const context = await import('../src/context.ts');
+  await compacting(async ({ runs }) => {
+    const a = await restingFor(51);
+    const early = await restingFor(49);
+    const small = await restingFor(120, 20_000);
+    context.idleSweep();
+    await settled(() => compacted(a) === 1);
+    assert.deepEqual(runs.filter((id) => [a.id, early.id, small.id].includes(id)), [a.id]);
+    assert.equal(JSON.parse(events(a.id, 'compact')[0].data).headless, true);
+    assert.equal(lifecycle.isResting(db.getAgent(a.id)), true, 'still resting');
+    assert.equal(db.getAgent(a.id).activity, 'unknown');
+    context.idleSweep();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(compacted(a), 1, 'once per idle period');
+  });
+});
+
+test('the idle sweep leaves a churning agent, a pushed turn, or a resting agent with another pause owner', async () => {
+  const context = await import('../src/context.ts');
+  await compacting(async ({ runs }) => {
+    const churn = await restingFor(55);
+    for (const min of [50, 30, 10]) inEvents(churn, 'standing:wake', min);
+    const held = await restingFor(55);
+    db.updateAgent(held.id, { paused_by: JSON.stringify(['standing-idle', 'human']) });
+    const pushed = agent();
+    idleFor(pushed, 55);
+    db.updateAgent(pushed.id, { context_tokens: 300_000 });
+    inEvents(pushed, 'pushed', 1);
+    const live = agent();
+    for (const min of [50, 30, 10]) inEvents(live, 'standing:wake', min);
+    idleFor(live, 55);
+    db.updateAgent(live.id, { context_tokens: 300_000 });
+    context.idleSweep();
+    await new Promise((r) => setTimeout(r, 50));
+    for (const a of [churn, held, pushed, live]) assert.equal(events(a.id, 'context:idle-compaction').length, 0, a.name);
+    assert.equal(runs.filter((id) => [churn.id, held.id, pushed.id, live.id].includes(id)).length, 0);
+  });
+});
+
+test("a wake waits for a resting agent's compaction to finish", async () => {
+  const context = await import('../src/context.ts');
+  await compacting(async ({ gate, release }) => {
+    gate.hold = true;
+    const a = await restingFor(55);
+    context.idleSweep();
+    await settled(() => events(a.id, 'compact').length === 1);
+    const woke = lifecycle.wakeResting(a.id, 'mail');
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(lifecycle.isResting(db.getAgent(a.id)), true, 'not resumed under the compaction');
+    release();
+    await woke;
+    assert.equal(compacted(a), 1);
+    assert.equal(db.getAgent(a.id).lifecycle, 'active');
+  });
+});
+
+test('the once-per-idle-period mark survives a daemon restart, and the compaction clears the stale size', async () => {
+  await compacting(async ({ runs }) => {
+    const context = await import('../src/context.ts');
+    const a = await restingFor(55);
+    context.idleSweep();
+    await settled(() => compacted(a) === 1);
+    assert.equal(db.getAgent(a.id).context_tokens, null, 'the size before the compaction is dropped');
+    db.updateAgent(a.id, { context_tokens: 300_000 }); // as if a stale report came in
+    // A restarted daemon: fresh module state over the same database.
+    const fresh = await import(`../src/context.ts?restart=${Date.now()}`);
+    fresh.idleSweep();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(events(a.id, 'context:idle-compaction').length, 1, 'not asked again');
+    assert.equal(runs.filter((id) => id === a.id).length, 1, 'not compacted again');
+  });
+});
+
+test('a failed compaction repairs the session; the agent stays resting and a wake resumes it', async () => {
+  await compacting(async ({ gate, repaired }) => {
+    const context = await import('../src/context.ts');
+    gate.fail = true;
+    const a = await restingFor(55);
+    context.idleSweep();
+    await settled(() => events(a.id, 'compact:failed').length === 1);
+    await settled(() => repaired.includes(a.id));
+    assert.equal(lifecycle.isResting(db.getAgent(a.id)), true);
+    await lifecycle.wakeResting(a.id, 'mail');
+    assert.equal(db.getAgent(a.id).lifecycle, 'active');
+  });
+});
+
+test('a compaction a restart cut off is cleared before the next one or a wake', async () => {
+  await compacting(async ({ repaired, runs }) => {
+    const a = await restingFor(55);
+    db.addEvent(a.id, 'compact', { reason: 'idle past the cache lifetime', headless: true, op: 'op-old' });
+    assert.equal(await lifecycle.compactResting(a.id, 'idle past the cache lifetime'), 'compacted');
+    assert.ok(repaired.includes(a.id), 'the session was repaired first');
+    assert.equal(JSON.parse(events(a.id, 'compact:failed')[0].data).op, 'op-old');
+    assert.ok(runs.includes(a.id));
+    const b = await restingFor(10);
+    db.addEvent(b.id, 'compact', { reason: 'x', headless: true, op: 'op-b' });
+    await lifecycle.wakeResting(b.id, 'mail');
+    assert.ok(repaired.includes(b.id), 'repaired before the resume');
+    assert.equal(lifecycle.compactionInterrupted(db.getAgent(b.id)), null);
+  });
+});
+
+test('a human unpause clears a compaction a restart cut off before resuming the session', async () => {
+  await compacting(async ({ repaired }) => {
+    const a = await restingFor(10);
+    db.addEvent(a.id, 'compact', { reason: 'idle past the cache lifetime', headless: true, op: 'op-unpause' });
+    await lifecycle.unpause(db.getAgent(a.id));
+    assert.ok(repaired.includes(a.id), 'repaired before the resume');
+    assert.equal(lifecycle.compactionInterrupted(db.getAgent(a.id)), null);
+    assert.equal(JSON.parse(events(a.id, 'compact:failed')[0].data).op, 'op-unpause');
+    assert.equal(db.getAgent(a.id).lifecycle, 'active');
+  });
+});
+
+test('a resting agent with a queued notice or unpushed mail is not compacted, nor a resting Codex agent', async () => {
+  await compacting(async ({ runs }) => {
+    const context = await import('../src/context.ts');
+    // The compaction is queued first, behind a held job, so the mail or notice that wakes the agent
+    // arrives before it runs and its wake queues after it.
+    const heldFirst = async (a, arrive) => {
+      let open;
+      lifecycle.serial(a.id, () => new Promise((r) => (open = r)));
+      const r = lifecycle.compactResting(a.id, 'idle past the cache lifetime');
+      await arrive();
+      open();
+      return r;
+    };
+    const noticed = await restingFor(55);
+    assert.equal(await heldFirst(noticed, async () => mail.queueNotice(noticed.id, 'a child finished')), 'held');
+    const mailed = await restingFor(55);
+    assert.equal(await heldFirst(mailed, () => mail.sendMail({ from: 'human', to: [mailed.name], subject: 'the answer', body: 'here' })), 'held');
+    const cx = await restingFor(55);
+    db.updateAgent(cx.id, { harness: 'codex' });
+    context.idleSweep();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(events(cx.id, 'context:idle-compaction').length, 0);
+    assert.ok(![noticed.id, mailed.id, cx.id].some((id) => runs.includes(id)));
+  });
 });
 
 test('a rest keeps idle_since', async () => {

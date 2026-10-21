@@ -7,6 +7,7 @@
 // JSON or SSE answer is written back as one line per message. The server's `Mcp-Session-Id`
 // is kept once it gives one. A 401 asks the daemon for a refreshed token once and retries.
 import { api } from './client.ts';
+import { envVar } from './env.ts';
 
 interface Credential {
   url: string;
@@ -19,7 +20,7 @@ const writeLine = (line: string) => process.stdout.write(line + '\n');
 export function runMcpProxy(name: string): void {
   let cred: Credential | undefined;
   let sessionId: string | undefined;
-  const agent = process.env.STAM_AGENT_ID ?? '';
+  const agent = envVar('AGENT_ID') ?? '';
 
   async function credential(refresh = false): Promise<Credential> {
     if (!refresh && cred && (cred.expires_at == null || Date.now() < cred.expires_at - 60_000)) return cred;

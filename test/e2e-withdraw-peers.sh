@@ -46,6 +46,12 @@ api() {
   _human=; [ "$5" = human ] && _human='-H x-stam-human:1'
   curl -s -X "$2" -H "authorization: Bearer $_tok" $_human -H 'content-type: application/json' ${4:+-d "$4"} "$_url$3"
 }
+# tapi: api for /api/test/* routes; -f fails at the call when the gate answers 404.
+tapi() {
+  _url=$MAIN_URL; _tok=$MAIN_TOKEN; [ "$1" = twin ] && { _url=$TWIN_URL; _tok=$TWIN_TOKEN; }
+  _human=; [ "$5" = human ] && _human='-H x-stam-human:1'
+  curl -sf -X "$2" -H "authorization: Bearer $_tok" $_human -H 'content-type: application/json' ${4:+-d "$4"} "$_url$3"
+}
 # The HTTP status of the same call.
 status() {
   _url=$MAIN_URL; _tok=$MAIN_TOKEN; [ "$1" = twin ] && { _url=$TWIN_URL; _tok=$TWIN_TOKEN; }
@@ -67,7 +73,7 @@ count_is() { [ "$(unread main)" = "$1" ] && [ "$(unread twin)" = "$1" ]; }
 BOSS=$(api twin POST /api/register '{"name":"boss","role":"test","harness":"claude"}' | jget "d['id']")
 FAR=$(api twin POST /api/register '{"name":"far","role":"test","harness":"claude"}' | jget "d['id']")
 # Only managers mail the human directly (S-548), so far is one: its asks must reach the human.
-node --no-warnings -e 'const { DatabaseSync } = require("node:sqlite"); new DatabaseSync(process.argv[1]).prepare("UPDATE agents SET type = ? WHERE id = ?").run("manager", process.argv[2])' "$TEST_TMP/twin/stam.db" "$FAR"
+tapi twin POST /api/test/agent "{\"agent\":\"$FAR\",\"type\":\"manager\"}" >/dev/null
 api twin POST "/api/agents/$FAR/set-parent" "{\"parent\":\"$BOSS\"}" >/dev/null
 
 echo "-- a permission request reaches the human on both machines"

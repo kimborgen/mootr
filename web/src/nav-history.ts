@@ -47,7 +47,9 @@ export const onHistoryChange = (f: () => void) => { histSubs.add(f); return () =
 // Moves to entry `i` as pressing back or forward that many times would; the list stays.
 export function jumpToEntry(i: number) {
   const e = hist.entries[i]
-  if (e && e.pos !== pos) history.go(e.pos - pos)
+  const d = e ? e.pos - pos : 0
+  // Delta 0 is the shown entry: history.go(0) reloads the page, so it is never called.
+  if (d !== 0) history.go(d)
 }
 // What the history records of a place: the thing in main, and never while an overlay is open.
 const record = (p: Place) => { if (p.current && !anyOverlay(p)) setHist(visit(hist, p.current, pos)) }
@@ -189,7 +191,8 @@ function onPop(e: PopStateEvent) {
   // the list holds one; otherwise main shows its gone state. The entry stays in the list, dimmed.
   if (target.current && !anyOverlay(target) && to !== pos && !worldAlive(target.current)) {
     const d = skipDead(hist, target.current, to, pos, worldAlive)
-    if (d !== null) { history.go(d); return }
+    // A live entry at the browser position just landed on is already shown: go(0) would reload.
+    if (d !== null && d !== 0) { history.go(d); return }
   }
   pos = to
   if (target.current !== cur?.current) noteVisit(target.current)

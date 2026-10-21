@@ -21,10 +21,11 @@ import { hasDecisionBlock, isDeferralOnly } from './decision-mail.ts';
 import { indexMail } from './vectors.ts';
 import * as events from './events.ts';
 import { embedFiles } from './mail-embed.ts';
+import { envVar } from './env.ts';
 
 export const HUMAN = 'human';
 // About 5,000 tokens at roughly 4 characters per token. Overflow becomes an attachment.
-const BODY_LIMIT_CHARS = Number(process.env.STAM_MAIL_BODY_CHARS ?? 20_000);
+const BODY_LIMIT_CHARS = Number(envVar('MAIL_BODY_CHARS') ?? 20_000);
 const PUSH_DEBOUNCE_MS = 2000;
 const NOTICE_LIST = 10;
 
@@ -258,7 +259,7 @@ export class RefusedError extends Error {}
 
 // System senders that may never reach the human (local scripts any shared-token caller can name): the refusal comes before the mail
 // gate, so the gate's exemption for system senders never applies to them.
-const NEVER_MAILS_HUMAN = new Set(['system:full-suite']);
+const NEVER_MAILS_HUMAN = new Set(['system:full-suite', 'system:go-parity']);
 
 export async function sendMail(input: SendInput): Promise<SentMail> {
   // Models sometimes pass one recipient, or a comma-separated list, as a plain string.
@@ -448,9 +449,13 @@ export async function sendMail(input: SendInput): Promise<SentMail> {
   // recipients, so the sender's threads, reply_to, and read_thread see it while it is queued or
   // delivered. It is stored only once a destination has taken the mail (queued or accepted), so a
   // refused send leaves none. The copy is never unread for anyone and never notices anyone.
-  // Forwarded mail comes from a peer's agent, whose copy the peer keeps.
-  const keepCopy = () => {
-    if (!mail && !input.forwarded) mail = storeMail(id, threadId, from, fromName!, [], input);
+  // Forwarded mail comes from a peer's agent, whose copy the peer keeps. The copy records the agents it was sent to
+  // (copy_to, S-2663), so it counts as an ask only of them. A mail already stored here for local recipients records
+  // the peer's recipients the same way, so a remote recipient of a mixed send is asked too.
+  const keepCopy = (sentTo: string[]) => {
+    if (input.forwarded) return;
+    if (mail) db.addCopyRecipients(id, sentTo);
+    else mail = storeMail(id, threadId, from, fromName!, [], input, undefined, sentTo);
   };
   let queuedTo: string[] | undefined;
   // Mail an agent or the human sends for itself, not stam's own mail (from_stam), a permission relay, or a
@@ -467,7 +472,7 @@ export async function sendMail(input: SendInput): Promise<SentMail> {
     const queue = () => {
       db.queueOutbox(id, peer.name, JSON.stringify({ ...payload, to: named }));
       queuedTo = [...(queuedTo ?? []), ...named];
-      keepCopy();
+      keepCopy(to);
       if (direct && startsPeer(peer, to, named)) {
         if (mayStartPeer(from, named)) startQueuedPeer(peer, fromName ?? from);
         else console.log(`peer:start ${peer.name}: not started: mail from ${fromName ?? from} to ${named.join(', ')} waits in the outbox`);
@@ -491,7 +496,7 @@ export async function sendMail(input: SendInput): Promise<SentMail> {
       const msg = `${peer.name}: ${r.data?.error ?? r.status}`;
       throw r.status >= 400 && r.status < 500 ? new RefusedError(msg) : new Error(msg);
     }
-    keepCopy();
+    keepCopy(to);
     // A relayed send (forwarded, as itsa.post sends for an agent on a peer) has no copy here when
     // every recipient is remote: the peer's stored mail is what the caller gets back.
     mail ??= r.data;
@@ -647,7 +652,7 @@ export function drainOutbox(): Promise<void> {
 }
 
 export function startOutbox(): void {
-  const every = Number(process.env.STAM_OUTBOX_MS) || 30_000;
+  const every = Number(envVar('OUTBOX_MS')) || 30_000;
   setInterval(() => void drainOutbox(), every).unref();
 }
 
@@ -655,7 +660,7 @@ export function startOutbox(): void {
 // stam sends on its own behalf (usage warnings, credit warnings, cost notices). The human
 // sees `[stam]` in the subject; the stand-in is only the envelope.
 export function stamSender(): db.Agent | undefined {
-  return db.listAgents().find((a) => a.lifecycle === 'active');
+  return db.firstActiveAgent();
 }
 
 // Mail from stam itself, with the mail it made. Undefined when no agent at all can stand in as sender.
@@ -663,7 +668,7 @@ export function stamSender(): db.Agent | undefined {
 export async function sendFromStamMail(to: string[], subject: string, body: string): Promise<SentMail | undefined> {
   // With no running agent (low memory is when agents get paused or archived), the newest agent
   // still stands in, so the mail reaches its recipients.
-  const sender = stamSender() ?? db.listAgents()[0];
+  const sender = stamSender() ?? db.firstAgent();
   if (!sender) return undefined;
   return sendMail({ from: sender.id, to, subject, body, new_thread: true, from_stam: true });
 }
@@ -719,7 +724,7 @@ function supersededHere(input: SendInput, from: string): boolean {
   return !!old && old.from_id === from && !old.superseded_by;
 }
 
-function storeMail(id: string, threadId: string, from: string, fromName: string, to: string[], input: SendInput, gate: { verdict?: db.MailVerdict; override?: string } = {}): db.Mail {
+function storeMail(id: string, threadId: string, from: string, fromName: string, to: string[], input: SendInput, gate: { verdict?: db.MailVerdict; override?: string } = {}, copyTo?: string[]): db.Mail {
   const quiet = input.itsa_id ? to.filter((r) => !input.interrupt?.includes(r)) : [];
   // The same mail arriving again (a forward under its original id) only adds recipients.
   const stored = db.getMail(id);
@@ -752,7 +757,7 @@ function storeMail(id: string, threadId: string, from: string, fromName: string,
     else if (a.content !== undefined) save(a.name ?? 'attachment.txt', (p) => writeFileSync(p, a.content!));
   }
 
-  db.createMail({ id, from_id: from, from_name: fromName, subject: input.subject, body, thread_id: threadId, reply_to: input.reply_to ?? null, permission_id: input.permission_id ?? null, auto_threaded: input.auto_threaded, notice: Boolean(input.from_stam || input.system), itsa_id: input.itsa_id, kind: input.kind, health: input.health, about_itsa: input.about_itsa, verdict: gate.verdict, override: gate.override, note: humanNote(input, from) }, to, quiet);
+  db.createMail({ id, from_id: from, from_name: fromName, subject: input.subject, body, thread_id: threadId, reply_to: input.reply_to ?? null, permission_id: input.permission_id ?? null, auto_threaded: input.auto_threaded, notice: Boolean(input.from_stam || input.system), itsa_id: input.itsa_id, kind: input.kind, health: input.health, about_itsa: input.about_itsa, verdict: gate.verdict, override: gate.override, note: humanNote(input, from), copy_to: copyTo }, to, quiet);
   for (const f of files) db.addAttachment(id, f.name, f.path, f.size);
   linkMail({ id, thread_id: threadId, subject: input.subject, body: input.body, itsa_id: input.itsa_id, about_itsa: input.about_itsa });
   // Indexed for search by meaning, queued so the send never waits on the embedder (S-141).
@@ -818,15 +823,24 @@ function senderName(id: string): string {
 // An idle-only notice is a new task (such as a ring turn): it waits for a fresh turn
 // instead of riding on some other tool's result, where a model can overlook it.
 // `ring` marks a ring turn, for the admission gate's record.
-const notices = new Map<string, { text: string; idleOnly: boolean; ring?: boolean }[]>();
+// `passive` (S-1744): the notice is queued but never starts a turn on its own. It reaches a
+// working agent after its next tool call, and an idle one only on its next real wake: it is
+// delivered when mail or another notice pushes a prompt, and takes no push by itself.
+// `onTaken` runs once when the notice leaves the queue, delivered; tool-changes.ts uses it to
+// record a passive notice as seen (S-1744).
+const notices = new Map<string, { text: string; idleOnly: boolean; ring?: boolean; passive?: boolean; onTaken?: () => void }[]>();
 
-export function queueNotice(agentId: string, text: string, opts: { idleOnly?: boolean; ring?: boolean } = {}): void {
-  notices.set(agentId, [...(notices.get(agentId) ?? []), { text, idleOnly: Boolean(opts.idleOnly), ring: opts.ring }]);
+export function queueNotice(agentId: string, text: string, opts: { idleOnly?: boolean; ring?: boolean; passive?: boolean; onTaken?: () => void } = {}): void {
+  notices.set(agentId, [...(notices.get(agentId) ?? []), { text, idleOnly: Boolean(opts.idleOnly), ring: opts.ring, passive: opts.passive, onTaken: opts.onTaken }]);
   db.addEvent(agentId, 'notice:queued', { text: text.slice(0, 120) });
-  schedulePush(agentId);
+  if (!opts.passive) schedulePush(agentId);
 }
 
 export const queuedNoticeCount = (agentId: string): number => notices.get(agentId)?.length ?? 0;
+
+// The queued notices that are reason enough to wake an agent; a passive one isn't (S-1744), so it
+// never stops an idle agent from resting.
+export const wakeableNoticeCount = (agentId: string): number => (notices.get(agentId) ?? []).filter((n) => !n.passive).length;
 
 // Drops the notices queued after the first `n`: a ring that failed to start takes its turn notices back.
 export function truncateNotices(agentId: string, n: number): void {
@@ -865,12 +879,26 @@ export function dropNotice(agentId: string, text: string): void {
   else notices.delete(agentId);
 }
 
+// Moves a taken-over agent's queued ring turns to its successor (S-2490): the predecessor is held
+// and runs nothing, so its turns would never be read. Each moves once, out of the predecessor's queue.
+export function moveRingNotices(from: string, to: string): number {
+  const all = notices.get(from) ?? [];
+  const ring = all.filter((n) => n.ring);
+  if (!ring.length) return 0;
+  const kept = all.filter((n) => !n.ring);
+  if (kept.length) notices.set(from, kept);
+  else notices.delete(from);
+  for (const n of ring) queueNotice(to, n.text, { idleOnly: n.idleOnly, ring: true, onTaken: n.onTaken });
+  return ring.length;
+}
+
 function takeNotices(agentId: string, includeIdleOnly: boolean): string[] {
   const all = notices.get(agentId) ?? [];
   const taken = all.filter((n) => includeIdleOnly || !n.idleOnly);
   const kept = all.filter((n) => !taken.includes(n));
   if (kept.length) notices.set(agentId, kept);
   else notices.delete(agentId);
+  for (const n of taken) n.onTaken?.();
   return taken.map((n) => n.text);
 }
 
@@ -905,7 +933,7 @@ export function onRestWake(fn: (agentId: string) => void): void {
 
 // Batches mail that arrives close together into one prompt.
 export function schedulePush(agentId: string): void {
-  if (restWaker && (db.unpushedCount(agentId) > 0 || queuedNoticeCount(agentId) > 0)) restWaker(agentId);
+  if (restWaker && (db.unpushedCount(agentId) > 0 || wakeableNoticeCount(agentId) > 0)) restWaker(agentId);
   clearTimeout(timers.get(agentId));
   timers.set(
     agentId,
@@ -928,11 +956,13 @@ async function pushIfIdle(agentId: string): Promise<void> {
   if (a.activity !== 'idle' && a.activity !== 'waiting') return;
   const hasMail = db.unpushedCount(agentId) > 0;
   const pending = notices.get(agentId) ?? [];
-  if (!hasMail && !pending.length) return;
+  // A push happens for mail or a wakeable notice; a passive notice rides along but never asks for one (S-1744).
+  if (!hasMail && pending.every((n) => n.passive)) return;
   if (!admit(a, pending.some((n) => n.ring) ? 'ring' : 'mail').ok) return;
   const text = [...pending.map((n) => n.text), ...(hasMail ? [render('mail-prompt', noticeList(agentId))] : [])].join('\n\n');
   if (await adapters[a.harness]?.pushPrompt?.(a, text).catch(() => false)) {
     notices.delete(agentId);
+    for (const n of pending) n.onTaken?.();
     if (hasMail) db.markPushed(agentId);
     db.addEvent(agentId, 'pushed', { mail: hasMail, notices: pending.length });
   }

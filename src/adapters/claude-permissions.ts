@@ -7,8 +7,8 @@
 // and Bash's text match alone lets a variable or a tilde path slip past.
 // Never added: `rm` (the built-in path check outranks an allow rule anyway), `sed -i`, `find`,
 // heredoc interpreters, push/fetch/gh, test runners, kill, tmux, ssh, sudo, docker.
-import { realpathSync } from 'node:fs';
 import { DEFAULT_STAM_HOME, STAM_HOME } from '../config.ts';
+import { secretCommandPatterns, secretPaths } from '../secret-files.ts';
 
 const GIT_READ = ['status', 'diff', 'log', 'show', 'rev-parse', 'merge-base', 'ls-files'];
 const READ_CMDS = ['ls', 'cat', 'head', 'tail', 'wc', 'grep', 'sed -n'];
@@ -28,46 +28,19 @@ export function allowRules(): string[] {
   ];
 }
 
-// The homes whose secrets are denied: the daemon's own STAM_HOME as given and resolved (a
-// symlinked home is read through either path), plus the default home (S-903).
-export function secretHomes(stamHome: string = STAM_HOME): string[] {
-  const homes = [stamHome];
-  try {
-    homes.push(realpathSync(stamHome));
-  } catch {
-    // not created yet: the given path is all there is
-  }
-  homes.push(DEFAULT_STAM_HOME);
-  return [...new Set(homes)];
-}
-
+// The secret files (secret-files.ts) by path, for Read, and for Edit and Write too (S-1888: a
+// Write could replace a settings file the daemon reads). `//` makes each path absolute, as in
+// the allow rules: the home is outside the working directories.
 export function denyRules(stamHome: string = STAM_HOME): string[] {
-  // `//` makes a Read path absolute, as in the allow rules: the home is outside the working directories.
-  const reads = secretHomes(stamHome).flatMap((h) => [
-    `Read(/${h}/token)`,
-    `Read(/${h}/peer-token)`,
-    `Read(/${h}/settings.json)`,
-    `Read(/${h}/settings.shared.json)`,
-    `Read(/${h}/settings.json.*)`,
-    // The OpenRouter and ElevenLabs keys and the MCP OAuth tokens (S-1888).
-    `Read(/${h}/opencode.env)`,
-    `Read(/${h}/voice.env)`,
-    `Read(/${h}/mcp-auth.json)`,
-  ]);
+  const files = secretPaths(stamHome).flatMap((p) => [`Read(/${p})`, `Edit(/${p})`, `Write(/${p})`]);
   return [
     'Bash(*stam/stam.db*)',
-    'Bash(*stam/token*)',
-    'Bash(*stam/peer-token*)',
-    'Bash(*stam/settings.json*)',
-    'Bash(*stam/settings.shared.json*)',
+    ...secretCommandPatterns().map((p) => `Bash(${p})`),
     'Bash(*stam/registry.json*)',
-    'Bash(*stam/opencode.env*)',
-    'Bash(*stam/voice.env*)',
-    'Bash(*stam/mcp-auth.json*)',
     'Bash(cat *.env)',
     'Bash(*/.ssh/*)',
     // The Read tool too, not only Bash (S-743), so the peer token and the settings holding it
     // (and their backups) are refused by resolved path.
-    ...reads,
+    ...files,
   ];
 }

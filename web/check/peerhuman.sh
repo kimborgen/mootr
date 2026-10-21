@@ -1,7 +1,7 @@
 #!/bin/sh
 # The human's writes for a peer machine's agent, from the page of a daemon that doesn't relay them
 # (auth.humanStrict, S-544): headless Chromium against two throwaway daemons (test/lib.sh): "main", the
-# page's daemon (strict on, legacyPeerToken off, far as its ITSA home), and "far", which holds an agent
+# page's daemon (strict on, far as its ITSA home), and "far", which holds an agent
 # with permission requests and an ITSA waiting on the human. The page answers each on far's own origin,
 # cross-origin, with no token; the test key stands in for tailscale serve on both. No model runs, nothing
 # is spent, and lib.sh stops both daemons on exit.
@@ -22,16 +22,16 @@ def env(d):
     return dict(re.findall(r"(\w+)='?([^' \n]+)'?", open(f"{tmp}/{d}/test.env").read()))
 def peer(name):
     return {"name": name, "url": env(name)["STAM_URL"], "token": open(f"{tmp}/{name}/token").read().strip()}
-# far is the ITSA home and so the settings home: main syncs legacyPeerToken off; humanStrict is local, so both set it.
+# far is the ITSA home and so the settings home; humanStrict is local, so both set it.
 json.dump({"resourceWarn": {"enabled": False}, "peers": [peer("far")], "itsa": {"home": "far"}, "auth": {"humanStrict": True}}, open(f"{tmp}/main/settings.json", "w"), indent=2)
-json.dump({"resourceWarn": {"enabled": False}, "peers": [peer("main")], "itsa": {"home": "far"}, "auth": {"humanStrict": True, "legacyPeerToken": False}}, open(f"{tmp}/far/settings.json", "w"), indent=2)
+json.dump({"resourceWarn": {"enabled": False}, "peers": [peer("main")], "itsa": {"home": "far"}, "auth": {"humanStrict": True}}, open(f"{tmp}/far/settings.json", "w"), indent=2)
 PY
 url() { on "$1" sh -c 'echo "$STAM_URL"'; }
 STAM_TEST_HUMAN_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')
 export STAM_TEST_HUMAN_KEY
 daemon_up main
 daemon_up far
-# Each daemon's peer token is made at its first start; the other's settings need it (strict needs legacyPeerToken off).
+# Each daemon's peer token is made at its first start; the other's settings need it.
 python3 - "$TEST_TMP" <<'PY'
 import json, sys
 tmp = sys.argv[1]

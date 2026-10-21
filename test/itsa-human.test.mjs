@@ -16,7 +16,7 @@ process.env.STAM_HOME = home;
 process.env.STAM_TMUX_SOCKET = `itsa-human-test-${process.pid}`;
 for (const k of ['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT', 'STAM_MACHINE']) delete process.env[k];
 
-let db, itsa, human;
+let db, itsa, human, waits, org;
 const agent = (id, name) => db.createAgent({ id, name, role: 'dev', machine: 'x', harness: 'opencode', model: null, effort: null, cwd: '/tmp', parent_id: null, session_id: null });
 const thread = (x) => db.threadMail(itsa.must(x.id).thread_id);
 const asks = (x) => thread(x).filter((m) => m.kind === 'ask');
@@ -28,6 +28,8 @@ before(async () => {
   db = await import('../src/db.ts');
   itsa = await import('../src/itsa.ts');
   human = await import('../src/itsa-human.ts');
+  waits = await import('../src/waits.ts');
+  org = await import('../src/org.ts');
   db.open();
   agent('a1', 'alice');
   agent('a2', 'bob');
@@ -296,4 +298,75 @@ test('the ask carries the owner’s whole comment, however long', async () => {
   await itsa.set(x.key, { status: 'needs_review' }, 'alice');
   const [a] = await askedBy(x, 1);
   assert.ok(a.body.includes(long), 'the ask body holds the whole comment');
+});
+
+// S-3080: an agent's wait_for on the human in an ITSA's thread is tied to the ITSA while it waits on the human,
+// and clears when the ITSA leaves that status, by the agent or by the human.
+const waitingOn = (agentId, itsaId) => db.listWaits(agentId).filter((w) => w.kind === 'human' && w.target === itsaId);
+const future = () => new Date(Date.now() + 3_600_000).toISOString();
+// An ITSA asking the human, as an agent makes it: its thread starts with the owner's comment, then the move.
+const openAsk = async (title, owner) => {
+  const x = await itsa.create({ title, by: 'human', owner, status: 'in_progress' });
+  await itsa.post(x.key, { by: owner, body: 'Need a call.' });
+  await itsa.set(x.key, { status: 'needs_input' }, owner);
+  return x;
+};
+test('S-3080: an agent’s wait on the human is tied to its ITSA, and leaving the status clears it; other waits stay', async () => {
+  const x = await openAsk('Tied ask', 'alice');
+  const y = await openAsk('Other ask', 'alice');
+  const tied = await waits.declare('a1', { on: 'human', thread: itsa.must(x.id).thread_id, note: 'the call' });
+  const other = await waits.declare('a1', { on: 'human', thread: itsa.must(y.id).thread_id, note: 'the other call' });
+  const timer = db.addWait({ agent_id: 'a1', kind: 'timer', source: 'stam', detail: 'a timer', until: future() });
+  assert.equal(tied.target, x.id);
+  assert.equal(other.target, y.id);
+  await itsa.set(x.key, { status: 'in_progress' }, 'alice');
+  await tick();
+  assert.equal(db.getWait(tied.id), undefined, 'the wait on the ITSA that left its human status is gone');
+  assert.ok(db.getWait(other.id), 'a wait for a different ask stays');
+  assert.ok(db.getWait(timer.id), 'a timer stays');
+  // Once the ITSA is out of its human status, a new wait in its thread is not tied to it.
+  assert.equal((await waits.declare('a1', { on: 'human', thread: itsa.must(x.id).thread_id, note: 'later' })).target, null);
+});
+
+test('S-3080: the human answering an ITSA ask through its action clears the agent’s wait on it', async () => {
+  const x = await openAsk('Answered ask', 'alice');
+  const w = await waits.declare('a1', { on: 'human', thread: itsa.must(x.id).thread_id, note: 'the answer' });
+  assert.equal(w.target, x.id);
+  assert.equal((await human.act(x.key, 'answer', 'Use option B')).itsa.status, 'in_progress');
+  assert.equal(db.getWait(w.id), undefined);
+});
+
+test('S-3080: a move between human statuses keeps the agent’s wait on the ITSA, which still waits on the human', async () => {
+  const x = await openAsk('Moved ask', 'alice');
+  const w = await waits.declare('a1', { on: 'human', thread: itsa.must(x.id).thread_id, note: 'the call' });
+  await itsa.set(x.key, { status: 'needs_review' }, 'alice');
+  await tick();
+  assert.equal(itsa.must(x.id).status, 'needs_review');
+  assert.equal(db.getWait(w.id)?.target, x.id, 'the wait stays tied to the ITSA');
+});
+
+test('S-3080: a restart settles a tied wait whose ITSA left its human status, and keeps one whose ask is open', async () => {
+  const gone = await openAsk('Withdrawn ask', 'alice');
+  const open = await openAsk('Open ask', 'alice');
+  const goneWait = await waits.declare('a2', { on: 'human', thread: itsa.must(gone.id).thread_id, note: 'gone' });
+  const openWait = await waits.declare('a2', { on: 'human', thread: itsa.must(open.id).thread_id, note: 'open' });
+  // The daemon stopped after the ITSA left its status and before the wait cleared: only the row moved.
+  db.open().prepare("UPDATE itsas SET status = 'in_progress' WHERE id = ?").run(gone.id);
+  org.rebuildWaits();
+  assert.equal(db.getWait(goneWait.id), undefined, 'the withdrawn ask leaves no wait behind');
+  assert.ok(db.getWait(openWait.id), 'an open ask keeps its wait');
+});
+
+test('S-3080: a tied wait is kept when its ITSA cannot be read, and settled only by a row that says so', async () => {
+  const x = await itsa.create({ title: 'Unreadable ask', by: 'human', owner: 'alice', status: 'needs_input' });
+  assert.equal(human.itsaAskSettled(x.id), false, 'a live ask');
+  assert.equal(human.itsaAskSettled('inotfound'), true, 'an ITSA that is not there settles its wait');
+  // Any other read error keeps the wait: the table is renamed away for this read only.
+  db.open().exec('ALTER TABLE itsas RENAME TO itsas_hold');
+  try {
+    assert.equal(human.itsaAskSettled(x.id), false, 'a failing read keeps the wait');
+  } finally {
+    db.open().exec('ALTER TABLE itsas_hold RENAME TO itsas');
+  }
+  assert.equal(human.itsaAskSettled(x.id), false, 'the ITSA is still in its human status');
 });

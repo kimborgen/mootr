@@ -123,6 +123,13 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_agent ON events(agent_id, id);
 CREATE INDEX IF NOT EXISTS events_agent_type ON events(agent_id, type);
+-- The last time each window of an account cleared (rules.ts flapHold), so a restart keeps the hold.
+CREATE TABLE IF NOT EXISTS window_clears (
+  account TEXT NOT NULL,
+  window TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (account, window)
+);
 -- usage_info's cold-turn and cache-window reads (S-2236): partial, so other events pay nothing.
 CREATE INDEX IF NOT EXISTS events_cache_cold ON events(ts) WHERE type = 'cache:cold';
 CREATE INDEX IF NOT EXISTS events_cache_ttl ON events(agent_id) WHERE type = 'cache:ttl';
@@ -205,6 +212,15 @@ CREATE TABLE IF NOT EXISTS mail_deliveries (
   PRIMARY KEY (agent_id, mail_id, batch)
 );
 CREATE INDEX IF NOT EXISTS mail_deliveries_agent ON mail_deliveries (agent_id, mail_id);
+-- The nudges a wait_for sent the awaited agent (S-2663): one row per key, so a key never nudges twice, however old.
+-- thread_id is '' for a threadless wait.
+CREATE TABLE IF NOT EXISTS wait_nudges (
+  target_id TEXT NOT NULL,
+  waiter_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  mail_id TEXT NOT NULL,
+  PRIMARY KEY (target_id, waiter_id, thread_id, mail_id)
+);
 CREATE TABLE IF NOT EXISTS permission_requests (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL,
@@ -227,6 +243,8 @@ CREATE TABLE IF NOT EXISTS agent_parents (
 );
 CREATE INDEX IF NOT EXISTS agent_parents_parent ON agent_parents (parent_id);
 CREATE INDEX IF NOT EXISTS agents_parent ON agents (parent_id);
+-- getAgent matches id OR name: with both indexed it is two lookups, not a scan of every row (S-2369).
+CREATE INDEX IF NOT EXISTS agents_name ON agents (name);
 CREATE INDEX IF NOT EXISTS agents_live ON agents (created_at) WHERE lifecycle != 'archived';
 CREATE TABLE IF NOT EXISTS rings (
   id TEXT PRIMARY KEY,
@@ -342,6 +360,14 @@ CREATE TABLE IF NOT EXISTS account_holds (
   resets_at INTEGER NOT NULL,
   source TEXT NOT NULL,
   since TEXT NOT NULL
+);
+-- The newest time a peer reported a window below 100% (S-2367). A local reading taken before it is
+-- overtaken: it never sets the window again, whatever the peers say later. See rules.ts.
+CREATE TABLE IF NOT EXISTS window_resets (
+  account TEXT NOT NULL,
+  window TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (account, window)
 );
 -- A browser's Web Push subscription: one row per device that turned notifications on.
 -- kinds is a JSON list of what pushes to it ('mail', 'permission').
@@ -784,6 +810,8 @@ export function open(): DatabaseSync {
     backfillThreads(db);
   } catch {}
   db.exec('CREATE INDEX IF NOT EXISTS mail_thread ON mail (thread_id)');
+  // A wait's nudge looks up an agent's newest mail (S-2574); a threadless lookup must not scan the table.
+  db.exec('CREATE INDEX IF NOT EXISTS mail_from ON mail (from_id)');
   // A permission request is a mail that carries the request.
   try {
     db.exec('ALTER TABLE mail ADD COLUMN permission_id TEXT');
@@ -814,6 +842,15 @@ export function open(): DatabaseSync {
   migrateSystemCalls(db);
   // Monitor waits on a job or a condition, so its rule-labelled time is wait.poll, not self.schedule-wait (S-244).
   runOnce('activity-monitor-wait-poll', "UPDATE activity_items SET category = 'wait.poll' WHERE category_source = 'rule' AND name = 'Monitor' AND category = 'self.schedule-wait'");
+  // The nudges already sent (S-2663) move into wait_nudges, so a nudge sent before this change is not sent again under the
+  // new keys. A thread-scoped no-ask key from before carried its answer's id; the new key for it is 'declare:'. A bare
+  // 'declare:' in a thread was sent with no answer there, so it is skipped: mapping it would suppress the first nudge the
+  // new rule sends after the awaited agent answers. A threadless one keeps its key: the new rule keys it on the same answer id.
+  runOnce('wait-nudges-from-events', `INSERT OR IGNORE INTO wait_nudges (target_id, waiter_id, thread_id, mail_id)
+    SELECT agent_id, json_extract(data, '$.waiter'), COALESCE(json_extract(data, '$.thread'), ''),
+      CASE WHEN json_extract(data, '$.mail') LIKE 'declare:%' AND COALESCE(json_extract(data, '$.thread'), '') <> '' THEN 'declare:' ELSE json_extract(data, '$.mail') END
+    FROM events WHERE type = 'wait:nudged' AND json_extract(data, '$.waiter') IS NOT NULL AND json_extract(data, '$.mail') IS NOT NULL
+      AND NOT (COALESCE(json_extract(data, '$.thread'), '') <> '' AND json_extract(data, '$.mail') = 'declare:')`);
   // The ITSA a mail is about (S-91): named by the sender (`send_mail` `itsa`), or the ITSA of
   // the thread it is in. Separate from itsa_id, which makes a reply a comment on the ITSA.
   try {
@@ -827,6 +864,15 @@ export function open(): DatabaseSync {
   // A ring member's PR verdict (S-1824): approve or request_changes, null outside a PR review.
   try {
     db.exec('ALTER TABLE ring_submissions ADD COLUMN verdict TEXT');
+  } catch {}
+  // S-3015: when a participant left an ITSA (a reviewer after its approve, or archived). The row stays, so the
+  // spend and reviewer counts that read it keep their attribution; only the members (participants()) skip it.
+  try {
+    db.exec('ALTER TABLE itsa_participants ADD COLUMN left_at TEXT');
+  } catch {}
+  // S-3015: the agent's type, kept with the pending unown so a home reached after the agent is gone still knows it.
+  try {
+    db.exec('ALTER TABLE itsa_pending_unown ADD COLUMN type TEXT');
   } catch {}
   // The decision model's verdict on a mail to the human (src/mail-check.ts): JSON, null
   // until a check has run. Added after the first release, so older mails stay null.
@@ -868,6 +914,11 @@ export function open(): DatabaseSync {
   try {
     db.exec('ALTER TABLE mail ADD COLUMN superseded_by TEXT');
   } catch {}
+  // The agents a sender's copy was sent to (S-2663): JSON, with 'all' for mail to everyone. Null for a copy stored
+  // before this column, and for every mail that is not a copy.
+  try {
+    db.exec('ALTER TABLE mail ADD COLUMN copy_to TEXT');
+  } catch {}
   // A system note for the recipient (S-1462): read_mail shows it after the body; the sender's own copy shows only that it exists.
   try {
     db.exec('ALTER TABLE mail ADD COLUMN note TEXT');
@@ -887,6 +938,10 @@ export function open(): DatabaseSync {
   // An ITSA's place in its board column, set by dragging; unranked ones sort by creation.
   try {
     db.exec('ALTER TABLE itsas ADD COLUMN rank REAL');
+  } catch {}
+  // The incident mark (S-2406): 1 while the chief of staff or the human marks the ITSA; closing clears it.
+  try {
+    db.exec('ALTER TABLE itsas ADD COLUMN incident INTEGER NOT NULL DEFAULT 0');
   } catch {}
   // A request stam made for a harness dialog on the agent's screen (permissions.ts,
   // dialogShown): its answer is typed into the dialog.
@@ -1110,6 +1165,29 @@ export function transaction<T>(fn: () => T): T {
   }
 }
 
+// When each window of an account last cleared (rules.ts flapHold). Written in the same
+// transaction as the blocker change it records, so the two never disagree.
+export function recordWindowClears(account: string, names: string[], at: number): void {
+  const ins = open().prepare('INSERT OR REPLACE INTO window_clears (account, window, at) VALUES (?, ?, ?)');
+  for (const name of names) ins.run(account, name, at);
+}
+export function windowClearAt(account: string, name: string): number | null {
+  const row = open().prepare('SELECT at FROM window_clears WHERE account = ? AND window = ?').get(account, name) as { at: number } | undefined;
+  return row?.at ?? null;
+}
+export function clearWindowClears(): void {
+  open().prepare('DELETE FROM window_clears').run();
+}
+
+// The oldest active agent, as listAgents().find would give it, without reading every row (stamSender runs
+// per cost notice, so a fleet-wide pause read the archived rows once per agent, S-2369).
+export function firstActiveAgent(): Agent | undefined {
+  return open().prepare("SELECT * FROM agents WHERE lifecycle = 'active' ORDER BY created_at LIMIT 1").get() as Agent | undefined;
+}
+export function firstAgent(): Agent | undefined {
+  return open().prepare('SELECT * FROM agents ORDER BY created_at LIMIT 1').get() as Agent | undefined;
+}
+
 export function listAgents(): Agent[] {
   return open().prepare('SELECT * FROM agents ORDER BY created_at').all() as unknown as Agent[];
 }
@@ -1276,11 +1354,15 @@ export function eventTimes(agentId: string, type: string, since: string): string
   return rows.map((r) => r.ts);
 }
 
-export function listEvents(agentId: string, limit = 50): { id: number; ts: string; type: string; data: string | null }[] {
-  return open()
-    .prepare('SELECT id, ts, type, data FROM events WHERE agent_id = ? ORDER BY id DESC LIMIT ?')
-    .all(agentId, limit)
-    .reverse() as unknown as { id: number; ts: string; type: string; data: string | null }[];
+// The agent's latest `limit` events, oldest first. With `type` (a GLOB such as `input:*`) it is the latest `limit`
+// events of that type, however old: a debugger reads input:screen events past the default 50 (S-2451). Events are
+// never pruned, so those stay readable for as long as the agent exists.
+export function listEvents(agentId: string, limit = 50, type?: string): { id: number; ts: string; type: string; data: string | null }[] {
+  const cols = 'SELECT id, ts, type, data FROM events WHERE agent_id = ?';
+  const rows = type
+    ? open().prepare(`${cols} AND type GLOB ? ORDER BY id DESC LIMIT ?`).all(agentId, type, limit)
+    : open().prepare(`${cols} ORDER BY id DESC LIMIT ?`).all(agentId, limit);
+  return rows.reverse() as unknown as { id: number; ts: string; type: string; data: string | null }[];
 }
 
 export interface Mail {
@@ -1566,14 +1648,14 @@ export function newMailId(): string {
 }
 
 export function createMail(
-  m: { id: string; from_id: string; from_name: string; subject: string; body: string; thread_id: string; reply_to: string | null; permission_id?: string | null; auto_threaded?: boolean; notice?: boolean; itsa_id?: string | null; kind?: string | null; health?: string | null; about_itsa?: string | null; verdict?: MailVerdict | null; override?: string | null; note?: string | null },
+  m: { id: string; from_id: string; from_name: string; subject: string; body: string; thread_id: string; reply_to: string | null; permission_id?: string | null; auto_threaded?: boolean; notice?: boolean; itsa_id?: string | null; kind?: string | null; health?: string | null; about_itsa?: string | null; verdict?: MailVerdict | null; override?: string | null; note?: string | null; copy_to?: string[] | null },
   to: string[],
   // Recipients whose copy doesn't interrupt a working agent.
   quiet: string[] = [],
 ): void {
   const d = open();
-  d.prepare('INSERT INTO mail (id, from_id, from_name, subject, body, created_at, thread_id, reply_to, permission_id, auto_threaded, notice, itsa_id, kind, health, about_itsa, verdict, override, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-    m.id, m.from_id, m.from_name, m.subject, m.body, now(), m.thread_id, m.reply_to, m.permission_id ?? null, m.auto_threaded ? 1 : 0, m.notice ? 1 : 0, m.itsa_id ?? null, m.kind ?? null, m.health ?? null, m.about_itsa ?? m.itsa_id ?? null, m.verdict ? JSON.stringify(m.verdict) : null, m.override ?? null, m.note ?? null,
+  d.prepare('INSERT INTO mail (id, from_id, from_name, subject, body, created_at, thread_id, reply_to, permission_id, auto_threaded, notice, itsa_id, kind, health, about_itsa, verdict, override, note, copy_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    m.id, m.from_id, m.from_name, m.subject, m.body, now(), m.thread_id, m.reply_to, m.permission_id ?? null, m.auto_threaded ? 1 : 0, m.notice ? 1 : 0, m.itsa_id ?? null, m.kind ?? null, m.health ?? null, m.about_itsa ?? m.itsa_id ?? null, m.verdict ? JSON.stringify(m.verdict) : null, m.override ?? null, m.note ?? null, m.copy_to ? JSON.stringify(m.copy_to) : null,
   );
   const ins = d.prepare('INSERT OR IGNORE INTO mail_recipients (mail_id, agent_id, quiet) VALUES (?, ?, ?)');
   for (const a of to) ins.run(m.id, a, quiet.includes(a) ? 1 : 0);
@@ -1731,6 +1813,37 @@ export function mailThreadIds(ids: string[]): Map<string, string> {
     for (const r of rows) if (r.thread_id) out.set(r.id, r.thread_id);
   }
   return out;
+}
+
+// The newest mail `from` sent to `to`, in `thread` when given, else in any thread: its id and row order (rowid
+// grows with each stored mail), or undefined. A mail counts when it has a recipient row for `to`; with `copies`, a
+// sender's copy counts too (a mail to a peer's agent is stored here with no recipient rows, S-241). Waits use it to
+// tell an unanswered ask (S-2574).
+// With `copies`, a mail counts for `to` when copy_to lists `to` (or 'all'), whether or not it has recipient rows, so a
+// remote recipient of a mixed send is asked too (S-2663). A copy stored before copy_to existed has no list, and counts
+// for anyone when it has no recipient rows, as it always did.
+export function latestMailBetween(from: string, to: string, thread: string | null, copies: boolean): { id: string; seq: number } | undefined {
+  return open().prepare(`SELECT m.id, m.rowid AS seq FROM mail m
+    WHERE m.from_id = ? AND (? IS NULL OR m.thread_id = ?)
+      AND (EXISTS (SELECT 1 FROM mail_recipients r WHERE r.mail_id = m.id AND r.agent_id = ?)
+        OR (? = 1 AND (
+          (m.copy_to IS NULL AND NOT EXISTS (SELECT 1 FROM mail_recipients r WHERE r.mail_id = m.id))
+          OR EXISTS (SELECT 1 FROM json_each(m.copy_to) WHERE value IN (?, 'all')))))
+    ORDER BY m.rowid DESC LIMIT 1`).get(from, thread, thread, to, copies ? 1 : 0, to) as { id: string; seq: number } | undefined;
+}
+
+// Records the agents a sender's copy was sent to, adding to any already recorded (S-2663).
+export function addCopyRecipients(id: string, to: string[]): void {
+  const d = open();
+  const row = d.prepare('SELECT copy_to FROM mail WHERE id = ?').get(id) as { copy_to: string | null } | undefined;
+  const have: string[] = row?.copy_to ? JSON.parse(row.copy_to) : [];
+  d.prepare('UPDATE mail SET copy_to = ? WHERE id = ?').run(JSON.stringify([...new Set([...have, ...to])]), id);
+}
+
+// Claims the nudge for a key: true when this call is the first to claim it, false when it was already sent (S-2663).
+// The primary key is the check, so no read of the events can miss an old key.
+export function claimNudge(target: string, waiter: string, thread: string, mail: string): boolean {
+  return open().prepare('INSERT OR IGNORE INTO wait_nudges (target_id, waiter_id, thread_id, mail_id) VALUES (?, ?, ?, ?)').run(target, waiter, thread, mail).changes === 1;
 }
 
 // Every agent's parents, as parentsOf gives them, in one pass over the parent links (GET /api/agents).
@@ -2122,6 +2235,15 @@ export function markRead(agentId: string, ids: string[]): number {
   return marked.length;
 }
 
+// The inverse of markRead (S-2246): the agent's copies of these mail go unread again. Returns the ids that were read.
+export function markUnread(agentId: string, ids: string[]): string[] {
+  if (!ids.length) return [];
+  const up = open().prepare('UPDATE mail_recipients SET read_at = NULL WHERE mail_id = ? AND agent_id = ? AND read_at IS NOT NULL');
+  const marked = ids.filter((id) => Number(up.run(id, agentId).changes) > 0);
+  if (marked.length) mailChanged([agentId]);
+  return marked;
+}
+
 // The client got the reply to `batch`: every mail in it is retired, whichever later batch handed it out
 // again, so a mail never stays owed once one reply carrying it arrived.
 export function ackDelivered(agentId: string, batch: string): void {
@@ -2407,6 +2529,16 @@ export function setWatchState(subject: string, state: unknown, etags: unknown): 
   open()
     .prepare('INSERT INTO watch_state (subject, state, etags, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(subject) DO UPDATE SET state = excluded.state, etags = excluded.etags, updated_at = excluded.updated_at')
     .run(subject, JSON.stringify(state), JSON.stringify(etags ?? {}), now());
+}
+
+// The subjects with a watch_state row that start with `prefix`.
+export function watchStateSubjects(prefix: string): string[] {
+  return (open().prepare('SELECT subject FROM watch_state WHERE substr(subject, 1, ?) = ?').all(prefix.length, prefix) as { subject: string }[]).map((r) => r.subject);
+}
+
+// Forgets a subject's row and the rows under it (`subject/...`), such as a Linear team's per-issue snapshots.
+export function deleteWatchStateTree(subject: string): void {
+  open().prepare('DELETE FROM watch_state WHERE subject = ? OR substr(subject, 1, ?) = ?').run(subject, subject.length + 1, `${subject}/`);
 }
 
 // The human's per-agent default view (agent_views above); no row means the global default.
@@ -2804,8 +2936,16 @@ export function busyIds(): string[] {
   return rows.map((r) => r.id);
 }
 
-export function hasPendingPermission(agentId: string): boolean {
-  return !!open().prepare("SELECT 1 FROM permission_requests WHERE agent_id = ? AND status = 'pending'").get(agentId);
+// With `since` (an ISO time), only requests created after it count: an older one is stale (S-2885).
+export function hasPendingPermission(agentId: string, since?: string): boolean {
+  return since
+    ? !!open().prepare("SELECT 1 FROM permission_requests WHERE agent_id = ? AND status = 'pending' AND created_at > ?").get(agentId, since)
+    : !!open().prepare("SELECT 1 FROM permission_requests WHERE agent_id = ? AND status = 'pending'").get(agentId);
+}
+
+// The agent's pending requests created at or before `before` (S-2885): stale, never to be answered.
+export function stalePendingPermissions(agentId: string, before: string): PermissionRequest[] {
+  return open().prepare("SELECT * FROM permission_requests WHERE agent_id = ? AND status = 'pending' AND created_at <= ?").all(agentId, before) as unknown as PermissionRequest[];
 }
 
 // The agent's pending request for a harness dialog, if one is open.
@@ -2857,12 +2997,18 @@ export function permissionMailRecipients(requestId: string): string[] {
 // Clears what waits on someone for this request: the agent's stam wait, whichever audience it was
 // waiting on, and the agent's own wait_for human tied to it (S-609, waits.ts). Its decision mails
 // about the request go too: the ones that name it, or sit in its thread. A request and the asks an
-// agent adds about it are one item, so they settle together.
+// agent adds about it are one item, so they settle together. `requestId` may also name an ITSA whose
+// human status an agent waits on (S-3080): its wait_for on the human is tied to that ITSA.
 export function clearRequestWaits(agentId: string, requestId: string): void {
   const n = open().prepare("DELETE FROM waits WHERE agent_id = ? AND ((source = 'stam' AND (target = ? OR data = ?)) OR (kind = 'human' AND target = ?))").run(agentId, requestId, requestId, requestId).changes;
   if (n) syncWaits(agentId);
   clearRequestDecisionMails(agentId, requestId);
   for (const fn of settledObservers) fn(requestId);
+}
+
+// The agents whose wait on the human is tied to `target` (a request, or an ITSA it waits on; S-3080).
+export function humanWaitersOf(target: string): string[] {
+  return (open().prepare("SELECT DISTINCT agent_id FROM waits WHERE kind = 'human' AND target = ?").all(target) as { agent_id: string }[]).map((r) => r.agent_id);
 }
 
 // Observers of a request settling, or leaving its first audience (S-637's auto-archive pass).

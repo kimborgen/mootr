@@ -37,8 +37,8 @@ python3 - "$GITHUB" <<'PY'
 import json, sys, urllib.request
 url = sys.argv[1]
 data = {
-  "issues": {"o/r#1": {"number": 1, "title": "PR one", "state": "open", "html_url": "https://github.com/o/r/pull/1", "user": {"login": "kim"}, "pull_request": {"url": "x"}}},
-  "pulls": {"o/r#1": {"number": 1, "title": "PR one", "state": "open", "merged": False, "draft": False, "html_url": "https://github.com/o/r/pull/1", "user": {"login": "kim"}, "head": {"sha": "sha1", "ref": "feature"}, "base": {"ref": "main"}}},
+  "issues": {"o/r#1": {"number": 1, "title": "PR one", "state": "open", "html_url": "https://github.com/o/r/pull/1", "user": {"login": "octocat"}, "pull_request": {"url": "x"}}},
+  "pulls": {"o/r#1": {"number": 1, "title": "PR one", "state": "open", "merged": False, "draft": False, "html_url": "https://github.com/o/r/pull/1", "user": {"login": "octocat"}, "head": {"sha": "sha1", "ref": "feature"}, "base": {"ref": "main"}}},
   "checkRuns": {"o/r@sha1": [{"name": "build", "status": "in_progress", "conclusion": None}]},
   "statuses": {"o/r@sha1": {"state": "pending", "statuses": []}},
   "reviews": {"o/r#1": []},

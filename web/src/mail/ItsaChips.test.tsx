@@ -27,6 +27,7 @@ beforeEach(() => {
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
+  phoneOn(false)
   doneFocus()
 })
 afterEach(() => {
@@ -36,13 +37,16 @@ afterEach(() => {
 })
 
 const render = async (mails: Mail[]) => { await act(async () => { root.render(<ThreadPanel className="thread-scroll" mails={mails} threadKey="t1" />) }) }
+// The phone layout keeps the header's ITSA row and "+N" scrolls to it; a desktop's tab carries the ITSAs instead.
+const phoneOn = (on: boolean) => { window.matchMedia = ((q: string) => ({ matches: on, media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia }
 
 const L1 = { id: 'i1', key: 'S-1', title: 'First', status: 'in_progress', source: 'named' as const }
 const L2 = { id: 'i2', key: 'S-2', title: 'Second', status: 'done', source: 'thread' as const }
 const L3 = { id: 'i3', key: 'S-3', title: 'Third', status: 'todo', source: 'itsa' as const }
 
 describe('linked ITSA chips', () => {
-  it('lists each linked ITSA once in the header, and on a message only those it names, inline on the sender line', async () => {
+  it('lists each linked ITSA once in the phone header, and on a message only those it names, inline on the sender line', async () => {
+    phoneOn(true)
     await render([mail('m1', { itsas: [L1, L2] }), mail('m2', { itsas: [L3] }), mail('m3')])
     const head = [...host.querySelectorAll('.th-itsas [data-about-itsa]')].map((b) => b.textContent)
     expect(head).toEqual(['S-1First', 'S-2Second', 'S-3Third'])
@@ -60,25 +64,57 @@ describe('linked ITSA chips', () => {
     } finally { setData({ itsas: [] }) }
   })
 
-  it('shows at most two keys on a message and folds the rest into +N, which brings the header chips into view', async () => {
+  it('shows at most two keys on a message; on a desktop its "+N" opens them all in place, and "Fewer" folds them again', async () => {
     const L4 = { id: 'i4', key: 'S-4', title: 'Fourth', status: 'todo', source: 'named' as const }
     const L5 = { id: 'i5', key: 'S-5', title: 'Fifth', status: 'todo', source: 'named' as const }
     const scrolled: Element[] = []
     Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this) }
     await render([mail('m1', { itsas: [L1, L3, L4, L5] }), mail('m2')])
-    const keys = [...host.querySelectorAll('.msg header .msg-itsas .ichip-mail')].map((b) => b.textContent)
-    expect(keys).toEqual(['S-1', 'S-3', '+2'])
+    const keys = () => [...host.querySelectorAll('.msg header .msg-itsas .ichip-mail')].map((b) => b.textContent)
+    expect(keys()).toEqual(['S-1', 'S-3', '+2'])
+    expect(host.querySelector('[data-more-itsas]')?.getAttribute('title')).toBe('Show all 4 ITSAs')
+    act(() => { (host.querySelector('[data-more-itsas]') as HTMLElement).click() })
+    expect(keys()).toEqual(['S-1', 'S-3', 'S-4', 'S-5', 'Fewer'])
+    act(() => { (host.querySelector('[data-fewer-itsas]') as HTMLElement).click() })
+    expect(keys()).toEqual(['S-1', 'S-3', '+2'])
+    expect(scrolled).toEqual([])
+  })
+
+  it('on a phone, "+N" brings the header chips into view instead', async () => {
+    phoneOn(true)
+    const L4 = { id: 'i4', key: 'S-4', title: 'Fourth', status: 'todo', source: 'named' as const }
+    const L5 = { id: 'i5', key: 'S-5', title: 'Fifth', status: 'todo', source: 'named' as const }
+    const scrolled: Element[] = []
+    Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this) }
+    await render([mail('m1', { itsas: [L1, L3, L4, L5] }), mail('m2')])
+    expect(host.querySelector('[data-more-itsas]')?.getAttribute('title')).toContain('show them in the thread header')
     act(() => { (host.querySelector('[data-more-itsas]') as HTMLElement).click() })
     expect(scrolled.map((e) => e.className)).toEqual(['th-itsas'])
+    expect(host.querySelector('[data-fewer-itsas]')).toBeNull()
   })
 
   it('shows no per-message chip when the thread links a single ITSA', async () => {
+    phoneOn(true)
     await render([mail('m1', { itsas: [L1] }), mail('m2', { itsas: [L1] })])
     expect(host.querySelectorAll('.th-itsas [data-about-itsa]').length).toBe(1)
     expect(host.querySelector('.msg-itsas')).toBeNull()
   })
 
+  it('leaves the header row to the tab on a desktop', async () => {
+    await act(async () => { root.render(<ThreadPanel className="thread-scroll" mails={[mail('m1', { itsas: [L1, L2] }), mail('m2', { itsas: [L3] })]} threadKey="t1" tabChips />) })
+    expect(host.querySelector('.th-itsas')).toBeNull()
+    expect(host.querySelector('.th-agents')).toBeNull()
+  })
+
+  it('keeps the header rows on a desktop with no tab, as an agent\'s inbox has', async () => {
+    setData({ agents: [{ id: 'a7', name: 'Ada' } as never] })
+    await render([mail('m1', { itsas: [L1, L2], agents: ['a7'] }), mail('m2', { itsas: [L3] })])
+    expect(host.querySelector('.th-itsas')).not.toBeNull()
+    expect(host.querySelector('.th-agents [data-open-agent="a7"]')).not.toBeNull()
+  })
+
   it('shows no chip row for a thread with no links', async () => {
+    phoneOn(true)
     await render([mail('m1')])
     expect(host.querySelector('.th-itsas')).toBeNull()
     expect(host.querySelector('.msg-itsas')).toBeNull()

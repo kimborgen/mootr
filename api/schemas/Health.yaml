@@ -1,0 +1,42 @@
+type: object
+additionalProperties: false
+required: [ok, machine, release, stalls, memory]
+properties:
+  ok:
+    type: boolean
+    enum: [true]
+  machine:
+    type: string
+  release:
+    type: string
+    nullable: true
+    description: The release sha the daemon runs; null when it does not run from a release (a test daemon).
+  stalls:
+    type: array
+    description: The last event-loop stalls (src/stall.ts).
+    items:
+      type: object
+      additionalProperties: false
+      required: [at, ms, label]
+      properties:
+        at:
+          type: string
+          format: date-time
+        ms:
+          type: integer
+        label:
+          type: string
+  memory:
+    type: object
+    additionalProperties: false
+    description: The daemon's process.memoryUsage(), in bytes.
+    required: [heapUsed, heapTotal, rss, external]
+    properties:
+      heapUsed:
+        type: integer
+      heapTotal:
+        type: integer
+      rss:
+        type: integer
+      external:
+        type: integer

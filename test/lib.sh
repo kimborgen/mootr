@@ -24,15 +24,19 @@
 # Before exiting, each daemon prints a line "spend NAME: $X" with its agents' cost today.
 # Harness logins stay the user's own (~/.claude, ~/.codex); only stam's state is private.
 # STAM_TEST_ROOT overrides the repo root, for a script sourcing this from elsewhere.
+# STAM_DAEMON=go runs the Go daemon (S-2194) instead of the TypeScript one: daemon_up starts go/bin/stamd
+# (built by go/build.sh when missing) and $STAM is go/bin/stam. Everything else here is unchanged. Go builds
+# run on storage only, so scripts/go-parity.mjs and the go-e2e gate set it there.
 
 ROOT="${STAM_TEST_ROOT:-$(dirname "$(readlink -f "$0")")/..}"
 STAM="$ROOT/bin/stam"
+[ "$STAM_DAEMON" = go ] && STAM="$ROOT/go/bin/stam"
 LIVE_HOME="$HOME/.local/share/stam"
 
 # Who runs the test, read before the environment is cleaned below: a stam agent's id, or
 # "user". It goes into the folder and tmux socket names and an owner file, so agents
 # running tests side by side can tell their folders apart and never clean up another's.
-STAM_TEST_OWNER=$(printf '%s' "${STAM_AGENT_ID:-user}" | tr -c 'A-Za-z0-9-' '_' | cut -c1-12)
+STAM_TEST_OWNER=$(printf '%s' "${MOOTR_AGENT_ID:-${STAM_AGENT_ID:-user}}" | tr -c 'A-Za-z0-9-' '_' | cut -c1-12)
 
 # A test may run inside a stam agent or a Claude Code session: drop everything that
 # points at the live daemon or the parent session, so neither the CLI, the test daemon,
@@ -40,6 +44,9 @@ STAM_TEST_OWNER=$(printf '%s' "${STAM_AGENT_ID:-user}" | tr -c 'A-Za-z0-9-' '_' 
 unset STAM_AGENT_ID STAM_AGENT_NAME STAM_URL STAM_TOKEN STAM_USER_STATUSLINE STAM_HOME STAM_PORT \
   STAM_TMUX_SOCKET STAM_MACHINE STAM_BIND STAM_OPENCODE_PORT STAM_AGENTS_SKILLS STAM_CLAUDE_BIN STAM_CODEX_BIN STAM_FAKE_CLAUDE_SCRIPT TMUX TMUX_PANE CLAUDECODE CLAUDE_PID CLAUDE_EFFORT \
   OPENROUTER_API_KEY
+# The MOOTR_ names a stam agent's environment carries (S-2889) would win over the STAM_ overrides above and below, so no
+# test inherits one: every test runs its CLI and daemons on STAM_ names only.
+for v in $(env | sed -n 's/^\(MOOTR_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
 # Search by meaning uses the scripted stub embedder in every test daemon (S-141): no model.
 export STAM_EMBEDDER=stub
 # Enables the test-only cost routes of POST /api/test/cost (src/daemon.ts); only this file sets it.
@@ -50,6 +57,9 @@ export STAM_AUTO_ARCHIVE_FULL_DELAY_MS="${STAM_AUTO_ARCHIVE_FULL_DELAY_MS:-21474
 # No test daemon rests an agent for a long wait or idle (S-1982) unless its test opts in, as
 # test/rest.test.mjs does; standing agents keep their own rest rule (STAM_STANDING_IDLE_HOURS).
 export STAM_REST_ENABLED="${STAM_REST_ENABLED:-0}"
+# No test daemon starts the assistant at boot (S-2144) unless its test sets this to 1, as
+# test/e2e-assistant-autostart.sh does; the daemon reads it in a test home only.
+export STAM_ASSISTANT_AUTOSTART="${STAM_ASSISTANT_AUTOSTART:-0}"
 # Claude Code agents run the fake (test/fake-claude) unless this run is a smoke test: run.sh sets
 # STAM_TEST_SMOKE for those. It's set here, not per test, so a daemon started before fake_claude
 # still spawns the fake, never the real claude (S-176).
@@ -146,6 +156,26 @@ on() {
   (use "$_d" && "$@")
 }
 
+# go_daemon_up NAME: starts go/bin/stamd in NAME's environment and waits until /api/health names it. The pid
+# file is what cleanup and daemon_stop use, as for the TypeScript daemon.
+go_daemon_up() {
+  { [ -x "$ROOT/go/bin/stamd" ] && [ -x "$ROOT/go/bin/stam" ]; } || sh "$ROOT/go/build.sh" >&2 || { echo "FAIL: go/build.sh failed"; exit 1; }
+  (
+    use "$1"
+    # The Go daemon opens an existing stam.db and doesn't create the schema: make it with the TS schema first (S-2297).
+    node --no-warnings "$ROOT/test/go-seed-db.mjs" || { echo "FAIL: go-seed-db.mjs didn't create the db"; exit 1; }
+    setsid "$ROOT/go/bin/stamd" </dev/null >"$STAM_HOME/daemon.log" 2>&1 &
+    echo $! >"$STAM_HOME/daemon.pid"
+  )
+  for _i in $(seq 1 50); do
+    # /api/health needs a token, as on the TS daemon.
+    curl -s -m 2 -H "authorization: Bearer $(cat "$TEST_TMP/$1/token")" "$(on "$1" sh -c 'echo "$STAM_URL"')/api/health" 2>/dev/null | grep -q "\"$1\"" && return 0
+    sleep 0.2
+  done
+  echo "FAIL: go daemon $1 not answering as itself; see $TEST_TMP/$1/daemon.log"
+  exit 1
+}
+
 daemon_up() {
   # Refuse to start a test daemon that would run the real claude: only a smoke test may (S-176).
   if [ -z "$STAM_TEST_SMOKE" ] && [ "$STAM_CLAUDE_BIN" != "$ROOT/test/fake-claude/claude" ]; then
@@ -158,6 +188,7 @@ daemon_up() {
     exit 1
   fi
   python3 "$ROOT/test/wire-peer-tokens.py" "$TEST_TMP" "$1" || true
+  if [ "$STAM_DAEMON" = go ]; then go_daemon_up "$1"; return; fi
   on "$1" "$STAM" daemon start >/dev/null || { echo "FAIL: daemon $1 didn't start; see $TEST_TMP/$1/daemon.log"; exit 1; }
   # A daemon starting its adapters can be slow to answer while other tests load the machine.
   for _i in 1 2 3 4 5 6 7 8 9 10; do
@@ -219,7 +250,12 @@ as_agent() {
 # daemon_stop NAME: stops it and waits until its port no longer answers, so a restart doesn't race
 # the old process still holding the port.
 daemon_stop() {
-  on "$1" "$STAM" daemon stop >/dev/null
+  if [ "$STAM_DAEMON" = go ]; then
+    _gp=$(cat "$TEST_TMP/$1/daemon.pid" 2>/dev/null)
+    case "$_gp" in '' | *[!0-9]*) ;; *) kill -s TERM "$_gp" 2>/dev/null ;; esac
+  else
+    on "$1" "$STAM" daemon stop >/dev/null
+  fi
   _url=$(on "$1" sh -c 'echo "$STAM_URL"')
   _down() { ! curl -s -m 2 -o /dev/null "$_url/"; }
   wait_until _down || { echo "FAIL: daemon $1 still answers after stop"; exit 1; }

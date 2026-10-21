@@ -3,7 +3,7 @@
 // Throwaway HOME, no daemon: `node --test test/review-dir-cleanup.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, existsSync, symlinkSync, chmodSync, readlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, symlinkSync, chmodSync, readlinkSync, statSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { tempDir } from './tmphome.mjs';
@@ -42,6 +42,14 @@ test('no review dir is a no-op; a symlink is refused and its target kept', async
   symlinkSync(target, join(root, 'rev-link'));
   assert.match(await pt.removeReviewDir({ id: 'a3', name: 'rev-link' }, [], root), /refused/);
   assert.equal(existsSync(join(target, 'node_modules')), true);
+});
+
+test('a reviewer launch makes its clone folder when it is missing (S-2165), and makes nothing for a refused name', () => {
+  assert.equal(existsSync(join(root, 'rev-new')), false);
+  assert.equal(pt.reviewDirForLaunch('rev-new'), join(root, 'rev-new'));
+  assert.equal(statSync(join(root, 'rev-new')).isDirectory(), true);
+  assert.equal(pt.reviewDirForLaunch('../escape'), null);
+  assert.equal(existsSync(join(home, '.cache', 'escape')), false);
 });
 
 test('a read-only subdir is reported, not thrown; a live agent inside keeps the dir; a test home skips the real root', async () => {

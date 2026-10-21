@@ -3,6 +3,7 @@
 // of polling. Each write site calls `emitEvent` once; `agent.changed` is coalesced.
 // This module imports nothing from stam's own modules, so a write site (db.ts, mail.ts,
 // itsa.ts, usage.ts) can import it without a cycle.
+import { scrubAgents } from './agent-public.ts';
 import type { ServerResponse } from 'node:http';
 
 const streams = new Set<ServerResponse>();
@@ -43,7 +44,7 @@ export function addEventStream(res: ServerResponse): void {
 // is the common case in a daemon with no web UI open, so it returns before serialising.
 export function emitEvent(type: string, data: unknown): void {
   if (!streams.size) return;
-  const payload = `event: ${type}\ndata: ${JSON.stringify(data ?? {})}\n\n`;
+  const payload = `event: ${type}\ndata: ${JSON.stringify(scrubAgents(data ?? {}))}\n\n`;
   for (const res of streams) send(res, payload);
 }
 

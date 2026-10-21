@@ -31,9 +31,16 @@ for me, others, home in (("union", [], "union"), ("ma", ["mb"], "ma"), ("mb", ["
     s["itsa"] = {"home": home}
     json.dump(s, open(f"{tmp}/{me}/settings.json", "w"), indent=2)
 PY
-on union node "$ROOT/test/activity-peers-seed.mjs" all >/dev/null
-ITSAS=1 on ma node "$ROOT/test/activity-peers-seed.mjs" even >/dev/null
-on mb node "$ROOT/test/activity-peers-seed.mjs" odd >/dev/null
+# The realistic-scale fixture (S-1079, test/activity-fixture.mjs: 120 agents, 3 days), written as each daemon's startup
+# seed (test-seed.json): the union holds all of it, ma the even agents with the ITSAs, mb the odd agents and no ITSAs.
+ROOT="$ROOT" TEST_TMP="$TEST_TMP" node --input-type=module -e '
+const { generateScale, splitScale, seedFile } = await import(process.env.ROOT + "/test/activity-fixture.mjs");
+const { writeFileSync } = await import("node:fs");
+const f = generateScale({ agents: 120, days: 3, now: Date.now() });
+for (const [home, part, itsas] of [["union", "all", true], ["ma", "even", true], ["mb", "odd", false]]) {
+  const { rows } = splitScale(f, part, { itsas });
+  writeFileSync(`${process.env.TEST_TMP}/${home}/test-seed.json`, JSON.stringify(seedFile(rows)));
+}'
 daemon_up union
 daemon_up ma
 daemon_up mb
@@ -130,17 +137,19 @@ as_same() {
 }
 status_of() { get "$1" "$2" "$3" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("error","ok")[:60])'; }
 # An odd agent (on mb) whose parent is even (on ma): the child reads its ancestor's tree, the parent its own.
-python3 - "$TEST_TMP/union/stam.db" >"$TEST_TMP/pair.txt" <<'PY'
-import sqlite3, sys
-d = sqlite3.connect(sys.argv[1])
-ids = [r[0] for r in d.execute("select id from agents order by id")]
+# The union daemon's agents, read through its API.
+get union /api/agents >"$TEST_TMP/union-agents.json"
+python3 - "$TEST_TMP/union-agents.json" >"$TEST_TMP/pair.txt" <<'PY'
+import json, sys
+agents = sorted(json.load(open(sys.argv[1])), key=lambda a: a["id"])
+ids = [a["id"] for a in agents]
 odd, even = set(ids[1::2]), set(ids[0::2])
-for a, p in d.execute("select id, parent_id from agents where parent_id is not null order by id"):
-    if a in odd and p in even:
-        print(a, p); break
-for (a,) in d.execute("select id from agents where harness='opencode' order by id"):
-    if a in odd:
-        print(a); break
+for a in agents:
+    if a.get("parent_id") and a["id"] in odd and a["parent_id"] in even:
+        print(a["id"], a["parent_id"]); break
+for a in agents:
+    if a["harness"] == "opencode" and a["id"] in odd:
+        print(a["id"]); break
 PY
 read CHILD PARENT <"$TEST_TMP/pair.txt"
 OC=$(sed -n 2p "$TEST_TMP/pair.txt")
@@ -152,22 +161,25 @@ as_same "$PARENT" ma "tree:$PARENT"
 as_same "$OC" mb "tree:$OC" oc-token "$OC"
 [ "$(get ma "/api/activity?by=summary&days=3&scope=tree:$PARENT" "tok-$PARENT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["agents"])')" -gt 1 ] || fail "$PARENT sees only itself in its own tree"
 # An ITSA, its worker (odd, so on mb, which has no ITSAs) and an unrelated developer.
-python3 - "$TEST_TMP/union/stam.db" >"$TEST_TMP/members.txt" <<'PY'
-import sqlite3, sys
-d = sqlite3.connect(sys.argv[1])
-ids = [r[0] for r in d.execute("select id from agents order by id")]
+python3 - "$TEST_TMP/union-agents.json" "$(on union sh -c 'echo "$STAM_URL"')" "$(cat "$TEST_TMP/union/token")" >"$TEST_TMP/members.txt" <<'PY'
+import json, sys, urllib.request
+agents = sorted(json.load(open(sys.argv[1])), key=lambda a: a["id"])
+url, token = sys.argv[2:4]
+def api(path):
+    return json.load(urllib.request.urlopen(urllib.request.Request(url + path, headers={"authorization": "Bearer " + token}), timeout=60))
+ids = [a["id"] for a in agents]
 odd = set(ids[1::2])
-for key, owner, created_by, parent, iid in d.execute("select key, owner, created_by, parent_id, id from itsas where kind='issue' and owner is not null order by key desc"):
-    if owner not in odd: continue
-    related = {owner, created_by} | {r[0] for r in d.execute("select agent_id from itsa_participants where itsa_id=?", (iid,))}
-    p = parent
-    while p:
-        r = d.execute("select owner, parent_id from itsas where id=?", (p,)).fetchone()
-        if not r: break
-        related.add(r[0]); p = r[1]
-    out = [a for a, in d.execute("select id from agents where type='developer' order by id") if a in odd and a not in related]
+developers = [a["id"] for a in agents if a.get("type") == "developer"]
+for i in sorted(api("/api/itsas?kind=issue"), key=lambda i: i["key"], reverse=True):
+    if not i.get("owner") or i["owner"] not in odd: continue
+    v = api("/api/itsas/" + i["key"])
+    related = {i["owner"], i["created_by"]} | set(v["participants"])
+    # The owners of every ancestor ITSA.
+    for c in v["parent_chain"]:
+        related.add(api("/api/itsas/" + c["key"])["owner"])
+    out = [a for a in sorted(developers) if a in odd and a not in related]
     if out:
-        print(key, owner, out[0]); break
+        print(i["key"], i["owner"], out[0]); break
 PY
 read KEY MEMBER OUTSIDER <"$TEST_TMP/members.txt"
 [ -n "$OUTSIDER" ] || fail "the fixture has no ITSA with a worker on mb and an unrelated developer on mb"

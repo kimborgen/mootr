@@ -1,11 +1,12 @@
 import { MainWorld } from './MainWorld'
 import { AGENTS } from '../stories/fixtures'
-import { rapidThreads } from '../stories/mailFixtures'
+import { mail, rapidThreads, STATUSES, T_ARCH, T_PERM, T_PLAIN, T_UNREAD, threadRoutes } from '../stories/mailFixtures'
 import { setRapid } from '../views/rapid'
 import { pane, seedShell } from '../stories/shell'
 import { sse, ds, type Story } from '../stories/types'
 import { ViewPortals } from '../views/registry'
-import type { Agent } from '../types'
+import type { Data } from '../store'
+import type { Agent, Thread } from '../types'
 
 // Main, drawn as the app draws it: inside the centre column, at a pane's height.
 const Main = () => <div id="center" style={{ height: 420 }}><MainWorld /><ViewPortals /></div>
@@ -28,13 +29,27 @@ const empty = world('fx-dev', pane('p0', []))
 const sw = world('fx-dev', pane('p0', ['view:fx-dev']))
 const agentOne = world('fx-dev', pane('p0', ['agent:fx-dev']))
 const none = seedShell({ current: null, worlds: {} })
+// A deferred thread: the same mail as T_ARCH under another id.
+const T_DEFER = { ...T_ARCH, thread_id: 'fx-t-defer' } satisfies Thread
+// A thread whose mail links an ITSA the store doesn't hold, and two agents: its tab's chips come from the link (S-2311).
+const T_CHIPS: Thread = { thread_id: 'fx-t-chips', mails: [mail('fm-chips', 'fx-t-chips', 'fx-dev', ['human', 'fx-review', 'fx-ops'], 'Re: Deploy plan', 'Staging gate is green.', {
+  itsas: [{ id: 'fx-i-chips', key: 'S-2525', title: 'Thread chip fit follow-ups', status: 'in_progress', source: 'itsa' }],
+})] }
+// The Inbox page (`w:inbox`) with a thread in the pane to the list's right.
+const inboxPane = seedShell({ current: 'w:inbox', worlds: { 'w:inbox': { root: { id: 's1', split: 'row', sizes: [1, 1], children: [
+  { id: 'list', tabs: ['inbox'], active: 'inbox' }, { id: 'right', tabs: ['thread:fx-t-plain'], active: 'thread:fx-t-plain' }] }, focused: 'right' } } })
+// A thread alone in main: its tab, the thread's routes beside the layout's.
+const threadTab = (t: Thread, extra: Partial<Data> = {}) => {
+  const s = world('fx-dev', pane('p0', ['thread:' + t.thread_id]))
+  return { ...s, data: { agents: AGENTS, itsaStatuses: STATUSES, ...extra }, routes: { ...s.routes, ...threadRoutes(t) } }
+}
 
 export const stories: Story[] = [{
   name: 'Main world',
   group: 'Tree and shell',
   what: "The current world's layout in the centre of the app. A split holds panes side by side or stacked, with a separator between them; a pane holds a tab strip and its views. Tabs drag between panes, an agent dragged in from the tree opens as a tab, and a drop on a pane's edge splits it that way. An agent's world starts as one pane with its terminal or conversation.",
   when: "Always, in `#w-main`, for whichever world is current: an agent's, a mail thread's, Settings, Usage, an ITSA. Selecting an agent in the tree, or an agent sending you somewhere, changes the world; the layout belongs to the daemon and is shared by every device, while which world each device shows is its own.",
-  code: ['web/src/shell/MainWorld.tsx#MainWorld', 'web/src/shell/MainWorld.tsx#ViewSwitch', 'web/src/shell/Tab.tsx#Tab', 'web/src/shell/Tab.tsx#TabBar'],
+  code: ['web/src/shell/MainWorld.tsx#MainWorld', 'web/src/shell/MainWorld.tsx#ViewSwitch', 'web/src/shell/Tab.tsx#Tab', 'web/src/shell/Tab.tsx#TabBar', 'web/src/views/ThreadView.tsx#ThreadArchive'],
   rules: [
     'The tab strip is `--size-tab-bar` (36 px) high on a desktop and `--size-hit-touch` plus its 1 px border on a phone. A tab (`shell/Tab.tsx`: glyph, title, chips, close, plus an actions slot at the strip\'s end) shows the view\'s icon, a title, a badge in the chips slot, and a close button that appears on hover. An agent\'s terminal, conversation and rapid-fire tabs are titled with its name only; details and instructions keep their suffix. Tabs split the strip evenly down to `--size-tab-min` (120 px, 96 px on a phone), then scroll; the active tab of the focused pane carries `--tab-indicator-focused`. The strip scrolls sideways with the wheel when it overflows.',
     'The strip hides when a world shows one thing (one pane with one tab); "Show tab bar" in the pane menu overrides, and an agent that has both a terminal and a conversation always shows it, for the switch between them (' + ds('Tabs and pane header') + ').',
@@ -45,7 +60,8 @@ export const stories: Story[] = [{
     'A staged image\'s tab (`image:PAGE.N`, S-1475) belongs to the page that opened it: the layout is shared with the human\'s other devices, so a page hides the image tabs it has no images for, in the strip and in a phone\'s strip, and never closes them.',
     'An agent\'s tab carries its waits as badges (`shell/Tab` chips, `waits.tsx#WaitBadges`), one per kind: an icon and a count, or the time left for a timer (`4m`, then `45s`). A tight tab folds them into one combined badge, and a desktop click on it opens the list of waits (a popover). On a desktop a click on a badge opens what it waits on and never selects the tab; on a phone a badge only informs (its tap target would be under 44 px), and the details list holds the links; the waiting bar under the app header is gone. After the badges, the tab carries chips for the ITSAs its agent owns at the top (`waits.tsx#ItsaChips`, S-1452), which give way to the waits and fold into an `N ITSAs` pill; see the Agent tab ITSA chips story. When even one badge does not fit, the active tab\'s thin bar under the strip (`waits.tsx#WaitThinBar`, `--size-tab-bar-thin`) holds them, A view\'s Reconnecting stays in the view.',
     'An agent\'s world always shows its tab bar, even with one tab, because the bar carries the agent\'s waits.',
-    'A tab moves only within its own area: dropping it in another world toasts "Tabs move only within their own area." A drop on an edge previews the new split with `--split-preview-fill`.',
+    'A tab moves only within its own area: dropping it in another world toasts "Tabs move only within their own area." A drop on an edge previews the new split with `--split-preview-fill`. A press on a chip (an ITSA, a wait badge, an agent mark) does not start the tab\'s drag; a press on the name or the glyph does (S-1872).',
+    'A mail thread\'s tab always shows the bar, even alone in main, as an agent\'s does. On a desktop its end holds two icons after a hairline, at `--size-control`: Defer (`alarm-clock`, or `alarm-clock-off` when deferred) and Archive (`archive`, or `archive-restore` when archived). Each tooltip and aria-label names its key (`d`, `e`). Archive is disabled while a permission request or an ITSA ask waits on you, with the reason in its tooltip. A click advances to the next mail, as `d` and `e` do, in the Inbox page and elsewhere. Its tab also carries the thread\'s chips after the title: the wait mark, the ITSAs its mail links to, and the agents in it (`waits.tsx#ThreadChips`, S-2311; see the Mail thread tab chips story).',
   ],
   states: [
     { name: 'No agent selected', data: { agents: AGENTS }, ...none, render: Main },
@@ -56,6 +72,12 @@ export const stories: Story[] = [{
     { name: 'Split side by side', data: { agents: AGENTS }, ...row, render: Main },
     { name: 'Split stacked', data: { agents: AGENTS }, ...col, render: Main },
     { name: 'Empty pane', data: { agents: AGENTS }, ...empty, render: Main },
+    { name: 'Thread tab bar, alone in main', ...threadTab(T_PLAIN, { humanThreads: [T_PLAIN] }), render: Main },
+    { name: 'Thread tab bar, deferred', ...threadTab(T_DEFER, { humanDeferred: [T_DEFER] }), render: Main },
+    { name: 'Thread tab bar, archived', ...threadTab(T_ARCH, { humanArchived: [T_ARCH] }), render: Main },
+    { name: 'Thread tab bar, archive disabled while a permission waits', ...threadTab(T_PERM, { humanThreads: [T_PERM], perms: [T_PERM.mails[0].permission!] }), render: Main },
+    { name: 'Thread tab bar, with its ITSA and agent chips', ...threadTab(T_CHIPS, { humanThreads: [T_CHIPS] }), render: Main },
+    { name: 'Thread tab bar, in the Inbox pane', data: { agents: AGENTS, itsaStatuses: STATUSES, humanThreads: [T_PLAIN, T_UNREAD] }, ...inboxPane, routes: { ...inboxPane.routes, ...threadRoutes(T_PLAIN) }, render: Main },
     { name: 'Terminal and conversation switch', data: { agents: WITH_VIEW }, ...sw, routes: { ...sw.routes, ...viewRoute }, setup: () => { setRapid('fx-dev', false); sw.setup() }, render: Main },
     { name: 'Rapid-fire mode', data: { agents: WITH_VIEW, humanThreads: rapidThreads(8) }, ...sw, setup: () => { setRapid('fx-dev', true); sw.setup() }, render: Main },
   ],

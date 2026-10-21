@@ -294,6 +294,8 @@ test('with no OpenRouter key nothing is asked and nothing is failed, so a key fi
   const key = readFileSync(env, 'utf8');
   const call = { id: 'nokey', name: 'Glob' };
   rmSync(env);
+  // The key was imported into the secret store (S-2114): no key means neither file.
+  rmSync(join(home, 'secrets.json'), { force: true });
   try {
     const before = calls();
     assert.deepEqual(await ts.toolSummaries('ag-1', [call], 500), { enabled: true, summaries: {}, pending: [] });

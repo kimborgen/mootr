@@ -80,6 +80,15 @@ test('the spawn path (mayAssign) passes an owner or participant by id and refuse
   assert.throws(() => owners.mayAssign(x.key, { agent: 'part-one', boss: false }), /part-one can't change/);
 });
 
+test('the itsa_post refusal names the owner and the fix: add you with itsa_set participants (S-2424)', async () => {
+  const x = await itsa.create({ title: 'Post target', by: 'human', owner: 'owner-one', kind: 'issue' });
+  assert.equal(visibility.mayPostItsa('out1', x.id), false);
+  const why = visibility.itsaRefusal('out1', x.id, 'post to');
+  assert.match(why, /^outsider can't post to /, why);
+  assert.match(why, /the owner, owner-one/, why);
+  assert.match(why, /add you with itsa_set participants\.$/, why);
+});
+
 test('the spawn path refuses a feedback-report participant, and names no participant as may', async () => {
   const x = await itsa.create({ title: 'Spawn report', by: 'human', owner: 'owner-one', kind: 'feedback-report', participants: ['part-one'] });
   assert.throws(() => owners.mayAssign(x.key, { agent: 'part1', boss: false }), (e) => {

@@ -97,12 +97,18 @@ test('a settings change is logged with who made it and the agents left on the ol
 });
 
 test("each harness maps 'default' to its own asking mode", () => {
-  assert.deepEqual(permissionConfig('default'), { approval_policy: 'on-request', sandbox_mode: 'workspace-write', approvals_reviewer: 'user' });
-  assert.deepEqual(permissionConfig('auto'), { approval_policy: 'on-request', sandbox_mode: 'workspace-write', approvals_reviewer: 'auto_review' });
+  assert.deepEqual(permissionConfig('default'), { approval_policy: 'on-request', default_permissions: 'stam', approvals_reviewer: 'user' });
+  assert.deepEqual(permissionConfig('auto'), { approval_policy: 'on-request', default_permissions: 'stam', approvals_reviewer: 'auto_review' });
   assert.equal(permissionConfig('bypass').approval_policy, 'never');
-  assert.deepEqual(sessionPermissions('default'), [{ action: '*', resource: '*', effect: 'ask' }]);
-  assert.equal(sessionPermissions('auto'), null);
-  assert.deepEqual(sessionPermissions('bypass'), [{ action: '*', resource: '*', effect: 'allow' }]);
+  // The mode's rule comes first, then the secret-file denies (S-1888), which win as the last matching rule.
+  assert.deepEqual(sessionPermissions('default').slice(0, 1), [{ action: '*', resource: '*', effect: 'ask' }]);
+  assert.deepEqual(sessionPermissions('bypass').slice(0, 1), [{ action: '*', resource: '*', effect: 'allow' }]);
+  for (const mode of ['default', 'auto', 'bypass']) {
+    const denies = sessionPermissions(mode).filter((r) => r.effect === 'deny');
+    assert.ok(denies.some((r) => r.action === 'read' && r.resource.endsWith('/secrets.json')), `${mode} denies reading the secret store`);
+    assert.ok(denies.some((r) => r.action === 'edit' && r.resource.endsWith('/token')), `${mode} denies editing the token`);
+  }
+  assert.ok(sessionPermissions('auto').every((r) => r.effect === 'deny'), 'auto adds only denies to OpenCode\'s own rules');
 });
 
 test("Settings offers 'default' only where the harness's prompts reach stam's permission requests", () => {

@@ -1,5 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import './scrub-env.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';

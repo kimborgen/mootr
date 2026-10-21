@@ -60,14 +60,18 @@ for (const size of sizes) {
   await p.waitForSelector('#tree .node', { timeout: 20000 });
   // The phone shows one pane at a time, so it takes the Mail tab; the desktop keeps the list in view.
   const nav = p.locator('[data-nav="mail"]');
-  if (await nav.isVisible()) await press(nav);
+  // The phone's Inbox page: the decision is its thread's row, marked by its kind; the desktop keeps the sidebar list.
+  const onPhone = await nav.isVisible();
+  if (onPhone) await press(nav);
+  const side = onPhone ? '#inbox-view' : '#mail-side';
   // The row is the decision mail's thread, pinned above the other threads; the thread has one row.
-  const row = p.locator(`#mail-side .mrow[data-thread="${dec.thread_id}"]`);
+  const row = p.locator(`${side} .mrow[data-thread="${dec.thread_id}"]`);
   await row.waitFor();
   check(tag, (await row.count()) === 1, 'the thread has one row', await row.count());
   check(tag, (await row.locator('.s').innerText()) === SUBJECT, 'the row shows the subject', await row.locator('.s').innerText());
   // The waiting marker of the pinned rows: the status slot says decision, and the row takes the waiting style.
-  check(tag, (await row.locator('.astat').innerText()) === 'decision', 'the row shows the decision marker', await row.locator('.astat').innerText());
+  const marker = onPhone ? await row.locator('.ir-kind').getAttribute('data-kind') : await row.locator('.astat').innerText();
+  check(tag, marker === 'decision', 'the row shows the decision marker', marker);
   check(tag, await row.evaluate((el) => el.classList.contains('ask')), 'the row takes the waiting style');
   const box = await row.boundingBox();
   check(tag, !!box && box.x + box.width <= p.viewportSize().width, 'the row fits the width', box);

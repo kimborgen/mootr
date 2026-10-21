@@ -6,7 +6,12 @@
 //   window:ACCOUNT        set when `paid: false` and a window reads 100% in a fresh reading,
 //                         or on a `limit` signal (its deadline: the exhausted windows, else the
 //                         fresh window that resets soonest, else '*' with none known); cleared per window by a fresh reading taken
-//                         after it was set that reads below 100% or past its resets_at.
+//                         after it was set that reads below 100%, or by the timer past its resets_at.
+//                         A fresh reading of the same account on a peer counts too (peer-readings.ts,
+//                         S-2367): the clear takes the newest reading on any machine, while a set
+//                         takes only this machine's own readings, and a peer's never sets one.
+//                         A window that re-sets within FLAP_MS of its last clear is held for
+//                         FLAP_MS more: its clear needs a reading below 100% after the hold.
 //   paid-forbidden:ACCOUNT set when paid spend appears on a `paid: false` account (Claude
 //                         statusline cost growing while a window reads 100%, or a Codex
 //                         credits balance that drops); cleared by a fresh reading taken after
@@ -35,6 +40,7 @@ import { STALE_MS } from './readings.ts';
 import * as blockers from './blockers.ts';
 import type { BlockerKind } from './blockers.ts';
 import * as probes from './cost-probes.ts';
+import { peerWindows, type Served } from './peer-readings.ts';
 
 type RuleKind = Extract<BlockerKind, 'window' | 'paid-forbidden' | 'credits-out'>;
 
@@ -55,6 +61,8 @@ interface WaitWin {
   after: string;
   // The limit error that set it, if one did.
   source?: string;
+  // ms before which a reading can't clear it: set when it re-sets within FLAP_MS of a clear.
+  hold?: number;
 }
 export interface Trigger {
   // A cost:signal's class, or paid spend seen by usage.report or a Codex balance.
@@ -146,6 +154,22 @@ export function parseResetTime(message: string | undefined, now: number): number
 }
 // With no reset time in the message, hold this long.
 export const DEFAULT_HOLD_MS = 30 * 60_000;
+// A window that re-sets within this long of its last clear is held for this long more, so a
+// reading that flips it (a source at 100% with a stale reset, a usage hovering at 100%) can't
+// pause and unpause the account in a loop. 10 minutes: the statusline reports about once a
+// minute and a window's usage moves over minutes, so a real re-hit is rare and costs at most
+// 10 more minutes of pause, while the 37-second flap of S-2365 falls well inside it.
+export const FLAP_MS = 10 * 60_000;
+// Tests start each case with no clears remembered.
+export function forgetWindowClears(): void {
+  db.clearWindowClears();
+}
+// The hold a window re-setting at `now` gets, if it cleared within FLAP_MS. The clears are in
+// the window_clears table, so a restart keeps them.
+function flapHold(account: string, name: string, now: number): number | undefined {
+  const at = db.windowClearAt(account, name);
+  return at != null && now - at < FLAP_MS ? now + FLAP_MS : undefined;
+}
 
 const fresh = (at: number, now: number) => now - at <= STALE_MS;
 let resetMarginMs = 60_000;
@@ -159,16 +183,50 @@ export function resetMargin(): number {
   return resetMarginMs;
 }
 
-// The windows an account's stored readings carry now, fresh or stale, with each one's
-// percentage, reset time, and reading time. Used by cost_pause to pick the default window
-// and to watch for a reset; it never writes.
-export function accountWindows(account: string): Record<string, Win> {
+// The windows of an account, each at its newest reading on any machine, fresh or stale, with
+// each one's percentage, reset time, and reading time. Used by cost_pause to pick the default
+// window and to watch for a reset; it never writes.
+export function accountWindows(account: string, now: number = Date.now()): Record<string, Win> {
   const acct = settings().cost.accounts?.[account];
   if (!acct?.match) return {};
-  return readingFor(acct).windows;
+  return acrossMachines(account, acct, readingFor(acct).windows, now).all;
+}
+
+// What this machine's own readings say, per configured account, for a peer's peer-readings.ts
+// (S-2367). Only the windows: a peer compares the match, so it never takes this account for its own.
+export function servedReadings(): Served {
+  const out: Served = {};
+  for (const [name, acct] of Object.entries(settings().cost.accounts ?? {})) {
+    if (!acct?.match) continue;
+    out[name] = { match: acct.match, windows: readingFor(acct).windows };
+  }
+  return out;
+}
+
+// Each window at its newest reading across this machine and its peers (S-2367). `all` is what
+// a clear reads. `own` is what a set reads: this machine's windows taken after the newest peer
+// reading below 100% seen for that window (window_resets). Such a local reading is overtaken, and
+// stays so: a later peer reading at 100% doesn't bring it back. A peer's window that no local
+// reading covers never sets anything.
+function acrossMachines(account: string, acct: CostAccount, local: Record<string, Win>, now: number): { all: Record<string, Win>; own: Record<string, Win> } {
+  const all: Record<string, Win> = { ...local };
+  const d = db.open();
+  for (const [name, w] of Object.entries(peerWindows(account, acct.match, now))) {
+    if (w.pct < 100) d.prepare('INSERT INTO window_resets (account, window, at) VALUES (?, ?, ?) ON CONFLICT (account, window) DO UPDATE SET at = MAX(at, excluded.at)').run(account, name, w.at);
+    if (!all[name] || w.at > all[name].at) all[name] = w;
+  }
+  const own = Object.fromEntries(
+    Object.entries(local).filter(([name, w]) => {
+      const reset = d.prepare('SELECT at FROM window_resets WHERE account = ? AND window = ?').get(account, name) as { at: number } | undefined;
+      return !reset || w.at >= reset.at;
+    }),
+  );
+  return { all, own };
 }
 // A window wait whose reset time, plus the margin, has passed.
-const timedOut = (w: WaitWin, now: number) => w.resets_at != null && now >= w.resets_at * 1000 + resetMarginMs;
+// A window's timer deadline: its reset plus the margin, or its flap hold's end when that is later.
+const deadline = (w: WaitWin) => Math.max(w.resets_at! * 1000 + resetMarginMs, w.hold ?? 0);
+const timedOut = (w: WaitWin, now: number) => w.resets_at != null && now >= deadline(w);
 // A window that reads 100% and hasn't reset.
 const full = (w: Win, now: number) => w.pct >= 100 && (w.resets_at == null || w.resets_at * 1000 > now);
 
@@ -263,8 +321,11 @@ function plan(account: string, trigger: Trigger, now: number): Step[] {
   const acct = settings().cost.accounts?.[account];
   if (!acct?.match) return [];
   const r = readingFor(acct);
+  const { all, own } = acrossMachines(account, acct, r.windows, now);
+  // Clears read the newest reading on any machine; sets read only this machine's own.
+  const m: Reading = { ...r, windows: all };
   const unpaid = acct.paid === false;
-  const freshFull = Object.entries(r.windows).filter(([, w]) => fresh(w.at, now) && full(w, now));
+  const freshFull = Object.entries(own).filter(([, w]) => fresh(w.at, now) && full(w, now));
   const existing = (kind: RuleKind) => blockers.blockersFor(account).filter((b) => b.kind === kind);
   const steps: Step[] = [];
 
@@ -279,17 +340,19 @@ function plan(account: string, trigger: Trigger, now: number): Step[] {
     let confirmed = false;
     let unconfirmed = false;
     for (const [name, w] of Object.entries(cur)) {
-      if (windowCleared(name, w, r, now)) confirmed = true;
+      if (windowCleared(name, w, m, now)) confirmed = true;
       else if (timedOut(w, now)) unconfirmed = true;
       else next[name] = w;
     }
-    if (unpaid) for (const [name, w] of freshFull) next[name] = { ...cur[name], pct: w.pct, resets_at: w.resets_at, after: cur[name]?.after ?? iso(w.at) };
+    if (unpaid)
+      for (const [name, w] of freshFull)
+        next[name] = { ...cur[name], pct: w.pct, resets_at: w.resets_at, after: cur[name]?.after ?? iso(w.at), hold: cur[name]?.hold ?? flapHold(account, name, now) };
     if (trigger.signal?.class === 'limit') {
       // The exhausted windows; with none, the fresh window that resets soonest, as the
       // deadline; with no reset time known, '*'.
       let named: [string, Win | null][] = freshFull;
       if (!named.length) {
-        const soonest = Object.entries(r.windows)
+        const soonest = Object.entries(own)
           .filter(([, w]) => fresh(w.at, now) && w.resets_at != null && w.resets_at * 1000 > now)
           .sort((a, b) => a[1].resets_at! - b[1].resets_at!)[0];
         named = soonest ? [soonest] : [['*', null]];
@@ -305,7 +368,7 @@ function plan(account: string, trigger: Trigger, now: number): Step[] {
           }
           holdAccount(account, resets * 1000, trigger.signal.source, iso(now));
         }
-        next[name] = { pct: w?.pct ?? null, resets_at: resets, after: iso(now), source: trigger.signal.source };
+        next[name] = { pct: w?.pct ?? null, resets_at: resets, after: iso(now), source: trigger.signal.source, hold: cur[name]?.hold ?? flapHold(account, name, now) };
       }
     }
     if (confirmed && hold && !next['*']) db.open().prepare('DELETE FROM account_holds WHERE account = ?').run(account);
@@ -317,7 +380,7 @@ function plan(account: string, trigger: Trigger, now: number): Step[] {
   // paid-forbidden
   {
     const cur = existing('paid-forbidden')[0];
-    const confirmed = cur != null && paidCleared(cur.clear as any, r, now);
+    const confirmed = cur != null && paidCleared(cur.clear as any, m, now);
     const wins = Object.values(((cur?.clear as any)?.windows ?? {}) as Record<string, WaitWin>);
     const unconfirmed = cur != null && !confirmed && wins.length > 0 && wins.every((w) => timedOut(w, now));
     let want: Want | null = cur && !confirmed && !unconfirmed ? { reason: cur.reason, clear: cur.clear } : null;
@@ -325,7 +388,7 @@ function plan(account: string, trigger: Trigger, now: number): Step[] {
       // It clears when the exhausted windows reset; with none exhausted, the next to reset.
       let wins: [string, Win][] = freshFull;
       if (!wins.length) {
-        const soonest = Object.entries(r.windows).filter(([, w]) => fresh(w.at, now) && w.resets_at != null && w.resets_at * 1000 > now).sort((a, b) => a[1].resets_at! - b[1].resets_at!)[0];
+        const soonest = Object.entries(own).filter(([, w]) => fresh(w.at, now) && w.resets_at != null && w.resets_at * 1000 > now).sort((a, b) => a[1].resets_at! - b[1].resets_at!)[0];
         wins = soonest ? [soonest] : [];
       }
       const windows = Object.fromEntries(wins.map(([n, w]) => [n, { pct: w.pct, resets_at: w.resets_at, after: iso(now) }]));
@@ -349,7 +412,7 @@ function plan(account: string, trigger: Trigger, now: number): Step[] {
         ? `Claude reports no balance, so stam probes the account (1, 2, 4, 8, 16 minutes, then every 16) and clears this when one succeeds`
         : `clears when a fresh balance reads at least $${low}`;
       want = { reason: `a credits error, ${trigger.signal.source}; ${then}`, clear: { after: iso(now) } };
-    } else if (cur && !creditsCleared(acct, cur.clear as any, r, low, now)) want = { reason: cur.reason, clear: cur.clear! };
+    } else if (cur && !creditsCleared(acct, cur.clear as any, m, low, now)) want = { reason: cur.reason, clear: cur.clear! };
     const why = out ?? (trigger.signal ? trigger.signal.source : `a fresh balance of at least $${low}`);
     steps.push({ kind: 'credits-out', want, why, unconfirmed: false });
   }
@@ -373,14 +436,29 @@ function heldUntil(account: string, now: number): { resets_at: number; source: s
 async function evaluate(account: string, trigger: Trigger, now: number): Promise<void> {
   const steps = plan(account, trigger, now);
   // The timer goes in before any pause is delivered, which can take a while.
-  schedule(account, steps);
-  for (const s of steps) await apply(account, s.kind, s.want, s.why, s.unconfirmed);
+  schedule(account, steps, now);
+  for (const s of steps) await apply(account, s.kind, s.want, s.why, s.unconfirmed, now);
 }
 
 // The rule blockers a new agent on the account would carry now, from fresh readings and the
 // account's blockers, whether or not any agent is on it yet. The spawn gate uses it.
 export function spawnBlockers(account: string, now: number = Date.now()): { kind: RuleKind; reason: string; clear: Record<string, unknown> | null }[] {
   return plan(account, {}, now).flatMap((s) => (s.want ? [{ kind: s.kind, ...s.want }] : []));
+}
+
+// The windows of an unpaid account that this machine's own readings put at 100% with a valid reset
+// still ahead, however old the reading is. A codex reading goes stale once no codex agent runs
+// (S-382), and plan() then sees no fresh window; but a window cannot reset before its reset time.
+// Eligibility is acrossMachines' `own`, as for a set: a local 100% overtaken by a peer reading
+// (window_resets, kept after the peer cache ages out) does not count. Used only to pick a reviewer
+// fallback type (admission.heldForFallback); it never refuses a spawn (S-905).
+export function exhaustedWindows(account: string, now: number = Date.now()): { name: string; reason: string }[] {
+  const acct = settings().cost.accounts?.[account];
+  if (!acct?.match || acct.paid !== false) return [];
+  const { own } = acrossMachines(account, acct, readingFor(acct).windows, now);
+  return Object.entries(own)
+    .filter(([, w]) => w.pct >= 100 && w.resets_at != null && w.resets_at * 1000 > now)
+    .map(([name, w]) => ({ name, reason: `${name} at ${w.pct}%, resets ${iso(w.resets_at! * 1000)}` }));
 }
 
 // Gives a new agent, before its launch, the rule blockers its account carries: a spawn the
@@ -394,11 +472,15 @@ export async function attachSpawn(agent: db.Agent): Promise<void> {
   }
 }
 
-// A window's wait is over when a fresh reading taken after it was set reads below 100% or
-// past its resets_at. '*' (a limit error that named no window) needs every window clear.
+// A window's wait is over when a fresh reading taken after it was set reads below 100%, and its
+// hold, if any, has passed. A reading at 100% never clears it, whatever its resets_at says: a
+// stale reset time would otherwise clear and re-set the window on every reading (S-2365); a
+// window past its reset clears on the timer instead (unconfirmed). '*' (a limit error that named
+// no window) needs every window clear.
 function windowCleared(name: string, w: WaitWin, r: Reading, now: number): boolean {
+  if ((w.hold ?? 0) > now) return false;
   const after = Date.parse(w.after);
-  const ok = (x: Win) => fresh(x.at, now) && x.at > after && !full(x, now);
+  const ok = (x: Win) => fresh(x.at, now) && x.at > after && x.pct < 100;
   if (name === '*') {
     const all = Object.values(r.windows);
     return all.length > 0 && all.every(ok);
@@ -457,22 +539,37 @@ function windowReason(wins: Record<string, WaitWin>): string {
     .join('; ');
 }
 
+// Lets the event loop run between agents, so a fleet-wide pause or resume doesn't hold it for the sum of the
+// agents' work (S-2369). Safe because passes on an account run one after another (the chain in evaluateRules), and
+// each agent's own changes stay in lifecycle.serial.
+const yieldLoop = () => new Promise<void>((r) => setImmediate(r));
+
 // Brings every agent on the account to the wanted state: the blocker with this reason and
 // clear condition, or none. Writes and events happen only on a change.
-async function apply(account: string, kind: RuleKind, want: { reason: string; clear: Record<string, unknown> | null } | null, why: string, unconfirmed = false): Promise<void> {
+async function apply(account: string, kind: RuleKind, want: { reason: string; clear: Record<string, unknown> | null } | null, why: string, unconfirmed = false, now = Date.now()): Promise<void> {
   if (!want) {
     for (const b of blockers.blockersFor(account).filter((x) => x.kind === kind)) {
+      await yieldLoop();
       db.addEvent(b.agent_id, 'cost:rule', { rule: kind, account, action: 'clear', reason: b.reason, cleared: why, ...(unconfirmed ? { unconfirmed: true } : {}) });
-      await blockers.clearBlocker(b.agent_id, kind, account, why);
+      await blockers.clearBlocker(b.agent_id, kind, account, why, kind === 'window' ? { names: windowNames(b.clear), at: now } : undefined);
     }
     return;
   }
   for (const a of agentsOn(account)) {
+    await yieldLoop();
     const have = blockers.blockers(a).find((x) => x.kind === kind && x.account === account);
     if (have && have.reason === want.reason && JSON.stringify(have.clear) === JSON.stringify(want.clear)) continue;
     if (!have || have.reason !== want.reason) db.addEvent(a.id, 'cost:rule', { rule: kind, account, action: 'set', reason: want.reason });
-    await blockers.addBlocker(a, { kind, account, reason: want.reason, clear: want.clear });
+    // A window the new wait drops was cleared while the others stay blocked: its history goes in with the change.
+    const kept = windowNames(want.clear);
+    const dropped = kind === 'window' && have ? windowNames(have.clear).filter((name) => !kept.includes(name)) : [];
+    await blockers.addBlocker(a, { kind, account, reason: want.reason, clear: want.clear, clears: dropped.length ? { names: dropped, at: now } : undefined });
   }
+}
+
+// The window names a window blocker's clear condition waits for.
+function windowNames(clear: Record<string, unknown> | null): string[] {
+  return Object.keys((clear as { windows?: Record<string, unknown> } | null)?.windows ?? {});
 }
 
 const RESET_PASSED = 'its reset time passed; no fresh reading confirmed it';
@@ -482,28 +579,44 @@ const RESET_PASSED = 'its reset time passed; no fresh reading confirmed it';
 // gets one immediate re-evaluation, so a deadline that passed while a pause was delivered
 // isn't lost.
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+const dues = new Map<string, number>();
 const firedLate = new Map<string, number>();
-function schedule(account: string, steps: Step[]): void {
+// When the account's timer next evaluates, or null: tests check a hold's wake-up.
+export function pendingWake(account: string): number | null {
+  return dues.get(account) ?? null;
+}
+// `now` is the evaluation's time, the one the steps were planned at. A hold still in force then
+// wakes the account at its end, even when the wall clock has passed that end already: the wake
+// is then immediate, so a reading the hold refused is judged again.
+function schedule(account: string, steps: Step[], now: number): void {
   clearTimeout(timers.get(account));
   timers.delete(account);
+  dues.delete(account);
   let due = Infinity;
   for (const s of steps) {
     if (!s.want) continue;
     const wins = Object.values(((s.want.clear as any)?.windows ?? {}) as Record<string, WaitWin>);
+    // A window wakes at its hold's end, so a reading the hold rejected is judged again then, and at its deadline.
+    if (s.kind === 'window')
+      for (const w of wins) {
+        if (w.hold != null && w.hold > now) due = Math.min(due, w.hold);
+        if (w.resets_at != null) due = Math.min(due, deadline(w));
+      }
     const times = wins.map((w) => (w.resets_at == null ? null : w.resets_at * 1000 + resetMarginMs));
-    if (s.kind === 'window') for (const t of times) if (t != null) due = Math.min(due, t);
     if (s.kind === 'paid-forbidden' && times.length && times.every((t) => t != null)) due = Math.min(due, Math.max(...(times as number[])));
   }
   if (due === Infinity) return;
-  const now = Date.now();
-  if (due <= now) {
-    if (firedLate.get(account) === due) return;
-    firedLate.set(account, due);
-  }
+  const wall = Date.now();
+  // An overdue wake fires once. The mark is set when the timer fires, not here: a later
+  // evaluation may replace a timer that never ran, and that wake must still happen.
+  if (due <= wall && firedLate.get(account) === due) return;
   const t = setTimeout(() => {
     timers.delete(account);
+    dues.delete(account);
+    firedLate.set(account, due);
     void evaluateRules(account);
-  }, Math.min(Math.max(0, due - now), 2 ** 31 - 1));
+  }, Math.min(Math.max(0, due - wall), 2 ** 31 - 1));
   t.unref?.();
   timers.set(account, t);
+  dues.set(account, due);
 }

@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { ServerResponse } from 'node:http';
 import { STAM_HOME } from './config.ts';
+import { MACHINE } from './config.ts';
 import { settings } from './settings.ts';
 import * as db from './db.ts';
 import { newestReview, reviewAgentOfComment, reviewVerdict } from './sources/github.ts';
@@ -356,18 +357,25 @@ export function githubSlug(url: string): string | null {
 }
 
 // The repos the diff API serves (S-1533): each name in `settings.itsa.repos` with the GitHub repo its checkout's origin
-// names (null when that isn't GitHub or can't be read), so the page can tell which PR links and URLs open in-app.
-export async function repos(): Promise<{ repos: { name: string; github: string | null }[] }> {
+// names (null when that isn't GitHub or can't be read), so the page can tell which PR links and URLs open in-app. The
+// checkout's own path and HEAD go with it (S-2104), so a pasted patch can be matched against that checkout, and labelled
+// with the commit it was read at, without another endpoint — and `machine` says whose checkouts these are, since the
+// page may not be served by the same daemon (this route is answered on the ITSA home).
+export async function repos(): Promise<{ machine: string; repos: { name: string; github: string | null; path: string; sha: string | null }[] }> {
   const out = await Promise.all(
     Object.entries(settings().itsa.repos).map(async ([name, path]) => {
       let github: string | null = null;
+      let sha: string | null = null;
       try {
         github = githubSlug((await run(['config', '--get', 'remote.origin.url'], { cwd: path })).stdout);
       } catch {}
-      return { name, github };
+      try {
+        sha = (await run(['rev-parse', 'HEAD'], { cwd: path })).stdout.trim() || null;
+      } catch {}
+      return { name, github, path, sha };
     }),
   );
-  return { repos: out };
+  return { machine: MACHINE, repos: out };
 }
 
 // The stam reviewer's verdict the diff header shows (S-1917), from the poller's snapshot of the watched PR, never a GitHub call.

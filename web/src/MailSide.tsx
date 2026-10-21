@@ -21,11 +21,12 @@ import { Loading } from './Loading'
 import { openedItsa, openItsa, StatusGlyph, statusLabel } from './itsa/itsa'
 import { AskBlockLine } from './itsa/AskBlockLine'
 import { isPlainWait, useDeferred, useToAnswerCount, useWaiting, type WaitingRow } from './itsa/WaitingList'
+import { unreadThreads as unreadThreadsOf } from './mail/inbox-model'
 import { swipeRow } from './mail/swipeRow'
 import { nameFor } from './mail/ThreadPanel'
 import { HistorySide } from './HistorySide'
 import { currentWorld, useShell } from './shell/layout'
-import { byId, hasPendingPermission, isUnreadForHuman, useData } from './store'
+import { byId, hasPendingPermission, useData, type Data } from './store'
 import { getUi, setUi } from './ui/state'
 import type { ItsaAttention, Permission } from './types'
 
@@ -36,6 +37,58 @@ const withWhom = (p: Permission) => (p.with?.length ? p.with.map((n) => '@' + n)
 const pending = hasPendingPermission
 // Awaiting: the human sent the last message, and nobody has answered it.
 const awaiting = (t: { mails: { from_id: string }[] }) => t.mails.at(-1)?.from_id === 'human'
+
+// The attention list the Inbox shows (see MailSide): one row per thing waiting on you, oldest first. `view` is
+// 'inbox' or 'toanswer'; the rows are empty for the other views. The sidebar header's count and the nav badge
+// both read it, so they agree. Plain waits (no thread, ask or decision) are left out of the inbox but kept for To answer.
+type Thread = Data['humanThreads'][number]
+export function attentionRows(view: string, data: Pick<Data, 'humanThreads' | 'humanArchived' | 'humanDeferred'>, waiting: WaitingRow[]) {
+  const { humanThreads, humanArchived, humanDeferred } = data
+  const deferredIds = new Set(humanDeferred.map((t) => t.thread_id))
+  // To answer also resolves archived threads: an ask stays there while archived or deferred (S-984).
+  const inbox = new Map((view === 'toanswer' ? [...humanThreads, ...humanArchived, ...humanDeferred] : humanThreads).map((t) => [t.thread_id, t]))
+  const askRow = new Map<string, ItsaAttention>()
+  // An agent's wait tied to a thread folds into that thread's row, which then carries the wait's marker.
+  const waitRow = new Map<string, WaitingRow>()
+  const att: { at: string; thread: Thread | null; row: WaitingRow | null }[] = []
+  const used = new Set<string>()
+  // A plain "agent waits for your reply" (no ask, request or decision behind it) only opens the
+  // chat: the To answer tab holds it, not the mail list (S-984).
+  if (view === 'inbox' || view === 'toanswer') {
+    for (const w of view === 'toanswer' ? waiting : waiting.filter((w) => !isPlainWait(w))) {
+      const tid = w.itsa ? w.itsa.ask_thread_id : w.threadId
+      const t = tid && !used.has(tid) ? inbox.get(tid) : undefined
+      if (t) { used.add(t.thread_id); if (w.itsa) askRow.set(t.thread_id, w.itsa); else waitRow.set(t.thread_id, w) }
+      att.push({ at: w.since, thread: t ?? null, row: t ? null : w })
+    }
+    for (const t of view === 'toanswer' ? [...humanThreads, ...humanArchived, ...humanDeferred] : humanThreads) if (pending(t) && !used.has(t.thread_id) && !deferredIds.has(t.thread_id)) { used.add(t.thread_id); att.push({ at: t.mails[0].created_at, thread: t, row: null }) }
+    att.sort((a, b) => a.at.localeCompare(b.at))
+  }
+  return { att, askRow, waitRow, used, inbox }
+}
+
+// Harness dialogs still with an agent's parent or the chief of staff (S-594): read-only rows in a collapsed group
+// of their own, shared by the Mail list and the Inbox page.
+export function DelegatedGroup({ delegated }: { delegated: Permission[] }) {
+  const cw = currentWorld()
+  if (!delegated.length) return null
+  return (
+    <details className="mail-delegated" data-delegated-group>
+      <summary><Icon name="chevron-right" size="xs" />With parent or chief of staff ({delegated.length})</summary>
+      {delegated.map((p) => {
+        const name = byId(p.agent_id)?.name ?? p.agent_name ?? p.agent_id
+        const open = () => selectAgent(p.agent_id)
+        return (
+          <div className={`mrow ${p.agent_id === cw ? 'sel' : ''}`} key={p.id} data-delegated={p.id} role="button" tabIndex={0}
+            title={`${name} is stopped on a dialog: ${p.action ?? ''} · with ${withWhom(p)}, who deny it or send it on to you${p.created_at ? ' · since ' + new Date(p.created_at).toLocaleString() : ''}`}
+            onClick={open} onKeyDown={(e) => { if (e.key === 'Enter') open() }}>
+            <Icon name="shield" size="xs" /><span className="s">{p.subject ?? `${name}: ${(p.action ?? 'a dialog').replace(/^Claude Code asks to allow /, '')}`}</span>
+            <span className="astat">with {withWhom(p)}</span><span className="t">{p.created_at ? ago(p.created_at) : ''}</span>
+          </div>)
+      })}
+    </details>
+  )
+}
 
 // In a sidebar pane (`pane`, S-1421) the pane sets the height, so there is no resize separator.
 export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLElement | null>; pane?: boolean }) {
@@ -69,34 +122,17 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
       if (tid && !row.classList.contains('ask') && !row.dataset.decision) setThreadArchived(tid, !archivedIds.has(tid))
     })
   }, [view, humanArchived])
-  const unreadThreads = humanThreads.filter(isUnreadForHuman)
+  // The unread count is the Inbox page's Unread list (a deferred ask's thread isn't in it).
+  const unreadThreads = unreadThreadsOf({ humanThreads, humanArchived, humanDeferred }, waiting, deferred)
   const selItsa = cw?.startsWith('w:itsa:') ? openedItsa() : null
   // The attention list: one row per thing waiting on you (`useWaiting`, oldest first), so the
   // header's count is the rows above the mail. Only the inbox has one. An item with a thread in
   // the inbox (an ITSA's ask thread, a request's thread) is that thread's row; any other keeps
   // a row of its own. A pending request's thread is pinned even when the list lacks it.
-  type Thread = (typeof humanThreads)[number]
-  // To answer also resolves archived threads: an ask stays there while archived or deferred (S-984).
-  const inbox = new Map((view === 'toanswer' ? [...humanThreads, ...humanArchived, ...humanDeferred] : humanThreads).map((t) => [t.thread_id, t]))
-  const askRow = new Map<string, ItsaAttention>()
-  // An agent's wait tied to a thread folds into that thread's row, which then carries the wait's marker.
-  const waitRow = new Map<string, WaitingRow>()
-  const att: { at: string; thread: Thread | null; row: WaitingRow | null }[] = []
+  const { att, askRow, waitRow, used, inbox } = attentionRows(view, { humanThreads, humanArchived, humanDeferred }, waiting)
   // The deferred asks and decisions (S-353): under the Deferred group at the foot, off the count.
   const def: typeof att = []
-  // A plain "agent waits for your reply" (no ask, request or decision behind it) only opens the
-  // chat: the To answer tab holds it, not the mail list (S-984).
-  const plain = isPlainWait
   if (view === 'inbox' || view === 'toanswer') {
-    const used = new Set<string>()
-    for (const w of view === 'toanswer' ? waiting : waiting.filter((w) => !plain(w))) {
-      const tid = w.itsa ? w.itsa.ask_thread_id : w.threadId
-      const t = tid && !used.has(tid) ? inbox.get(tid) : undefined
-      if (t) { used.add(t.thread_id); if (w.itsa) askRow.set(t.thread_id, w.itsa); else waitRow.set(t.thread_id, w) }
-      att.push({ at: w.since, thread: t ?? null, row: t ? null : w })
-    }
-    for (const t of view === 'toanswer' ? [...humanThreads, ...humanArchived, ...humanDeferred] : humanThreads) if (pending(t) && !used.has(t.thread_id) && !deferredIds.has(t.thread_id)) { used.add(t.thread_id); att.push({ at: t.mails[0].created_at, thread: t, row: null }) }
-    att.sort((a, b) => a.at.localeCompare(b.at))
     for (const w of deferred) {
       const tid = w.itsa ? w.itsa.ask_thread_id : w.threadId
       // A thread set aside with Defer is out of the inbox; To answer and Deferred list it (S-1068).
@@ -204,20 +240,7 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
         </div>
         {view === 'history' ? <HistorySide bare /> : <div className="mail-side-list" ref={list}>
           {att.map((a) => attRow(a))}
-          {delegated.length ? <details className="mail-delegated" data-delegated-group>
-            <summary><Icon name="chevron-right" size="xs" />With parent or chief of staff ({delegated.length})</summary>
-            {delegated.map((p) => {
-              const name = byId(p.agent_id)?.name ?? p.agent_name ?? p.agent_id
-              const open = () => selectAgent(p.agent_id)
-              return (
-                <div className={`mrow ${p.agent_id === cw ? 'sel' : ''}`} key={p.id} data-delegated={p.id} role="button" tabIndex={0}
-                  title={`${name} is stopped on a dialog: ${p.action ?? ''} · with ${withWhom(p)}, who deny it or send it on to you${p.created_at ? ' · since ' + new Date(p.created_at).toLocaleString() : ''}`}
-                  onClick={open} onKeyDown={(e) => { if (e.key === 'Enter') open() }}>
-                  <Icon name="shield" size="xs" /><span className="s">{p.subject ?? `${name}: ${(p.action ?? 'a dialog').replace(/^Claude Code asks to allow /, '')}`}</span>
-                  <span className="astat">with {withWhom(p)}</span><span className="t">{p.created_at ? ago(p.created_at) : ''}</span>
-                </div>)
-            })}
-          </details> : null}
+          <DelegatedGroup delegated={delegated} />
           {def.length ? <details className="mail-deferred" data-deferred-group open={view === 'toanswer' || undefined}>
             <summary><Icon name="chevron-right" size="xs" />Decide later ({def.length})</summary>
             {def.map((a) => attRow(a, true))}

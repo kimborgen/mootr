@@ -6,6 +6,7 @@
 // runs, no model. Run with `node --test test/retro-search.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import './scrub-env.mjs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

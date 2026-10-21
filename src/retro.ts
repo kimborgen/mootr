@@ -139,7 +139,7 @@ export async function fileRetro(api: Api, by: string, a: { kind: string; title?:
   const target = a.target?.replace(/\s+/g, ' ').trim() || 'none';
   // A lesson to change a template, block, tool or file must name it, or the steward can't route it (S-1228).
   if (['improve', 'instruction'].includes(a.kind) && target.toLowerCase() === 'none') {
-    throw new Error('target is required for improve and instruction items: name the template, block, tool, script or file the lesson is about, so the steward can route it. Examples: type-reviewer, blocks/type-manager/30-manager-mail-wait.md, scripts/merge-pr.mjs, web/check/phone.mjs, pr_open.');
+    throw new Error('target is required for improve and instruction items: name the template, block, tool, script or file the lesson is about, so the steward can route it. Examples: type-reviewer, blocks/type-manager/30-manager-mail-wait.md, web/check/phone.mjs, pr_merge, pr_open.');
   }
   // Evidence defaults to `none`, so an old caller's schema keeps working; an unknown class is refused.
   const evidence = a.evidence?.trim() || 'none';

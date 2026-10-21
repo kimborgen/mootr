@@ -2,7 +2,7 @@
 // the thread (choices, picks, ranks, deferrals, permission answers) are staged, shown in a
 // rendered preview, and sent with the reply.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { answerPermission, archiveThreadAndAdvance, assistantOpts, markMailRead, toggleThreadArchived, toggleThreadDeferred } from '../actions'
+import { answerPermission, archiveThreadAndAdvance, assistantOpts, keptUnread, markMailRead, toggleThreadArchived, toggleThreadDeferred } from '../actions'
 import { actItsa } from '../itsa/ItsaActions'
 import { api, ApiError } from '../api'
 import { Composer, type ComposerHandle, type SendPayload } from '../Composer'
@@ -13,8 +13,9 @@ import { Icon } from '../Icon'
 import * as mb from '../mail/mailblocks'
 import { suggestedPicks, type SuggestedPick } from '../mail/suggestedPicks'
 import { nameFor, ThreadPanel, type ItsaAsk, type Stage } from '../mail/ThreadPanel'
+import { takeOpenFocus } from '../mail/diffOpen'
 import { isPhone, refreshTabs, registerView } from '../shell/layout'
-import { getData, isArchivedThread, isDeferredThread, refreshSlow, threadWaitsOnHuman, useData } from '../store'
+import { getData, refreshSlow, setData, threadWaitsOnHuman, useData } from '../store'
 import { answerInput, inputStatus } from '../perm/input'
 import type { ItsaView, Mail, Permission } from '../types'
 import { icon } from '../icons'
@@ -64,7 +65,6 @@ function showNote(b: HTMLElement, note?: string) {
   b.querySelector<HTMLElement>('.mb-foot [data-own]')?.setAttribute('hidden', '')
 }
 
-export const threadTitles = new Map<string, string>()
 // A refused reply whose thread had no box to put its draft in (its view was gone): kept for that
 // thread, and put back when its view next shows.
 const unsent = new Map<string, string>()
@@ -135,23 +135,27 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
       sig.current = s
       unreadIds.current = unread
       setMails(ms)
-      threadTitles.set(tid, plainSubject(ms[0]?.subject))
+      // The loaded mails count for the waits too (S-2286): a thread past the list's 60 keeps its guard.
+      setData({ openThreads: [...getData().openThreads.filter((t) => t.thread_id !== tid), { thread_id: tid, mails: ms }].slice(-20) })
       refreshTabs()
     }
-    // Showing a thread marks the human's mail in it read, once per mail.
-    const fresh = unread.filter((id) => !marked.current.has(id))
+    // Showing a thread marks the human's mail in it read, once per mail; mail the `u` key marked unread stays unread.
+    const fresh = unread.filter((id) => !marked.current.has(id) && !keptUnread.get(tid)?.has(id))
     if (fresh.length && root.current?.offsetParent) {
       fresh.forEach((id) => marked.current.add(id))
       ownRead.current = true
       void markMailRead(fresh)
     }
   }, [tid])
+  // Opening the thread (mounting it, or a new thread) reads its mail, so an earlier `u` on it no longer holds it unread.
+  useEffect(() => { keptUnread.delete(tid) }, [tid])
   useEffect(() => {
     if (ownRead.current) { ownRead.current = false; return }
     load()
   }, [load, mailTick])
   // The shell shows every view after each layout render: a show reloads only a thread not yet loaded.
-  useEffect(() => registerView(viewKey, { show: () => { if (loaded.current !== tid) load() }, focus: () => box()?.focus() }), [viewKey, tid, load])
+  // On return, the Open button that took the reader away has focus back — only one from this thread's own view (S-2105 review).
+  useEffect(() => registerView(viewKey, { show: () => { if (loaded.current !== tid) load() }, focus: () => { const b = takeOpenFocus(root.current); if (b) b.focus(); else box()?.focus() } }), [viewKey, tid, load])
 
   // A draft refused while its view was gone goes back in its box when the view shows.
   useEffect(() => {
@@ -393,22 +397,6 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
     mb.renderMath(box)
   }, [previewHtml])
 
-  // Archiving hides the thread from the mail list; a pending permission request, or the ITSA
-  // whose ask this thread carries, must be answered first, so its thread stays put until then.
-  const archived = isArchivedThread(tid)
-  const deferred = isDeferredThread(tid)
-  const perm = mails.some((m) => m.permission?.status === 'pending')
-  const needsAnswer = perm || threadWaitsOnHuman(tid)
-  const head = (
-    <div className="thread-actions"><span className="spacer" />
-      <button className="btn" data-defer type="button" 
-        title={deferred ? 'Move this thread back to your mail' : needsAnswer ? 'Save this thread for later; it stays under To answer' : 'Save this thread for later'}
-        onClick={() => toggleThreadDeferred(tid)} aria-label={deferred ? 'Undefer' : 'Defer'}><Icon name={deferred ? 'alarm-clock-off' : 'alarm-clock'} /><span className="btn-label">{deferred ? 'Undefer' : 'Defer'}</span></button>
-      <button className="btn" data-archive type="button" disabled={!archived && needsAnswer}
-        title={archived ? 'Move this thread back to your mail' : needsAnswer ? (perm ? 'Answer the permission request first' : 'Answer what waits on you first') : 'Hide this thread from your mail (e)'}
-        onClick={() => toggleThreadArchived(tid)} aria-label={archived ? 'Unarchive' : 'Archive'}><Icon name={archived ? 'archive-restore' : 'archive'} /><span className="btn-label">{archived ? 'Unarchive' : 'Archive'}</span></button></div>
-  )
-
   const phone = isPhone()
   const slot: BottomSlot = {
     staged: staged.size > 0, onInput: setText, onSend: send, takesCc: true,
@@ -432,7 +420,7 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
   return (
     <div className="thread-view" ref={root}>
       {error ? <div className="thread-scroll"><div className="pad muted">{error}</div></div>
-        : <ThreadPanel className="thread-scroll" scrollRef={scroll} mails={shown} threadKey={mails.length ? tid : ''} unread={unreadIds.current} onStage={stage} afterRender={applyStaged} head={head} ask={ask} humanView />}
+        : <ThreadPanel className="thread-scroll" scrollRef={scroll} mails={shown} threadKey={mails.length ? tid : ''} unread={unreadIds.current} onStage={stage} afterRender={applyStaged} ask={ask} humanView tabChips />}
       <div className={`thread-reply${noting ? ' noting' : ''}`}>
         {skipped.length ? <div className="rp-info" role="status"><Icon name="info" size="xs" /><span>{skipped.join('. ')}</span></div> : null}
         <div className={`reply-preview${previewOpen ? ' open' : ''}`} ref={preview} hidden={!previewShown}>
@@ -456,19 +444,24 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
 
 // The phone's Archive, in the pane's top bar so it stays in reach as the thread scrolls. The
 // thread's own header hides its copy there. Same rules: a pending permission request holds it.
-export function ThreadArchive({ tid }: { tid: string }) {
-  const { humanThreads, humanArchived, humanDeferred } = useData()
-  const t = [...humanThreads, ...humanArchived, ...humanDeferred].find((x) => x.thread_id === tid)
+// On a desktop it is the tab bar's pair (S-2286): each icon names its key in its tooltip, and a
+// thread that waits on the human's answer holds Archive too, as the desktop always has.
+export function ThreadArchive({ tid, desktop = false }: { tid: string; desktop?: boolean }) {
+  const { humanThreads, humanArchived, humanDeferred, openThreads } = useData()
+  const t = [...humanThreads, ...humanArchived, ...humanDeferred, ...openThreads].find((x) => x.thread_id === tid)
   const archived = humanArchived.some((x) => x.thread_id === tid)
-  const needsAnswer = !!t?.mails.some((m) => m.permission?.status === 'pending')
+  const perm = !!t?.mails.some((m) => m.permission?.status === 'pending')
+  const needsAnswer = perm || (desktop && threadWaitsOnHuman(tid))
   const deferred = humanDeferred.some((x) => x.thread_id === tid)
+  const dKey = desktop ? ' (d)' : ''
+  const aKey = desktop ? ' (e)' : ''
   return (
     <>
-      <button className="icon-btn" data-defer type="button" title={deferred ? 'Move this thread back to your mail' : needsAnswer ? 'Save this thread for later; it stays under To answer' : 'Save this thread for later'}
-        onClick={() => toggleThreadDeferred(tid)} aria-label={deferred ? 'Undefer' : 'Defer'}><Icon name={deferred ? 'alarm-clock-off' : 'alarm-clock'} /></button>
+      <button className="icon-btn" data-defer type="button" title={(deferred ? 'Move this thread back to your mail' : needsAnswer ? 'Save this thread for later; it stays under To answer' : 'Save this thread for later') + dKey}
+        onClick={() => toggleThreadDeferred(tid)} aria-label={(deferred ? 'Undefer' : 'Defer') + dKey}><Icon name={deferred ? 'alarm-clock-off' : 'alarm-clock'} /></button>
       <button className="icon-btn" data-archive type="button" disabled={!archived && needsAnswer}
-        title={archived ? 'Move this thread back to your mail' : needsAnswer ? 'Answer the permission request first' : 'Hide this thread from your mail'}
-        onClick={() => toggleThreadArchived(tid)} aria-label={archived ? 'Unarchive' : 'Archive'}><Icon name={archived ? 'archive-restore' : 'archive'} /></button>
+        title={archived ? 'Move this thread back to your mail' + aKey : needsAnswer ? (perm ? 'Answer the permission request first' : 'Answer what waits on you first') : 'Hide this thread from your mail' + aKey}
+        onClick={() => toggleThreadArchived(tid)} aria-label={(archived ? 'Unarchive' : 'Archive') + aKey}><Icon name={archived ? 'archive-restore' : 'archive'} /></button>
     </>
   )
 }

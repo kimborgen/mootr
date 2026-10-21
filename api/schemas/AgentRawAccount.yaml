@@ -1,0 +1,23 @@
+type: object
+additionalProperties: false
+description: One account's raw spend (src/cost-display.ts RawAcct).
+required: [api, kind, worth_seven_day, five_hour, seven_day]
+properties:
+  api:
+    type: number
+    format: double
+  kind:
+    type: string
+    enum: [subscription, paid, none]
+  worth_seven_day:
+    type: number
+    format: double
+    nullable: true
+  five_hour:
+    type: number
+    format: double
+    nullable: true
+  seven_day:
+    type: number
+    format: double
+    nullable: true

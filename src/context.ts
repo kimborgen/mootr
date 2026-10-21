@@ -6,8 +6,9 @@ import * as db from './db.ts';
 import { settings } from './settings.ts';
 import { render, renderWithRetro, withRetroReminder } from './templates.ts';
 import { queueNotice } from './mail.ts';
-import { requestCompaction } from './lifecycle.ts';
+import { requestCompaction, compactResting, cacheCompactionHeld, isResting } from './lifecycle.ts';
 import { markCold } from './cache-cold.ts';
+import { adapters } from './adapters/index.ts';
 
 const measureNext = new Set<string>();
 const idleCompacted = new Map<string, string>();
@@ -94,9 +95,11 @@ export function idleSweep(): void {
   const avg = avgAfterCompaction();
   for (const a of db.listAgents()) {
     if ((a.lifecycle !== 'active' && a.lifecycle !== 'paused') || !a.idle_since || a.context_tokens == null) continue;
-    // A resting agent has no harness to compact; its rest compacted first when it would outlast the cache (lifecycle.rest).
-    if (db.restOwned(a)) continue;
+    // A resting agent is compacted headless and stays resting (S-2238), on a harness whose compaction quits it
+    // (Claude Code); one with another pause owner is left alone.
+    if (db.restOwned(a) && (!isResting(a) || !adapters[a.harness]?.compactQuits)) continue;
     if (Date.now() - Date.parse(a.idle_since) < s.idleMinutes * 60_000) continue;
+    if (cacheCompactionHeld(a)) continue;
     idleCompactIfDue(a, 'idle past the cache lifetime', avg);
   }
 }
@@ -108,12 +111,16 @@ export function idleCompactIfDue(a: db.Agent, reason: string, avg = avgAfterComp
   const s = settings().idleCompaction;
   if (!s.enabled || !a.idle_since || a.context_tokens == null) return false;
   if (idleCompacted.get(a.id) === a.idle_since) return false;
+  // Once per idle period across daemon restarts too (S-2238): the event outlives the map.
+  const last = db.lastEventAt(a.id, ['context:idle-compaction']);
+  if (last && last >= a.idle_since) return false;
   // A stored 0 dates from before onContext ignored it: no measurement.
   const base = a.tokens_after_compaction || avg;
   const threshold = base != null ? base + s.growthTokens : s.minTokens;
   if (a.context_tokens <= threshold) return false;
   idleCompacted.set(a.id, a.idle_since);
   db.addEvent(a.id, 'context:idle-compaction', { tokens: a.context_tokens, threshold, reason });
-  requestCompaction(a, { reason }).catch((e) => db.addEvent(a.id, 'compaction-error', String(e)));
+  const run = isResting(a) ? compactResting(a.id, reason) : requestCompaction(a, { reason });
+  run.catch((e) => db.addEvent(a.id, 'compaction-error', String(e)));
   return true;
 }

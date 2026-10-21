@@ -86,10 +86,18 @@ for (const size of SIZES) for (const theme of THEMES) {
   const node = () => p.locator(`#tree .node:has(.name:text-is("${target.name}"))`).first();
   const menu = async (label) => { await node().click({ button: 'right' }); await p.getByRole('menuitem', { name: label }).first().click(); };
   // On a phone the sidebar is an overlay: open it when the tree isn't showing.
-  const sideTab = async (id) => { const t = p.locator(`#side-panes [role=tab][data-tab="${id}"]`); if (!size.phone && (await t.count()) && (await t.getAttribute('aria-selected')) !== 'true') { await t.click(); await p.waitForTimeout(300); } };
+  // A tab with a page also opens that page (S-1428): this shot is of the sidebar, so main goes back to the world it showed.
+  const sideTab = async (id) => {
+    const t = p.locator(`#side-panes [role=tab][data-tab="${id}"]`);
+    if (size.phone || !(await t.count()) || (await t.getAttribute('aria-selected')) === 'true') return;
+    const was = await p.evaluate(() => window.stamDebug.shell.currentWorld());
+    await t.click();
+    await p.waitForTimeout(300);
+    if ((await p.evaluate(() => window.stamDebug.shell.currentWorld())) !== was) await p.evaluate((w) => window.stamDebug.shell.showAgentWorld(w), was);
+  };
   const phoneLeft = async () => { await sideTab('agents'); if (size.phone && !(await p.locator('#tree .node').first().isVisible())) { await p.locator('[data-nav="left"]').first().tap(); await p.waitForTimeout(500); } };
   // The mail list has its own tab in the phone's navigation.
-  const phoneMail = async () => { if (size.phone && !(await p.locator('#mail-side').isVisible())) { await p.locator('[data-nav="mail"]').first().tap(); await p.waitForTimeout(500); } };
+  const phoneMail = async () => { if (size.phone && !(await p.locator('#inbox-view').isVisible())) { await p.locator('[data-nav="mail"]').first().tap(); await p.waitForTimeout(500); } };
 
   await p.goto(origin + '/#token=' + token);
   await p.waitForSelector('#tree .node', { timeout: 20000 }).catch(() => {});
@@ -110,7 +118,10 @@ for (const size of SIZES) for (const theme of THEMES) {
   // The Cost tab (S-1423): the subscription entries, then one entry's details open. Desktop only; the phone has no panes.
   if (!size.phone) {
     await step('cost', async () => {
+      // The Cost tab also opens the Usage page (S-1428); this shot is of the sidebar, so main keeps what it showed.
+      const was = await p.evaluate(() => window.stamDebug.shell.currentWorld());
       await sideTab('cost');
+      if ((await p.evaluate(() => window.stamDebug.shell.currentWorld())) !== was) await p.evaluate((w) => window.stamDebug.shell.showAgentWorld(w), was);
       await p.locator('#cost-side .csd-row, #cost-side .csd-empty').first().waitFor();
       const row = p.locator('#cost-side .csd-row').first();
       if (await row.count()) { await row.hover(); await p.waitForSelector('.csd-pop'); }
@@ -188,7 +199,8 @@ for (const size of SIZES) for (const theme of THEMES) {
   if (chipThread) await step('itsa-chip', async () => {
     await phoneMail();
     await p.locator(`[data-thread="${chipThread.thread_id}"]`).first().click();
-    await p.waitForSelector('.thread-head .ichip-mail', { timeout: 10000 });
+    // The phone's head carries the chip; a desktop's thread tab does (S-1471 §2a).
+    await p.waitForSelector(size.phone ? '.thread-head .ichip-mail' : '.tab.active [data-itsa]:not([data-itsa="folded"])', { timeout: 10000 });
   }, 1500);
   // ITSAs: the Issues list (the navigation's Issues tab on a phone), an ITSA's world, its
   // status and owner pickers, and its board. Nothing is picked, so this is safe on a live daemon too.
@@ -244,11 +256,11 @@ for (const size of SIZES) for (const theme of THEMES) {
       await post(`/api/agents/human/threads/${archThread.thread_id}/archive`);
       // The list polls every 8 s; wait for it to pick the change up.
       await p.waitForTimeout(9000);
-      await p.locator('.mail-toggle').first().click();
+      await p.locator(size.phone ? '[data-filter="awaiting"]' : '.mail-toggle').first().click();
     }, 600);
     await post(`/api/agents/human/threads/${archThread.thread_id}/unarchive`);
     await p.waitForTimeout(9000);
-    await p.locator('.mail-toggle').first().click();
+    await p.locator(size.phone ? '[data-filter="awaiting"]' : '.mail-toggle').first().click();
   }
 
   // The Swipe view (S-1003): the inbox as a stack of cards; on a desktop the top card pulled left
@@ -296,6 +308,7 @@ for (const size of SIZES) for (const theme of THEMES) {
   await step('settings-prompt-mode', async () => { await p.locator('text=Prompt input starts in').first().scrollIntoViewIfNeeded(); }, 600);
   await step('settings-sidebar', async () => { await p.locator('.settings-nav .item:has-text("Sidebar")').first().click(); await p.waitForSelector('.sidebar-set'); }, 600);
   await step('settings-context', async () => { await p.locator('[data-sec="context"], .settings-nav .item:has-text("Context")').first().click(); }, 600);
+  await step('settings-cache', async () => { await p.locator('.settings-nav .item:has-text("Prompt caching")').first().click(); await p.waitForSelector('[data-cache-harness="opencode"]'); }, 600);
   await step('settings-spend', async () => { await p.locator('.settings-nav .item:has-text("Spending")').first().click(); }, 600);
   await step('settings-tools', async () => { await p.locator('.settings-nav .item:has-text("Tools")').first().click(); await p.waitForSelector('.tools-card'); }, 800);
   await step('settings-tools-args', async () => { await p.locator('.tools-card details.tool').filter({ hasText: 'send_mail' }).first().locator('summary').click(); }, 800);
@@ -467,7 +480,7 @@ for (const size of SIZES) for (const theme of THEMES) {
     }, 600);
     await step('itsa-ask', async () => {
       await phoneMail();
-      await p.locator(`#mail-side .mrow[data-att-itsa="${asked.id}"]`).click();
+      await (size.phone ? p.locator(`#inbox-view .mrow:has([data-chip="itsa"][title="${asked.title}"])`).first() : p.locator(`#mail-side .mrow[data-att-itsa="${asked.id}"]`)).click();
       await p.waitForSelector(`.itsa-view[data-itsa="${asked.id}"] .itsa-ask`);
     }, 1500);
     if (write) await step('itsa-ask-staged', async () => {

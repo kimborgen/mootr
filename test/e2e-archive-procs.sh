@@ -14,12 +14,11 @@ set -e
 DIR="$(mktemp -d "$TEST_TMP/work.XXXX")"
 # loop.sh PIDFILE: ignores SIGTERM and SIGHUP, writes its pid, and runs until killed.
 printf '%s\n' 'trap "" TERM HUP; echo $$ >"$1"; while :; do sleep 1; done' >"$DIR/loop.sh"
-NODE=$(command -v node)
 cat >"$TEST_TMP/procs.json" <<EOF2
 { "turns": [
   { "match": "orphan", "steps": [
     { "shell": "(. $TEST_TMP/second/test.env && $STAM daemon start >/dev/null 2>&1)" },
-    { "shell": "(. $TEST_TMP/third/test.env && setsid $NODE --no-warnings $ROOT/src/cli.ts daemon run </dev/null >>$TEST_TMP/third/daemon.log 2>&1 & echo \$! >$DIR/third.pid)" },
+    { "shell": "(. $TEST_TMP/third/test.env && setsid $STAM daemon run </dev/null >>$TEST_TMP/third/daemon.log 2>&1 & echo \$! >$DIR/third.pid)" },
     { "shell": "(setsid sh $DIR/loop.sh $DIR/orphan.pid </dev/null >/dev/null 2>&1 &)" },
     { "reply": "DONE" } ] },
   { "match": "tree", "steps": [

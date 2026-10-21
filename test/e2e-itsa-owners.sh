@@ -99,6 +99,41 @@ waitfor "api GET '/api/itsas/$P' | jget \"d['participants']\" | grep -q '$PART'"
 waitfor "api GET '/api/by-session/$SESSION_P/system' | grep -q 'You participate in these ITSAs: $P'" || fail "the system prompt doesn't name the participated ITSA"
 waitfor "api GET '/api/agents/$PART/instructions' | grep -q 'You participate in these ITSAs: $P'" || fail "the Instructions view doesn't name the participated ITSA"
 
+echo "-- spawn with participate: the child joins as a participant, the owner stays (S-2424)"
+PJ=$(mk "{\"title\":\"Joined work\",\"owner\":\"lead\",\"status\":\"delegated\"}")
+api POST /api/agents "{\"name\":\"joiner\",\"role\":\"Commenter.\",\"harness\":\"claude\",\"cwd\":\"$TEST_TMP\",\"participate\":[\"$PJ\"]}" >/dev/null || fail "a spawn with participate was refused"
+JOINER=$(api GET /api/agents/joiner | jget "d['id']")
+[ "$(api GET "/api/itsas/$PJ" | jget "d['owner']")" = "$LEAD" ] || fail "the participate spawn changed the owner of $PJ"
+api GET "/api/itsas/$PJ" | jget "d['participants']" | grep -q "$JOINER" || fail "joiner isn't a participant of $PJ"
+echo "-- participate: the spawner is the calling agent, and must be a member (S-2424)"
+PM=$(mk "{\"title\":\"Manager work\",\"owner\":\"lead\",\"status\":\"delegated\"}")
+"$STAM" spawn mgr --itsa "$PM" --cwd "$TEST_TMP" --role "Owns the manager work." >/dev/null
+"$STAM" spawn auth --cwd "$TEST_TMP" --role "Not a member." >/dev/null
+MGR=$(api GET /api/agents/mgr | jget "d['id']")
+AUTH=$(api GET /api/agents/auth | jget "d['id']")
+agent_token() { tmux -L "$STAM_TMUX_SOCKET" show-environment -t "$1" STAM_TOKEN | cut -d= -f2-; }
+MGR_TOKEN=$(agent_token "$MGR")
+AUTH_TOKEN=$(agent_token "$AUTH")
+[ -n "$MGR_TOKEN" ] && [ -n "$AUTH_TOKEN" ] || fail "an agent has no STAM_TOKEN in its environment"
+# The HTTP status of a POST with an agent's own token, without the human header.
+agent_post() { curl -s -o /dev/null -w '%{http_code}' -X POST -H "authorization: Bearer $1" -H 'content-type: application/json' "$STAM_URL$2" -d "$3"; }
+N0=$(api GET /api/agents | jget "len(d)")
+[ "$(agent_post "$AUTH_TOKEN" /api/agents "{\"name\":\"refused\",\"role\":\"x\",\"harness\":\"claude\",\"cwd\":\"$TEST_TMP\",\"participate\":[\"$PM\"]}")" = 403 ] || fail "a non-member's spawn with participate, naming no by, wasn't refused"
+[ "$(agent_post "$AUTH_TOKEN" /api/agents "{\"name\":\"refused\",\"role\":\"x\",\"harness\":\"claude\",\"cwd\":\"$TEST_TMP\",\"by\":\"$MGR\",\"participate\":[\"$PM\"]}")" = 403 ] || fail "a non-member naming a member as by wasn't refused"
+api GET /api/agents/refused >/dev/null 2>&1 && fail "a refused participate spawn left an agent behind"
+[ "$(api GET /api/agents | jget "len(d)")" = "$N0" ] || fail "a refused participate spawn changed the agent count"
+case "$(agent_post "$MGR_TOKEN" /api/agents "{\"name\":\"kidp\",\"role\":\"Joins the manager work.\",\"harness\":\"claude\",\"cwd\":\"$TEST_TMP\",\"by\":\"$MGR\",\"participate\":[\"$PM\"]}")" in
+  2??) ;;
+  *) fail "the owner's spawn with participate was refused" ;;
+esac
+KIDP=$(api GET /api/agents/kidp | jget "d['id']")
+[ "$(api GET "/api/itsas/$PM" | jget "d['owner']")" = "$MGR" ] || fail "the participate spawn changed the owner of $PM"
+api GET "/api/itsas/$PM" | jget "d['participants']" | grep -q "$KIDP" || fail "kidp isn't a participant of $PM"
+[ "$(agent_post "$AUTH_TOKEN" /api/itsas/may-participate "{\"itsa\":\"$PM\",\"agent\":\"$MGR\"}")" = 403 ] || fail "an agent reached the peer-only may-participate route"
+
+api POST /api/agents "{\"name\":\"nojoin\",\"role\":\"x\",\"harness\":\"claude\",\"cwd\":\"$TEST_TMP\",\"participate\":[\"NOPE-98\"]}" >/dev/null && fail "a spawn with an unknown participate ITSA succeeded"
+api GET /api/agents/nojoin >/dev/null 2>&1 && fail "a refused participate spawn left an agent behind"
+
 echo "-- a parent with no ITSA, or no parent, doesn't block the spawn"
 reg nobody >/dev/null
 "$STAM" spawn orphan --parent nobody --cwd "$TEST_TMP" --role "No ITSA." >/dev/null || fail "a spawn under a parent with no ITSA was blocked"

@@ -49,7 +49,7 @@ export const large: Inv = (() => {
     layer('system-prompt', 'System prompt', 'stam-generated', Array.from({ length: 14 }, (_, i) => block('system-prompt', `Prompt part ${i + 1}`, { body: words(120, 'sys') }))),
     layer('instruction-files', 'Instruction files', 'repo', claude, { path: '/home/fixture/project/CLAUDE.md' }),
     layer('first-prompt', 'First prompt', 'stam', [block('first-prompt', 'First prompt', { body: words(150, 'task') })]),
-    layer('skills', 'Skills', 'skill', ['adhd', 'kim-style', 'run', 'init'].map((n) => block('skills', n, { body: words(400, n) }))),
+    layer('skills', 'Skills', 'skill', ['adhd', 'house-style', 'run', 'init'].map((n) => block('skills', n, { body: words(400, n) }))),
     layer('mcp-instructions', 'MCP instructions', 'stam', [block('mcp-instructions', 'MCP instructions')]),
     layer('mcp-tools', 'MCP tools', 'mcp', Array.from({ length: 60 }, (_, i) => tool(i + 1))),
   ]

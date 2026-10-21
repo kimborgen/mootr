@@ -27,7 +27,7 @@ describe('entries follow the column\'s filter kinds', () => {
     expect(run(es, 'Has not').filters).toEqual({ branch: { kind: 'has', has: false } })
   })
   it('range and date: at least / at most', () => {
-    expect(labels(cellActions(col('cost'), row(), cx({ costs: { issues: [{ key: 'S-12', total: { cost_usd: 2 } }] } }), base, []))).toContain('At most this')
+    expect(labels(cellActions(col('cost'), row(), cx({ costs: { issues: [{ key: 'S-12', total: { cost_usd: 2 }, cost: { mode: 'api', own: { api: 2 }, total: { api: 2 } } }] } }), base, []))).toContain('At most this')
     const es = cellActions(col('updated'), row(), cx(), base, [])
     expect(labels(es).slice(0, 2)).toEqual(['At least this', 'At most this'])
     expect(acts(es)[0].hint).toBe('2026-10-12')

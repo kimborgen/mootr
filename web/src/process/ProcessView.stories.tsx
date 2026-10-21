@@ -37,6 +37,7 @@ export const stories: Story[] = [{
     'Under 600 px the flow is one column fitted to the pane\'s width (pan down only), its text at the body size, and the sheet becomes a bottom sheet, as the system view\'s tree becomes an outline (' + ds('Density') + ').',
     'A wide drawing opens at its top left and never smaller than 80%, so its text stays legible; the user pans for the rest.',
     'Nothing animates: the drawing is at rest, and a layout change is a fresh placement, not a transition.',
+    'A node with boundary events (a cost or a timeout that does something) keeps its edge marker decorative: it passes taps through to the node, so the events are named in the node\'s label and in the sheet\'s line, as `on cost → pause`.',
   ],
   states: [
     { name: 'Dev change', routes: { 'GET /api/processes': PROCESSES }, render: () => pane(<ProcessView viewKey="process" />) },

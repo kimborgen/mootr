@@ -67,11 +67,35 @@ function lastAsk(x: itsa.Itsa): { id: string } | undefined {
     WHERE m.about_itsa = ? AND m.kind = 'ask' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1`).get(HUMAN, x.id) as { id: string } | undefined;
 }
 
+// The ITSA whose thread this is, while it waits on the human (S-3080): a wait_for on the human in that
+// thread is tied to it, and clears when the ITSA leaves the status.
+export function waitingItsaOfThread(threadId: string): string | undefined {
+  const x = db.open().prepare('SELECT id, status FROM itsas WHERE thread_id = ?').get(threadId) as { id: string; status: string } | undefined;
+  return x && itsa.statusOf(x.status)?.human ? x.id : undefined;
+}
+
+// Whether the ITSA a wait on the human is tied to has left its human status, or is gone (S-3080). A read
+// that fails keeps the wait: only a row that says so settles it.
+export function itsaAskSettled(id: string): boolean {
+  try {
+    const x = db.open().prepare('SELECT status FROM itsas WHERE id = ?').get(id) as { status: string } | undefined;
+    return !x || !itsa.statusOf(x.status)?.human;
+  } catch (e) {
+    log(`wait tied to ${id} kept, its ask couldn't be read`, e);
+    return false;
+  }
+}
+
 export function onStatus(x: itsa.Itsa, actor: string, from: string): void {
-  if (actor === HUMAN || from === x.status) return;
+  if (from === x.status) return;
+  // Leaving a human status for a non-human one settles the ask whoever moved the ITSA, so the agent's wait on it
+  // goes too (S-3080). A move between human statuses asks again, and the wait stays tied to the ITSA.
+  const leaving = !!itsa.statusOf(from)?.human;
+  if (leaving && !itsa.statusOf(x.status)?.human) for (const agent of db.humanWaitersOf(x.id)) db.clearRequestWaits(agent, x.id);
+  if (actor === HUMAN) return;
   // An agent moved the ITSA out of a human status: the human's ask is settled without them. This runs
   // before a new ask is mailed, so the old one is the latest.
-  if (itsa.statusOf(from)?.human) {
+  if (leaving) {
     const ask = lastAsk(x);
     if (ask) withdrawQuietly([ask.id], actor, `@${db.getAgent(actor)?.name ?? actor} moved ${x.key} to ${x.status}`, { keepThread: !!itsa.statusOf(x.status)?.human });
   }

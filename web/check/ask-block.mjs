@@ -70,15 +70,18 @@ for (const size of sizes) {
   await p.waitForSelector('#tree .node', { timeout: 20000 });
   // The phone shows one pane at a time, so it takes the Mail tab; the desktop keeps the list in view.
   const nav = p.locator('[data-nav="mail"]');
-  if (await nav.isVisible()) await press(nav);
-  const att = p.locator(`#mail-side .mrow[data-att-itsa="${ask.id}"]`);
+  // On the phone the Inbox page lists the ask as its thread's row, with the ITSA's chip; the desktop keeps the sidebar list.
+  const onPhone = await nav.isVisible();
+  if (onPhone) await press(nav);
+  const side = onPhone ? '#inbox-view' : '#mail-side';
+  const att = onPhone ? p.locator(`#inbox-view .mrow:has([data-chip="itsa"][title="${ask.title}"])`).first() : p.locator(`#mail-side .mrow[data-att-itsa="${ask.id}"]`);
   await att.waitFor();
   const rowLine = await att.locator('[data-ask-block]').innerText().catch(() => 'none');
   check(tag, rowLine === ROW, 'the ask row shows its short blocking line', rowLine);
   await p.waitForTimeout(300);
   await p.screenshot({ path: `${out}/ask-block-mail-${tag}.png` });
   // The dialog's row: a pending dialog stops kid, shown in short form on its row.
-  const dialogRow = p.locator('#mail-side .mrow[title*="asks to use Read"]').filter({ has: p.locator('[data-ask-block]') }).first();
+  const dialogRow = p.locator(`${side} .mrow[title*="asks to use Read"]`).filter({ has: p.locator('[data-ask-block]') }).first();
   const dialogRowLine = await dialogRow.locator('[data-ask-block]').innerText().catch(() => 'none');
   check(tag, dialogRowLine === ROW, 'the dialog row shows its short blocking line', dialogRowLine);
   await press(att);
@@ -95,7 +98,7 @@ for (const size of sizes) {
   // while the ITSA shows, so the check goes back to the Mail tab first.
   await p.goto(origin + '/#token=' + token);
   await p.waitForSelector('#tree .node', { state: 'attached', timeout: 20000 });
-  if (await nav.isVisible()) await press(nav);
+  if (onPhone) await press(nav);
   await dialogRow.waitFor();
   await press(dialogRow);
   const dialogBar = p.locator('[data-perm-pending] [data-ask-block]').first();

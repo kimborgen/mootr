@@ -78,22 +78,27 @@ FUT=$(($(date +%s) + 7200))
 
 fail() { echo "FAIL: $1"; exit 1; }
 api() { curl -s -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -H 'x-stam-human: 1' "$@"; }
-# The first column of the first row of a read-only query on the daemon's database, or nothing.
-q() {
-  node --no-warnings -e '
-const { DatabaseSync } = require("node:sqlite");
-const row = new DatabaseSync(process.argv[1], { readOnly: true }).prepare(process.argv[2]).get();
-if (row) console.log(Object.values(row)[0] ?? "");' "$STAM_HOME/stam.db" "$1"
-}
-aid() { q "SELECT id FROM agents WHERE name = '$1'"; }
-count_blockers() { q "SELECT COUNT(*) FROM blockers b JOIN agents a ON a.id = b.agent_id WHERE a.name = '$1' AND b.kind = '$2' AND b.account = '$3'"; }
+# tget PATH: a test-route read (-f: a gate 404 fails here). py EXPR: EXPR over the JSON on stdin, as d.
+tget() { curl -sf -H "authorization: Bearer $TOKEN" "$STAM_URL/api/test/$1"; }
+py() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+aid() { api "$STAM_URL/api/agents" | python3 -c 'import json,sys; print(next((a["id"] for a in json.load(sys.stdin) if a["name"] == sys.argv[1]), ""))' "$1"; }
+count_blockers() { tget "blockers?agent=$1" | py "sum(b['kind'] == '$2' and b['account'] == '$3' for b in d)"; }
 has_blocker() { [ "$(count_blockers "$1" "$2" "$3")" = 1 ]; }
 no_blocker() { [ "$(count_blockers "$1" "$2" "$3")" = 0 ]; }
 # 1 once the mail with this subject was pushed to the agent, 0 while it waits.
-pushed() { q "SELECT r.pushed_at IS NOT NULL FROM mail_recipients r JOIN mail m ON m.id = r.mail_id JOIN agents a ON a.id = r.agent_id WHERE a.name = '$1' AND m.subject = '$2'"; }
+pushed() { tget "mail-pushed?agent=$1&subject=$2" | py "int(d[0]['pushed']) if d else ''"; }
 is_pushed() { [ "$(pushed "$1" "$2")" = 1 ]; }
-refusals() { q "SELECT COUNT(*) FROM events WHERE agent_id = '$(aid "$1")' AND type = 'cost:refused'"; }
+# The events of an agent of one type whose data holds a text: count.
+event_count() { tget "events?agent=$(aid "$1")&type=$2" | py "sum('$3' in (e['data'] or '') for e in d)"; }
+refusals() { event_count "$1" cost:refused ''; }
 refused() { [ "$(refusals "$1")" -ge 1 ]; }
+# Who acknowledged an agent's blocker-set notice: empty while nobody did.
+acked_by() { tget "cost-notices?agent=$1" | py "next((n['acked_by'] or '' for n in d if n['kind'] == 'blocker-set'), '')"; }
+# The mails in an agent's inbox whose subject matches a regex: their threads' first bodies, one per line break.
+inbox_subjects() { api "$STAM_URL/api/agents/$1/inbox?limit=200" | py "'\n'.join(m['subject'] for m in d)"; }
+mail_body() { api "$STAM_URL/api/agents/$1/inbox?limit=200" | python3 -c 'import json,re,sys
+for m in json.load(sys.stdin):
+    if re.search(sys.argv[1], m["subject"]): print(m["thread_id"]); break' "$2" | while read -r _t; do api "$STAM_URL/api/threads/$_t" | py "d[0]['body']"; done; }
 ping() { "$STAM" mail send --to "$1" --subject "$2" "ping" >/dev/null; }
 reading() { api -X POST "$STAM_URL/api/test/cost" -d "{\"action\":\"reading\",\"name\":\"$1\",\"windows\":{\"five_hour\":{\"used_percentage\":$2,\"resets_at\":$FUT}}}" >/dev/null; }
 fallbacks_due() { api -X POST "$STAM_URL/api/test/cost" -d "{\"action\":\"fallback-due\",\"now\":$(($(date +%s) * 1000 + 7200000))}" >/dev/null; }
@@ -160,6 +165,19 @@ hook_code() { curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST -H "authoriza
 [ "$(hook_code "$W1_TOKEN" itsa-gate '{"action":"status"}')" = 403 ] || fail "an agent's token reached itsa-gate"
 [ "$(hook_code "$TOKEN" itsa-gate '{"action":"status"}')" = 200 ] || fail "the shared token was refused by itsa-gate"
 [ "$(hook_code "$W1_TOKEN" await '{}')" = 403 ] || fail "an agent's token reached await"
+[ "$(hook_code "$W1_TOKEN" agent '{"agent":"w1"}')" = 403 ] || fail "an agent's token reached agent"
+[ "$(hook_code "$W1_TOKEN" events '{}')" = 403 ] || fail "an agent's token reached events"
+[ "$(hook_code "$W1_TOKEN" pending-unown '{}')" = 403 ] || fail "an agent's token reached pending-unown"
+[ "$(hook_code "$W1_TOKEN" permission '{}')" = 403 ] || fail "an agent's token reached permission"
+[ "$(hook_code "$W1_TOKEN" wait '{}')" = 403 ] || fail "an agent's token reached wait"
+[ "$(hook_code "$W1_TOKEN" usage '{}')" = 403 ] || fail "an agent's token reached usage"
+[ "$(hook_code "$W1_TOKEN" settings '{}')" = 403 ] || fail "an agent's token reached settings"
+[ "$(hook_code "$W1_TOKEN" set-setting '{"key":"x","value":"y"}')" = 403 ] || fail "an agent's token reached set-setting"
+[ "$(hook_code "$W1_TOKEN" token-at-rest '{}')" = 403 ] || fail "an agent's token reached token-at-rest"
+[ "$(hook_code "$W1_TOKEN" seed-agents '{}')" = 403 ] || fail "an agent's token reached seed-agents"
+[ "$(hook_code "$W1_TOKEN" mail '{}')" = 403 ] || fail "an agent's token reached mail"
+[ "$(hook_code "$W1_TOKEN" delivery-fail '{}')" = 403 ] || fail "an agent's token reached delivery-fail"
+[ "$(hook_code "$W1_TOKEN" kv '{"key":"x","value":"y"}')" = 403 ] || fail "an agent's token reached kv"
 [ "$(hook_code "$W1_TOKEN" no-such-hook '{}')" = 403 ] || fail "an agent's token got past the prefix gate on an unknown test route"
 touch "$STAM_HOME/stall-release"
 [ "$(hook_code "$TOKEN" await '{}')" = 200 ] || fail "the shared token was refused by await"
@@ -172,31 +190,31 @@ wait_until refused w1
 [ "$(pushed w1 WINDOW-PING-1)" = 0 ] || fail "the admission gate let a turn start on w1 while its window read 100%"
 
 echo "-- 2. the manager acts: mgr pauses w2's tree until reset, which acknowledges the notice"
-w2_acked() { [ -n "$(q "SELECT acked_by FROM cost_notices WHERE agent_id = '$(aid w2)' AND kind = 'blocker-set'")" ]; }
+w2_acked() { [ -n "$(acked_by w2)" ]; }
 wait_until w2_acked
-[ "$(q "SELECT acked_by FROM cost_notices WHERE agent_id = '$(aid w2)' AND kind = 'blocker-set'")" = "$(aid mgr)" ] || fail "the notice about w2 wasn't acknowledged by mgr"
+[ "$(acked_by w2)" = "$(aid mgr)" ] || fail "the notice about w2 wasn't acknowledged by mgr"
 # The notice about w1 went to the chief of staff, which didn't act.
-[ -z "$(q "SELECT acked_by FROM cost_notices WHERE agent_id = '$(aid w1)' AND kind = 'blocker-set'")" ] || fail "the notice about w1 was acknowledged"
+[ -z "$(acked_by w1)" ] || fail "the notice about w1 was acknowledged"
 
 echo "-- 3. the fallback: past fallbackMinutes, unacted notices run onSubExhausted and tell the chief of staff"
 fallbacks_due
-fb() { q "SELECT $2 FROM cost_fallbacks f JOIN cost_notices n ON n.id = f.notice_id WHERE f.agent_id = '$(aid "$1")' AND n.kind = 'blocker-set' AND f.kind = 'window'"; }
+fb() { tget "cost-fallbacks?agent=$1" | py "next((f['$2'] for f in d if f['notice_kind'] == 'blocker-set' and f['kind'] == 'window'), '')"; }
 fb_done() { [ "$(fb "$1" state)" = done ]; }
 for w in w1 w2 w3; do wait_until fb_done "$w"; done
 case "$(fb w2 result)" in "skipped: mgr acted on it"*) ;; *) fail "w2's fallback should be skipped for the manager's act, got: $(fb w2 result)" ;; esac
 case "$(fb w3 result)" in "waited: "*) ;; *) fail "w3's fallback should have run the wait action, got: $(fb w3 result)" ;; esac
-told() { [ "$(q "SELECT COUNT(*) FROM mail m JOIN mail_recipients r ON r.mail_id = m.id WHERE r.agent_id = '$(aid cos)' AND m.subject LIKE '%Cost fallback ran for $1%'")" -ge 1 ]; }
+told() { inbox_subjects cos | grep -q "Cost fallback ran for $1"; }
 wait_until told w3
 wait_until told w1
 ! told w2 || fail "the chief of staff was told of a fallback for w2, whose manager acted"
-[ "$(q "SELECT COUNT(*) FROM events WHERE agent_id = '$(aid w2)' AND type = 'cost:fallback' AND data LIKE '%start%'")" = 0 ] || fail "w2's fallback ran"
+[ "$(event_count w2 cost:fallback start)" = 0 ] || fail "w2's fallback ran"
 
 echo "-- 1 (continued). a fresh Claude reading below 100% clears the blockers; the held mail goes in"
 reading claude 40
 for w in w1 w2 w3; do wait_until no_blocker "$w" window claude-like; done
 wait_until is_pushed w1 WINDOW-PING-1
 # mgr's cost pause lifts on the same reading.
-no_pause() { [ -z "$(q "SELECT paused_by FROM agents WHERE name = 'w2' AND paused_by IS NOT NULL AND paused_by <> '[]'")" ]; }
+no_pause() { [ "$(api "$STAM_URL/api/agents/w2" | py "d.get('paused_by') or '[]'")" = '[]' ]; }
 wait_until no_pause
 
 echo "-- 1 (Codex): the same on a Codex agent"
@@ -219,13 +237,13 @@ echo "-- 4. budget (OpenCode): the agent's spend reaches \$0.05, which holds the
 # the agent's own reported cost: $0.06 for oc, on the openrouter account.
 api -X POST "$STAM_URL/api/test/cost" -d '{"action":"spend","agent":"oc","cost":0.06}' >/dev/null
 wait_until has_blocker oc budget openrouter
-[ "$(q "SELECT ROUND(SUM(cost_usd), 2) >= 0.05 FROM usage WHERE account = 'openrouter'")" = 1 ] || fail "the ledger doesn't show the stub's spend"
+[ "$(tget "usage-total?account=openrouter" | py "round(d['cost_usd'], 2) >= 0.05")" = True ] || fail "the ledger doesn't show the stub's spend"
 ping oc BUDGET-PING
 wait_until refused oc
 [ "$(pushed oc BUDGET-PING)" = 0 ] || fail "the admission gate let a turn start on oc while its budget was spent"
 OUT=$("$STAM" spawn oc2 --harness opencode --model openrouter/stub/model --cwd "$D" "Say hi." 2>&1) && fail "a spawn onto the spent account succeeded" || true
 case "$OUT" in *budget*) ;; *) fail "the refused spawn doesn't name the budget: $OUT" ;; esac
-budget_mail() { q "SELECT m.body FROM mail m JOIN mail_recipients r ON r.mail_id = m.id WHERE r.agent_id = 'human' AND m.subject LIKE '%openrouter% reached%' LIMIT 1"; }
+budget_mail() { mail_body human 'openrouter.* reached'; }
 has_budget_mail() { [ -n "$(budget_mail)" ]; }
 wait_until has_budget_mail
 budget_mail | grep -q '```decision' || fail "stam's budget mail to the human has no decision block"
@@ -249,7 +267,7 @@ wait_until refused oc
 [ "$(pushed oc ERROR-PING)" = 0 ] || fail "the admission gate let a turn start on oc while its account had a provider error"
 OUT=$("$STAM" spawn oc4 --harness opencode --model openrouter/stub/model --cwd "$D" "Say hi." 2>&1) && fail "a spawn onto an account with a provider error succeeded" || true
 case "$OUT" in *error*) ;; *) fail "the refused spawn doesn't name the error: $OUT" ;; esac
-probes() { q "SELECT COUNT(*) FROM events WHERE agent_id = '$(aid oc)' AND type = 'cost:probe' AND data LIKE '%$1%'"; }
+probes() { event_count oc cost:probe "$1"; }
 printf 503 >"$STUB/key-status"
 probe_due openrouter
 [ "$(probes '"outcome":"fail"')" = 1 ] || fail "the failing probe wasn't recorded"
@@ -260,7 +278,7 @@ wait_until no_blocker oc error openrouter
 wait_until is_pushed oc ERROR-PING
 
 echo "-- 6 (auth). two auth errors in one outage mail the human once; a probe clears it"
-auth_mail() { q "SELECT COUNT(*) FROM mail m JOIN mail_recipients r ON r.mail_id = m.id WHERE r.agent_id = 'human' AND m.subject LIKE '%openrouter: authentication error%'"; }
+auth_mail() { inbox_subjects human | grep -c 'openrouter: authentication error' || true; }
 provider_error oc auth 'session.execution.failed (401)'
 wait_until has_blocker oc error openrouter
 provider_error oc auth 'session.execution.failed (401)'

@@ -32,13 +32,23 @@ TOKEN=$(cat "$STAM_HOME/token")
 human() { curl -s -X "$1" -H "authorization: Bearer $TOKEN" -H 'x-stam-human: 1' -H "x-stam-test-human: $STAM_TEST_HUMAN_KEY" -H 'content-type: application/json' "$STAM_URL$2" ${3:+-d "$3"}; }
 field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const v=process.argv[1].split(".").reduce((o,k)=>o?.[k],JSON.parse(s));console.log(v==null?"":typeof v==="object"?JSON.stringify(v):v)})' "$1"; }
 spawn() { human POST /api/agents "$1"; }
-sql() { node --no-warnings -e 'const { DatabaseSync } = require("node:sqlite"); const d = new DatabaseSync(process.argv[1], { readOnly: true }); const r = d.prepare(process.argv[2]).get(); if (r) console.log(Object.values(r)[0] ?? "");' "$STAM_HOME/stam.db" "$1"; }
-typeof() { sql "SELECT type FROM agents WHERE name = '$1'"; }
+# get PATH: a read of the daemon's API (-f: a failure, or a gate 404, fails here). pyj EXPR: EXPR over the JSON on stdin, as d.
+get() { curl -sf -H "authorization: Bearer $TOKEN" "$STAM_URL$1"; }
+pyj() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+# agent NAME FIELD: a field of the agent with that name, empty when there is none.
+agent() { get /api/agents | pyj "next((a['$2'] for a in d if a['name'] == '$1'), '')"; }
+# live PREFIX: how many agents whose name starts with PREFIX are not archived.
+live_prefix() { get /api/agents | pyj "sum(a['name'].startswith('$1') and a['lifecycle'] != 'archived' for a in d)"; }
+# ring NAME FIELD: a field of the ring, empty when there is none.
+ring_field() { curl -s -H "authorization: Bearer $TOKEN" "$STAM_URL/api/rings/$1" | pyj "'' if 'error' in d or d.get('$2') is None else d['$2']"; }
+ring_count() { get /api/rings | pyj "sum(r['name'] == '$1' for r in d)"; }
+codex_blockers() { get "/api/test/blockers" | pyj "sum(b['account'] == 'codex-like' for b in d)"; }
+typeof() { agent "$1" type; }
 
 FUT=$(($(date +%s) + 7200))
 reading() { human POST /api/test/cost "{\"action\":\"reading\",\"name\":\"codex\",\"windows\":{\"five_hour\":{\"used_percentage\":$1,\"resets_at\":$FUT}}}" >/dev/null; }
-held() { [ "$(sql "SELECT COUNT(*) FROM blockers WHERE account = 'codex-like'")" -ge 1 ]; }
-free() { [ "$(sql "SELECT COUNT(*) FROM blockers WHERE account = 'codex-like'")" = 0 ]; }
+held() { [ "$(codex_blockers)" -ge 1 ]; }
+free() { [ "$(codex_blockers)" = 0 ]; }
 spawn "{\"name\":\"holder\",\"cwd\":\"$D\",\"harness\":\"codex\"}" >/dev/null
 "$STAM" wait holder --until idle --timeout 60 >/dev/null
 hold() { reading 100; wait_until held; }
@@ -50,7 +60,7 @@ R=$(spawn "{\"name\":\"rr1\",\"type\":\"review-ring\",\"cwd\":\"$D\",\"prompt\":
 [ "$(printf %s "$R" | field ring.name)" = rr1 ] || fail "ring name: $R"
 [ -n "$(printf %s "$R" | field ring.id)" ] || fail "no ring id: $R"
 [ "$(printf %s "$R" | field members | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).map(m=>m.name+":"+m.type).join(",")))')" = "rr1-1:reviewer,rr1-2:reviewer-opus" ] || fail "members: $R"
-[ "$(sql "SELECT format || '/' || max_rounds || '/' || COALESCE(moderator_id,'none') || '/' || topic || '/' || created_by FROM rings WHERE name = 'rr1'")" = "rounds/3/none/review the patch/human" ] || fail "ring row: $(sql "SELECT format, max_rounds, moderator_id, topic, created_by FROM rings WHERE name = 'rr1'")"
+[ "$(ring_field rr1 format)/$(ring_field rr1 max_rounds)/$(ring_field rr1 moderator_id | sed 's/^$/none/')/$(ring_field rr1 topic)/$(ring_field rr1 created_by)" = "rounds/3/none/review the patch/human" ] || fail "ring row: $(curl -s -H "authorization: Bearer $TOKEN" "$STAM_URL/api/rings/rr1")"
 [ "$(typeof rr1-1)" = reviewer ] && [ "$(typeof rr1-2)" = reviewer-opus ] || fail "agent types"
 "$STAM" ring rr1 | grep -q '"status": "running"' || fail "ring not running"
 OUT=$(spawn "{\"name\":\"rr1b\",\"type\":\"review-ring\",\"cwd\":\"$D\"}")
@@ -61,14 +71,14 @@ settings '{"fire-ring":{"description":"x","harness":"","model":null,"effort":nul
 R=$(spawn "{\"name\":\"rr2\",\"type\":\"fire-ring\",\"cwd\":\"$D\",\"prompt\":\"decide it\"}")
 [ "$(printf %s "$R" | field moderator.name)" = rr2-mod ] || fail "moderator: $R"
 [ "$(printf %s "$R" | field moderator.type)" = reviewer-opus ] || fail "moderator type: $R"
-[ "$(sql "SELECT format || '/' || max_rounds || '/' || moderator_decides || '/' || (moderator_id = (SELECT id FROM agents WHERE name = 'rr2-mod')) FROM rings WHERE name = 'rr2'")" = "fire/2/1/1" ] || fail "ring row"
+[ "$(ring_field rr2 format)/$(ring_field rr2 max_rounds)/$(ring_field rr2 moderator_decides)/$([ "$(ring_field rr2 moderator_id)" = "$(agent rr2-mod id)" ] && echo 1)" = "fire/2/1/1" ] || fail "ring row"
 [ "$(typeof rr2-mod)" = reviewer-opus ] || fail "moderator agent type"
 
 echo "-- 3. ring_create: spawn entries and the moderator by type"
 R=$(human POST /api/rings "{\"name\":\"rc1\",\"topic\":\"t\",\"format\":\"debate\",\"cwd\":\"$D\",\"spawn\":[{\"type\":\"reviewer\"},{\"type\":\"reviewer-opus\"}],\"moderator\":{\"type\":\"reviewer-opus\"},\"moderator_decides\":true}")
 [ "$(printf %s "$R" | field name)" = rc1 ] || fail "ring_create: $R"
 [ "$(typeof rc1-1)" = reviewer ] && [ "$(typeof rc1-2)" = reviewer-opus ] && [ "$(typeof rc1-mod)" = reviewer-opus ] || fail "ring_create agent types"
-[ "$(sql "SELECT format || '/' || moderator_decides FROM rings WHERE name = 'rc1'")" = "debate/1" ] || fail "ring_create ring row"
+[ "$(ring_field rc1 format)/$(ring_field rc1 moderator_decides)" = "debate/1" ] || fail "ring_create ring row"
 R=$(human POST /api/rings "{\"name\":\"rc2\",\"topic\":\"t\",\"format\":\"rounds\",\"cwd\":\"$D\",\"members\":[\"rc1-1\"],\"spawn\":[{\"type\":\"reviewer-opus\"}],\"moderator\":\"holder\"}")
 [ "$(printf %s "$R" | field name)" = rc2 ] || fail "ring_create with an existing moderator: $R"
 
@@ -77,7 +87,7 @@ hold
 R=$(spawn "{\"name\":\"rr3\",\"type\":\"review-ring\",\"cwd\":\"$D\",\"prompt\":\"review it\"}")
 [ "$(printf %s "$R" | field kind)" = ring ] || fail "held member: $R"
 [ "$(typeof rr3-1)" = reviewer-opus ] || fail "held member's type: $(typeof rr3-1)"
-[ "$(sql "SELECT COUNT(*) FROM events WHERE type = 'reviewer:fallback' AND agent_id = (SELECT id FROM agents WHERE name = 'rr3-1')")" = 1 ] || fail "no reviewer:fallback event"
+[ "$(get "/api/test/events?agent=$(agent rr3-1 id)&type=reviewer:fallback" | pyj "len(d)")" = 1 ] || fail "no reviewer:fallback event"
 
 echo "-- 5. a member that can't start: the whole ring falls to the single fallback reviewer"
 # solo has no fallback, so with codex held its spawn is refused, after fr-1 (claude) started.
@@ -87,44 +97,44 @@ R=$(spawn "{\"name\":\"fr\",\"type\":\"fb-ring\",\"cwd\":\"$D\",\"prompt\":\"rev
 [ "$(printf %s "$R" | field type)" = reviewer-opus ] || fail "fallback reviewer type: $R"
 printf %s "$R" | field warning | grep -q "didn't start.*can't spawn fr-2" || fail "no reason in the warning: $(printf %s "$R" | field warning)"
 printf %s "$R" | field first_prompt | grep -q 'review it' || fail "fallback reviewer lost the brief"
-[ "$(sql "SELECT COUNT(*) FROM agents WHERE name LIKE 'fr-%' AND lifecycle != 'archived'")" = 0 ] || fail "members left running"
-[ "$(sql "SELECT lifecycle FROM agents WHERE name = 'fr-1'")" = archived ] || fail "fr-1 not archived"
-[ "$(sql "SELECT COUNT(*) FROM rings WHERE name = 'fr'")" = 0 ] || fail "a ring was left"
+[ "$(live_prefix fr-)" = 0 ] || fail "members left running"
+[ "$(agent fr-1 lifecycle)" = archived ] || fail "fr-1 not archived"
+[ "$(ring_count fr)" = 0 ] || fail "a ring was left"
 
 echo "-- 6. no fallback: the spawn is refused, nothing is left"
 OUT=$(spawn "{\"name\":\"nf\",\"type\":\"nofb-ring\",\"cwd\":\"$D\",\"prompt\":\"review it\"}")
 printf %s "$OUT" | grep -q "can't start ring nf.*no fallback" || fail "no refusal: $OUT"
-[ "$(sql "SELECT COUNT(*) FROM agents WHERE name LIKE 'nf%' AND lifecycle != 'archived'")" = 0 ] || fail "members left running"
+[ "$(live_prefix nf)" = 0 ] || fail "members left running"
 unhold
 
 echo "-- 7. an explicit model, harness, or preset is refused"
 for X in '"model":"claude-sonnet-5-5"' '"harness":"claude"' '"preset":"standard"'; do
   OUT=$(spawn "{\"name\":\"rx\",\"type\":\"review-ring\",\"cwd\":\"$D\",\"prompt\":\"x\",$X}")
   printf %s "$OUT" | grep -q 'takes no harness, model, or preset' || fail "spawned with $X: $OUT"
-  [ -z "$(sql "SELECT id FROM agents WHERE name LIKE 'rx%'")" ] || fail "left an agent ($X)"
+  [ "$(get /api/agents | pyj "sum(a['name'].startswith('rx') for a in d)")" = 0 ] || fail "left an agent ($X)"
 done
 echo "-- 8. a member or moderator whose launch fails after its row exists is archived"
 launchfail() { human POST /api/test/launch-fail "{\"names\":$1}" >/dev/null; }
-live() { sql "SELECT COUNT(*) FROM agents WHERE name LIKE '$1' AND lifecycle != 'archived'"; }
+live() { live_prefix "${1%\%}"; }
 launchfail '["lf-2"]'
 OUT=$(human POST /api/rings "{\"name\":\"lf\",\"topic\":\"t\",\"format\":\"rounds\",\"cwd\":\"$D\",\"spawn\":[{\"type\":\"reviewer\"},{\"type\":\"reviewer-opus\"}]}")
 printf %s "$OUT" | grep -q 'launch of lf-2 failed' || fail "member launch failure not reported: $OUT"
 [ "$(live 'lf-%')" = 0 ] || fail "member launch failure left agents running"
-[ "$(sql "SELECT lifecycle FROM agents WHERE name = 'lf-2'")" = archived ] || fail "lf-2 not archived"
-[ "$(sql "SELECT COUNT(*) FROM rings WHERE name = 'lf'")" = 0 ] || fail "a ring was left (member)"
+[ "$(agent lf-2 lifecycle)" = archived ] || fail "lf-2 not archived"
+[ "$(ring_count lf)" = 0 ] || fail "a ring was left (member)"
 launchfail '["lm-mod"]'
 OUT=$(human POST /api/rings "{\"name\":\"lm\",\"topic\":\"t\",\"format\":\"rounds\",\"cwd\":\"$D\",\"spawn\":[{\"type\":\"reviewer\"},{\"type\":\"reviewer-opus\"}],\"moderator\":{\"type\":\"reviewer-opus\"}}")
 printf %s "$OUT" | grep -q 'launch of lm-mod failed' || fail "moderator launch failure not reported: $OUT"
 [ "$(live 'lm-%')" = 0 ] || fail "moderator launch failure left agents running"
-[ "$(sql "SELECT lifecycle FROM agents WHERE name = 'lm-mod'")" = archived ] || fail "lm-mod not archived"
-[ "$(sql "SELECT COUNT(*) FROM rings WHERE name = 'lm'")" = 0 ] || fail "a ring was left (moderator)"
+[ "$(agent lm-mod lifecycle)" = archived ] || fail "lm-mod not archived"
+[ "$(ring_count lm)" = 0 ] || fail "a ring was left (moderator)"
 launchfail '[]'
 # A name that is already taken is refused, and that agent is left alone.
 spawn "{\"name\":\"tk-2\",\"cwd\":\"$D\",\"harness\":\"claude\"}" >/dev/null
 OUT=$(human POST /api/rings "{\"name\":\"tk\",\"topic\":\"t\",\"format\":\"rounds\",\"cwd\":\"$D\",\"spawn\":[{\"type\":\"reviewer\"},{\"type\":\"reviewer-opus\"}]}")
 printf %s "$OUT" | grep -q 'tk-2 is taken' || fail "a taken name was not refused: $OUT"
 [ "$(live 'tk-2')" = 1 ] || fail "the colliding agent was archived"
-[ "$(sql "SELECT lifecycle FROM agents WHERE name = 'tk-1'")" = archived ] || fail "tk-1 not archived"
+[ "$(agent tk-1 lifecycle)" = archived ] || fail "tk-1 not archived"
 # 9. Cleanup archives only the agents the ring itself created, never one that took a member's
 # name while the ring's spawn awaited. The first entry's ITSA lookup is held until the colliding
 # agent exists (synchronized on the gate's waiting count, no sleeps), then fails.
@@ -140,7 +150,7 @@ gate release >/dev/null
 wait $RINGPID
 [ -s "$TEST_TMP/cx.out" ] && ! grep -q '"cx"' "$TEST_TMP/cx.out" || fail "the ring did not fail: $(cat "$TEST_TMP/cx.out")"
 [ "$(live 'cx-1')" = 1 ] || fail "the ring's cleanup archived an agent it did not create"
-[ "$(sql "SELECT COUNT(*) FROM rings WHERE name = 'cx'")" = 0 ] || fail "a ring was left"
+[ "$(ring_count cx)" = 0 ] || fail "a ring was left"
 echo "-- 10. a ring spawned with itsa: members and moderator join as participants, the owner stays (S-501)"
 settings '{"fire-ring":{"description":"x","harness":"","model":null,"effort":null,"review":{"fallback":"reviewer","ring":{"format":"fire","members":["reviewer","reviewer-opus"],"moderator":{"type":"reviewer-opus","decides":true},"maxRounds":2}}}}'
 spawn "{\"name\":\"io\",\"cwd\":\"$D\",\"harness\":\"claude\"}" >/dev/null
@@ -149,12 +159,12 @@ IK=$(human POST /api/itsas '{"title":"Ring target","owner":"io"}' | field key)
 R=$(spawn "{\"name\":\"ri\",\"type\":\"fire-ring\",\"cwd\":\"$D\",\"prompt\":\"review it\",\"itsa\":\"$IK\"}")
 [ "$(printf %s "$R" | field kind)" = ring ] || fail "not a ring: $R"
 X=$(human GET "/api/itsas/$IK")
-[ "$(printf %s "$X" | field owner)" = "$(sql "SELECT id FROM agents WHERE name = 'io'")" ] || fail "the ring took the owner: $X"
+[ "$(printf %s "$X" | field owner)" = "$(agent io id)" ] || fail "the ring took the owner: $X"
 for N in ri-1 ri-2 ri-mod; do
-  printf %s "$X" | grep -q "$(sql "SELECT id FROM agents WHERE name = '$N'")" || fail "$N is no participant: $X"
+  printf %s "$X" | grep -q "$(agent $N id)" || fail "$N is no participant: $X"
 done
 R=$(spawn "{\"name\":\"rs\",\"type\":\"reviewer\",\"cwd\":\"$D\",\"prompt\":\"review it\",\"itsa\":\"$IK\"}")
 X=$(human GET "/api/itsas/$IK")
-[ "$(printf %s "$X" | field owner)" = "$(sql "SELECT id FROM agents WHERE name = 'io'")" ] || fail "a single reviewer took the owner: $X"
-printf %s "$X" | grep -q "$(sql "SELECT id FROM agents WHERE name = 'rs'")" || fail "rs is no participant: $X"
+[ "$(printf %s "$X" | field owner)" = "$(agent io id)" ] || fail "a single reviewer took the owner: $X"
+printf %s "$X" | grep -q "$(agent rs id)" || fail "rs is no participant: $X"
 echo "PASS e2e-reviewer-ring"

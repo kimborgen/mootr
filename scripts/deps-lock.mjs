@@ -19,7 +19,7 @@ export const NODEPS = 76;
 // can't remove or replace the entry between any two of them.
 //   flock -s LOCK sh -c 'classify ENTRY; link ENTRY/node_modules TARGET || { rm -rf TARGET; cp -a ... TARGET; }'
 // STAM_DEPS_LINK (default `cp -al`) names the link command; a test sets it to a failing one for the EXDEV path.
-const SCRIPT = `if [ ! -e "$1/node_modules" ]; then [ -e "$1/.ready" ] && exit ${NODEPS}; exit ${GONE}; fi; \${STAM_DEPS_LINK:-cp -al} "$1/node_modules" "$2" && exit 0; rm -rf "$2"; exec cp -a "$1/node_modules" "$2"`;
+const SCRIPT = `if [ ! -e "$1/node_modules" ]; then [ -e "$1/.ready" ] && exit ${NODEPS}; exit ${GONE}; fi; \${MOOTR_DEPS_LINK:-\${STAM_DEPS_LINK:-cp -al}} "$1/node_modules" "$2" && exit 0; rm -rf "$2"; exec cp -a "$1/node_modules" "$2"`;
 const linkArgv = (root, entry, target) => ['flock', '-s', join(root, LOCK_NAME), 'sh', '-c', SCRIPT, 'sh', entry, target];
 const plainArgv = (entry, target) => ['sh', '-c', SCRIPT, 'sh', entry, target];
 

@@ -49,6 +49,19 @@ export function boxRows(lines: string[]): { at: number; end: number } | undefine
   return boxAt(lines);
 }
 
+// The rows of the box a prompt was pasted into, [at, end): when the mark line has a rule over it
+// and a rule under it, everything between the two, blank rows too (a pasted blank line is a blank
+// row inside the box, and the transcript above holds none of it); otherwise as boxRows.
+export function promptBoxRows(lines: string[]): { at: number; end: number } | undefined {
+  const box = boxAt(lines);
+  if (!box) return undefined;
+  if (box.at > 0 && RULE.test(lines[box.at - 1])) {
+    const under = lines.findIndex((l, i) => i > box.at && RULE.test(l));
+    if (under > 0) return { at: box.at, end: under };
+  }
+  return box;
+}
+
 // Whether a completion menu shows under the box (S-500): Claude Code marks its highlighted row
 // with ❯, and Enter would take that row. A menu over the box changes the lines above it instead,
 // which sameAround finds.

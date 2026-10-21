@@ -11,9 +11,10 @@ import * as watch from '../watch.ts';
 import { settings } from '../settings.ts';
 import { ghToken } from '../mcp-auth.ts';
 import { mirrorEventMain, mirrorEventPr } from '../pr-mirror.ts';
+import { envVar } from '../env.ts';
 
 const DEFAULT_BASE = 'https://api.github.com';
-const base = () => (process.env.STAM_GITHUB_API || DEFAULT_BASE).replace(/\/+$/, '');
+const base = () => (envVar('GITHUB_API') || DEFAULT_BASE).replace(/\/+$/, '');
 
 // Log a message once per daemon, so a missing token or a glob subject doesn't repeat every tick.
 const logged = new Set<string>();
@@ -43,7 +44,8 @@ export function parseSubject(subject: string): GithubSubject | null {
 // The token to poll with: a test override, else the `gh` login's. Null when there is none,
 // so the tick is skipped (logged once).
 export async function token(): Promise<string | null> {
-  if (process.env.STAM_GITHUB_TOKEN) return process.env.STAM_GITHUB_TOKEN;
+  const token = envVar('GITHUB_TOKEN');
+  if (token) return token;
   try {
     return await ghToken();
   } catch {

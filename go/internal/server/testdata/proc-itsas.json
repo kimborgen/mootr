@@ -1,0 +1,9 @@
+[
+  {"key": "S-1", "id": "i1", "title": "A change", "status": "in_progress", "kind": "issue", "stage": null, "owner": "child"},
+  {"key": "S-2", "id": "i2", "title": "In review", "status": "in_review", "kind": "issue", "stage": null, "owner": null},
+  {"key": "S-3", "id": "i3", "title": "Staged", "status": "in_progress", "kind": "issue", "stage": "review", "owner": "boss"},
+  {"key": "S-4", "id": "i4", "title": "Finished", "status": "done", "kind": "issue", "stage": "done", "owner": "child"},
+  {"key": "S-5", "id": "i5", "title": "A retro item", "status": "todo", "kind": "retro", "stage": null, "owner": null},
+  {"key": "S-6", "id": "i6", "title": "No kind", "status": "todo", "kind": null, "stage": null, "owner": "x"},
+  {"key": "S-7", "id": "i7", "title": "Blocked", "status": "blocked", "kind": "issue", "stage": null, "owner": "child"}
+]

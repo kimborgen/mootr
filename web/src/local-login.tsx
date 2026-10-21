@@ -4,6 +4,7 @@
 // (localStorage, this origin only) and sent as the Bearer; a 401 drops it.
 import { useEffect, useState } from 'react'
 import { Icon } from './Icon'
+import { setStanding } from './ui/menu'
 
 const TOKEN_KEY = 'stamToken'
 const KIND_KEY = 'stamTokenKind'
@@ -18,18 +19,52 @@ export function dropToken(): void {
   try { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(KIND_KEY) } catch {}
 }
 
+const WANT_KEY = 'stamLoginWanted'
+
 // Whether to show the login instead of the app: only on 127.0.0.1, only when the stored token (if any) is
-// refused, and only with auth.localHuman on. Through tailscale serve nothing changes. Returns the folder the
-// command names (the daemon user's), or null for the app.
-export async function needsLocalLogin(token: string): Promise<string | null> {
+// refused or the human asked to log in (LoginOffer), and only with auth.localHuman on. Through tailscale serve
+// nothing changes. Returns the folder the command names (the daemon user's) and whether that user has
+// passwordless sudo, or null for the app. An asked-for
+// login keeps the stored token until the login replaces it, so a reload without logging in gets the app back.
+export type LoginInfo = { dir: string; passwordlessSudo: boolean }
+export async function needsLocalLogin(token: string): Promise<LoginInfo | null> {
   if (!onLoopback()) return null
+  let wanted = false
+  try { wanted = sessionStorage.getItem(WANT_KEY) === '1'; sessionStorage.removeItem(WANT_KEY) } catch {}
   try {
-    const r = await fetch('/api/health', { headers: token ? { authorization: 'Bearer ' + token } : {} })
-    if (r.status !== 401) return null
-    dropToken()
+    if (!wanted) {
+      const r = await fetch('/api/health', { headers: token ? { authorization: 'Bearer ' + token } : {} })
+      if (r.status !== 401) return null
+      dropToken()
+    }
     const d = await (await fetch('/api/human/login')).json()
-    return d?.enabled === true && typeof d.dir === 'string' ? d.dir : null
+    return d?.enabled === true && typeof d.dir === 'string' ? { dir: d.dir, passwordlessSudo: d.passwordlessSudo === true } : null
   } catch { return null }
+}
+
+// The offer to log in (S-2121): the daemon refused a human action from this page on 127.0.0.1 (the app's own
+// human-only reads at boot count) and said a local login is there. A state to act on, not a notification: it is
+// the notice bar's standing notice (ui/menu.tsx), which a transient notice covers only while it shows. Dismissed,
+// it comes back with the next refusal. Log in reloads into the login page; once offered, the Settings nav keeps a
+// Log in too (loginOffered).
+let offered = false
+export function offerLogin(): void {
+  offered = true
+  setStanding(<LoginOffer />)
+}
+export const loginOffered = (): boolean => offered
+export function startLogin(): void {
+  try { sessionStorage.setItem(WANT_KEY, '1') } catch {}
+  location.reload()
+}
+export function LoginOffer() {
+  return (
+    <div className="toast login-offer" id="login-offer" role="alert">
+      <span>This page isn't logged in as the human, so mootr refuses approvals and settings changes here.</span>
+      <button className="btn primary" type="button" onClick={startLogin}>Log in</button>
+      <button className="icon-btn" type="button" aria-label="Dismiss" title="Dismiss" onClick={() => setStanding(null)}><Icon name="x" /></button>
+    </div>
+  )
 }
 
 // What the human runs: an empty root-owned file named by the code, in folders made readable whatever the
@@ -71,7 +106,7 @@ export async function nameOf(secret: string): Promise<string> {
   return base32(h.subarray(0, 16))
 }
 
-export function LocalLogin({ dir }: { dir: string }) {
+export function LocalLogin({ dir, passwordlessSudo = false }: { dir: string; passwordlessSudo?: boolean }) {
   const [pair, setPair] = useState<{ secret: string; name: string } | null>(null)
   const [msg, setMsg] = useState('')
   const [busy, setBusy] = useState(false)
@@ -102,7 +137,9 @@ export function LocalLogin({ dir }: { dir: string }) {
         <button className="btn primary" type="submit" disabled={busy || !pair}>Log in</button>
       </form>
       {msg && <p className="local-login-error" role="alert">{msg}</p>}
-      <p className="muted">Agents run as your Unix user. Where they have passwordless sudo, this login doesn't keep them out; for real isolation, run agents as another Unix user.</p>
+      {passwordlessSudo
+        ? <p className="local-login-warn" role="alert" id="local-login-sudo"><Icon name="shield-alert" />Your user has passwordless sudo, so any agent can become root and log in as you: this login keeps no agent out. Require a password for sudo, or run agents as another Unix user.</p>
+        : <p className="muted">Agents run as your Unix user. Where they have passwordless sudo, this login doesn't keep them out; for real isolation, run agents as another Unix user.</p>}
     </main>
   )
 }

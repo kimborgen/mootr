@@ -6,6 +6,7 @@
 import { settings } from './settings.ts';
 import { peers, peerPoll } from './peers.ts';
 import { paidSpentIn, paidSpentAll } from './readings.ts';
+import { envVar } from './env.ts';
 
 const PERS = ['day', 'week', 'month', 'cap'] as const;
 type Per = (typeof PERS)[number];
@@ -16,8 +17,8 @@ export interface Spend {
   accounts: Record<string, Totals>;
 }
 
-export const REFRESH_MS = Number(process.env.STAM_PEER_SPEND_MS) || 30_000;
-export const STALE_MS = Number(process.env.STAM_PEER_SPEND_STALE_MS) || 10 * 60_000;
+export const REFRESH_MS = Number(envVar('PEER_SPEND_MS')) || 30_000;
+export const STALE_MS = Number(envVar('PEER_SPEND_STALE_MS')) || 10 * 60_000;
 
 // The route's answer: this machine's totals for a peer's request, null for any other caller (a
 // spend total is for the daemons, not agents or the browser).

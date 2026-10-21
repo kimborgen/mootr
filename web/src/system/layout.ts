@@ -117,9 +117,11 @@ export const curve = (x1: number, y1: number, x2: number, y2: number) => {
   const m = (y1 + y2) / 2
   return `M${r1(x1)} ${r1(y1)}C${r1(x1)} ${r1(m)} ${r1(x2)} ${r1(m)} ${r1(x2)} ${r1(y2)}`
 }
-export const rail = (x: number, y1: number, x2: number, y2: number) => {
+export const rail = (x: number, y1: number, x2: number, y2: number) => `M${r1(x)} ${r1(y1)}${elbow(x, y1, x2, y2)}`
+// A rail from where the pen is, down at x to y2 and across to x2: the rail's stretch without its M.
+const elbow = (x: number, y1: number, x2: number, y2: number) => {
   const r = Math.min(R, Math.max(0, (x2 - x) / 2), Math.max(0, (y2 - y1) / 2))
-  return `M${r1(x)} ${r1(y1)}V${r1(y2 - r)}Q${r1(x)} ${r1(y2)} ${r1(x + r)} ${r1(y2)}H${r1(x2)}`
+  return `V${r1(y2 - r)}Q${r1(x)} ${r1(y2)} ${r1(x + r)} ${r1(y2)}H${r1(x2)}`
 }
 const r1 = (v: number) => Math.round(v * 10) / 10
 // Cards on a phone (S-705): every card a full card in one column, depth-first, each level stepping in
@@ -236,7 +238,10 @@ export function packLayout(nodes: TreeIn[], dims: PackDims, folded: ReadonlySet<
   // The spine stands above the columns, centred over them, one wire down each step.
   const spineBottom = spine.length * CH + (spine.length - 1) * rowGap
   const top = spineBottom + (subs.length ? gapY : 0)
-  const sx = Math.max(0, (packed.w - CW) / 2)
+  // A stacked root's rail runs in the gutter half a gap left of its column, so the first column
+  // shifts right by that half gap, and only when it holds a stacked root, so no other layout moves.
+  const lead = packed.groups[0]?.length > 1 ? gapX / 2 : 0
+  const sx = lead + Math.max(0, (packed.w - CW) / 2)
   spine.forEach((sp, i) => {
     pos.set(sp.id!, { x: sx, y: i * (CH + rowGap), w: CW, depth: sp.depth })
     if (i) {
@@ -245,30 +250,64 @@ export function packLayout(nodes: TreeIn[], dims: PackDims, folded: ReadonlySet<
       wires.push({ id: sp.id!, from: spine[i - 1].id!, kind: 'curve', d: curve(x1, y1, x1, y2), bez: [x1, y1, x1, m, x1, m, x1, y2] })
     }
   })
-  let cx = 0
+  // The chief of staff's wire to a root stacked below another subtree in its column can't be a curve:
+  // it would pass behind the cards above. It runs down its column's left rail instead, with an elbow
+  // into the root. The column's first stacked root takes a lane: a curve from the foot to the top of
+  // its gutter, then down the rail. The rest hang off the rail where the wire above them left. `rails`
+  // holds, per stacked root, its rail's x, where its rail starts, and whether it takes a lane.
+  const rails = new Map<string, { x: number; from: number; lane: boolean }>()
+  let cx = lead
   packed.groups.forEach((ids) => {
     let cy = top
-    for (const i of ids) {
+    let prev = 0
+    ids.forEach((i, j) => {
       const s = subs[i]
       for (const nd of s.list) { const p = s.x.get(nd.id!)!; pos.set(nd.id!, { x: cx + p.x, y: cy + p.y, w: CW, depth: nd.depth }) }
       for (const e of s.edges) {
         const ax = cx + e.ax, st = cy + e.start, foot = cy + e.foot, e2x = cx + e.cx, e2y = cy + e.cy
         wires.push({ id: e.id, from: e.from, kind: 'rail', d: rail(ax, st, e2x, e2y), bez: [ax, foot, ax, e2y, ax, e2y, e2x, e2y] })
       }
+      if (j) rails.set(s.top.id!, { x: cx - gapX / 2, from: prev, lane: j === 1 })
+      prev = cy + CH / 2
       cy += s.h + rowGap
-    }
+    })
     cx += Math.max(0, ...ids.map((i) => subs[i].w)) + gapX
   })
-  // The chief of staff's wire to each column's root, fanned across its foot in the roots' own left
-  // to right order, so no two cross.
+  // The chief of staff's wires that leave its foot, fanned across it in the order they meet the
+  // columns' top edge: a curve meets it at its root's centre, a lane at its gutter's rail. Every such
+  // wire is the same S-curve from the foot to that point on the edge, so with the ports in the same
+  // order no two cross: two curves that share their ends' heights never cross if their ends keep
+  // their order. A lane's rail then runs down its gutter below the edge, where no chief wire is, so
+  // its curve needs no height of its own. (The old lanes ran level across under the curves, and no
+  // height cleared both neighbours.)
   const bp = pos.get(branch.id!)!
+  const mid = bp.x + CW / 2
   const roots = subs.map((s) => ({ id: s.top.id!, p: pos.get(s.top.id!)! })).sort((a, b) => a.p.x - b.p.x)
-  roots.forEach((r, i) => {
-    const port = roots.length > 1 ? (i / (roots.length - 1) - 0.5) * CW * PORTS : 0
-    const x1 = bp.x + CW / 2 + port, y1 = bp.y + CH, x2 = r.p.x + CW / 2, y2 = r.p.y, m = (y1 + y2) / 2
-    wires.push({ id: r.id, from: branch.id!, kind: 'curve', d: curve(x1, y1, x2, y2), bez: [x1, y1, x1, m, x2, m, x2, y2] })
+  const laned = roots.filter((r) => rails.get(r.id)?.lane)
+  const curves = roots.filter((r) => !rails.has(r.id))
+  const meet = (r: { id: string; p: Pos }) => rails.get(r.id)?.lane ? rails.get(r.id)!.x : r.p.x + CW / 2
+  const fan = [...laned, ...curves].sort((a, b) => meet(a) - meet(b))
+  const port = (i: number) => mid + (fan.length > 1 ? (i / (fan.length - 1) - 0.5) * CW * PORTS : 0)
+  const y1 = bp.y + CH
+  fan.forEach((r, i) => {
+    const x1 = port(i), y2 = top, side = rails.get(r.id)
+    if (side?.lane) {
+      // Down its rail from the edge, then across into the root: the rail's own bez, from the edge.
+      const x = side.x, cy = r.p.y + CH / 2
+      wires.push({ id: r.id, from: branch.id!, kind: 'rail', d: curve(x1, y1, x, y2) + elbow(x, y2, r.p.x, cy), bez: [x, y2, x, cy, x, cy, r.p.x, cy] })
+    } else {
+      const x2 = r.p.x + CW / 2, m = (y1 + y2) / 2
+      wires.push({ id: r.id, from: branch.id!, kind: 'curve', d: curve(x1, y1, x2, y2), bez: [x1, y1, x1, m, x2, m, x2, y2] })
+    }
   })
-  return { pos, wires, width: Math.max(packed.w, sx + CW), height: top + packed.h, stacksOut: true, cols: subs.length ? n : 1 }
+  // The stacked roots below a column's first hang off its rail, each from the elbow above it.
+  for (const r of roots) {
+    const side = rails.get(r.id)
+    if (!side || side.lane) continue
+    const cy = r.p.y + CH / 2
+    wires.push({ id: r.id, from: branch.id!, kind: 'rail', d: rail(side.x, side.from, r.p.x, cy), bez: [side.x, side.from, side.x, cy, side.x, cy, r.p.x, cy] })
+  }
+  return { pos, wires, width: Math.max(packed.w + lead, sx + CW), height: top + packed.h, stacksOut: true, cols: subs.length ? n : 1 }
 }
 
 // Every descendant of a node in the full tree, folded or not.

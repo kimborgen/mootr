@@ -31,9 +31,9 @@ interface Local {
   v: number
   open: { left: boolean; bottom: boolean }
   size: { left: number; right: number; bottom: number }
-  // On a phone, what covers main: the agent tree ('left'), the mail list ('mail'), or the
+  // On a phone, what covers main: the agent tree ('left') or the
   // issues ('issues').
-  mobile?: 'left' | 'mail' | 'issues' | 'bottom' | null
+  mobile?: 'left' | 'issues' | 'bottom' | null
   // The world this device shows. The human's own navigation changes only this; an agent
   // moving the daemon's current world moves every device.
   current?: string | null
@@ -322,7 +322,7 @@ export const worldOpen = (name: 'left' | 'bottom') => (isPhone() ? local.mobile 
 export function closePhoneOverlay() { if (isPhone() && local.mobile) { local.mobile = null; changed() } }
 // The phone's bottom navigation: shows the agent tree, the mail list, or the issues over
 // main, or none of them.
-export type Mobile = 'left' | 'mail' | 'issues' | 'bottom' | null
+export type Mobile = 'left' | 'issues' | 'bottom' | null
 export function phoneShow(side: Mobile) { if (local.mobile !== side) { local.mobile = side; changed() } }
 export const phoneShows = (): Mobile => local.mobile ?? null
 

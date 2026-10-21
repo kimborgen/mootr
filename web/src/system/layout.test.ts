@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { bestColumns, columnLayout, columnWidth, descendants, packLayout, treeLayout, type TreeIn } from './layout'
+import { bezAt, flightRoute, routeAt, type Bez } from './flights'
+import { bestColumns, columnLayout, columnWidth, descendants, packLayout, treeLayout, type TreeIn, type Wire } from './layout'
 
 const DIMS = { w: 200, h: 100, gapX: 20, gapY: 50, indent: 20, rowGap: 10 }
 // human > cos > (release, mgr > (dev1, dev2, review), lead > (sub > (x)))
@@ -100,6 +101,42 @@ describe('packLayout', () => {
   const at = (id: string) => l.pos.get(id)!
   // The top-level subtrees: what each column holds.
   const SUBS = [['release'], ['mgr', 'dev1', 'dev2', 'review'], ['lead', 'sub', 'x']]
+  // The straight stretches of a path: each M, V, H, Q or C (its end) from where the pen was; a cubic
+  // is sampled into short stretches.
+  const stretches = (d: string) => {
+    const out: number[][] = []
+    let x = 0, y = 0
+    for (const [, c, args] of d.matchAll(/([MVHCQ])([^MVHCQ]*)/g)) {
+      const v = args.trim().split(/[\s,]+/).map(Number)
+      if (c === 'C') {
+        let p = { x, y }
+        for (let i = 1; i <= 16; i++) { const q = bezAt([x, y, ...v] as Bez, i / 16); out.push([p.x, p.y, q.x, q.y]); p = q }
+        x = p.x; y = p.y
+        continue
+      }
+      const [nx, ny] = c === 'V' ? [x, v[0]] : c === 'H' ? [v[0], y] : [v[v.length - 2], v[v.length - 1]]
+      if (c !== 'M') out.push([x, y, nx, ny])
+      x = nx; y = ny
+    }
+    return out
+  }
+  // A wire's drawn segments: a rail's stretches, a curve's sampled.
+  const segs = (w: Wire): number[][] => w.kind === 'curve'
+    ? Array.from({ length: 40 }, (_, i) => { const a = bezAt(w.bez, i / 40), b = bezAt(w.bez, (i + 1) / 40); return [a.x, a.y, b.x, b.y] })
+    : stretches(w.d)
+  // Whether two segments cross, or lie along one another (a stretch drawn twice); an end touching the
+  // other doesn't count.
+  const crosses = ([ax, ay, bx, by]: number[], [cx, cy, dx, dy]: number[]) => {
+    const side = (px: number, py: number, qx: number, qy: number, rx: number, ry: number) => Math.sign((qx - px) * (ry - py) - (qy - py) * (rx - px))
+    const s1 = side(ax, ay, bx, by, cx, cy), s2 = side(ax, ay, bx, by, dx, dy)
+    const s3 = side(cx, cy, dx, dy, ax, ay), s4 = side(cx, cy, dx, dy, bx, by)
+    if (s1 === 0 && s2 === 0) {
+      // Collinear: they overlap when their spans do, along x or along y.
+      const span = (p: number, q: number, r: number, s: number) => Math.min(Math.max(p, q), Math.max(r, s)) - Math.max(Math.min(p, q), Math.min(r, s))
+      return span(ax, bx, cx, dx) > 1e-6 || span(ay, by, cy, dy) > 1e-6
+    }
+    return s1 * s2 < 0 && s3 * s4 < 0
+  }
 
   it('places every agent, and draws a wire per child', () => {
     expect([...l.pos.keys()].sort()).toEqual(NODES.map((n) => n.id).sort())
@@ -141,6 +178,138 @@ describe('packLayout', () => {
     }
     // The chief of staff's fan reaches every column's root.
     expect(l.wires.filter((w) => w.from === 'cos').map((w) => w.id).sort()).toEqual(['lead', 'mgr', 'release'])
+  })
+
+  it('runs the chief of staff\'s wire to a stacked root down the left rail, clear of the cards above', () => {
+    // One column: the subtrees stack, so the two below the first take a rail, not a curve.
+    const one = packLayout(NODES, P, new Set(), 1, 1)
+    const cards = [...one.pos.values()]
+    const rails = one.wires.filter((w) => w.from === 'cos' && w.kind === 'rail')
+    expect(rails.map((w) => w.id).sort()).toEqual(['lead', 'mgr'])
+    // A stretch crosses a card when it runs through the card's inside.
+    const crosses = ([x1, y1, x2, y2]: number[], p: { x: number; y: number }) =>
+      Math.min(x1, x2) < p.x + DIMS.w - 0.01 && Math.max(x1, x2) > p.x + 0.01 &&
+      Math.min(y1, y2) < p.y + DIMS.h - 0.01 && Math.max(y1, y2) > p.y + 0.01
+    for (const w of rails) {
+      for (const s of stretches(w.d)) {
+        expect(s[0]).toBeGreaterThanOrEqual(0)
+        for (const p of cards) expect(crosses(s, p)).toBe(false)
+      }
+    }
+    // The stacked root's rail drops left of its own column, down to the root's level.
+    for (const w of rails) {
+      const drops = stretches(w.d).filter((s) => s[0] === s[2] && Math.max(s[1], s[3]) > at(w.id).y)
+      expect(drops.length).toBeGreaterThan(0)
+      for (const s of drops) expect(s[0]).toBeLessThan(at(w.id).x)
+    }
+  })
+
+  it('never crosses two of the chief of staff\'s wires, at one, two or three columns', () => {
+    for (const n of [1, 2, 3]) {
+      const ws = packLayout(NODES, P, new Set(), n, 1).wires.filter((w) => w.from === 'cos')
+      const ss = ws.map(segs)
+      for (let a = 0; a < ws.length; a++) for (let b = a + 1; b < ws.length; b++)
+        for (const s of ss[a]) for (const t of ss[b]) expect(crosses(s, t)).toBe(false)
+    }
+  })
+
+  it('never crosses the chief of staff\'s wires with five subtrees, where a middle column stacks', () => {
+    const leaves: TreeIn[] = [{ id: 'human', parent: null }, { id: 'cos', parent: 'human' }, ...['A', 'B', 'C', 'D', 'E'].map((id) => ({ id, parent: 'cos' }))]
+    for (const n of [3, 4]) {
+      const lay = packLayout(leaves, P, new Set(), n, 1)
+      const ws = lay.wires.filter((w) => w.from === 'cos')
+      // Some root sits below another in its column, so a rail is in play.
+      expect(ws.some((w) => w.kind === 'rail')).toBe(true)
+      const ss = ws.map(segs)
+      for (let a = 0; a < ws.length; a++) for (let b = a + 1; b < ws.length; b++)
+        for (const s of ss[a]) for (const t of ss[b]) expect([n, ws[a].id, ws[b].id, crosses(s, t)]).toEqual([n, ws[a].id, ws[b].id, false])
+    }
+  })
+
+  // Whether a stretch runs through a card's inside.
+  const through = ([x1, y1, x2, y2]: number[], p: { x: number; y: number }) =>
+    Math.min(x1, x2) < p.x + DIMS.w - 0.01 && Math.max(x1, x2) > p.x + 0.01 &&
+    Math.min(y1, y2) < p.y + DIMS.h - 0.01 && Math.max(y1, y2) > p.y + 0.01
+  // The chief of staff's wires of a packing: none crosses or overlaps another, none runs through a
+  // card, and every mail route to a child misses every card.
+  const checkChief = (lay: ReturnType<typeof packLayout>, ctx: string) => {
+    const ws = lay.wires.filter((w) => w.from === 'cos')
+    const cards = [...lay.pos.values()]
+    const ss = ws.map(segs)
+    const bad: string[] = []
+    for (let a = 0; a < ws.length; a++) {
+      for (const s of ss[a]) for (const p of cards) if (through(s, p)) bad.push(`${ws[a].id} runs through a card`)
+      for (let b = a + 1; b < ws.length; b++)
+        for (const s of ss[a]) for (const t of ss[b]) if (crosses(s, t)) bad.push(`${ws[a].id} crosses ${ws[b].id}`)
+    }
+    const D = { cardH: DIMS.h, landIn: 0, pad: 16, gap: 16, corner: 6, lift: 120, top: -16 }
+    // A route lands in its child's stack, at the child's own edge, so only the other cards count.
+    for (const w of ws) {
+      const r = flightRoute(lay.pos.get('cos')!, lay.pos.get(w.id)!, { bez: w.bez, down: true, kind: w.kind }, D)
+      const others = [...lay.pos].filter(([id]) => id !== 'cos' && id !== w.id).map(([, p]) => p)
+      for (let i = 0; i <= 200; i++) {
+        const q = routeAt(r, i / 200)
+        if (others.some((p) => q.x > p.x + 1 && q.x < p.x + DIMS.w - 1 && q.y > p.y + 1 && q.y < p.y + DIMS.h - 1)) bad.push(`${w.id}'s mail runs through a card`)
+      }
+    }
+    expect([ctx, bad.slice(0, 3)]).toEqual([ctx, []])
+  }
+  // A seeded generator, so the random packings repeat.
+  const rng = (seed: number) => () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 2 ** 32 }
+  // The chief of staff under `subs` top-level subtrees, each a leaf or a small tree, so some stack.
+  const randomTree = (rand: () => number, subs: number): TreeIn[] => {
+    const out: TreeIn[] = [{ id: 'human', parent: null }, { id: 'cos', parent: 'human' }]
+    let k = 0
+    const grow = (parent: string, depth: number) => {
+      const n = 1 + Math.floor(rand() * 4)
+      for (let i = 0; i < n; i++) {
+        const id = `n${k++}`
+        out.push({ id, parent })
+        if (depth < 2 && rand() < 0.5) grow(id, depth + 1)
+      }
+    }
+    for (let s = 0; s < subs; s++) {
+      const id = `t${s}`
+      out.push({ id, parent: 'cos' })
+      if (rand() < 0.8) grow(id, 1)
+    }
+    return out
+  }
+
+  it('keeps every chief wire clear for random packings at one to six columns', () => {
+    const rand = rng(7)
+    for (let trial = 0; trial < 40; trial++) {
+      const nodes = randomTree(rand, 1 + Math.floor(rand() * 7))
+      for (let n = 1; n <= 6; n++) checkChief(packLayout(nodes, P, new Set(), n, 1), `trial ${trial}, ${n} columns`)
+    }
+  })
+
+  it('keeps the chief of staff\'s wires clear in the repro: A over B and E, C and D, E\'s lane clear of both curves', () => {
+    // A is a manager over two leaves, B to E are leaves: the packing is [[A], [B, E], [C], [D]].
+    const nodes: TreeIn[] = [
+      { id: 'human', parent: null }, { id: 'cos', parent: 'human' },
+      { id: 'A', parent: 'cos' }, { id: 'a1', parent: 'A' }, { id: 'a2', parent: 'A' },
+      { id: 'B', parent: 'cos' }, { id: 'C', parent: 'cos' }, { id: 'D', parent: 'cos' }, { id: 'E', parent: 'cos' },
+    ]
+    const lay = packLayout(nodes, P, new Set(), 4, 1)
+    expect(lay.pos.get('E')!.x).toBe(lay.pos.get('B')!.x)
+    expect(lay.pos.get('E')!.y).toBeGreaterThan(lay.pos.get('B')!.y)
+    expect(lay.wires.find((w) => w.id === 'E')!.kind).toBe('rail')
+    checkChief(lay, 'repro')
+  })
+
+  it('lets a mail sheet ride a stacked root\'s rail and miss every card', () => {
+    const one = packLayout(NODES, P, new Set(), 1, 1)
+    const D = { cardH: DIMS.h, landIn: 0, pad: 16, gap: 16, corner: 6, lift: 120, top: -16 }
+    for (const w of one.wires.filter((x) => x.from === 'cos' && x.kind === 'rail')) {
+      const r = flightRoute(one.pos.get('cos')!, one.pos.get(w.id)!, { bez: w.bez, down: true, kind: 'rail' }, D)
+      for (let i = 0; i <= 400; i++) {
+        const q = routeAt(r, i / 400)
+        for (const p of one.pos.values()) {
+          expect(q.x > p.x + 1 && q.x < p.x + DIMS.w - 1 && q.y > p.y + 1 && q.y < p.y + DIMS.h - 1).toBe(false)
+        }
+      }
+    }
   })
 
   it('keeps the human and the chief of staff a spine above the columns', () => {

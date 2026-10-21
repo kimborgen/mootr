@@ -67,8 +67,30 @@ export function developerCapRefusal(agents: Slotted[], types: Record<string, Age
 // itself when a slot frees. Urgent waiters go ahead of normal ones, first come first served within
 // each class. The daemon saves it to a file after every change and restores it at start, so a
 // restart or deploy during a wait loses no request (restoreQueue).
-export const URGENT_REASONS = ['red-main', 'deploy-hold', 'approved-pr'] as const;
+export const URGENT_REASONS = ['red-main', 'deploy-hold', 'approved-pr', 'incident'] as const;
 export type UrgentReason = (typeof URGENT_REASONS)[number];
+
+// An incident (S-2406) queues ahead like red-main, but only under an ITSA, or an ancestor of one, that carries the
+// incident mark. Only the human or the chief of staff sets the mark, and closing the ITSA clears it. Fails closed: a
+// missing or unreadable mark is no mark.
+export function incidentRefusal(urgent: UrgentReason | undefined, marked: boolean): string | null {
+  if (urgent !== 'incident' || marked) return null;
+  return 'urgent: incident needs an ITSA, or one of its parents, that the chief of staff or the human has marked as an incident; no mark was found, or the ITSA home did not answer yes, so this spawn is refused. Use urgent red-main, deploy-hold or approved-pr, or ask the chief of staff.';
+}
+// The ITSA home's answer to an incident spawn's mark question, on a machine that isn't the home (S-2421): only a 200 with
+// an explicit `marked: true` is a yes. Anything else, an unreachable home, a timeout, a non-200 or a malformed reply, is a no.
+export async function homeSaysMarked(ask: () => Promise<{ status: number; data: unknown }>): Promise<boolean> {
+  try {
+    const r = await ask();
+    return r.status === 200 && (r.data as { marked?: unknown } | null)?.marked === true;
+  } catch {
+    return false;
+  }
+}
+// Whether a chain of ITSAs (the spawn's own, then its ancestors) carries the mark: only a mark stored as 1 counts.
+export const chainMarked = (chain: readonly { incident?: unknown }[]): boolean => chain.some((x) => x.incident === 1);
+// Who may set or clear the mark: the human, or the chief of staff (by its agent id). Every other caller is refused.
+export const mayMarkIncident = (by: string | null | undefined, human: boolean, cosId: string | null | undefined): boolean => human || (Boolean(by) && by === cosId);
 
 export interface Waiter {
   name: string;
@@ -88,6 +110,21 @@ export function enqueueWaiter(w: Waiter): number {
   if (w.urgent) at = queue.findLastIndex((x) => x.urgent) + 1;
   queue.splice(at, 0, w);
   return at + 1;
+}
+
+// Demotes each incident waiter that `marked` no longer finds marked (its mark cleared, or its marked ITSA closed) to a
+// normal waiter, in its arrival place among the normal ones, with its urgent reason removed, so it no longer goes ahead
+// (S-2406). Returns the demoted waiters.
+export function demoteRevoked(marked: (w: Waiter) => boolean): Waiter[] {
+  const revoked = queue.filter((w) => w.urgent === 'incident' && !marked(w));
+  for (const w of revoked) {
+    dropWaiter(w.name);
+    const body = { ...(w.body as Record<string, unknown>) };
+    delete body.urgent;
+    const at = queue.findIndex((x) => !x.urgent && x.at > w.at);
+    queue.splice(at < 0 ? queue.length : at, 0, { name: w.name, body, by: w.by, at: w.at });
+  }
+  return revoked;
 }
 
 // Puts waiters read back from the saved queue in front of any already there, keeping their order.
@@ -206,4 +243,25 @@ export function grantSlots(agents: Slotted[], types: Record<string, AgentType>, 
     free--;
   }
   return { granted, dropped };
+}
+
+export type Told = 'told' | 'absent' | 'unreachable';
+
+// Delivers a queued spawn's notice to its caller (S-2720): an unreachable machine is retried `retries` times, `delayMs`
+// apart, and a caller no daemon knows, or one still unreachable at the end, hands the notice to `fallback`, so a
+// dropped or failed spawn is never silent. Resolves to where it went.
+export async function deliverWaiterNotice(tell: () => Promise<Told>, fallback: (why: string) => Promise<unknown>, retries = 6, delayMs = 10_000): Promise<'told' | 'fallback'> {
+  let last: Told | 'refused' = 'unreachable';
+  for (let i = 0; i <= retries; i++) {
+    try {
+      last = await tell();
+    } catch {
+      last = 'refused';
+    }
+    if (last === 'told') return 'told';
+    if (last === 'absent') break;
+    if (i < retries) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  await fallback(last === 'absent' ? 'no machine knows that caller' : last === 'refused' ? 'the notice was refused' : 'its machine is unreachable').catch(() => {});
+  return 'fallback';
 }

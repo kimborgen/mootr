@@ -62,7 +62,7 @@ Node order is kept as written: the UI uses it as a layout hint. `edges` normalis
 - **agent** — an agent does the work; its lane names the type. Optional `done_when` and, as a
   sub-process, `call: <process id>` (it must name another loaded process).
 - **human** — waits on your user; `ask: approve | decide | answer | review | test`.
-- **script** — runs a command (`run`), such as `scripts/merge-pr.mjs`.
+- **script** — runs a command (`run`), such as `npm run build`.
 - **exclusive** — a gateway that takes exactly one outgoing edge, each guarded by its `when`.
 - **parallel** — a split or join: several outgoing edges (or several incoming ones) at once.
 - **wait** — waits for an event (`event`), such as the deploy watcher's `deploy`.
@@ -112,4 +112,4 @@ Boundary events and a node's `tell` aren't editable in the panel yet; they are k
 
 A failure after the ITSA exists cancels it and deletes a pushed branch. Nothing changes until the PR merges.
 
-Your user's **Approve** on the proposal tells its owner to have the PR reviewed (`scripts/pr-review.mjs`) and merged (`scripts/merge-pr.mjs`); the deploy watcher closes the ITSA after the deploy. **Request changes**, or a proposal closed as canceled or won't-do, closes the PR and deletes its branch. The existing proposal gate (`src/retro-loop.ts`) already stops an agent from moving the proposal to merge or done before the human approved it.
+Your user's **Approve** on the proposal tells its owner to have the PR reviewed and merged (see Merging in `docs/pull-requests.md`); the deploy watcher closes the ITSA after the deploy. **Request changes**, or a proposal closed as canceled or won't-do, closes the PR and deletes its branch. The existing proposal gate (`src/retro-loop.ts`) already stops an agent from moving the proposal to merge or done before the human approved it.

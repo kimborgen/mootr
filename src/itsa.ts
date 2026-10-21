@@ -50,6 +50,8 @@ export interface Itsa {
   closed_at: string | null;
   // Its place in a board column, lower first; null sorts by creation time (web/src/itsa/Board.tsx).
   rank: number | null;
+  // 1 while the chief of staff or the human marks it an incident (S-2406); closing it clears the mark.
+  incident?: number;
 }
 
 export interface ItsaLink {
@@ -222,9 +224,10 @@ export function must(ref: string): Itsa {
   return x;
 }
 
+// The current participants: a row that left (left_at, S-3015) is not one of them.
 export function participants(ref: string): string[] {
   const x = must(ref);
-  return (db.open().prepare('SELECT agent_id FROM itsa_participants WHERE itsa_id = ? ORDER BY agent_id').all(x.id) as { agent_id: string }[]).map((r) => r.agent_id);
+  return (db.open().prepare('SELECT agent_id FROM itsa_participants WHERE itsa_id = ? AND left_at IS NULL ORDER BY agent_id').all(x.id) as { agent_id: string }[]).map((r) => r.agent_id);
 }
 
 // The open ITSAs with a link of `system` to `url`, newest link first (the process runner finds a PR's ITSAs with it).
@@ -267,15 +270,20 @@ export function addEvent(itsaId: string, actor: string | null, type: string, dat
     .run(itsaId, now(), actor, type, data === undefined ? null : JSON.stringify(data));
 }
 
+// Replaces the members only: a row that left stays as it is, unless the new list names it again.
 function setParticipants(itsaId: string, ids: string[]): void {
-  const d = db.open();
-  d.prepare('DELETE FROM itsa_participants WHERE itsa_id = ?').run(itsaId);
-  const ins = d.prepare('INSERT OR IGNORE INTO itsa_participants (itsa_id, agent_id) VALUES (?, ?)');
-  for (const a of ids) ins.run(itsaId, a);
+  db.open().prepare('DELETE FROM itsa_participants WHERE itsa_id = ? AND left_at IS NULL').run(itsaId);
+  for (const a of ids) rejoin(itsaId, a);
 }
 
 export function ensureParticipant(itsaId: string, who: string): void {
   db.open().prepare('INSERT OR IGNORE INTO itsa_participants (itsa_id, agent_id) VALUES (?, ?)').run(itsaId, who);
+}
+
+// An explicit join (addParticipant, an owner taking the ITSA) makes a member again, clearing a soft leave (S-3015).
+// A post does not: ensureParticipant leaves a row that left alone.
+function rejoin(itsaId: string, who: string): void {
+  db.open().prepare('INSERT INTO itsa_participants (itsa_id, agent_id, left_at) VALUES (?, ?, NULL) ON CONFLICT(itsa_id, agent_id) DO UPDATE SET left_at = NULL').run(itsaId, who);
 }
 
 // Counts of an ITSA's direct children by category, for its roll-up bar.
@@ -451,7 +459,7 @@ export async function list(f: ListFilters = {}): Promise<ListedItsa[]> {
   if (f.participant !== undefined) {
     const p = await person(f.participant);
     if (p) {
-      where.push('id IN (SELECT itsa_id FROM itsa_participants WHERE agent_id = ?)');
+      where.push('id IN (SELECT itsa_id FROM itsa_participants WHERE agent_id = ? AND left_at IS NULL)');
       args.push(p);
     }
   }
@@ -484,7 +492,7 @@ function withCardFacts(rows: Itsa[]): ListedItsa[] {
   for (const m of d.prepare("SELECT itsa_id, health FROM mail WHERE kind = 'update' AND itsa_id IS NOT NULL AND health IS NOT NULL ORDER BY created_at").all() as { itsa_id: string; health: string }[])
     health.set(m.itsa_id, m.health);
   const people = new Map<string, string[]>();
-  for (const p of d.prepare('SELECT itsa_id, agent_id FROM itsa_participants ORDER BY itsa_id, agent_id').all() as { itsa_id: string; agent_id: string }[])
+  for (const p of d.prepare('SELECT itsa_id, agent_id FROM itsa_participants WHERE left_at IS NULL ORDER BY itsa_id, agent_id').all() as { itsa_id: string; agent_id: string }[])
     people.set(p.itsa_id, [...(people.get(p.itsa_id) ?? []), p.agent_id]);
   const values = fieldValuesByItsa();
   return rows.map((x) => ({ ...x, links: linksBy.get(x.id) ?? [], health: health.get(x.id) ?? null, participants: people.get(x.id) ?? [], fields: values.get(x.id) ?? {} }));
@@ -497,6 +505,21 @@ export function ancestorsOf(x: Itsa): Itsa[] {
   for (let p = x.parent_id ? find(x.parent_id) : undefined; p && !seen.has(p.id); p = p.parent_id ? find(p.parent_id) : undefined) {
     seen.add(p.id);
     out.push(p);
+  }
+  return out;
+}
+
+// The ITSA and its ancestors, when the chain reaches a root (S-2406). Null when a parent is missing or the chain
+// loops, so a chain that isn't proven grants nothing; `ancestorsOf` alone stops quietly at either.
+export function provenChain(x: Itsa): Itsa[] | null {
+  const out: Itsa[] = [x];
+  const seen = new Set<string>([x.id]);
+  for (let cur = x; cur.parent_id; ) {
+    const p = find(cur.parent_id);
+    if (!p || seen.has(p.id)) return null;
+    seen.add(p.id);
+    out.push(p);
+    cur = p;
   }
   return out;
 }
@@ -540,6 +563,8 @@ export interface SetInput {
   action?: string;
   // Field values by field key (S-364); null clears one. Validated against the field's type.
   fields?: Record<string, unknown>;
+  // The incident mark (S-2406). The route allows only the chief of staff or the human to set it.
+  incident?: boolean;
 }
 
 // Changes any field, refusing a reparent that would create a cycle, and records each
@@ -641,6 +666,14 @@ export async function set(ref: string, f: SetInput, by: string | null = null): P
       }
     }
 
+    // The incident mark (S-2406) is set by the chief of staff or the human, and closing the ITSA clears it.
+    const incident = f.incident !== undefined ? (f.incident ? 1 : 0) : (cur.incident ?? 0);
+    const marked = changes.status && isClosedStatus(String(changes.status.to)) ? 0 : incident;
+    if (marked !== (cur.incident ?? 0)) {
+      upd.incident = marked;
+      changes.incident = { from: cur.incident ?? 0, to: marked };
+    }
+
     // Closing leaves the process at its end node (S-1398), in the same change as the status, unless the caller names a stage.
     let fieldValues = f.fields;
     if (changes.status && isClosedStatus(String(changes.status.to)) && !(fieldValues && 'stage' in fieldValues) && findField('stage')) {
@@ -679,7 +712,7 @@ export async function set(ref: string, f: SetInput, by: string | null = null): P
         changes.participants = { from: before, to: resolvedParticipants };
       }
     } else if (finalOwner) {
-      ensureParticipant(cur.id, finalOwner);
+      rejoin(cur.id, finalOwner);
     }
 
     // Reordering on a board isn't activity worth a line in the thread.
@@ -714,10 +747,46 @@ export async function addParticipant(ref: string, who: unknown, by: string | nul
   return tx(() => {
     const x = must(ref);
     const before = participants(x.id);
-    ensureParticipant(x.id, p);
+    rejoin(x.id, p);
     const added = !before.includes(p);
     if (added) addEvent(x.id, actor, 'participants', { from: before, to: [...before, p].sort() });
     return { itsa: find(x.id)!, added };
+  });
+}
+
+// Removes one participant: the undo of a join a failed spawn made (S-2441). Touches only that agent's row, and
+// records an event only when it removes one, so the API and CLI can say what changed.
+export async function removeParticipant(ref: string, who: unknown, by: string | null = null): Promise<{ itsa: Itsa; removed: boolean }> {
+  const actor = (await person(by)) ?? HUMAN;
+  const p = await person(who);
+  if (!p) throw new Error('removeParticipant needs a person (an agent id or name, or human)');
+  return tx(() => {
+    const x = must(ref);
+    const before = participants(x.id);
+    const removed = before.includes(p);
+    if (removed) {
+      db.open().prepare('DELETE FROM itsa_participants WHERE itsa_id = ? AND agent_id = ?').run(x.id, p);
+      addEvent(x.id, actor, 'participants', { from: before, to: before.filter((a) => a !== p) });
+    }
+    return { itsa: find(x.id)!, removed };
+  });
+}
+
+// S-3015: ends one participant's part in an ITSA without removing its row, so the spend and reviewer counts still
+// attribute the agent to it. The agent is no longer a participant: no delivery, no membership. A join clears it.
+export async function leaveParticipant(ref: string, who: unknown, by: string | null = null): Promise<{ itsa: Itsa; left: boolean }> {
+  const actor = (await person(by)) ?? HUMAN;
+  const p = await person(who);
+  if (!p) throw new Error('leaveParticipant needs a person (an agent id or name, or human)');
+  return tx(() => {
+    const x = must(ref);
+    const before = participants(x.id);
+    const left = before.includes(p);
+    if (left) {
+      db.open().prepare('UPDATE itsa_participants SET left_at = ? WHERE itsa_id = ? AND agent_id = ?').run(new Date().toISOString(), x.id, p);
+      addEvent(x.id, actor, 'participants', { from: before, to: before.filter((a) => a !== p) });
+    }
+    return { itsa: find(x.id)!, left };
   });
 }
 
@@ -732,7 +801,7 @@ export function openAgentIds(): string[] {
     .prepare(
       `SELECT owner AS id FROM itsas WHERE owner IS NOT NULL AND ${notClosed}
        UNION
-       SELECT agent_id AS id FROM itsa_participants WHERE itsa_id IN (SELECT id FROM itsas WHERE ${notClosed})`,
+       SELECT agent_id AS id FROM itsa_participants WHERE left_at IS NULL AND itsa_id IN (SELECT id FROM itsas WHERE ${notClosed})`,
     )
     .all(...closed, ...closed) as { id: string }[];
   return rows.map((r) => r.id);

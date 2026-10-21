@@ -5,6 +5,11 @@ import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DiffView, type DiffViewApi } from './DiffView'
+import { openDiff, peekDiffGoto } from '../files/open'
+
+// The shell's own `open` needs the app's view registry, which a unit test has not built; a landing reaches an open view
+// through `onDiffGoto`, which is what this file drives (S-2105 review).
+vi.mock('../shell/layout', async (orig) => ({ ...(await orig<typeof import('../shell/layout')>()), open: vi.fn() }))
 import type { DiffSource } from './diffSource'
 import { storePatch } from './patchStore'
 import type { DiffFileItem } from './diffModel'
@@ -385,6 +390,21 @@ describe('go to declaration', () => {
     expect((host.querySelector('[data-dv-file="src/b.ts"] .dv-viewed input') as HTMLInputElement).checked).toBe(true)
   })
 
+  it('lands on the file a mail block\'s Open names, on a fresh mount and in place when its tab is already open (S-2105 review)', async () => {
+    // Set before the view exists: a mount takes it.
+    act(() => { openDiff('stam2', 7, 'src/b.ts') })
+    const { host } = await mountApi()
+    await vi.waitFor(() => expect(flashed(host, 'src/b.ts')?.textContent).toBe('one'))
+    expect(peekDiffGoto('diff:stam2#7')).toBeNull()
+    // The same tab, opened again from another mail: shell.open only brings it forward, so the view is told and jumps
+    // to a file it was hiding.
+    expect(paths(host)).not.toContain('test/a.test.ts')
+    act(() => { openDiff('stam2', 7, 'test/a.test.ts') })
+    await vi.waitFor(() => expect(flashed(host, 'test/a.test.ts')?.textContent).toBe('one'))
+    // Handled: nothing is left to jump this view later, on a retry.
+    expect(peekDiffGoto('diff:stam2#7')).toBeNull()
+  })
+
   it('one match in a file of the PR jumps there, asking at the head with the file as from', async () => {
     decl = () => ready([MATCH('src/b.ts', 3)])
     const host = await mount()
@@ -447,12 +467,11 @@ describe('go to declaration', () => {
   // request at all. The stub still offers fetched sides, so the file draws and its identifier hooks exist.
   it('a source with no declaration lookup answers quietly and asks nothing', async () => {
     const stub: DiffSource = {
-      title: 'Patch deadbeefdeadbeef', provenance: 'patch', scope: 'patch:deadbeefdeadbeef',
+      title: 'Patch deadbeefdeadbeef', provenance: 'patch', scope: 'patch:deadbeefdeadbeef', twoSided: () => true,
       loadList: async () => ({ files: FILES, shas: { head: HEAD, base: BASE, mergeBase: BASE }, review: null, empty: 'This patch has no files.' }),
-      sideRef: () => ({ repo: 'stam2', pr: 7, head: HEAD, base: BASE }),
+      loadFile: () => Promise.resolve({ s: 'text', base: 'one\ntwo\nthree\n', head: 'one\nTWO\nthree\nfour\n' }),
       loadSide: () => Promise.resolve({ kind: 'missing' }),
       declQuery: () => null,
-      hunks: () => null,
     }
     const host = document.createElement('div')
     document.body.append(host)
@@ -542,7 +561,7 @@ describe('the patch view (S-2103)', () => {
   // One file's hunks: a context row, a two-for-one change, and no second side anywhere.
   const PATCH = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,3 @@\n one\n-two\n+TWO\n+three\n'
 
-  it('draws a patch:HASH tab from its own hunks, with no request and no PR chrome', async () => {
+  it('draws a patch:HASH tab from its own hunks, with no diff request and no PR chrome', async () => {
     localStorage.clear()
     const h = storePatch(PATCH)!
     const host = await mount(`patch:${h}`)
@@ -550,12 +569,43 @@ describe('the patch view (S-2103)', () => {
     expect(host.querySelector('.dv-repo')?.textContent).toBe('patch')
     expect(host.querySelector('.dv-shas')).toBeNull()
     expect(host.querySelector('.dv-review')).toBeNull()
-    expect(host.querySelector('.dv-mode')).toBeNull()
     expect(host.querySelector('.dv-count')?.textContent).toBe('1 of 1 files')
+    // No file has two sides yet, so there is no Split to offer (S-2104 review).
+    expect(host.querySelector('.dv-mode')).toBeNull()
     await vi.waitFor(() => expect(host.querySelector('[data-dv-file="src/a.ts"] .cm-line')).not.toBeNull())
     expect(host.querySelectorAll('[data-dv-file="src/a.ts"] .cm-line')).toHaveLength(5)
     expect(paths(host)).toEqual(['src/a.ts'])
-    expect(calls).toEqual([])
+    // A patch tab asks the diff API nothing; it reads its files from checkouts (S-2104), and the repos answer says which.
+    expect(calls).toEqual(['/api/diff/repos'])
+  })
+
+  // S-2104: a file the writer's checkout holds is matched, drawn with both sides, and labelled with where it came from.
+  it('matches a file against the writer\'s checkout and says where it came from', async () => {
+    localStorage.clear()
+    const h = storePatch(PATCH, { host: 'storage', cwd: '/w/stam2-x' })!
+    route = (u) => (u.startsWith('/api/files/read') ? text('one\nTWO\nthree\n') : json(404, { error: 'no route' }))
+    const host = await mount(`patch:${h}`)
+    await vi.waitFor(() => expect(host.querySelector('[data-dv-file="src/a.ts"] .cm-line')).not.toBeNull())
+    const row = host.querySelector('[data-dv-file="src/a.ts"]')!
+    expect(row.querySelector('.dv-row.muted')?.textContent).toBe('Live checkout · storage:/w/stam2-x')
+    // This file has two sides, so the tab offers Split on a wide pane.
+    expect(host.querySelector('.dv-mode')).not.toBeNull()
+    // Both sides of the patch, drawn from one file: the file itself, and the file reverse-applied. Never the hunk doc.
+    expect(row.textContent).toContain('TWO')
+    expect(row.textContent).toContain('two')
+    expect(row.textContent).not.toContain('@@')
+    expect(new URL(calls.find((u) => u.startsWith('/api/files/read'))!, 'http://x').searchParams.get('path')).toBe('/w/stam2-x/src/a.ts')
+  })
+
+  it('keeps the hunk-only view and says so when nothing matched', async () => {
+    localStorage.clear()
+    const h = storePatch(PATCH, { host: 'storage', cwd: '/w/stam2-x' })!
+    route = (u) => (u.startsWith('/api/files/read') ? text('not this file at all\n') : json(404, { error: 'no route' }))
+    const host = await mount(`patch:${h}`)
+    await vi.waitFor(() => expect(host.querySelector('[data-dv-file="src/a.ts"] .cm-line')).not.toBeNull())
+    const row = host.querySelector('[data-dv-file="src/a.ts"]')!
+    expect(row.querySelector('.dv-row.muted')?.textContent).toBe('Declarations unavailable · file changed or not found')
+    expect(row.textContent).toContain('@@ -1,2 +1,3 @@')
   })
 
   it('an entry that is gone says to open it again from its mail', async () => {
@@ -575,7 +625,7 @@ describe('the patch view (S-2103)', () => {
     await vi.waitFor(() => expect(host.querySelector('[data-dv-file="x.html"] .cm-line')).not.toBeNull())
     expect(host.querySelector('[data-dv-file="x.html"] img, [data-dv-file="x.html"] b')).toBeNull()
     expect(host.textContent).toContain(html)
-    expect(calls).toEqual([])
+    expect(calls).toEqual(['/api/diff/repos'])
   })
 
   // A realistic pasted patch: 20 files and about 2,000 lines, as a review-size fence arrives.
@@ -595,6 +645,6 @@ describe('the patch view (S-2103)', () => {
     const view = EditorView.findFromDOM(host.querySelector<HTMLElement>('[data-dv-file="src/mod00.ts"] .cm-editor')!)
     expect(view?.state.doc.lines).toBe(101)
     expect(view?.state.doc.line(2).text).toBe(' // line 0 of src/mod00.ts')
-    expect(calls).toEqual([])
+    expect(calls).toEqual(['/api/diff/repos'])
   })
 })

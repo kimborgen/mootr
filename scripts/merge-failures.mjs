@@ -5,7 +5,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { envVar } from '../src/env.ts';
+import { isMain } from './main-guard.mjs';
 
 const UNITS = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
 
@@ -32,10 +33,12 @@ const kinds = (e) => [...new Set((e.outcomes ?? []).map((o) => o.kind).filter((k
 const prList = (e) => e.prs.map((p) => `#${p.pr}`).join(' ');
 const failingText = (e) => (e.failing ?? []).map((f) => (f.tests?.length ? `${f.step}: ${f.tests.join(', ')}` : f.step)).join('; ') || '-';
 const culprit = (e) => (e.isolated === null ? 'unknown' : e.isolated.length ? e.isolated.map((p) => `#${p}`).join(' ') : '-');
+// The steps that failed once and passed on re-run (S-1592), logged even when the train merged; `flaky` is null otherwise.
+const flakySteps = (e) => (e.flaky ?? []).join(', ') || '-';
 
 export function render(entries, sinceText) {
-  const rows = entries.map((e) => [e.at.slice(0, 16).replace('T', ' '), prList(e), kinds(e).join(',') || '-', failingText(e), culprit(e)]);
-  const head = ['time', 'prs', 'kind', 'failing', 'culprit'];
+  const rows = entries.map((e) => [e.at.slice(0, 16).replace('T', ' '), prList(e), kinds(e).join(',') || '-', failingText(e), culprit(e), flakySteps(e)]);
+  const head = ['time', 'prs', 'kind', 'failing', 'culprit', 'flaky'];
   const width = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   const line = (r) => r.map((c, i) => c.padEnd(width[i])).join('  ').trimEnd();
   const culprits = entries.reduce((n, e) => n + (e.isolated?.length ?? 0), 0);
@@ -45,7 +48,9 @@ export function render(entries, sinceText) {
   const count = {};
   for (const e of others) for (const k of kinds(e)) count[k] = (count[k] ?? 0) + 1;
   const extra = others.length ? `; ${others.length} without a gate failure (${Object.entries(count).map(([k, n]) => `${n} ${k}`).join(', ') || 'no outcome kind'})` : '';
-  return [...(rows.length ? [line(head), ...rows.map(line)] : []), `${failed.length} failed trains, ${culprits} culprit PRs, since ${since}${extra}`].join('\n');
+  const flaky = entries.filter((e) => e.flaky?.length).length;
+  const flakyText = flaky ? `; ${flaky} flaky` : '';
+  return [...(rows.length ? [line(head), ...rows.map(line)] : []), `${failed.length} failed trains, ${culprits} culprit PRs, since ${since}${extra}${flakyText}`].join('\n');
 }
 
 function main(args, env = process.env) {
@@ -57,12 +62,12 @@ function main(args, env = process.env) {
     else throw new Error('usage: node scripts/merge-failures.mjs [--since 7d] [--json]');
   }
   const since = sinceText ? new Date(Date.now() - parseSince(sinceText)) : null;
-  const file = join(env.STAM_HOME || join(homedir(), '.local/share/stam'), 'merge-train-failures.jsonl');
+  const file = join(envVar('HOME', env) || join(homedir(), '.local/share/stam'), 'merge-train-failures.jsonl');
   const entries = readFailures(file, since);
   console.log(json ? JSON.stringify(entries, null, 2) : render(entries, sinceText));
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isMain(import.meta.url)) {
   try {
     main(process.argv.slice(2));
   } catch (e) {

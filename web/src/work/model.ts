@@ -15,7 +15,8 @@ export type Show = 'open' | 'all'
 export type Group = 'issues' | 'agents' | 'flat' | 'column'
 export const GROUPS: Group[] = ['issues', 'agents', 'flat', 'column']
 // A row of the Work table: an ITSA, in a group or as a Needs-you row's subject.
-export interface WorkRow { it: Itsa; depth: number; context: boolean }
+// `role` is set in the agent grouping only: which way the ITSA belongs to that agent, as its owner or a participant.
+export interface WorkRow { it: Itsa; depth: number; context: boolean; role?: 'owner' | 'participant' }
 // `root` is the issue an issue group is for; `agent` the root agent of an agent group. A flat
 // group, the unowned group, and a standalone group have no agent; the flat group has no root
 // either, and no header.
@@ -101,7 +102,9 @@ export function groupWork(all: Itsa[], opts: GroupOptions): WorkGroup[] {
 
 // One group per top-level agent tree: its agents in tree order (depth first, siblings by
 // creation), each agent's ITSAs under it at the agent's depth. An ITSA whose owner is not an
-// agent in the store (none, or one that was forgotten) goes to a trailing Unowned group.
+// agent in the store (none, or one that was forgotten) goes to a trailing Unowned group. An ITSA is listed
+// once per agent tree: under its owner when the owner is in that tree, else under its shallowest participant
+// there. The human is no agent.
 export function groupByAgent(all: Itsa[], agents: AgentNode[], opts: GroupOptions): WorkGroup[] {
   const wanted = wantedFn(opts)
   const known = new Map(agents.map((a) => [a.id, a]))
@@ -113,21 +116,44 @@ export function groupByAgent(all: Itsa[], agents: AgentNode[], opts: GroupOption
   }
   for (const list of kids.values()) list.sort((x, y) => (x.created_at ?? '').localeCompare(y.created_at ?? '') || x.id.localeCompare(y.id))
 
-  const byOwner = new Map<string, Itsa[]>()
+  // Each top-level agent tree with the depth of each agent in it; `seen` guards against a cycle in the stored parents.
+  const trees: Map<string, number>[] = []
+  const measure = (a: AgentNode, depth: number, seen: Set<string>, into: Map<string, number>) => {
+    into.set(a.id, depth)
+    for (const c of kids.get(a.id) ?? []) {
+      if (seen.has(c.id)) continue
+      seen.add(c.id)
+      measure(c, depth + 1, seen, into)
+    }
+  }
+  for (const r of kids.get(null) ?? []) {
+    const into = new Map<string, number>()
+    measure(r, 0, new Set([r.id]), into)
+    trees.push(into)
+  }
+
+  const byAgent = new Map<string, Itsa[]>()
   const unowned: WorkRow[] = []
   for (const x of all) {
     if (!wanted(x)) continue
-    if (x.owner && known.has(x.owner)) byOwner.set(x.owner, [...(byOwner.get(x.owner) ?? []), x])
-    else unowned.push({ it: x, depth: 0, context: false })
+    // agentIdsOf lists the owner first, so a tie in depth goes to the owner.
+    const ids = agentIdsOf(x).filter((id) => known.has(id))
+    for (const tree of trees) {
+      const here = ids.filter((id) => tree.has(id))
+      if (!here.length) continue
+      const at = x.owner && tree.has(x.owner) ? x.owner : here.reduce((best, id) => (tree.get(id)! < tree.get(best)! ? id : best))
+      byAgent.set(at, [...(byAgent.get(at) ?? []), x])
+    }
+    if (!x.owner || !known.has(x.owner)) unowned.push({ it: x, depth: 0, context: false })
   }
   // Sort orders each agent's ITSAs and the Unowned ones; the agents keep their tree order.
-  for (const [id, list] of byOwner) byOwner.set(id, sortedBy(list, opts))
+  for (const [id, list] of byAgent) byAgent.set(id, sortedBy(list, opts))
   const unownedRows = sorted(unowned, opts.sort, opts.cols, opts.cx ?? NO_CX, (r) => r)
 
   const groups: WorkGroup[] = []
   // Depth first over one tree; `seen` guards against a cycle in the stored parents.
   const walk = (a: AgentNode, depth: number, seen: Set<string>, rows: WorkRow[]) => {
-    for (const x of byOwner.get(a.id) ?? []) rows.push({ it: x, depth, context: false })
+    for (const x of byAgent.get(a.id) ?? []) rows.push({ it: x, depth, context: false, role: x.owner === a.id ? 'owner' : 'participant' })
     for (const c of kids.get(a.id) ?? []) {
       if (seen.has(c.id)) continue
       seen.add(c.id)

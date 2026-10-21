@@ -2,7 +2,7 @@
 // served at /sw.js), the install prompt, and this device's push subscription.
 import { api, token } from './api'
 
-export interface PushDevice { id: string; endpoint: string; label: string; kinds: string[]; created_at: string; last_ok_at: string | null; last_error: string | null }
+export interface PushDevice { id: string; endpoint_hash: string; label: string; kinds: string[]; created_at: string; last_ok_at: string | null; last_error: string | null }
 export interface PushInfo { publicKey: string; kinds: string[]; devices: PushDevice[] }
 
 export const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
@@ -55,6 +55,12 @@ export function initNotify(openThread: (thread: string) => void) {
   navigator.serviceWorker.addEventListener('message', (e) => {
     if (e.data?.type === 'open-thread' && e.data.thread) openThread(String(e.data.thread))
   })
+}
+
+// The daemon never serves a device's endpoint (a capability URL); it serves this hash, SHA-256 in hex.
+export async function endpointHash(endpoint: string): Promise<string> {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(endpoint))
+  return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 export async function currentSubscription(): Promise<PushSubscription | null> {

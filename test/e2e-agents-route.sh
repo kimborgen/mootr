@@ -7,18 +7,18 @@ set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 daemon_home main
 use main
-node "$ROOT/test/agents-route-seed.mjs" >/dev/null
 daemon_up main
 auth="authorization: Bearer $(cat "$STAM_HOME/token")"
 fail() { echo "FAIL: $1"; exit 1; }
-post() { curl -s -m 60 -H "$auth" -H 'content-type: application/json' -d "$2" "$STAM_URL/api/test/$1"; }
+post() { curl -sf -m 60 -H "$auth" -H 'content-type: application/json' -d "$2" "$STAM_URL/api/test/$1"; }
+post seed-agents '{"count":300}' >/dev/null
 
 # The daemon's own background work (reconcile, polls) also runs statements while a window is open, so one window can
 # hold a burst that is not the request's. The request's cost is the least a window shows over a few windows.
 counts=""
 for _i in 1 2 3 4 5; do
   post statements '{"action":"start"}' | grep -q '"ok":true' || fail "the statement count didn't start"
-  curl -s -m 60 -H "$auth" "$STAM_URL/api/agents" >"$TEST_TMP/agents.json"
+  curl -sf -m 60 -H "$auth" "$STAM_URL/api/agents" >"$TEST_TMP/agents.json"
   counts="$counts $(post statements '{"action":"stop"}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["statements"])')"
 done
 statements=$(echo $counts | tr ' ' '\n' | sort -n | head -1)

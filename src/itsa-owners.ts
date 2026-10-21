@@ -7,12 +7,15 @@
 // machine go through POST /api/agents/:id/notice on its daemon.
 import * as db from './db.ts';
 import * as itsa from './itsa.ts';
+import { isReviewerType } from './agent-types.ts';
 import { settings } from './settings.ts';
 import { render } from './templates.ts';
 import { tellAnywhere, HUMAN } from './mail.ts';
 import { MACHINE } from './config.ts';
 import { findAgentPeer, locateAgent, peerByName, peerCall, type Via } from './peers.ts';
 import { itsaRefusal, mayEditItsa } from './mail-visibility.ts';
+import { chainMarked, homeSaysMarked } from './developer-cap.ts';
+import { envVar } from './env.ts';
 
 const log = (what: string, e: unknown) => console.error(`ITSA owners: ${what}: ${e instanceof Error ? e.message : e}`);
 const isHome = () => settings().itsa.home === MACHINE;
@@ -38,6 +41,32 @@ async function toHome(method: string, path: string, body?: unknown, timeoutMs = 
   return r.data;
 }
 
+// --- The incident mark (S-2406, S-2421) ----------------------------------------------------
+
+// The bound on the home's answer to an incident spawn's mark question: a spawn waits no longer than this for it.
+const INCIDENT_ASK_MS = 5000;
+
+// Whether the ITSA a spawn names, or one of its ancestors, carries the incident mark, read from this daemon's ITSA DB.
+// An ITSA this daemon can't read is no mark.
+export function incidentMarkedHere(ref: unknown): boolean {
+  if (!ref) return false;
+  try {
+    const x = itsa.find(String(ref));
+    const chain = x && itsa.provenChain(x);
+    return chain !== null && chain !== undefined && chainMarked(chain);
+  } catch {
+    return false;
+  }
+}
+
+// The same question for an incident spawn on this daemon: read here on the ITSA home, else asked of the home (S-2421).
+// Fails closed: an unreachable home, a timeout or a bad reply is no mark.
+export async function incidentMarked(ref: unknown): Promise<boolean> {
+  if (!ref) return false;
+  if ((settings().itsa.home ?? MACHINE) === MACHINE) return incidentMarkedHere(ref);
+  return homeSaysMarked(() => peerCall(homePeer(), 'GET', `/api/itsas/incident-marked?itsa=${encodeURIComponent(String(ref))}`, undefined, INCIDENT_ASK_MS));
+}
+
 // --- Spawning an owner ---------------------------------------------------------------------
 
 // The ITSA a spawn names, from the home daemon (here or a peer): its id and key, its
@@ -58,6 +87,21 @@ export function mayAssign(ref: string, via?: Via): void {
   if (!via || via.boss || !isHome()) return;
   const id = itsa.must(ref).id;
   if (!mayEditItsa(via.agent, id)) throw new itsa.ForbiddenError(itsaRefusal(via.agent, id, 'change'));
+}
+
+// Whether the agent asking for a spawn (`via`) may add the new agent as a participant of each of these ITSAs
+// (S-2424, `participate`): the same check as mayAssign, so an owner, a participant or an ancestor owner may. Throws
+// ForbiddenError when it may not, and an error when the ITSA is unknown or the home can't be asked: nothing
+// may start on an unverified spawn. On the home it is checked here; on a peer, the home checks it.
+export async function mayParticipate(refs: string[], via?: Via): Promise<void> {
+  for (const ref of refs) {
+    if (isHome()) {
+      itsa.must(ref);
+      mayAssign(ref, via);
+    } else {
+      await toHome('POST', '/api/itsas/may-participate', { itsa: ref }, 8000, via);
+    }
+  }
 }
 
 // Sets the owner on the home and returns who owned it just before, as the write saw it.
@@ -203,7 +247,7 @@ function ownedBy(agentId: string): itsa.Itsa[] {
 function participatedBy(agentId: string): itsa.Itsa[] {
   return db
     .open()
-    .prepare('SELECT i.* FROM itsas i JOIN itsa_participants p ON p.itsa_id = i.id WHERE p.agent_id = ? ORDER BY i.created_at')
+    .prepare('SELECT i.* FROM itsas i JOIN itsa_participants p ON p.itsa_id = i.id WHERE p.agent_id = ? AND p.left_at IS NULL ORDER BY i.created_at')
     .all(agentId) as unknown as itsa.Itsa[];
 }
 
@@ -247,6 +291,15 @@ export async function joinItsa(ref: string, agentId: string, by: string, via?: V
   mayAssign(ref, via);
   if (isHome()) await itsa.addParticipant(ref, agentId, by);
   else await toHome('POST', '/api/itsas/join', { itsa: ref, agent: agentId, by }, 8000, via);
+}
+
+// Undoes a join that a spawn made before it failed (S-2441): removes the agent's row from the ITSA. The agent is
+// new, so every row for it came from that spawn; nothing else is touched. Routed like joinItsa: the home removes it,
+// on a peer over the same route. A failure is the caller's to log.
+export async function leaveItsa(ref: string, agentId: string, by: string, via?: Via): Promise<void> {
+  mayAssign(ref, via);
+  if (isHome()) await itsa.removeParticipant(ref, agentId, by);
+  else await toHome('POST', '/api/itsas/leave', { itsa: ref, agent: agentId, by }, 8000, via);
 }
 
 // Routed like the owner assignment: the home daemon records the join, whether the spawn
@@ -299,6 +352,8 @@ interface Who {
   name: string;
   // The agent's parent, sent by the machine that holds it; the home can't read a peer's agent row.
   parent?: string | null;
+  // The agent's type, sent the same way; a reviewer type leaves the ITSAs it joined when it is unowned (S-3015).
+  type?: string | null;
 }
 
 const isLive = (a: { lifecycle: string }) => a.lifecycle !== 'archived';
@@ -360,7 +415,7 @@ function reportStop(agent: Who, what: string): void {
 // agent down (a failed launch) is told once, by the activity observer.
 export function watchOwnerStops(): void {
   itsa.onStatus(statusChanged);
-  const every = Number(process.env.STAM_ITSA_RETRY_MS) || 30_000;
+  const every = Number(envVar('ITSA_RETRY_MS')) || 30_000;
   retryPendingUnowns().catch((e) => log('retry', e));
   setInterval(() => retryPendingUnowns().catch((e) => log('retry', e)), every).unref();
   db.onLifecycleChange((_before, after) => {
@@ -381,6 +436,19 @@ export function watchOwnerStops(): void {
 // One unown at a time per agent on the home, so two requests for the same agent (a retry
 // and the original) can't both unown its ITSAs or both notify.
 const unowning = new Map<string, Promise<unknown>>();
+
+// S-3015: a reviewer whose approve is posted, or that is archived or forgotten, leaves the ITSAs it joined: each
+// row is marked left (a soft leave, so spend and reviewer counts keep it), with a participant event. An ITSA it still
+// owns keeps it as a member. `branch` limits it to the ITSAs whose branch link is that branch (a verdict's PR).
+// Runs on the home, where the rows are. The caller checks the agent is a reviewer.
+export async function releaseReviewer(agentId: string, by: string, branch?: string): Promise<number> {
+  const notOwned = '(i.owner IS NULL OR i.owner <> ?)';
+  const rows = branch === undefined
+    ? db.open().prepare(`SELECT p.itsa_id FROM itsa_participants p JOIN itsas i ON i.id = p.itsa_id WHERE p.agent_id = ? AND p.left_at IS NULL AND ${notOwned}`).all(agentId, agentId) as { itsa_id: string }[]
+    : db.open().prepare(`SELECT p.itsa_id FROM itsa_participants p JOIN itsas i ON i.id = p.itsa_id WHERE p.agent_id = ? AND p.left_at IS NULL AND ${notOwned} AND p.itsa_id IN (SELECT itsa_id FROM itsa_links WHERE system = 'branch' AND external_id = ?)`).all(agentId, agentId, branch) as { itsa_id: string }[];
+  for (const r of rows) await itsa.leaveParticipant(r.itsa_id, agentId, by);
+  return rows.length;
+}
 
 // On the home: the owner is gone. Each open ITSA goes to its heir (the parent, else the nearest
 // live ancestor, else the chief of staff) with its status kept, an event, and a notice to the heir
@@ -421,6 +489,9 @@ export function unownLocal(agent: Who, how: 'archived' | 'forgotten'): Promise<v
         break;
       }
     }
+    // S-3015: a reviewer that is unowned (archived or forgotten) leaves its ITSAs too. Its own try: a failure is logged,
+    // and the unown above stands.
+    if (agent.type && isReviewerType(agent.type)) await releaseReviewer(agent.id, agent.id).catch((e) => log(`couldn't take ${agent.name} out of its ITSAs`, e));
     for (const [id, list] of given) {
       await tellAnywhere(id, render('itsa-owner-handoff', { what: `${agent.name} was ${how}`, list: list.map((k) => `${k.key} "${k.title}" (${k.status})`).join(', ') })).catch((e) => log(`handoff notice to ${id}`, e));
     }
@@ -437,15 +508,16 @@ export function unownLocal(agent: Who, how: 'archived' | 'forgotten'): Promise<v
 // exists stays, so its created_at identifies the request.
 export function queueUnown(agent: Who, how: 'archived' | 'forgotten'): void {
   if (isHome()) return;
-  db.open().prepare('INSERT OR IGNORE INTO itsa_pending_unown (agent_id, name, how, created_at) VALUES (?, ?, ?, ?)').run(agent.id, agent.name, how, new Date().toISOString());
+  db.open().prepare('INSERT OR IGNORE INTO itsa_pending_unown (agent_id, name, how, type, created_at) VALUES (?, ?, ?, ?, ?)').run(agent.id, agent.name, how, agent.type ?? null, new Date().toISOString());
 }
 
 // Tells the home. The row stays until the home acknowledges, and only the row this call
 // read is deleted, so a retry and a new request can't remove each other's.
 async function sendUnown(agentId: string): Promise<void> {
-  const row = db.open().prepare('SELECT agent_id, name, how, created_at FROM itsa_pending_unown WHERE agent_id = ?').get(agentId) as { agent_id: string; name: string; how: string; created_at: string } | undefined;
+  const row = db.open().prepare('SELECT agent_id, name, how, type, created_at FROM itsa_pending_unown WHERE agent_id = ?').get(agentId) as { agent_id: string; name: string; how: string; type: string | null; created_at: string } | undefined;
   if (!row) return;
-  await toHome('POST', '/api/itsas/unown-agent', { id: row.agent_id, name: row.name, how: row.how, parent: db.getAgent(row.agent_id)?.parent_id ?? null }, 15_000);
+  // The type is the one queued with the request: a forgotten agent's row is gone by the time a retry sends it.
+  await toHome('POST', '/api/itsas/unown-agent', { id: row.agent_id, name: row.name, how: row.how, parent: db.getAgent(row.agent_id)?.parent_id ?? null, type: row.type }, 15_000);
   db.open().prepare('DELETE FROM itsa_pending_unown WHERE agent_id = ? AND created_at = ?').run(row.agent_id, row.created_at);
 }
 
@@ -500,7 +572,7 @@ export async function retryPendingUnowns(): Promise<void> {
           continue;
         }
         const fails = (b?.fails ?? 0) + 1;
-        const every = Number(process.env.STAM_ITSA_RETRY_MS) || 30_000;
+        const every = Number(envVar('ITSA_RETRY_MS')) || 30_000;
         backoff.set(r.agent_id, { fails, next: Date.now() + retryDelay(every, fails) });
         log(`still can't unown ${r.name}'s ITSAs (try ${fails})`, e);
       }

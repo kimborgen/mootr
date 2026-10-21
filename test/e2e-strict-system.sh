@@ -2,7 +2,7 @@
 # The deploy watcher's CLI sequence (S-601, under S-426), with auth.humanStrict on and off: read an ITSA,
 # set it done and post a note with --system deploy-watch, send its alert mail with mail send --system,
 # link a branch, hit health. The shared-token CLI doesn't claim to be the human for these, so they pass
-# in both modes with no would-refuse in the log; a shared-token call that claims the human on a
+# in both modes with no auth.humanStrict line in the log; a shared-token call that claims the human on a
 # human-only route is still refused under strict. Free: one registered agent.
 set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
@@ -14,7 +14,7 @@ setauth() { python3 - "$TEST_TMP/main/settings.json" "$1" <<'PY'
 import json, os, sys
 p = sys.argv[1]
 s = json.load(open(p)) if os.path.exists(p) else {}
-s.setdefault('auth', {}).update({'humanStrict': sys.argv[2] == 'true', 'legacyPeerToken': False})
+s.setdefault('auth', {}).update({'humanStrict': sys.argv[2] == 'true'})
 json.dump(s, open(p, 'w'))
 PY
 }
@@ -28,16 +28,20 @@ watcher() { # MODE: runs the watcher's sequence against the running daemon
   on main "$STAM" itsa show "$ID" >"$_t" 2>&1 || fail "$_m: itsa show: $(cat "$_t")"
   on main "$STAM" itsa set "$ID" --status done --system deploy-watch >"$_t" 2>&1 || fail "$_m: itsa set: $(cat "$_t")"
   on main "$STAM" itsa post "$ID" "deployed" --system deploy-watch >"$_t" 2>&1 || fail "$_m: itsa post: $(cat "$_t")"
+  # The nightly Go parity run posts its line as a system sender too (S-2297).
+  on main "$STAM" itsa post "$ID" "nightly" --system go-parity >"$_t" 2>&1 || fail "$_m: itsa post --system go-parity: $(cat "$_t")"
   on main "$STAM" itsa show "$ID" | grep -q '"status": *"done"' || fail "$_m: the ITSA isn't done"
   on main "$STAM" mail send --to "$A" --system deploy-watch --subject "alert" "stopped" >"$_t" 2>&1 || fail "$_m: mail send --system: $(cat "$_t")"
   [ "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $TOKEN" "$URL/api/health")" = 200 ] || fail "$_m: health refused"
   on main "$STAM" status >/dev/null 2>&1 || fail "$_m: stam status failed"
   on main "$STAM" ls >"$_t" 2>&1 || fail "$_m: stam ls: $(cat "$_t")"
   grep -q alpha "$_t" || fail "$_m: stam ls didn't list the agent: $(cat "$_t")"
-  ! grep -Eq 'auth.humanStrict (would refuse|refuses)' "$LOG" || fail "$_m: log has a refusal: $(grep -E 'auth.humanStrict (would refuse|refuses)' "$LOG")"
+  ! grep -Eq 'auth.humanStrict (off|is off|refuses)' "$LOG" || fail "$_m: log has a refusal: $(grep -E 'auth.humanStrict (off|is off|refuses)' "$LOG")"
   # A link's `system` is its kind, not a sender: the human's header stays, so it works with strict off.
   if [ "$_m" = off ]; then
-    on main "$STAM" itsa link "$ID" --system branch --external-id some-branch --repo stam2 >"$_t" 2>&1 || fail "$_m: itsa link --system branch: $(cat "$_t")"
+    # The derived repo's name is the checkout's folder name (S-2083), not always `stam2`.
+    _repo=$(python3 -c 'import json,sys; print(next(iter(json.load(open(sys.argv[1]))["itsa"]["repos"])))' "$TEST_TMP/main/settings.json") || fail "$_m: no derived repo in settings.json"
+    on main "$STAM" itsa link "$ID" --system branch --external-id some-branch --repo "$_repo" >"$_t" 2>&1 || fail "$_m: itsa link --system branch: $(cat "$_t")"
   fi
 }
 setauth true

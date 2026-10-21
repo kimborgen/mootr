@@ -12,9 +12,14 @@
 //     growth in statusline cost while a window reads 100% (recorded in usage.report).
 //   - unknown: no fresh reading. Codex reports no cost, so its period spend is unknown; its
 //     credits balance is exposed separately as `balance`.
+//   - estimate, priced (S-2119): any other pay-per-token provider (accounts.payPerTokenProvider) has
+//     no balance endpoint, so its spend is the ledger's tokens at the registry's prices for each
+//     row's model (`PROVIDER/MODEL`), or the cost the harness reported for a model with no price.
 import * as db from './db.ts';
 import { settings, type CostAccount, type CostBudget } from './settings.ts';
-import { isOpenRouter, matchAccount, openRouterAccounts } from './accounts.ts';
+import { isOpenRouter, matchAccount, openRouterAccounts, payPerTokenProvider } from './accounts.ts';
+import { priceUsd } from './attribution.ts';
+import { registry } from './registry.ts';
 import { timed } from './stall.ts';
 
 // A reading older than this, while an agent on the account is active, is stale and counts as
@@ -39,6 +44,8 @@ export interface AccountBudget {
 export interface AccountReading {
   account: string;
   match: { harness: string; model?: string };
+  // The provider that bills it per token (accounts.payPerTokenProvider), or null.
+  provider: string | null;
   windows: Record<string, AccountWindow>;
   // When the account's limits or billing reading was last written, and its age.
   updated_at: string | null;
@@ -136,6 +143,30 @@ function ledger(account: string, column: 'cost_usd' | 'paid_estimate_usd', since
   return row.s ?? 0;
 }
 
+// How an account's paid spend is read from the ledger: billed dollars (OpenRouter), tokens at the
+// registry's prices (another pay-per-token provider), the paid estimate (Claude), or none (Codex).
+type Basis = 'billed' | 'priced' | 'estimate' | 'none';
+function basisOf(acct: CostAccount, name: string, providers: Record<string, unknown>): Basis {
+  if (isOpenRouter(acct, name)) return 'billed';
+  if (payPerTokenProvider(acct, name, providers)) return 'priced';
+  return acct.match.harness === 'codex' ? 'none' : 'estimate';
+}
+
+// An account's spend from the first day of a period (or all time) at the registry's per-model
+// prices (attribution.priceUsd: a missing output or cache price is the input's, and a context
+// suffix such as `[1m]` prices as its model), or, for a model with no price, the cost the harness reported.
+export function pricedSpend(account: string, since: string | null, prices: Record<string, any> = registry().prices ?? {}): number {
+  const sql = `SELECT model, SUM(tokens_in) AS tin, SUM(tokens_out) AS tout, SUM(tokens_cache_read) AS tcr, SUM(tokens_cache_write) AS tcw, SUM(cost_usd) AS cost
+    FROM usage WHERE account = ?${since ? ' AND day >= ?' : ''} GROUP BY model`;
+  const rows = db.open().prepare(sql).all(...(since ? [account, since] : [account])) as { model: string | null; tin: number; tout: number; tcr: number; tcw: number; cost: number }[];
+  let usd = 0;
+  for (const r of rows) {
+    const priced = r.model ? priceUsd({ model: r.model, tokens_in: r.tin ?? 0, tokens_out: r.tout ?? 0, tokens_cache_read: r.tcr ?? 0, tokens_cache_write: r.tcw ?? 0 }, prices) : null;
+    usd += priced ?? r.cost ?? 0;
+  }
+  return usd;
+}
+
 // Every configured account's reading. `now` is injectable for tests.
 export function accountReadings(now: number = Date.now()): AccountReading[] {
   const cost = settings().cost;
@@ -144,9 +175,11 @@ export function accountReadings(now: number = Date.now()): AccountReading[] {
   // The accounts with an active agent, matched once against this read of the config (S-344): matching each
   // agent per account read settings.json again every time.
   const activeAccounts = new Set(agents.filter((a) => a.lifecycle === 'active').map((a) => matchAccount(cost, a.harness, a.model ?? null)));
+  const providers = settings().providers;
   const out: AccountReading[] = [];
   for (const [name, acct] of Object.entries(accounts)) {
     if (!acct) continue;
+    const basis = basisOf(acct, name, providers);
     const sub = timed('snapshot: subscription row', () => entry(acct.match.harness));
     const credits = timed('snapshot: credits row', () => creditsFor(acct, name));
     const isCodex = acct.match.harness === 'codex';
@@ -162,6 +195,7 @@ export function accountReadings(now: number = Date.now()): AccountReading[] {
     // its period spend stays unknown.
     const paid = (per: 'day' | 'week' | 'month'): PaidPeriod => {
       const since = periodStart(per, now);
+      if (basis === 'priced') return { usd: timed('snapshot: ledger', () => pricedSpend(name, since)), source: 'estimate' };
       if (isCodex) return { usd: null, source: 'unknown' };
       if (openrouter) return { usd: timed('snapshot: ledger', () => ledger(name, 'cost_usd', since)), source: 'exact' };
       return { usd: timed('snapshot: ledger', () => ledger(name, 'paid_estimate_usd', since)), source: subFresh ? 'estimate' : 'unknown' };
@@ -169,13 +203,14 @@ export function accountReadings(now: number = Date.now()): AccountReading[] {
 
     let budget: AccountBudget | null = null;
     if (acct.budget) {
-      const spent = spentFor(acct.budget, { name, openrouter, isCodex, now });
+      const spent = spentFor(acct.budget, { name, basis, now });
       budget = { usd: acct.budget.usd, per: acct.budget.per, spent, remaining: spent == null ? null : Math.max(0, acct.budget.usd - spent) };
     }
 
     out.push({
       account: name,
       match: acct.match,
+      provider: payPerTokenProvider(acct, name, providers),
       windows: windowsOf(sub),
       updated_at: updatedAt,
       age_ms: ageMs(updatedAt, now),
@@ -190,13 +225,11 @@ export function accountReadings(now: number = Date.now()): AccountReading[] {
 
 // What has been spent against a budget's own period: the same ledger column as the paid
 // reading, over that period. Null when the account has no paid ledger (Codex, unmanaged).
-function spentFor(
-  budget: CostBudget,
-  ctx: { name: string; openrouter: boolean; isCodex: boolean; now: number },
-): number | null {
-  if (ctx.isCodex) return null;
+function spentFor(budget: CostBudget, ctx: { name: string; basis: Basis; now: number }): number | null {
+  if (ctx.basis === 'none') return null;
   const since = periodStart(budget.per, ctx.now);
-  return ledger(ctx.name, ctx.openrouter ? 'cost_usd' : 'paid_estimate_usd', since);
+  if (ctx.basis === 'priced') return pricedSpend(ctx.name, since);
+  return ledger(ctx.name, ctx.basis === 'billed' ? 'cost_usd' : 'paid_estimate_usd', since);
 }
 
 // An account's paid spend over a budget period, from the same ledger column as its budget
@@ -205,7 +238,7 @@ function spentFor(
 export function paidSpentIn(account: string, per: CostBudget['per'], now: number = Date.now()): number | null {
   const acct = settings().cost.accounts?.[account];
   if (!acct) return null;
-  return spentFor({ usd: 0, per }, { name: account, openrouter: isOpenRouter(acct, account), isCodex: acct.match.harness === 'codex', now });
+  return spentFor({ usd: 0, per }, { name: account, basis: basisOf(acct, account, settings().providers), now });
 }
 
 // All paid spend over a budget period, summed from the whole ledger whatever accounts are
@@ -214,14 +247,20 @@ export function paidSpentIn(account: string, per: CostBudget['per'], now: number
 // recorded), or when it was written by OpenCode on an openrouter/ model: a deleted account's
 // rows keep the harness and model they were written with, so removing the account from
 // settings doesn't turn its billed dollars into a zero estimate. Every other row counts by
-// its paid estimate.
+// its paid estimate, except a configured pay-per-token provider account's rows, which count at the
+// registry's prices (pricedSpend).
 export function paidSpentAll(per: CostBudget['per'], now: number = Date.now()): number {
   const since = periodStart(per, now);
   const names = openRouterAccounts();
+  const providers = settings().providers;
+  const priced = Object.entries(settings().cost.accounts ?? {})
+    .filter(([n, a]) => a && !names.includes(n) && basisOf(a, n, providers) === 'priced')
+    .map(([n]) => n);
   const marks = names.map(() => '?').join(',');
+  const skip = priced.length ? ` AND account NOT IN (${priced.map(() => '?').join(',')})` : '';
   const sum = `SUM(CASE WHEN account IN (${marks}) OR (harness = 'opencode' AND model LIKE 'openrouter/%') THEN cost_usd ELSE paid_estimate_usd END)`;
   const row = (since
-    ? db.open().prepare(`SELECT ${sum} AS s FROM usage WHERE day >= ?`).get(...names, since)
-    : db.open().prepare(`SELECT ${sum} AS s FROM usage`).get(...names)) as { s: number | null };
-  return row.s ?? 0;
+    ? db.open().prepare(`SELECT ${sum} AS s FROM usage WHERE day >= ?${skip}`).get(...names, since, ...priced)
+    : db.open().prepare(`SELECT ${sum} AS s FROM usage WHERE 1${skip}`).get(...names, ...priced)) as { s: number | null };
+  return (row.s ?? 0) + priced.reduce((t, n) => t + pricedSpend(n, since), 0);
 }

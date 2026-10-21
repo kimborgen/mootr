@@ -23,21 +23,26 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { promisify } from 'node:util';
 import { STAM_HOME } from './config.ts';
-import { settings } from './settings.ts';
+import { isSettingsHome, setSetting, settings, settingsOnDisk } from './settings.ts';
+import * as secrets from './secrets.ts';
+import { checkCredential } from './llm/http.ts';
 import type { McpAuth } from './instructions.ts';
+import { envVar } from './env.ts';
 
 const execFileAsync = promisify(execFile);
 const storeFile = () => join(STAM_HOME, 'mcp-auth.json');
-const insecure = () => process.env.STAM_MCP_AUTH_INSECURE === '1';
+const insecure = () => envVar('MCP_AUTH_INSECURE') === '1';
 const trimSlash = (u: string) => u.replace(/\/+$/, '');
 
 // One server's stored login. The client registration is kept beside the tokens so a refresh
 // needs no new discovery. `server_url` is the configured MCP url this grant was made for;
-// a changed url needs a new login, so a grant's bearer never follows a moved server.
+// a changed url needs a new login, so a grant's bearer never follows a moved server. The
+// client secret is a reference into the secret store (S-2736); a plain string is the old form,
+// moved by migrateClientSecrets at start.
 export interface AuthEntry {
   server_url?: string;
   client_id?: string;
-  client_secret?: string;
+  client_secret?: secrets.SecretRef | string;
   access_token?: string;
   refresh_token?: string;
   // Milliseconds since the epoch, or absent when the server gave no expires_in.
@@ -155,7 +160,7 @@ function resourceMatches(prmResource: string, serverUrl: string): boolean {
   }
 }
 
-const pending = new Map<string, { name: string; verifier: string; redirect: string; client_id: string; client_secret?: string; token_endpoint: string; resource: string; scopes: string[]; at: number }>();
+const pending = new Map<string, { name: string; verifier: string; redirect: string; client_id: string; client_secret?: secrets.SecretRef | string; token_endpoint: string; resource: string; scopes: string[]; at: number }>();
 
 // The protected-resource metadata for a server URL: first the 401's `WWW-Authenticate`
 // resource_metadata, then `/.well-known/oauth-protected-resource` + its path, then at the
@@ -230,6 +235,31 @@ async function authFor(name: string): Promise<{ url: string; auth: McpAuth }> {
   return { url: s.url, auth: s.auth };
 }
 
+// A client secret's value for a request: a reference is read from the store, and one the store
+// doesn't hold is an error, never a silent drop. A plain string is checked and used as it is, until
+// the write path moves it into the store. Only a store entry tagged `mcp` is a client secret (S-2767),
+// so a provider's key never goes to an MCP server's token endpoint. The error names the entry, never its value.
+function clientSecretValue(server: string, secret: secrets.SecretRef | string | undefined): string | undefined {
+  if (!secret) return undefined;
+  if (typeof secret === 'string') return checkCredential(secret, `${server}'s client secret`);
+  const provider = secrets.providerOf(secret.secret);
+  if (provider !== undefined && provider !== 'mcp') throw new Error(`${server}: ${secret.secret} is not an MCP client secret`);
+  const value = secrets.getSecret(secret.secret);
+  if (value !== undefined) return value;
+  // Client secrets live in each machine's own store, and only the home machine's holds them.
+  if (!isSettingsHome()) throw new Error(`${server}: log in on the home machine, which keeps its client secret`);
+  throw new Error(`${server}: its client secret ${secret.secret} isn't in the secret store`);
+}
+
+// The reference a grant keeps for a client secret: a settings reference as it is, and a plain
+// string (a registration's, or an old settings value) moved into the store under the server's
+// name first. The store write is committed before the reference is returned.
+function keepClientSecret(server: string, secret: secrets.SecretRef | string | undefined): secrets.SecretRef | undefined {
+  if (!secret) return undefined;
+  if (secrets.isRef(secret)) return secret;
+  return secrets.setMcpClientSecret(server, secret);
+}
+
 // Begins a login and returns the authorize URL to open. `redirect` is the web UI's
 // `/oauth/callback`. The state, verifier, and client registration stay in memory for ten
 // minutes and are single use.
@@ -241,6 +271,8 @@ export async function startLogin(name: string, redirect: string): Promise<{ url:
   const md = await authServerMetadata(String(prm.authorization_servers[0]));
   const scopes = auth.scopes ?? prm.scopes_supported ?? [];
   const client = auth.client_id ? { client_id: auth.client_id, client_secret: auth.client_secret } : await registerClient(md, redirect, scopes);
+  // A configured secret the store can't give fails here, before the human goes to the browser.
+  clientSecretValue(name, client.client_secret);
   const resource = String(prm.resource ?? url);
   const state = b64url(randomBytes(24));
   const verifier = b64url(randomBytes(32));
@@ -255,7 +287,7 @@ export async function startLogin(name: string, redirect: string): Promise<{ url:
 
 // Stores the tokens of a grant. A refresh keeps the old refresh_token when the response
 // omits one; a new login replaces the whole grant, so it never keeps another grant's token.
-function saveTokens(name: string, tok: any, p: { server_url: string; client_id: string; client_secret?: string; token_endpoint: string; resource: string; scopes: string[] }, opts: { refresh?: boolean } = {}): void {
+function saveTokens(name: string, tok: any, p: { server_url: string; client_id: string; client_secret?: secrets.SecretRef | string; token_endpoint: string; resource: string; scopes: string[] }, opts: { refresh?: boolean } = {}): void {
   const s = store();
   const prev = opts.refresh ? s[name] ?? {} : {};
   s[name] = {
@@ -281,10 +313,12 @@ export async function finishLogin(code: string, state: string): Promise<{ name: 
   if (Date.now() - p.at > 600_000) throw new Error('the login state has expired');
   const serverUrl = settings().mcpServers?.[p.name]?.url ?? '';
   const form = new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: p.redirect, client_id: p.client_id, code_verifier: p.verifier, resource: p.resource });
-  if (p.client_secret) form.set('client_secret', p.client_secret);
+  const secret = clientSecretValue(p.name, p.client_secret);
+  if (secret) form.set('client_secret', secret);
   const tok = tokenResponse(await postForm(p.token_endpoint, form));
   if (!tok.access_token) throw new Error('the token endpoint returned no access_token');
-  saveTokens(p.name, tok, { server_url: serverUrl, client_id: p.client_id, client_secret: p.client_secret, token_endpoint: p.token_endpoint, resource: p.resource, scopes: p.scopes });
+  // The secret is kept once the login has worked, and the grant then names it (S-2736).
+  saveTokens(p.name, tok, { server_url: serverUrl, client_id: p.client_id, client_secret: keepClientSecret(p.name, p.client_secret), token_endpoint: p.token_endpoint, resource: p.resource, scopes: p.scopes });
   return { name: p.name };
 }
 
@@ -292,7 +326,8 @@ async function refresh(name: string, e: AuthEntry): Promise<void> {
   if (!e.refresh_token || !e.token_endpoint || !e.client_id) throw new Error(`${name} has no refresh_token`);
   const form = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: e.refresh_token, client_id: e.client_id });
   if (e.resource) form.set('resource', e.resource);
-  if (e.client_secret) form.set('client_secret', e.client_secret);
+  const secret = clientSecretValue(name, e.client_secret);
+  if (secret) form.set('client_secret', secret);
   const tok = tokenResponse(await postForm(e.token_endpoint, form));
   saveTokens(name, tok, { server_url: e.server_url ?? '', client_id: e.client_id, client_secret: e.client_secret, token_endpoint: e.token_endpoint, resource: e.resource ?? '', scopes: e.scopes ?? [] }, { refresh: true });
 }
@@ -350,9 +385,75 @@ export async function status(): Promise<{ name: string; type: string; logged_in:
   return out;
 }
 
-// Forgets a server's stored login.
+// The secret name the settings reference for a server, if any.
+function settingsSecretName(name: string): string | undefined {
+  const v = settingsOnDisk()?.mcpServers?.[name]?.auth?.client_secret;
+  return secrets.isRef(v) ? v.secret : undefined;
+}
+
+// Forgets a server's stored login. A client secret the registration made goes with it; one the
+// settings name stays, since the next login needs it (S-2736).
 export function logout(name: string): void {
   const s = store();
+  const ref = s[name]?.client_secret;
   delete s[name];
   writeStore(s);
+  if (secrets.isRef(ref) && ref.secret === secrets.mcpClientSecretName(name) && ref.secret !== settingsSecretName(name)) secrets.remove(ref.secret);
+}
+
+// Moves the plain-text client secrets into the secret store (S-2736): the McpAuth values in
+// settings (on the home daemon, which holds the shared settings) and the token file's. Each moves
+// under its server's name, and its entry becomes the reference; the store write is committed
+// before the plain text is replaced. A store name already holding another value is left alone,
+// and a store that can't be read moves nothing. A second run finds only references, so it changes
+// nothing. Logs names, never values.
+export function migrateClientSecrets(): void {
+  const moved = (server: string, value: string): secrets.SecretRef | undefined => {
+    try {
+      const name = secrets.mcpClientSecretName(server);
+      if (!name) {
+        console.warn(`mcp-auth: ${server}'s client secret stays in settings: no store name fits it`);
+        return undefined;
+      }
+      const held = secrets.stored(name)?.value;
+      if (held !== undefined && held !== value) {
+        console.warn(`mcp-auth: ${server}'s client secret stays in place: ${name} holds another value`);
+        return undefined;
+      }
+      if (held === undefined) {
+        secrets.set(name, { value, provider: 'mcp' });
+        console.log(`mcp-auth: moved ${server}'s client secret into the secret store as ${name}`);
+      }
+      return { secret: name };
+    } catch (e) {
+      console.warn(`mcp-auth: ${server}'s client secret stays in place: ${e instanceof Error ? e.message : e}`);
+      return undefined;
+    }
+  };
+  if (isSettingsHome()) {
+    const servers = settingsOnDisk()?.mcpServers;
+    if (servers && typeof servers === 'object') {
+      const next = structuredClone(servers);
+      let changed = false;
+      for (const [server, s] of Object.entries<any>(next)) {
+        const value = s?.auth?.client_secret;
+        if (typeof value !== 'string' || !value) continue;
+        const ref = moved(server, value);
+        if (!ref) continue;
+        s.auth.client_secret = ref;
+        changed = true;
+      }
+      if (changed) setSetting('mcpServers', next);
+    }
+  }
+  const s = store();
+  let changed = false;
+  for (const [server, e] of Object.entries(s)) {
+    if (typeof e.client_secret !== 'string' || !e.client_secret) continue;
+    const ref = moved(server, e.client_secret);
+    if (!ref) continue;
+    e.client_secret = ref;
+    changed = true;
+  }
+  if (changed) writeStore(s);
 }

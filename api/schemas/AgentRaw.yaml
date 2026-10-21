@@ -1,0 +1,15 @@
+type: object
+additionalProperties: false
+description: Own and tree raw spend per account, only in answers to a peer daemon (src/agent-costs.ts AgentRaw).
+required: [own, tree]
+properties:
+  own:
+    type: object
+    description: A map keyed by account name.
+    additionalProperties:
+      $ref: '#/components/schemas/AgentRawAccount'
+  tree:
+    type: object
+    description: A map keyed by account name.
+    additionalProperties:
+      $ref: '#/components/schemas/AgentRawAccount'

@@ -33,9 +33,11 @@ The base token layer is `web/tokens.css`, and `web/fonts/` holds subset builds o
 - Model names are neutral badges.
 - Terminals stay dark in both themes: a harness's screen is a fixed artifact, like a PDF sheet that is dimmed rather than inverted.
 - A mail message lies on its thread's deck like a sheet: `surface-page`, square, a hairline and no shadow.
+- Mail thread (S-1471): on desktop the thread's head, messages and reply sit in one column at `--measure-conversation`, centred on the deck, the same measure and centre line as an agent's conversation. The head scrolls away with the messages, and the bottom input centres at the same measure under a thread tab. The bottom input takes the focused pane's column: its edges are the messages' column's edges (`.ov-col`, `.thread-head`), so it lines up at every pane width and with a scrollbar; with one pane it is full width, as before (S-2284).
 - Mail components (`docs/mail-components.md`) are apparatus, not cards: a callout is a hairline note with a coloured label and no tinted fill, an agent mention is link ink with the harness mark and never a chip, a decision's options are bordered rows, and a diff tints only its changed lines.
-- The persona rules ban toasts. What has a place on screen reports there: settings save state in the settings nav, a permission answer on its mail, a send in its prompt input. What has none, such as the result of a menu action, takes the one exception the rule allows: a single transient bar at the top centre, which a newer notice replaces rather than stacks under.
+- The persona rules ban toasts. What has a place on screen reports there: settings save state in the settings nav, a permission answer on its mail, a send in its prompt input. What has none, such as the result of a menu action, takes the one exception the rule allows: a single transient bar at the top centre, which a newer notice replaces rather than stacks under. The bar has one persistent case, a state the person must act on rather than a notification: the local login offer (S-2121, `.login-offer`), shown when a page on 127.0.0.1 that isn't logged in as the human is refused a human action. It is the same bar, never a second one: the bar's standing notice, with Log in and Dismiss. A transient notice covers it while it shows, then it returns; dismissed, it comes back with the next refusal, and Settings keeps a Log in meanwhile.
 - The executive assistant's drop-down is the top overlay world: `overlay-panel-bg`, `radius-lg` at its bottom corners, `shadow-raised`, over the scrim.
+- The desktop nav bar is the sidebar's footer: its icon buttons are `.icon-btn`, in one row (theme, the Inbox, Work and Agents pages, Settings, Usage, System view, Process view). The page the icon opens is pressed: `.icon-btn.on`, accent-subtle, with `aria-current="page"`. Inbox carries the count that waits on you as the warning `.badge` at the icon's corner. The page icons are hidden on a phone, where the bottom bar opens the pages (S-1428).
 - The system view (`w:system`, epic S-445) is exempt from the motion rules, by the maintainer's decision of 2026-10-13: it may animate events freely, under `.claude/skills/system-view-motion`. Everything else (colour, tokens, type, radius, no toasts) still applies.
 
 ## Identity
@@ -85,7 +87,8 @@ The proposed reading — that Notion’s achievement is restraint and progressiv
 ### Transfers
 
 - The reveal contract: tab close buttons, row actions, the block handle, and the annotation toolbar exist only on hover or focus-within. They fade in at duration-fast and vanish at 0ms — the same asymmetry as menu exits. At rest a tab shows state glyphs, never controls.
-- Block-level actions in mail components show at rest (the diff block's Open, a decision's options): touch has no hover, and the block is the reader's to act on. Row actions keep the reveal contract. On touch, `--size-hit-touch` overrides the compact chrome row height.
+- Block-level actions in mail components show at rest (the diff block's Open, a decision's options): touch has no hover, and the block is the reader's to act on. Row actions keep the reveal contract. On touch, `--size-hit-touch` overrides the compact chrome row height, and a block action is at least that wide.
+- A bar that holds a touch target and has a 1px border is sized `calc(var(--size-hit-touch) + 1px)`, as `.tabbar` is: under border-box the border comes out of the content, leaving 43px for a 44px button.
 - The binding rule: consecutive list items space at 0.25em against doc-para-space at 0.75em; headings bind forward; captions bind to their objects. Stated as one adjacency rule so future block types inherit it rather than each inventing its own spacing.
 - The override contract stays capped at eight tokens. Notion restyles a page with effectively three controls, so eight is already generous. The cap is now a rule rather than a count that happens to be current.
 - Line spacing and paragraph spacing are different things, already structural here as doc-leading-body, doc-para-space, and doc-para-indent. Confirmed, kept, and now citable to precedent.
@@ -409,6 +412,14 @@ The active tab’s fill always equals the pane surface so the tab fuses with its
 | `input-border` | #918B81 | #918B81 | Freestanding input border. One value in both themes: 3.27:1 and 3.02:1 light, 5.19:1 and 4.92:1 dark — the old values failed 1.4.11 at 1.58:1 and 1.50:1. In-grid inputs are borderless |
 | `input-border-focus` | #4A6DB0 | #7E9CD6 | Input border focused, plus the halo. 4.94:1 light, 6.36:1 dark |
 
+### Touch scrim
+
+A touch tap on a scrim closes what it covers and presses nothing beneath it. The scrim is only a shadow, so the tap that closes a sheet lands on whatever lies under it: the menu's outside press closes the menu and swallows the click that tap makes (`swallowNextClick` in `web/src/ui/menu.tsx`). A preview over the Alt+A prompt works the same way: a tap outside it closes the preview alone, and the card beneath stays unpicked.
+
+The Alt+A prompt has no scrim on a phone. It fills the screen, and `#suggest-scrim` is hidden under `max-width: 760px` in `web/style.css`, so a tap cannot land on one. Where the scrim shows (a wider screen, pointer or not), a click on it closes the preview and the prompt together. This width rule is the one that decides the prompt's scrim, not `pointer: coarse` itself: a coarse pointer on a wide screen still gets the scrim.
+
+A menu that is open when the Alt+A prompt opens over it leaves a prompt-over-menu entry when it closes, and one back press onto that entry does not reopen the prompt: `onPop` in `web/src/nav-history.ts` steps past it (S-2020). The phone check drives this with Alt+A over the pane menu, a touch tap that closes the menu, and one back press: the `suggest` step of `web/check/phone.mjs`.
+
 ### Writing surface and PDF
 
 At rest a citation is ink, not a chip: the fill and border tokens below are hover, focus, and selection states only. The token names carry "hover" rather than "chip" deliberately — a developer holding a token named chip will eventually build a chip. The PDF sheet is not surface-page: in dark theme the writing page goes dark because it is the user’s text, but the sheet stays a dimmed warm white, because a PDF is a fixed artifact and inverting it would lie about the source.
@@ -449,6 +460,12 @@ At rest a citation is ink, not a chip: the fill and border tokens below are hove
 | `tree-row-selected-fg` | #26231F | #E8E4DC | Selected tree row text |
 | `empty-icon-fg` | #6A655D | #918B81 | Empty-state glyph where one appears at all — bare, never in a tinted container |
 | `swatch-border` | #6A655D | #918B81 | Border on annotation color swatches. 5.50:1 light, 4.39:1 dark on the menu surface; the raw marigold alone is 1.59:1, which is why the border is mandatory |
+
+The Agents page's table (S-1432) is a chrome table: rows at `size-row-table`, the sticky `table-header-bg` header with `table-border` hairlines, and a selected row on `table-row-active-bg`. A group line (Machine, ITSA) sits on `table-header-bg` too. Its columns shrink, then drop by priority as the table narrows, so it never scrolls sideways; a long value cuts with an ellipsis and shows in full as its tooltip.
+
+The Agents page's scope chips (S-2937) are a `.seg` in the header, after the live count: Live (the default), Waiting, Stopped and Archived, each with its count. The live count in the header stays the live count whatever the scope. Waiting counts the live agents with a permission request open or any wait; the header's "asks or waits" counts the human's waiting list, which is a different count. Archived rows show "archived" as their activity. Stopped and Archived list their agents in the same table; Age shows when such an agent last changed. An archive shows its first 100 rows, then a button pages in the next 100. The scope is kept in the `agentsTableCols` view record. The phone keeps its tree.
+
+The Agents page's detail pane (S-3048) is on the desktop's right: `DetailsView` for the picked agent, 420 px (`--size-agents-pane`), with the table on the left. A row is picked by a click or the arrow keys and stays picked through polls and any scope that still lists it. Space shows or hides the pane, not while focus is in a field, and the choice is kept in the `agentsTableCols` record. The pane is open from a 1100 px desk on until the human chooses; below 900 px it lies over the table. The table's columns drop by the table's own width, so the pane narrows them, never the name. The phone keeps its tree.
 
 ### Status
 
@@ -906,6 +923,16 @@ Built, at frontend/src/wcs/style/Floating.tsx, which owns the placement arithmet
 
 The writing page follows its clamp-and-collapse spec. Tabs overflow by horizontal scroll with no dropdown chevron and no shrinking below 96px, with a 16px mask fade at the clipped edge — a fade is a diagram of clipping, not a gradient decoration. Reference table columns collapse by declared priority — title, then year, authors, venue, then the rest — and title never collapses; the priority data belongs to REF, but the rule that a priority exists and that title survives belongs to the system. Panes never go below 240px, and the PDF sheet scales to fit width at any size rather than cropping.
 
+### Cards
+
+An issue card (stam's `IssueCard`, `web/src/itsa/IssueCard.tsx`) is drawn from the issue card layout in settings. Its slots run in order: TOP (the key, locked first, then up to three items, then the needs-you mark and the ⋯ menu, which can't be placed), TITLE (the locked title, clamped to one to three lines), META (up to five inline items, one row), BADGES (chips, one row, unlimited, clipped), and FOOT (up to three items, one row). An empty slot takes no height. Items keep their forms from the registry: `inline` text on TOP, META and FOOT, `chip` on BADGES.
+
+Sizes: `board` is the kanban card, a `--surface-page` box with a `--border-subtle` hairline, `--radius-sm`, and its rows are as tall as their content, one line each. `nested`, inside a system-view agent card, has no box of its own, so no card sits in a card; it is drawn in the system view's PR.
+
+States: hover takes the `--border-default` border and shows the ⋯ menu; keyboard focus shows the focus ring; a dragged card dims to 50%; a drop target's column takes `--drop-fill`; needs-you is a warning badge in TOP; a closed ITSA's title is `--text-secondary`. Every state uses one channel.
+
+Phone (360–430 px): the card is full width, the whole card is the target, and a long press opens its menu. Its ⋯ button is `--size-hit-touch` square.
+
 ## Empty, loading, and error
 
 ### Principle
@@ -928,7 +955,7 @@ One typographic stack serves empty, loading, and error on every surface: eyebrow
 ## Persona rules
 
 - Cursors: text over text surfaces, pointer only on interactive chrome, grab and grabbing on handles and drags, col-resize on gutters, default elsewhere. The page never shows pointer at rest.
-- No toasts. Status renders at its source: save state in the context line, row failures in their rows, badge changes in place. A floating notification stack is the single most software-scented surface a tool can grow. This reopens only if an error class with no on-screen source location ever exists, and then a single top-center transient bar gets specified rather than a stack.
+- No toasts. Status renders at its source: save state in the context line, row failures in their rows, badge changes in place. A floating notification stack is the single most software-scented surface a tool can grow. This reopens only if an error class with no on-screen source location ever exists, and then a single top-center transient bar gets specified rather than a stack. The local login offer is that bar's one persistent case (see "In mootr").
 - No emoji, no illustration, no mascots anywhere. Empty states are typographic.
 - No toggle switches, no boxed keycaps, no skeleton shimmer, no zebra striping on the page, no left-border blockquotes, no reference cards, no citation chips, no page icons or cover images.
 - Microcopy register: sentence case everywhere; no exclamation marks; no first-person app voice — "Let’s get started" is banned; labels are scholarly nouns such as References, Manuscript, Figures, Annotations; empty states state a fact and offer one act; dialog buttons name their verb, so "Delete reference" rather than "OK".

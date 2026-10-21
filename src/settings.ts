@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync, renam
 import { MACHINE, ROOT, STAM_HOME } from './config.ts';
 import { derivedRepos } from './default-repo.ts';
 import { validate, noteInvalid, retryNotices } from './accounts.ts';
+import * as secrets from './secrets.ts';
 import type { McpServer } from './instructions.ts';
 
 // Cost policy (docs/cost-policy.md): which provider login or key agents bill to, and what
@@ -24,6 +25,9 @@ export const SYSTEM_ACCOUNT = 'openrouter-system';
 
 export interface CostAccount {
   match: { harness: string; model?: string };
+  // The provider that bills this account per token (S-2118): a settings.providers id or `openrouter`.
+  // Unset, an OpenCode account whose match.model is `ID/...` for a configured provider ID is billed by it.
+  provider?: string;
   // false means extra usage is turned off in the harness.
   subscription?: boolean;
   paid?: boolean;
@@ -60,6 +64,60 @@ export interface CostConfig {
 }
 
 // The tree check's interval is clamped to this range (hours).
+// settings.harness (S-2240): each key the harness reads, with the values it takes. Claude Code's own schema
+// takes `5m` or `1h` for the TTLs and 100,000 to 1,000,000 tokens for autoCompactWindow.
+export interface HarnessSettings {
+  claude: { promptCacheTtl?: '5m' | '1h'; subagentPromptCacheTtl?: '5m' | '1h'; idleCompaction?: boolean; autoCompactWindow?: number };
+  codex: { model_auto_compact_token_limit?: number };
+}
+const TTL = (v: unknown) => v === '5m' || v === '1h';
+const int = (min: number, max = Number.MAX_SAFE_INTEGER) => (v: unknown) => Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
+export const HARNESS_KEYS: Record<keyof HarnessSettings, Record<string, { ok: (v: unknown) => boolean; want: string }>> = {
+  claude: {
+    promptCacheTtl: { ok: TTL, want: '"5m" or "1h"' },
+    subagentPromptCacheTtl: { ok: TTL, want: '"5m" or "1h"' },
+    idleCompaction: { ok: (v) => typeof v === 'boolean', want: 'true or false' },
+    autoCompactWindow: { ok: int(100_000, 1_000_000), want: 'a whole number of tokens from 100000 to 1000000' },
+  },
+  codex: {
+    model_auto_compact_token_limit: { ok: int(1), want: 'a whole number of tokens above 0' },
+  },
+};
+
+// `o[k]` when `o` has it as its own property, else undefined.
+const specOf = <T>(o: Record<string, T>, k: string): T | undefined => (Object.hasOwn(o, k) ? o[k] : undefined);
+
+// The problem with settings.harness about to be saved, or null when it is valid: an unknown harness or key,
+// or a value the harness wouldn't take. A missing or null key is fine: the harness keeps its default (the
+// Settings page clears a key to null, which harnessOf drops).
+export function harnessProblem(user: any): string | null {
+  const h = user?.harness;
+  if (h === undefined) return null;
+  if (!isObj(h)) return 'harness must be an object';
+  for (const [name, keys] of Object.entries(h)) {
+    // Own keys only: a name like `constructor` or `toString` must not find Object.prototype's.
+    const spec = specOf(HARNESS_KEYS, name);
+    if (!spec) return `harness.${name} is not a harness stam sets (${Object.keys(HARNESS_KEYS).join(', ')})`;
+    if (!isObj(keys)) return `harness.${name} must be an object`;
+    for (const [k, v] of Object.entries(keys)) {
+      const key = specOf(spec, k);
+      if (!key) return `harness.${name}.${k} is not a setting stam passes on (${Object.keys(spec).join(', ')})`;
+      if (v !== null && !key.ok(v)) return `harness.${name}.${k} must be ${key.want}`;
+    }
+  }
+  return null;
+}
+
+// settings.harness as read: only the valid keys, so a hand-edited file never puts a bad value on a launch.
+function harnessOf(h: unknown): HarnessSettings {
+  const out: HarnessSettings = { claude: {}, codex: {} };
+  for (const name of Object.keys(HARNESS_KEYS) as (keyof HarnessSettings)[]) {
+    const keys = isObj(h) && Object.hasOwn(h, name) && isObj(h[name]) ? h[name] : {};
+    for (const [k, v] of Object.entries(keys)) if (specOf(HARNESS_KEYS[name], k)?.ok(v)) (out[name] as Record<string, unknown>)[k] = v;
+  }
+  return out;
+}
+
 export const TREE_CHECK_MIN_HOURS = 0.25;
 export const TREE_CHECK_MAX_HOURS = 168;
 
@@ -76,9 +134,11 @@ export const DEFAULTS = {
     enforceTokens: 500_000,
   },
   idleCompaction: {
-    // Prompt caches expire after about 5 minutes or 1 hour; compact before the 1-hour mark.
+    // Prompt caches expire after about 5 minutes or 1 hour; compact before the 1-hour mark, which counts from
+    // the last request's start. Resting agents too, headless (S-2238). Claude Code's own idle compaction is
+    // off in the settings stam writes for it, so the two don't race.
     enabled: true,
-    idleMinutes: 55,
+    idleMinutes: 50,
     // Compact when the context is this much above its size after the last compaction,
     // or above the average size after compaction over the last 5 days, or else above minTokens.
     // The context thresholds also count only once an agent has grown this much since its
@@ -102,6 +162,10 @@ export const DEFAULTS = {
   // wait_for or wake_me rests it at its turn end instead (S-2237, lifecycle.requestRest).
   rest: { enabled: true, afterMinutes: 20, graceMinutes: 2, types: { cos: false, assistant: false } as Record<string, boolean> },
   exitRecovery: { percentOfWindow: 85, windowTokens: 350_000, repeatMinutes: 5 },
+  // The harnesses' own cache and compaction settings, applied at an agent's next launch (S-2240): claude's go
+  // into the claude-settings.json stam writes per agent, codex's are `-c` overrides. A key left out keeps the
+  // harness default (for claude's idleCompaction, stam's own `false`). Checked at write time (harnessProblem).
+  harness: { claude: {}, codex: {} } as HarnessSettings,
   // Harness menus that pop up over an idle agent's input and block delivery. When one is
   // on screen, stam sends these keys. Escape cancels a menu without touching a draft.
   banners: [
@@ -141,6 +205,16 @@ export const DEFAULTS = {
   // { "name": { "url": "...", "headers": {} } }; "enabled": false keeps it out of every
   // harness. The type lives in instructions.ts (McpServer), the form all harnesses share.
   mcpServers: {} as Record<string, McpServer>,
+  // LLM providers besides OpenRouter (src/llm, S-2116), keyed by the id a model is prefixed with
+  // (`myazure:gpt-4o`): { kind: 'openai-compatible', baseUrl, apiKey?: { env, secret }, maxTokensParam? },
+  // { kind: 'azure', endpoint, apiVersion, deployment?, apiKey?: { env, secret } } or (S-2117)
+  // { kind: 'bedrock', region, apiKey?: { env, secret }, profile?, endpoint? }. `apiKey.env` names the
+  // environment variable that holds the key, `apiKey.secret` a name in the secret store (S-2114, the
+  // variable wins when both are set); no apiKey means the server takes none (Bedrock: AWS credentials
+  // from the chain, signed with SigV4). Parsed in src/llm/openai.ts and src/llm/bedrock.ts; an entry
+  // that doesn't parse is ignored. Each one also becomes an OpenCode provider block
+  // (src/adapters/opencode-providers.ts), so OpenCode runs `ID/MODEL`.
+  providers: {} as Record<string, unknown>,
   // The decision model (src/decide.ts): a cheap call to microsoft/microsoft-decision-1
   // through OpenRouter that answers a fixed question about a piece of state. `model` is the
   // model id; `mailCheck` (Settings › Mail to you) asks it, on each mail to the human,
@@ -179,6 +253,8 @@ export const DEFAULTS = {
   activity: {
     classify: { enabled: false, maxUsdPerDay: 0.2, concurrency: 2 },
   } as { classify: { enabled: boolean; maxUsdPerDay: number; concurrency: number } },
+  // The away digest (S-2821): the human's activity after more than awayMinutes without any opens an away window.
+  digest: { awayMinutes: 120 },
   // What a new agent gets when the web UI's + adds one with no other input. cwd may start with ~.
   spawnDefaults: { preset: 'standard', cwd: '~' } as { preset: string | null; cwd: string | null },
   // When agents mail the human: "necessary" (only when they can't do without the human),
@@ -188,8 +264,9 @@ export const DEFAULTS = {
   // model missing from the map may, and a parent gets the mail instead when one may not.
   humanMail: { when: 'necessary', models: { 'claude-haiku-5-5': false } } as { when: 'necessary' | 'important' | 'everything'; models: Record<string, boolean> },
   // The human's executive assistant: routes the human's messages, spawns agents, and
-  // manages stam. cwd '' means a folder of its own, STAM_HOME/assistant.
-  assistant: { harness: 'claude', model: 'claude-sonnet-5-5', effort: 'medium', cwd: '' } as { harness: string; model: string | null; effort: string | null; cwd: string },
+  // manages stam. cwd '' means a folder of its own, STAM_HOME/assistant. autostart: the daemon
+  // starts it at boot when none exists (S-2144); an archived, stopped or paused one is left alone.
+  assistant: { harness: 'claude', model: 'claude-sonnet-5-5', effort: 'medium', cwd: '', autostart: true } as { harness: string; model: string | null; effort: string | null; cwd: string; autostart: boolean },
   // The assistant the Assistant tab opens on, for a device that hasn't picked one (S-164):
   // 'assistant' for the executive assistant, or the name of a chief of staff's assistant.
   assistantDefault: 'assistant',
@@ -224,10 +301,15 @@ export const DEFAULTS = {
   // with the retro round) before archiving anyway. Every archive asks for it, forced or not.
   // S-1393: a shut-down agent is archived once it has been shut down this many hours, when it owns
   // no open ITSA, is not standing, cos, or the assistant, and its worktree is clean and merged.
-  archive: { finalRoundMinutes: 3, idleShutdownHours: 12 },
+  // S-908: a shut-down agent whose work is safe (its PR merged, or approved and queued for merge, and
+  // its branch pushed) is archived after `queuedShutdownMinutes`, without waiting the hours above.
+  // `archiveWhenQueued: false` turns that off.
+  archive: { finalRoundMinutes: 3, idleShutdownHours: 12, archiveWhenQueued: true, queuedShutdownMinutes: 10 },
   // The mode the web prompt input starts in: 'mail' (mail from the human) or 'direct' (typed into the
   // agent's terminal). A box switches for itself; a fresh load starts here.
   promptDefaultMode: 'mail' as 'mail' | 'direct',
+  // Where Mail opens on the desktop (S-2310): 'inbox' is the Inbox page (`w:inbox`), 'sidebar' the sidebar's Mail tab.
+  mailOpens: 'inbox' as 'inbox' | 'sidebar',
   // Search by meaning (S-141): 'local' embeds mail with a small model under STAM_HOME/embedder
   // (`stam embedder install`, or the daemon in the background on first need); 'off' keeps the
   // keyword search. Tests set STAM_EMBEDDER=stub instead, which overrides this (src/embed.ts).
@@ -275,6 +357,9 @@ export const DEFAULTS = {
     // remote its branch is fetched from (a remote name or URL; '' = `storage` if the checkout has that remote, else the local branch is pushed), the origin it pushes to, and the gh binary
     // and GitHub repo it opens the PR with ('' = the repo `origin` points at). Without a `storage` remote in the checkout, the local branch is pushed. Runs on the ITSA home, where gh is.
     prOpen: { repo: '', storage: '', origin: 'origin', gh: 'gh', github: '' },
+    // A repo's merge flow by repo name (S-2202, scripts/repo-config.mjs): the keys of its .stam/repo.json that the file
+    // leaves out, or the whole config for a repo without one. A repo with neither keeps the private gate.mjs flow.
+    repoConfig: {} as Record<string, Record<string, unknown>>,
     // Required (default): every agent belongs to at least one open ITSA. A spawn with no
     // `itsa` joins its parent's most recently updated open ITSA as a participant, and the
     // web tree marks agents that are in none. Off: ITSAs are optional again, no joins, no
@@ -356,7 +441,7 @@ export const DEFAULTS = {
     githubSeconds: 60,
     // The Linear poller (src/sources/linear.ts): its interval, and the MCP tool names it calls.
     linearSeconds: 60,
-    linearTools: { issue: 'get_issue', comments: 'list_comments' },
+    linearTools: { issue: 'get_issue', comments: 'list_comments', teamIssues: 'list_issues' },
   },
   // The retro digest (S-161): mailed to the chief of staff at day and hour, local time. day is
   // 'daily' (the default) or a weekday.
@@ -364,18 +449,17 @@ export const DEFAULTS = {
   // Who a request may claim to be (S-238). With sharedTokenClaims off, the shared token (the
   // human's and the CLI's) may still act as the human, but not name an agent (src/daemon.ts actor).
   // humanStrict (S-543): only trustedHuman is the human; the shared token and x-stam-human aren't. It takes
-  // effect whatever legacyPeerToken says: the shared token never passes as a peer (S-1064).
+  // effect: the shared token never passes as a peer (S-1064).
   // Don't enable humanStrict before C3b: relayed human actions (permission answers on another machine's agents,
   // ITSA acts from a machine that isn't the ITSA home, peer agent control) are refused (S-544).
-  // legacyPeerToken (S-545) is now ignored (S-1064): the shared token with x-stam-local or x-stam-agent gets a 403;
-  // only the peer token (STAM_HOME/peer-token) can act as a peer.
+  // The shared token with x-stam-local or x-stam-agent gets a 403 (S-1064); only the peer token (STAM_HOME/peer-token) acts as a peer.
   // localHuman (S-613): on one machine without Tailscale, the web page on 127.0.0.1 becomes the human once root
   // vouches for the code it shows (`sudo /usr/bin/install -D -m 644 /dev/null /run/stam-human/UID/CODE`; coreutils
   // only, never stam's code, as root). Linux only for now. An agent can still wrap sudo via the shell rc or PATH. It changes nothing for tailscale serve.
   // On for a fresh install (S-2121): ensureSettings writes these defaults into a new settings.json, and pins an
   // existing file that lacks it to false. A missing value still reads as off, so a lost pin never turns it on.
   // Hosts where agents have passwordless sudo or docker gain no protection from it: there agents are root.
-  auth: { sharedTokenClaims: true, legacyPeerToken: true, humanStrict: false, localHuman: true },
+  auth: { sharedTokenClaims: true, humanStrict: false, localHuman: true },
   // An event-loop stall longer than stallMs ms is logged with what was running (src/stall.ts).
   debug: { stallMs: 100 },
   // The folders the human's Files API may read on this machine (S-1525); null means the folder holding
@@ -526,6 +610,8 @@ export function mayMailHuman(model: string | null): boolean {
 // headers (they hold credentials) become REDACTED. A file that isn't JSON reads as empty.
 export const REDACTED = '[redacted]';
 export const SECRET_KEY = /(token|secret|password|apikey|api_key|authorization)$/i;
+// A secret store name (src/secrets.ts NAME_RE): settings name one, never hold its value.
+export const SECRET_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 // A parsed settings value with credentials replaced by REDACTED, recursing into arrays.
 export function redactValue(parsed: any): any {
   const scrub = (v: any): any => {
@@ -536,11 +622,24 @@ export function redactValue(parsed: any): any {
     return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, SECRET_KEY.test(k) && (!x || typeof x !== 'object') ? REDACTED : scrub(x)]));
   };
   const out = scrub(parsed);
+  // A provider's `apiKey: {secret: NAME}` names a secret in the store, not a value (S-2115): the name
+  // shows, so the human sees which stored key a provider sends. A value that isn't a name stays hidden.
+  if (out?.providers && typeof out.providers === 'object')
+    for (const [id, p] of Object.entries<any>(out.providers)) {
+      const name = parsed?.providers?.[id]?.apiKey?.secret;
+      if (p?.apiKey && typeof p.apiKey === 'object' && typeof name === 'string' && SECRET_NAME.test(name)) p.apiKey.secret = name;
+    }
   // An MCP server's env and headers may hold credentials under any name: every value is redacted.
   if (out?.mcpServers && typeof out.mcpServers === 'object')
     for (const s of Object.values<any>(out.mcpServers))
       for (const field of ['env', 'headers'])
         if (s?.[field] && typeof s[field] === 'object') for (const k of Object.keys(s[field])) s[field][k] = REDACTED;
+  // An MCP server's OAuth client secret is a name in the store too (S-2736), as a provider's apiKey is.
+  if (out?.mcpServers && typeof out.mcpServers === 'object')
+    for (const [id, s] of Object.entries<any>(out.mcpServers)) {
+      const name = parsed?.mcpServers?.[id]?.auth?.client_secret?.secret;
+      if (s?.auth?.client_secret && typeof s.auth.client_secret === 'object' && typeof name === 'string' && SECRET_NAME.test(name)) s.auth.client_secret.secret = name;
+    }
   return out;
 }
 export function redactSettingsText(text: string): string {
@@ -575,6 +674,8 @@ export interface SharedCache {
   settings: Record<string, any>;
   registry?: Record<string, any>;
   instructions?: string;
+  // The home's overridden type templates (S-417): file name without .md (type-NAME) to text.
+  templates?: Record<string, string>;
   // The home's web UI origin (S-414), where a peer's UI sends shared writes.
   web?: string;
 }
@@ -585,6 +686,7 @@ export function readSharedCache(): SharedCache | null {
     const out: SharedCache = { rev: c.rev, settings: c.settings };
     if (isObj(c.registry)) out.registry = c.registry;
     if (typeof c.instructions === 'string') out.instructions = c.instructions;
+    if (isObj(c.templates)) out.templates = Object.fromEntries(Object.entries(c.templates).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
     if (typeof c.web === 'string') out.web = c.web;
     return out;
   } catch {
@@ -592,22 +694,22 @@ export function readSharedCache(): SharedCache | null {
   }
 }
 
-// The home's user registry and global instructions as this daemon uses them (S-387): from the cache
+// The home's user registry, global instructions, and type templates as this daemon uses them (S-387): from the cache
 // on a non-home daemon that has one with them, else null, and the caller reads its local file. Reads
 // only the local settings file and the cache, never settings(), since settings() reads the registry.
 // Kept until either file's stat changes.
-let peerSharedMemo: { key: string; value: { registry?: Record<string, any>; instructions?: string } | null } | null = null;
-export function peerShared(): { registry?: Record<string, any>; instructions?: string } | null {
+let peerSharedMemo: { key: string; value: { registry?: Record<string, any>; instructions?: string; templates?: Record<string, string> } | null } | null = null;
+export function peerShared(): { registry?: Record<string, any>; instructions?: string; templates?: Record<string, string> } | null {
   const key = fileKey();
   if (peerSharedMemo?.key === key) return peerSharedMemo.value;
-  let value: { registry?: Record<string, any>; instructions?: string } | null = null;
+  let value: { registry?: Record<string, any>; instructions?: string; templates?: Record<string, string> } | null = null;
   let user: any = null;
   try {
     user = JSON.parse(readFileSync(file(), 'utf8'));
   } catch {}
   if (user && !localHomeIsMe(user)) {
     const c = readSharedCache();
-    if (c && (c.registry || c.instructions !== undefined)) value = { registry: c.registry, instructions: c.instructions };
+    if (c && (c.registry || c.instructions !== undefined || c.templates)) value = { registry: c.registry, instructions: c.instructions, templates: c.templates };
   }
   peerSharedMemo = { key, value };
   return value;
@@ -645,6 +747,7 @@ export function settingsChanged(): void {
 // Writes the defaults on first start, and adds top-level keys introduced since, so
 // every setting is visible in the file. An install from before local login became the default
 // (S-2121) has a file with no auth.localHuman: it gets false written once, so it keeps working as it did.
+// The file holds defaults the user never set, so its text can't show what they did set: compare with the derived default (S-2306, S-2319).
 export function ensureSettings(): void {
   mkdirSync(STAM_HOME, { recursive: true });
   let user: any = {};
@@ -727,16 +830,53 @@ export function setSetting(key: keyof Settings, value: unknown): void {
 
 // Settings whose value is a record of views keyed by id: a patch merges them per id, so two
 // pages saving different views both keep theirs (S-293).
-const VIEW_RECORDS = ['boardViews', 'workViews', 'sidebarCols', 'sidebarPanes', 'motion'];
+const VIEW_RECORDS = ['boardViews', 'workViews', 'sidebarCols', 'sidebarPanes', 'motion', 'cardLayouts', 'agentsTableCols'];
 
 // Applies the human's partial change to the settings file, as one read and write, so two
 // patches never interleave. A top-level key replaces its value, except a view record, which
 // merges per id: a null value deletes that view. With `fill`, a view record only adds the ids
 // the file doesn't have yet (a browser's copy moving in), and other keys are left alone.
 // Returns the new text, or the cost problem that keeps it from being written.
-type PatchProblem = { problem: string; field: 'cost' | 'requirements' };
+type PatchProblem = { problem: string; field: 'cost' | 'requirements' | 'harness' };
+// An MCP server's plain-text OAuth client secret moves into the secret store on the home daemon, and
+// the reference takes its place (S-2736). Every settings write runs through here, so a value typed on
+// the MCP page, sent by settings_ask, or saved as the whole file never reaches settings.json. A store
+// that refuses throws, so nothing is written.
+function storeMcpSecrets(mcpServers: unknown): unknown {
+  if (!isSettingsHome() || !isObj(mcpServers)) return mcpServers;
+  const out = structuredClone(mcpServers);
+  for (const [server, s] of Object.entries<any>(out)) {
+    const value = s?.auth?.client_secret;
+    if (typeof value === 'string' && value) s.auth.client_secret = secrets.setMcpClientSecret(server, value);
+  }
+  return out;
+}
+function storeMcpSecretsInPatch(patch: Record<string, unknown>): Record<string, unknown> {
+  return 'mcpServers' in patch ? { ...patch, mcpServers: storeMcpSecrets(patch.mcpServers) } : patch;
+}
+function storeMcpSecretsInText(text: string): string {
+  let user: any;
+  try {
+    user = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  if (!isObj(user) || !isObj(user.mcpServers)) return text;
+  const servers = storeMcpSecrets(user.mcpServers);
+  return isDeepStrictEqual(servers, user.mcpServers) ? text : JSON.stringify({ ...user, mcpServers: servers }, null, 2) + '\n';
+}
+
+// The text a patch makes, checked on its plain values first. Its MCP client secrets are stored only once
+// it passes (S-2767), so a refused patch leaves the stored secret as it was. The text returned holds
+// the references, which the caller writes; a store that refuses throws, so nothing is written.
+function checkedPatchText(current: string, patch: Record<string, unknown>, fill: boolean): { text: string } | PatchProblem {
+  const r = patchedSettingsText(current, patch, fill);
+  if ('problem' in r) return r;
+  return patchedSettingsText(current, storeMcpSecretsInPatch(patch), fill);
+}
+
 export function patchSettings(patch: Record<string, unknown>, fill = false): { text: string } | PatchProblem {
-  const r = patchedSettingsText(readSettingsText(), patch, fill);
+  const r = checkedPatchText(readSettingsText(), patch, fill);
   if ('problem' in r) return r;
   writeSecretFile(file(), r.text);
   settingsChanged();
@@ -751,7 +891,7 @@ export function patchSharedSettings(patch: Record<string, unknown>, fill = false
   // A mixed key that held only local paths leaves an empty object: it changes nothing shared.
   const mine = localPart(patch);
   const shared = Object.fromEntries(Object.entries(sharedPart(patch)).filter(([k, v]) => !(k in mine && isObj(v) && !Object.keys(v).length)));
-  const r = patchedSettingsText(current, fill ? patch : shared, fill);
+  const r = checkedPatchText(current, fill ? patch : shared, fill);
   if ('problem' in r) return r;
   let own: unknown = {};
   try {
@@ -878,6 +1018,8 @@ export function patchedSettingsText(current: string, patch: Record<string, unkno
   if (problem) return { problem, field: 'cost' };
   const reqProblem = requirementsProblem(user);
   if (reqProblem) return { problem: reqProblem, field: 'requirements' };
+  const harness = harnessProblem(user);
+  if (harness) return { problem: harness, field: 'harness' };
   return { text: JSON.stringify(user, null, 2) + '\n' };
 }
 
@@ -902,7 +1044,7 @@ export function patchTouchedText(current: string, patch: Record<string, unknown>
 
 // Writes settings text the human approved or posted: the one write path for a whole-file save.
 export function writeSettingsText(text: string): void {
-  writeSecretFile(file(), text);
+  writeSecretFile(file(), isSettingsHome() ? storeMcpSecretsInText(text) : text);
   settingsChanged();
 }
 
@@ -910,6 +1052,15 @@ export function writeSettingsText(text: string): void {
 // save route calls this so an invalid cost config never reaches the file.
 export function costProblem(user: any): string | null {
   return validate({ ...DEFAULTS.cost, ...(user?.cost ?? {}) });
+}
+
+// The problem in a whole settings file about to be saved (the save route and an approved whole-file
+// settings_ask), or null: the cost config, then settings.harness.
+export function fileProblem(user: any): PatchProblem | null {
+  const cost = costProblem(user);
+  if (cost) return { problem: cost, field: 'cost' };
+  const harness = harnessProblem(user);
+  return harness ? { problem: harness, field: 'harness' } : null;
 }
 
 // The key prefix of requirements (`R` in `R-12`): letters only, so a key is never read as a number or a path.
@@ -1040,9 +1191,11 @@ function readSettings(): { value: Settings; cacheable: boolean } {
     standing: { ...DEFAULTS.standing, ...user.standing, growth: { ...DEFAULTS.standing.growth, ...user.standing?.growth } },
     rest: { ...DEFAULTS.rest, ...user.rest, types: { ...DEFAULTS.rest.types, ...user.rest?.types } },
     exitRecovery: { ...DEFAULTS.exitRecovery, ...user.exitRecovery },
+    harness: harnessOf(user.harness),
     peers: Array.isArray(user.peers) ? user.peers : [],
     cost,
     mcpServers: user.mcpServers && typeof user.mcpServers === 'object' ? user.mcpServers : {},
+    providers: user.providers && typeof user.providers === 'object' && !Array.isArray(user.providers) ? user.providers : {},
     decisions: {
       model: typeof user.decisions?.model === 'string' && user.decisions.model ? user.decisions.model : DEFAULTS.decisions.model,
       mailCheck: user.decisions?.mailCheck === false ? false : DEFAULTS.decisions.mailCheck,
@@ -1076,6 +1229,7 @@ function readSettings(): { value: Settings; cacheable: boolean } {
         concurrency: Math.max(1, Math.floor(nonNegative(user.activity?.classify?.concurrency, DEFAULTS.activity.classify.concurrency))),
       },
     },
+    digest: { awayMinutes: nonNegative(user.digest?.awayMinutes, DEFAULTS.digest.awayMinutes) },
     banners: Array.isArray(user.banners) ? user.banners : DEFAULTS.banners,
     chiefOfStaff: typeof user.chiefOfStaff === 'string' ? user.chiefOfStaff : null,
     treeCheck: {
@@ -1088,12 +1242,13 @@ function readSettings(): { value: Settings; cacheable: boolean } {
     },
     resourceWarn: resourceWarnOf(user.resourceWarn),
     spawnDefaults: { ...DEFAULTS.spawnDefaults, ...user.spawnDefaults },
-    assistant: { ...DEFAULTS.assistant, ...user.assistant },
+    assistant: { ...DEFAULTS.assistant, ...user.assistant, autostart: user.assistant?.autostart !== false },
     assistantDefault: typeof user.assistantDefault === 'string' && user.assistantDefault.trim() ? user.assistantDefault.trim() : DEFAULTS.assistantDefault,
     childNotices: ['turn', 'tree-idle', 'none'].includes(user.childNotices) ? user.childNotices : DEFAULTS.childNotices,
     permissionModes: permissionModesOf(user.permissionModes),
     agentView: { default: user.agentView?.default === 'terminal' ? 'terminal' : 'conversation' },
     promptDefaultMode: user.promptDefaultMode === 'direct' ? 'direct' : 'mail',
+    mailOpens: user.mailOpens === 'sidebar' ? 'sidebar' : 'inbox',
     developerCap: Number.isInteger(user.developerCap) && user.developerCap >= 0 ? user.developerCap : DEFAULTS.developerCap,
     staleWorkingMinutes: typeof user.staleWorkingMinutes === 'number' && user.staleWorkingMinutes > 0 ? user.staleWorkingMinutes : DEFAULTS.staleWorkingMinutes,
     startingTimeoutMinutes: typeof user.startingTimeoutMinutes === 'number' && user.startingTimeoutMinutes > 0 ? user.startingTimeoutMinutes : DEFAULTS.startingTimeoutMinutes,
@@ -1101,12 +1256,14 @@ function readSettings(): { value: Settings; cacheable: boolean } {
     archive: {
       finalRoundMinutes: typeof user.archive?.finalRoundMinutes === 'number' && user.archive.finalRoundMinutes >= 0 ? user.archive.finalRoundMinutes : DEFAULTS.archive.finalRoundMinutes,
       idleShutdownHours: typeof user.archive?.idleShutdownHours === 'number' && user.archive.idleShutdownHours >= 0 ? user.archive.idleShutdownHours : DEFAULTS.archive.idleShutdownHours,
+      archiveWhenQueued: user.archive?.archiveWhenQueued === false ? false : DEFAULTS.archive.archiveWhenQueued,
+      queuedShutdownMinutes: typeof user.archive?.queuedShutdownMinutes === 'number' && user.archive.queuedShutdownMinutes >= 0 ? user.archive.queuedShutdownMinutes : DEFAULTS.archive.queuedShutdownMinutes,
     },
     search: {
       embedder: user.search?.embedder === 'off' ? 'off' : DEFAULTS.search.embedder,
       turnDays: typeof user.search?.turnDays === 'number' && user.search.turnDays > 0 ? user.search.turnDays : DEFAULTS.search.turnDays,
     },
-    auth: { sharedTokenClaims: user.auth?.sharedTokenClaims === false ? false : true, legacyPeerToken: user.auth?.legacyPeerToken === false ? false : true, humanStrict: user.auth?.humanStrict === true, localHuman: user.auth?.localHuman === true },
+    auth: { sharedTokenClaims: user.auth?.sharedTokenClaims === false ? false : true, humanStrict: user.auth?.humanStrict === true, localHuman: user.auth?.localHuman === true },
     debug: { stallMs: Number(user.debug?.stallMs) > 0 ? Number(user.debug?.stallMs) : DEFAULTS.debug.stallMs },
     diff: {
       classes: Object.fromEntries(Object.entries(DEFAULTS.diff.classes).map(([k, d]) => [k, Array.isArray(user.diff?.classes?.[k]) ? user.diff.classes[k].filter((x: unknown) => typeof x === 'string' && x.trim()).map(String) : d])),
@@ -1164,6 +1321,8 @@ function readSettings(): { value: Settings; cacheable: boolean } {
         const v = (user.itsa?.prOpen as Record<string, unknown> | undefined)?.[k];
         return [k, typeof v === 'string' && v ? v : d];
       })) as typeof DEFAULTS.itsa.prOpen,
+      // Only objects; repo-config.mjs checks their keys where they are used.
+      repoConfig: Object.fromEntries(Object.entries(user.itsa?.repoConfig ?? {}).filter((e): e is [string, Record<string, unknown>] => e[1] !== null && typeof e[1] === 'object' && !Array.isArray(e[1]))),
       statuses: Array.isArray(user.itsa?.statuses) && user.itsa.statuses.length ? (user.itsa.statuses as Settings['itsa']['statuses']) : DEFAULTS.itsa.statuses,
       actions: itsaActions(user.itsa?.actions),
     },

@@ -1,0 +1,30 @@
+type: object
+additionalProperties: false
+description: A standing agent's load numbers (src/agent-load.ts), set for non-archived standing agents only.
+required: [open_itsas, median_lead_s, lead_n, context_tokens, context_threshold, context_ratio, workspace_bytes, workspace_files]
+properties:
+  open_itsas:
+    type: integer
+  median_lead_s:
+    type: number
+    format: double
+    nullable: true
+  lead_n:
+    type: integer
+  context_tokens:
+    type: integer
+    nullable: true
+  context_threshold:
+    type: integer
+  context_ratio:
+    type: number
+    format: double
+    nullable: true
+  workspace_bytes:
+    type: integer
+    nullable: true
+  workspace_files:
+    type: integer
+    nullable: true
+  workspace_capped:
+    type: boolean

@@ -37,19 +37,27 @@ human() { curl -s -X "$1" -H "authorization: Bearer $TOKEN" -H 'x-stam-human: 1'
 field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const v=process.argv[1].split(".").reduce((o,k)=>o?.[k],JSON.parse(s));console.log(v==null?"":typeof v==="object"?JSON.stringify(v):v)})' "$1"; }
 spawn() { human POST /api/agents "$1"; }
 trio() { printf %s "$1" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const a=JSON.parse(s);console.log([a.harness,a.model,a.effort].map((x)=>x??"").join(":"))})'; }
-sql() { node --no-warnings -e 'const { DatabaseSync } = require("node:sqlite"); const d = new DatabaseSync(process.argv[1], { readOnly: true }); const r = d.prepare(process.argv[2]).get(); if (r) console.log(Object.values(r)[0] ?? "");' "$STAM_HOME/stam.db" "$1"; }
-events() { sql "SELECT COUNT(*) FROM events WHERE agent_id = (SELECT id FROM agents WHERE name = '$1') AND type = '$2'"; }
+# get PATH: a read of the daemon's API (-f: a failure, or a gate 404, fails here). pyj EXPR: EXPR over the JSON on stdin, as d.
+get() { curl -sf -H "authorization: Bearer $TOKEN" "$STAM_URL$1"; }
+pyj() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+# agent_id NAME: the agent's id, empty when there is none. agent_count PREFIX: how many agents have a name starting with PREFIX.
+agent_id() { get /api/agents | pyj "next((a['id'] for a in d if a['name'] == '$1'), '')"; }
+agent_count() { get /api/agents | pyj "sum(a['name'].startswith('$1') for a in d)"; }
+events() { get "/api/test/events?agent=$(agent_id "$1")&type=$2" | pyj "len(d)"; }
 
 # A codex holder agent carries the window blocker that holds the codex account: a reading of 100%
 # through the test hook, the way test/e2e-cost.sh does it (a row written straight into the database
 # is cleared by the daemon's own reconciling, and races its writes).
 FUT=$(($(date +%s) + 7200))
 reading() { human POST /api/test/cost "{\"action\":\"reading\",\"name\":\"codex\",\"windows\":{\"five_hour\":{\"used_percentage\":$1,\"resets_at\":$FUT}}}" >/dev/null; }
-held() { [ "$(sql "SELECT COUNT(*) FROM blockers WHERE account = 'codex-like'")" -ge 1 ]; }
-free() { [ "$(sql "SELECT COUNT(*) FROM blockers WHERE account = 'codex-like'")" = 0 ]; }
+held() { [ "$(get /api/test/blockers | pyj "sum(b['account'] == 'codex-like' for b in d)")" -ge 1 ]; }
+free() { [ "$(get /api/test/blockers | pyj "sum(b['account'] == 'codex-like' for b in d)")" = 0 ]; }
 spawn "{\"name\":\"holder\",\"cwd\":\"$D\",\"harness\":\"codex\"}" >/dev/null
 "$STAM" wait holder --until idle --timeout 60 >/dev/null
-hold() { reading 100; wait_until held; }
+# A window that re-sets within 10 minutes of its clear is held past the next reading (rules.ts
+# flapHold, S-2365), so the test forgets each clear before it holds again, as the unit tests do.
+forget_clears() { curl -sf -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{"action":"forget-clears"}' "$STAM_URL/api/test/cost" >/dev/null; }
+hold() { forget_clears; reading 100; wait_until held; }
 unhold() { reading 10; wait_until free; }
 
 echo "-- 1. default: the primary"
@@ -80,7 +88,7 @@ settings reviewer none
 hold
 OUT=$(spawn "{\"name\":\"r5\",\"type\":\"reviewer\",\"cwd\":\"$D\"}")
 printf %s "$OUT" | grep -q "can't spawn r5" || fail "a held reviewer with no fallback spawned: $OUT"
-[ -z "$(sql "SELECT id FROM agents WHERE name = 'r5'")" ] || fail "refused reviewer left an agent"
+[ -z "$(agent_id r5)" ] || fail "refused reviewer left an agent"
 unhold
 
 echo "-- 5. a custom scenario type walks its own chain: a type on the held account is skipped"
@@ -102,7 +110,7 @@ echo "-- 6. a ring type is refused an explicit harness, model, or preset"
 for X in '"harness":"claude"' '"model":"claude-sonnet-5-5"' '"preset":"standard"'; do
   OUT=$(spawn "{\"name\":\"r10\",\"type\":\"review-ring\",\"cwd\":\"$D\",\"prompt\":\"x\",$X}")
   printf %s "$OUT" | grep -q 'takes no harness, model, or preset' || fail "a ring type spawned with $X: $OUT"
-  [ -z "$(sql "SELECT id FROM agents WHERE name LIKE 'r10%'")" ] || fail "refused ring left an agent ($X)"
+  [ "$(agent_count r10)" = 0 ] || fail "refused ring left an agent ($X)"
 done
 
 echo "-- 7. the manager's instructions name the process and targets"
@@ -112,4 +120,20 @@ human GET /api/agents/boss/instructions | grep -qF 'spawn the default reviewer, 
 human GET /api/agents/boss/instructions | grep -qF 'A ring reviewer is spawned with `spawn_agent` `type` like any other' || fail "no ring spawn sentence"
 settings reviewer default
 human GET /api/agents/boss/instructions | grep -qF 'spawn the default reviewer, `reviewer` (codex gpt-6.1-sol, low)' || fail "no reviewer default after the default changes"
+echo "-- 8. a codex reading at 100% that went stale once its holder was archived still moves a reviewer to its fallback (S-905)"
+settings reviewer default
+hold
+"$STAM" archive holder --force >/dev/null
+"$STAM" forget holder >/dev/null
+# A fresh reading under 100% clears the holder's window blocker. Then the reading goes stale: taken two hours ago,
+# at 100%, its reset still ahead, so no fresh window blocker, but the fallback gate still sees it. The test hook
+# takes the reading at that time (`at`).
+reading 10
+wait_until free
+OLD=$(node -e 'console.log(new Date(Date.now() - 7200000).toISOString())')
+human POST /api/test/cost "{\"action\":\"stale-reading\",\"name\":\"codex\",\"at\":\"$OLD\",\"windows\":{\"five_hour\":{\"used_percentage\":100,\"resets_at\":$FUT}}}" >/dev/null
+[ "$(get /api/test/blockers | pyj "sum(b['account'] == 'codex-like' for b in d)")" = 0 ] || fail "the window blocker is still set"
+R=$(spawn "{\"name\":\"r9\",\"type\":\"reviewer\",\"cwd\":\"$D\",\"prompt\":\"review it\"}")
+[ "$(trio "$R")" = "claude:claude-opus-5-5:medium" ] || fail "stale-held reviewer started on codex: $(trio "$R") ($R)"
+[ "$(events r9 reviewer:fallback)" = 1 ] || fail "no reviewer:fallback event for the stale hold"
 echo "PASS e2e-reviewer-spawn"

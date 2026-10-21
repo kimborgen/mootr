@@ -4,7 +4,7 @@
 // and editing every issue is the Issues page's job, so nothing here lists the backlog, the
 // ready queue, or closed work.
 import type { Itsa, ItsaCategory } from '../types'
-import { isTestLink, type IssueCosts } from './links'
+import { isTestLink, type IssueCost, type IssueCosts } from './links'
 import { agentIdsOf } from './model'
 
 // A group of moving ITSAs under the root issue they belong to. `root` is null for the trailing
@@ -27,9 +27,9 @@ export interface GlanceOptions {
 
 const testLinks = (it: Itsa) => (it.links ?? []).filter(isTestLink)
 
-// Each issue's cost in dollars by key, built once per report so a card's lookup is a map hit.
-export function costIndex(report: IssueCosts | null | undefined): Map<string, number> {
-  return new Map((report?.issues ?? []).map((i) => [i.key, i.total.cost_usd]))
+// Each issue's cost row by key, built once per report so a card's lookup is a map hit.
+export function costIndex(report: IssueCosts | null | undefined): Map<string, IssueCost> {
+  return new Map((report?.issues ?? []).map((i) => [i.key, i]))
 }
 
 // Each ITSA's root, memoised: a walk stops at the first ancestor already resolved and

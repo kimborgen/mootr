@@ -5,7 +5,8 @@
 //    names only the mails withdrawn;
 //  - when the mail sits on peer b and the withdrawal starts here, this daemon's devices get the
 //    close too, peer c is told with b named as the holder, and b isn't told (it closed its own);
-//  - a relayed close is confirmed with the holder before it closes anything, and isn't relayed on.
+//  - a relayed close is confirmed with the holder before it closes anything, and isn't relayed on;
+//  - a relayed mail is pushed only when it is recent mail to the human from someone else.
 // Throwaway STAM_HOME, no daemon: `node --test test/withdraw-peers.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -112,6 +113,26 @@ test('a relayed close is confirmed with the holder first, and isn\'t relayed on'
   await assert.rejects(webpush.onRelay({ machine: 'c', close: true, thread_id: 'tx' }), /mail_ids/);
   await sleep(200);
   assert.equal(pushes.length, 0);
+});
+
+test('a relay is pushed only for recent mail to the human from someone else (webpush guard)', async () => {
+  pushes.length = 0;
+  const fresh = new Date().toISOString();
+  bThreads.tr = [{ id: 'mr', from_id: 'a1', from_name: 'a1', subject: 'fresh', created_at: fresh, recipients: [{ id: 'human', read_at: null }] }];
+  bThreads.tn = [{ id: 'mn', from_id: 'a1', from_name: 'a1', subject: 'not ours', created_at: fresh, recipients: [{ id: 'a2', read_at: null }] }];
+  bThreads.th = [{ id: 'mh', from_id: 'human', from_name: 'human', subject: 'own mail', created_at: fresh, recipients: [{ id: 'human', read_at: null }] }];
+  // Mail addressed to another agent, and the human's own mail to itself, are refused and push nothing.
+  await assert.rejects(webpush.onRelay({ machine: 'b', mail_id: 'mn', thread_id: 'tn' }), /mail mn is not to the human/);
+  await assert.rejects(webpush.onRelay({ machine: 'b', mail_id: 'mh', thread_id: 'th' }), /mail mh is not to the human/);
+  await sleep(200);
+  assert.equal(pushes.length, 0, 'a refused relay pushes nothing');
+  // Mail to the human from an agent passes, and its one notification names that mail.
+  const ok = await webpush.onRelay({ machine: 'b', mail_id: 'mr', thread_id: 'tr' });
+  assert.equal(ok.pushed, 1);
+  await settle(1);
+  assert.equal(pushes.length, 1, 'the relayed mail pushes once');
+  assert.equal(pushes[0].kind, 'mail');
+  assert.equal(pushes[0].mail_id, 'mr');
 });
 
 test.after(() => { push.close(); b.close(); c.close(); });

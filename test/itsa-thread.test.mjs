@@ -85,7 +85,7 @@ test('send_mail with reply_to into the thread is a comment: participants get it;
   agent('a5', 'erin');
   // erin has the thread's mail in her mailbox (named in a post); she isn't in the ITSA, so her reply is refused.
   db.createMail({ id: 'seed-erin', from_id: 'a2', from_name: 'bob', subject: parent.subject, body: 'seed', thread_id: t, reply_to: null, itsa_id: x.id, kind: 'comment' }, ['a5']);
-  await assert.rejects(mail.sendMail({ from: 'a5', to: ['bob'], body: 'let me in', reply_to: 'seed-erin' }), /erin can't post to S-1: .*add you as a participant/);
+  await assert.rejects(mail.sendMail({ from: 'a5', to: ['bob'], body: 'let me in', reply_to: 'seed-erin' }), /erin can't post to S-1: .*add you with itsa_set participants/);
   assert.ok(!itsa.participants(x.id).includes('a5'));
   // Added as a participant, her reply goes to everyone else.
   await itsa.addParticipant(x.id, 'a5');

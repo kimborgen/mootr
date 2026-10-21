@@ -4,12 +4,13 @@
 // `x-stam-local: 1`, which stops them from fanning out again.
 import type { ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { settings } from './settings.ts';
 import { MACHINE, RELEASE, STAM_HOME } from './config.ts';
 import * as db from './db.ts';
 import { timed } from './stall.ts';
+import { envVar } from './env.ts';
 
 export interface Peer {
   name: string;
@@ -33,11 +34,16 @@ export interface Via {
   // The caller's daemon's answer to who owns a branch (branch-scope.ts, S-581): sent with a pr_open or a
   // branch link, and read only from a peer.
   scope?: 'tree' | 'foreign' | 'none';
+  // The caller's daemon's answer to what the agent may review (S-1065), sent with a verdict relay and read only from a
+  // peer: its role there, and the branches it owns (its worktree's, and stam/<name>). The home can't see a peer's agents.
+  reviewRole?: 'reviewer' | 'manager' | 'other';
+  // null (or missing): unknown, which a verdict relay refuses.
+  ownBranches?: string[] | null;
 }
 
 // The headers that name the agent a forwarded request acts as; none for a daemon's own calls.
-function viaHeaders(via?: Via): Record<string, string> {
-  return via ? { 'x-stam-agent': via.agent, ...(via.boss ? { 'x-stam-agent-boss': '1' } : {}), ...(via.assistant ? { 'x-stam-agent-assistant': '1' } : {}), ...(via.scope ? { 'x-stam-branch-scope': via.scope } : {}) } : {};
+export function viaHeaders(via?: Via): Record<string, string> {
+  return via ? { 'x-stam-agent': via.agent, ...(via.boss ? { 'x-stam-agent-boss': '1' } : {}), ...(via.assistant ? { 'x-stam-agent-assistant': '1' } : {}), ...(via.scope ? { 'x-stam-branch-scope': via.scope } : {}), ...(via.reviewRole ? { 'x-stam-review-role': via.reviewRole, ...(Array.isArray(via.ownBranches) ? { 'x-stam-own-branches': JSON.stringify(via.ownBranches) } : {}) } : {}) } : {};
 }
 
 export function peers(): Peer[] {
@@ -51,8 +57,8 @@ export function peerByName(name: string): Peer | undefined {
 // A peer that failed is skipped by lists until a probe in the background reaches it again, every
 // 30 seconds, so a stopped machine slows only the request that found it down, not one request
 // per retry. A direct call to a down peer probes it first (S-256), with the short CHECK_MS.
-const PROBE_MS = Number(process.env.STAM_PEER_PROBE_MS) || 30_000;
-const CHECK_MS = Number(process.env.STAM_PEER_CHECK_MS) || 2000;
+const PROBE_MS = Number(envVar('PEER_PROBE_MS')) || 30_000;
+const CHECK_MS = Number(envVar('PEER_CHECK_MS')) || 2000;
 const down = new Map<string, number>();
 const checking = new Map<string, Promise<boolean>>();
 
@@ -206,7 +212,7 @@ async function until(check: () => Promise<boolean>, deadline: number): Promise<b
 }
 
 async function startPeer(p: Peer): Promise<void> {
-  const deadline = Date.now() + Number(process.env.STAM_PEER_START_TIMEOUT_MS ?? 300_000);
+  const deadline = Date.now() + Number(envVar('PEER_START_TIMEOUT_MS') ?? 300_000);
   const fail = (why: string, tail: string[] = []) => new Error(`${p.name} is unreachable and didn't start: ${why}${tail.length ? `\n${tail.join('\n')}` : ''}`);
   if (!p.start) throw fail('no start command in settings.json (peers[].start)');
   console.log(`peer:start ${p.name}: running ${p.start}`);
@@ -222,6 +228,17 @@ async function startPeer(p: Peer): Promise<void> {
   }
   down.delete(p.name);
   console.log(`peer:start ${p.name}: up`);
+}
+
+// True while the deploy watcher holds: its hold, or a hold a lift set aside (deploy-hold.lifting-PID, S-1770) while it
+// compares or after a put-back that failed. A STAM_HOME that can't be listed counts as held.
+function deployHeld(): boolean {
+  if (existsSync(join(STAM_HOME, 'deploy-hold'))) return true;
+  try {
+    return readdirSync(STAM_HOME).some((f) => f.startsWith('deploy-hold.lifting-'));
+  } catch {
+    return true;
+  }
 }
 
 // Peers on another release (S-236). A peer whose release differs from this daemon's runs its
@@ -244,7 +261,7 @@ export async function ensureCurrent(p: Peer): Promise<string | undefined> {
   }
   // The deploy watcher owns the moves storage makes (S-525): while its hold is in place, or once it has put storage on
   // another release, a spawn doesn't move the peer past what the watcher deployed.
-  if (existsSync(join(STAM_HOME, 'deploy-hold'))) {
+  if (deployHeld()) {
     console.log(`peer:deploy ${p.name}: not deployed, a deploy hold is in place`);
     return `${p.name} isn't on ${mine}: a deploy hold is in place, so ${p.name} keeps its release`;
   }
@@ -268,10 +285,10 @@ export async function ensureCurrent(p: Peer): Promise<string | undefined> {
 }
 
 async function deployPeer(p: Peer, release: string): Promise<void> {
-  const deadline = Date.now() + Number(process.env.STAM_PEER_DEPLOY_TIMEOUT_MS ?? 600_000);
+  const deadline = Date.now() + Number(envVar('PEER_DEPLOY_TIMEOUT_MS') ?? 600_000);
   const fail = (why: string, tail: string[] = []) => new Error(`${p.name} didn't deploy ${release}: ${why}${tail.length ? `\n${tail.join('\n')}` : ''}`);
   console.log(`peer:deploy ${p.name}: running ${p.deploy} for ${release}`);
-  const { code, tail } = await runPeerCommand(p.deploy!, { ...process.env, STAM_RELEASE: release, STAM_PEER: p.name }, deadline);
+  const { code, tail } = await runPeerCommand(p.deploy!, { ...process.env, ...{ STAM_RELEASE: release, STAM_PEER: p.name } }, deadline);
   if (code === 'late') throw fail('its deploy command ran past the deadline', tail);
   if (code !== 0) {
     console.log(`peer:deploy ${p.name}: deploy command exited ${code}`);
@@ -363,6 +380,23 @@ export async function peerHits(ref: string): Promise<{ hits: { peer: Peer; agent
   // can return our own agent, which must not be stored as a twin of itself.
   for (const h of hits) if (h.agent.machine !== MACHINE) db.rememberPeerAgent(h.agent);
   return { hits, unreachable: results.includes('unreachable') };
+}
+
+// The other machine whose daemon knows an agent named `ref`, for a set-parent that names an agent no
+// one here has (S-2453). Read only and never remembered, so a refusal changes no row. A peer that
+// doesn't answer in time, or answers anything but that agent, is no match: undefined, not a guess.
+export async function peerMachineOf(ref: string): Promise<string | undefined> {
+  const found = await Promise.all(
+    peers().map(async (p) => {
+      try {
+        const r = await peerCall(p, 'GET', `/api/agents/${encodeURIComponent(ref)}`, undefined, 4000);
+        return r.status === 200 && typeof r.data?.id === 'string' ? String(r.data.machine || p.name) : undefined;
+      } catch {
+        return undefined;
+      }
+    }),
+  );
+  return found.find((m) => m !== undefined && m !== MACHINE);
 }
 
 // Like findAgentPeer, but tells an agent no peer has ('absent': every peer answered 404)

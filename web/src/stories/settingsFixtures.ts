@@ -2,6 +2,7 @@
 // catalogue, and the routes that serve them (the stub in fixtures.ts answers by route). Nothing
 // here comes from a live daemon: names are fixture-*, hosts are example.com, tokens are fake.
 import { reply } from './types'
+import type { CacheAgent } from '../views/CacheSettings'
 
 export const SETTINGS = {
   assistant: { harness: 'claude', model: 'claude-opus-5-5', effort: 'medium', cwd: '' },
@@ -17,6 +18,7 @@ export const SETTINGS = {
   activity: { classify: { enabled: true, maxUsdPerDay: 0.5, concurrency: 2 } },
   context: { warnTokens: 150000, instructTokens: 200000, enforceTokens: 250000 },
   idleCompaction: { enabled: true, growthTokens: 40000, idleMinutes: 50, minTokens: 60000 },
+  rest: { enabled: true, afterMinutes: 20, graceMinutes: 2 },
   cost: {
     instructions: 'Keep reviewers on the cheap model unless the change touches shared code.',
     dailyWarnUsd: 25,
@@ -117,7 +119,18 @@ export const settingsRoutes = (scope: Scope = { home: 'fixture-machine', local: 
   'GET /api/itsas/fields': [],
   'GET /api/permission-modes': PERMISSION_MODES,
   'PATCH /api/config/settings': { text: JSON.stringify(settings) },
+  'GET /api/cache/agents': { agents: CACHE_AGENTS, offline: [] },
 })
+
+// Settings › Prompt caching (S-2239): each agent's detected cache window, as GET /api/cache/agents sends it.
+const ttlAt = (minutes: number) => new Date(Date.now() - minutes * 60000).toISOString()
+export const cacheAgent = (name: string, o: Partial<CacheAgent> = {}): CacheAgent => ({ id: `fx-${name}`, name, machine: 'fixture-machine', harness: 'claude', model: 'claude-opus-5-5', lifecycle: 'active', account: 'fixture-claude', paid: false, ttl: '1h', ttl_at: ttlAt(3), ...o })
+export const CACHE_AGENTS: CacheAgent[] = [
+  cacheAgent('fixture-dev'),
+  cacheAgent('fixture-waiter', { ttl_at: ttlAt(40), lifecycle: 'paused' }),
+  cacheAgent('fixture-new', { ttl: null, ttl_at: null }),
+  cacheAgent('fixture-review', { harness: 'codex', model: 'gpt-6.1-sol', account: 'fixture-codex', ttl: null, ttl_at: null }),
+]
 
 // A save that the daemon refuses, and one that waits for the human (a 202 {requested}).
 export const SAVE_REFUSED = { 'PATCH /api/config/settings': reply(403, { error: 'fixture: settings.json is read-only' }) }

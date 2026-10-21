@@ -125,3 +125,25 @@ test('the peer-forwarding transport carries force through unchanged', async () =
   assert.equal(calls[0].body.force, true);
   assert.equal(calls[0].body.by, self);
 });
+
+test('the CLI sends force_unpushed:true for --force-unpushed, and none otherwise (S-2201)', async () => {
+  calls.length = 0;
+  const p = await cli(['archive', 'x', '--force-unpushed']);
+  assert.equal(p.code, 0, p.err);
+  assert.equal(calls[0].body.force_unpushed, true);
+  assert.ok(!calls[0].body.force && !calls[0].body.discard, 'it implies neither force nor discard');
+  calls.length = 0;
+  await cli(['archive', 'x', '--force', '--discard']);
+  assert.ok(!calls[0].body.force_unpushed, 'force and discard do not set it');
+});
+
+test('agent_control carries force_unpushed for an archive (S-2201)', async () => {
+  calls.length = 0;
+  const mcp = await import('../src/mcp.ts');
+  await mcp.callTool('agent_control', { self, agent: 'x', action: 'archive', force_unpushed: true });
+  assert.equal(calls[0].body.force_unpushed, true);
+  assert.ok(!calls[0].body.force && !calls[0].body.discard);
+  calls.length = 0;
+  await mcp.callTool('agent_control', { self, agent: 'x', action: 'archive', force: true, discard: true });
+  assert.ok(!calls[0].body.force_unpushed);
+});

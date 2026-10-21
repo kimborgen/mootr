@@ -188,6 +188,27 @@ describe('a tight tab', () => {
     expect(host.querySelector('[data-wait=folded]')).toBeNull()
     expect([...host.querySelectorAll('[data-wait]')].map((b) => b.getAttribute('data-wait'))).toEqual(['children'])
   })
+  it('holds the fifth roomier step at the narrower mode, and measures again once the count clears', async () => {
+    // Each big-room step from folded is a roomier one: the fifth is held at folded, and a narrower step after it is still taken.
+    room = 100
+    await tab(three)
+    expect(host.querySelector('[data-wait=folded]')).not.toBeNull()
+    const step = async (r: number) => { room = r; await act(async () => { fire() }) }
+    for (let i = 0; i < 4; i++) {
+      await step(200)
+      expect(host.querySelectorAll('[data-wait]').length).toBe(3)
+      await step(100)
+      expect(host.querySelector('[data-wait=folded]')).not.toBeNull()
+    }
+    await step(200)
+    expect(host.querySelector('[data-wait=folded]')).not.toBeNull()
+    await step(40)
+    expect(host.querySelectorAll('[data-wait]').length).toBe(0)
+    // Nothing measures until the count clears: the room is back then, and the held slot measures again.
+    room = 200
+    await act(async () => { vi.advanceTimersByTime(1) })
+    expect(host.querySelectorAll('[data-wait]').length).toBe(3)
+  })
   it('closes the popover when the tab is no longer folded, and does not bring it back', async () => {
     room = 100
     await tab(three)

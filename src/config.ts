@@ -3,20 +3,25 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, realpathSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { envVar } from './env.ts';
 
 export const ROOT = join(import.meta.dirname, '..');
 // The live home, which a test daemon never uses: tests set STAM_HOME to a throwaway folder.
 export const DEFAULT_STAM_HOME = join(homedir(), '.local', 'share', 'stam');
-export const STAM_HOME = process.env.STAM_HOME ?? DEFAULT_STAM_HOME;
+// The renamed home (S-2889) is used only when it exists and the stam home doesn't: nothing is created, moved or linked.
+const MOOTR_DEFAULT_HOME = join(homedir(), '.local', 'share', 'mootr');
+const defaultHome = !existsSync(DEFAULT_STAM_HOME) && existsSync(MOOTR_DEFAULT_HOME) ? MOOTR_DEFAULT_HOME : DEFAULT_STAM_HOME;
+export const STAM_HOME = envVar('HOME') ?? defaultHome;
 // Whether this is the live home (S-422): never a test home, so test-only switches, such as
 // STAM_TEST_HUMAN_KEY, do nothing here (src/test-env.ts gates them on the test-home marker).
-export const LIVE_HOME = (() => {
+const isHome = (home: string) => {
   try {
-    return realpathSync(STAM_HOME) === realpathSync(DEFAULT_STAM_HOME);
+    return realpathSync(STAM_HOME) === realpathSync(home);
   } catch {
-    return resolve(STAM_HOME) === resolve(DEFAULT_STAM_HOME);
+    return resolve(STAM_HOME) === resolve(home);
   }
-})();
+};
+export const LIVE_HOME = isHome(DEFAULT_STAM_HOME) || isHome(MOOTR_DEFAULT_HOME);
 // `stam deploy` builds releases into RELEASES/SHA and points RELEASES/current at the live one.
 export const RELEASES = join(STAM_HOME, 'releases');
 const realReleases = (() => {
@@ -28,14 +33,17 @@ const realReleases = (() => {
 })();
 // The release this code runs from, or null when it runs from a checkout.
 // STAM_RELEASE_ID names the release in a test daemon, which runs from a checkout.
-export const RELEASE = process.env.STAM_RELEASE_ID ?? (realReleases && dirname(ROOT) === realReleases ? basename(ROOT) : null);
+export const RELEASE = envVar('RELEASE_ID') ?? (realReleases && dirname(ROOT) === realReleases ? basename(ROOT) : null);
 // A release hands agents (MCP shim, hooks, statusline) the stable `current` path, so they
 // follow deploys and never pin a release that gets pruned. A checkout hands out its own.
 export const STAM_BIN = RELEASE ? join(RELEASES, 'current', 'bin', 'stam') : join(ROOT, 'bin', 'stam');
-export const PORT = Number(process.env.STAM_PORT ?? 7878);
-export const STAM_URL = process.env.STAM_URL ?? `http://127.0.0.1:${PORT}`;
-export const TMUX_SOCKET = process.env.STAM_TMUX_SOCKET ?? 'stam';
-export const MACHINE = process.env.STAM_MACHINE ?? hostname();
+export const PORT = Number(envVar('PORT') ?? 7878);
+export const STAM_URL = envVar('URL') ?? `http://127.0.0.1:${PORT}`;
+// The tmux server a home keeps its agents' terminals in: a tmux socket *name* (`tmux -L`), a short word,
+// not a path. The default `stam` is one name for the whole machine, so a second home here needs its own
+// (`STAM_TMUX_SOCKET=other`), or its agents land in the first home's tmux server (export/README.public.md).
+export const TMUX_SOCKET = envVar('TMUX_SOCKET') ?? 'stam';
+export const MACHINE = envVar('MACHINE') ?? hostname();
 
 // Private to the user: it holds generated settings, and Codex refuses a socket in a
 // folder other users could write to.
@@ -79,7 +87,7 @@ export function ensurePeerToken(): string {
 }
 
 export function readToken(): string | undefined {
-  if (process.env.STAM_TOKEN) return process.env.STAM_TOKEN;
+  if (envVar('TOKEN')) return envVar('TOKEN');
   try {
     return readFileSync(join(STAM_HOME, 'token'), 'utf8').trim();
   } catch {
@@ -91,5 +99,5 @@ export function readToken(): string | undefined {
 // tmpfs; '' when tests use /tmp itself.
 export function testTmpBase(): string {
   const tmpfs = spawnSync('stat', ['-f', '-c', '%T', '/tmp'], { encoding: 'utf8' }).stdout?.trim() === 'tmpfs';
-  return process.env.STAM_TEST_TMPDIR || (tmpfs ? join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'stam-test') : '');
+  return envVar('TEST_TMPDIR') || (tmpfs ? join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'stam-test') : '');
 }

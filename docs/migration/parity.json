@@ -1,0 +1,1843 @@
+{
+  "go_sha": "9cafd1c0b32dacaccdf119430ee1269612dd5e8a",
+  "ts_sha": "d09959917a7928d5029d89beb3fd3e896fd44c2d",
+  "run_at": "2026-10-19T13:17:57.171Z",
+  "tests": {
+    "account-readings": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "accounts": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "activity": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "activity-classify": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "activity-info": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "activity-load": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "activity-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "activity-peers-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "activity-readers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "activity-rules": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "activity-stats": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "activity-summary": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "activity-warming": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "admission": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-class": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-identity": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-instructions": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-ips": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-load": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-rates": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-reads-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-routes-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-tokens": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-types": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-view-default": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-view-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agent-views-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "agents-route": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "allocations": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "archive-cascade": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "archive-cascade-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "archive-cascade-route": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "archive-force": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "archive-procs": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "archive-unpushed": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ask-block": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "assistant": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "assistant-autostart": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "attribution": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "auto-archive": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "auto-archive-full": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "auto-archive-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "auto-archive-repair": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "banner-stagger": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "banners-quiet": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "block-summaries": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "blockers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "blocks": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "blocks-compose": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "budgets": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "busy": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "cache-cold-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "check-playwright-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "child-notices": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "children-waits-cascade-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "children-waits-scale-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "chromium-lock": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "claude-dialog-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "claude-ghost-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "claude-permissions": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "claude-view": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "claude-view-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "cli-help-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "client-dedup": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "client-dedup-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "codex-no-rollout": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "codex-reviewer-sandbox": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "codex-usage": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "codex-view": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "compact-dedupe": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "compact-epipe-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "compact-restart": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "compact-restart-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "compress": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "compress-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "config-guard": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "config-patch": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "context": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "cos": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "cost": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "cost-display": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "cost-fallback": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "cost-instructions": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "cost-notices": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "cost-pause": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "cost-probes": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "cost-switch": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "daemon-stub": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "db-backup-lock": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "db-synchronous": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "db-user-version": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "decide": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "decision-fence": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "decision-mail": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "decision-mail-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "decl-index": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "default-read-stale": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "default-repo-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "deferred": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "delegate-ask": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "delegate-peer-parent": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "deploy": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "deploy-bisect": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "deploy-canary": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "deploy-health-wait": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "deploy-prune-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "deploy-storage-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "deploy-watch-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "developer-cap": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "developer-cap-peer": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "developer-cap-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "diff-api": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "diff-api-route": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "doc-citations": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "doc-shas": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "embed-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "event-waits": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "events": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "events-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "exit-context": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "export": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "export-overrides": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "failed-notice": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "fastpath": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "feedback": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "feedback-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "files": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "files-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "first-prompt-ghost": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "first-prompt-recover": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "forget": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "full-suite-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "gate-cap-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "gate-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "github-poller": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "github-poller-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "go-catchup-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "go-parity-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "guard": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "guard-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "harness-dialog": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "harness-guard": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "hit-classify": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "hit-sampler": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "home-lock": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "human-owner": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "human-relay": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "human-strict": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "human-strict-holder": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "human-strict-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "human-thread-quiet": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "idle-shutdown-archive": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "instructions": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "inventory": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "inventory-block-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "isolation": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "issue-costs": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-fields": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-fields-agent": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-fields-prompt": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-fields-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-human": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-human-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-incident": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-mcp": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-owners": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-owners-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-owners-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-permission-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-post-gate": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-post-gate-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-queue": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-search": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-thread": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-thread-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-tools": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "itsa-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "janitor": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "janitor-sweep": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "janitor-tmux": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "kill-hard": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "layout": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "layout-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "leak-gate-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ledger-recon": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "light-list-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "limits": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "linear-poller": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "linear-poller-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "live-head-guard": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "llm-layer": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "llm-providers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "local-default": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "local-human": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "local-human-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "m1": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "m2": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "m5": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "machines": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "machines-origin": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "machines-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-about-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-archive": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-check": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-embed": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-embed-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-from-stam-http": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-full-suite-sender": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-gate": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-gate-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-gate-strict": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-gate-strict-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-itsas-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-models": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-note-display": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-opens": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-read-cited": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-recipients-index": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-reply-only-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-routing-uncertain": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-search": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-threading": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-title": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-title-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-tools-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mail-visibility-creator": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "manager-merge-line": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-auth": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-config": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-follow": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-import": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-itsa-create": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-itsa-ref": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-process-propose": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-proxy": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-reconnect": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-reexec": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-registry": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-ring-submit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-send-mail": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-servers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-slack-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-tools": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "mcp-wait-for": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "measured-effort": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "merge-failures-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "merge-pr-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "model-catalog": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "notices-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "onboarding-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "opencode-stop": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "opencode-token": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "openrouter": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "org": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "orphan-procs": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-busy": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-control": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-deploy": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-identity": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-outbox": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-parent": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-permission": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-queue-start": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-readings": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-remember": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-spend": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-start": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-ui-writes": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-ui-writes-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-wait": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peers-down": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "permission-asks": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "permission-dialog-mail": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "permission-modes": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "permission-modes-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "permission-requests-index": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "permission-typed": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "personal-workspace": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "personal-workspace-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "pr-merge-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "pr-merge-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "pr-open-scope": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "pr-open-scope-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "pr-open-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "pr-review-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "pr-review-relay-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "pr-review-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "pr-sync-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "process": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "process-briefs": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "process-counts": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "process-edit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "process-proposal": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "process-proposal-route": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "process-run": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "process-stage": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "proctree-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "prompt-default-mode": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "push": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "read-mail": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "readings": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "reconcile-quiet": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "refresh-derived": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "registry-home": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "release-lock": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "remote": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "reply-archived-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "reply-local": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "reply-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "reply-system": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "repo-config-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "req-check": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "req-check-b-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "req-check-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "req-fp-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "req-remote": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "req-seed-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "req-tools": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "req-tools-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "requirements": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "requirements-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "resolve-recipient": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "resource-warn": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "rest-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "restart-mail": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "retro": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "retro-digest-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "retro-lessons-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "retro-loop": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "retro-loop-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "retro-reminder-failure-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "retro-reminders-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "retro-search-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "retro-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "review-dir-cleanup": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "reviewer-ring": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "reviewer-spawn": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "reviewer-types": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ring": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ring-create-rollback": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ring-peer": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ring-split": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ring-verdict-line": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "round-skipped": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "rules": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "run-flags": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "run-skip": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "run-timeout": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "said": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "samples": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "search": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "search-meaning": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "search-meaning-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "secrets": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "secrets-route": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "sent-copy": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "session-end": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "settings-ask-conflict": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "settings-file-mode": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "settings-memo": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "settings-notice": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "settings-sync": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "settings-writes": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "skill-import": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "skills": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "spawn-usage": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "spawn-worktree-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "stale-working": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "stall": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "stall-labels-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "stall-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "stamd-wrapper": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "standing-growth": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "standing-rest-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "starting-archive": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "starting-dead": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "statusline-cache-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "statusline-post-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "steps": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "steps-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "story-check-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "strict-system": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "suggest": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "suggest-input": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "suggest-input-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "suggest-rescore-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "suggest-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "supersede": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "sw-close": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "sw-group": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "swallowed-wait": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "sweep-test-homes": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "template-blocks": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "term-size": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "test-hooks": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "test-slot": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "thread-defer": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "thread-resolved": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "threads-with": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ticket-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tiny-models": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tmphome-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tmux-clients": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tmux-env-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tmux-snapshot-async-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tmux-snapshot-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "token-scope": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tool-changes-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tool-names": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tool-summaries": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tool-summaries-route": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tools": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tree": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "tree-check-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "triage-failures-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "turn-harden-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "turn-stall-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "type-memory": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "type-skills": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ui": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ui-assistant": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ui-build": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ui-ownview": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "ui-viewtoggle": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "unread-counts": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "usage": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "usage-agents-filter": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "usage-drill": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "usage-history": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "usage-scope": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "voice": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "voice-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "waits": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "waits-claude": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "waits-harness-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "waits-mcp": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "waits-stam": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "waits-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "watch": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "watch-pr": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "watch-pr-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "watch-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "window-summary-calls": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "withdraw": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "withdraw-ask": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "withdraw-ask-http": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "withdraw-ask-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "withdraw-peers": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "withdraw-peers-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "workspace-fresh-base": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "workspace-prompt-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "workspace-reused-branch": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "workspace-share-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "worktree-deps-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "worth": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "write-timeout-thread-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "write-timeout-unit": {
+      "module": "unassigned",
+      "status": "fail"
+    }
+  }
+}

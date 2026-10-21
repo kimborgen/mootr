@@ -59,8 +59,33 @@ for (const size of sizes) {
   await p.goto(origin + '/#token=' + token);
   await p.waitForSelector('#tree .node', { timeout: 20000 });
   const nav = p.locator('[data-nav="mail"]');
-  if (await nav.isVisible()) await press(nav);
-  const row = p.locator(`#mail-side .mrow[data-thread="${tid}"]`);
+  // The phone's Inbox page: its chips are the lists (Deferred, All and To answer), the rows are the same.
+  const onPhone = await nav.isVisible();
+  if (onPhone) await press(nav);
+  const side = onPhone ? '#inbox-view' : '#mail-side';
+  const row = p.locator(`${side} .mrow[data-thread="${tid}"]`);
+  const chip = (id) => p.locator(`#inbox-view [data-filter="${id}"]`);
+  // Inbox: the deferred thread isn't listed, and the Deferred toggle counts it.
+  if (onPhone) {
+    await chip('all').waitFor();
+    await p.waitForFunction(() => /Deferred\s*1/.test(document.querySelector('#inbox-view [data-filter="deferred"]')?.textContent ?? ''));
+    check(tag, (await row.count()) === 0 || !(await row.first().isVisible()), 'the inbox does not list the deferred thread');
+    await press(chip('deferred'));
+    await row.first().waitFor();
+    check(tag, await row.first().isVisible(), 'Deferred lists the thread');
+    const box = await row.first().boundingBox();
+    check(tag, !!box && box.x + box.width <= p.viewportSize().width, 'the row fits the width', box);
+    await p.waitForTimeout(300);
+    await p.screenshot({ path: `${out}/defer-asks-deferred-${tag}.png` });
+    await press(chip('all'));
+    await press(chip('toanswer'));
+    await row.first().waitFor();
+    check(tag, await row.first().isVisible(), 'To answer still lists the deferred ask');
+    await p.waitForTimeout(300);
+    await p.screenshot({ path: `${out}/defer-asks-toanswer-${tag}.png` });
+    await ctx.close();
+    continue;
+  }
   const toggle = (sel) => p.locator(`#mail-side ${sel}`);
   // Inbox: the deferred thread isn't listed, and the Deferred toggle counts it.
   await toggle('.mail-toggle[aria-pressed]').first().waitFor();

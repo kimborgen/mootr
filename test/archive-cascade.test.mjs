@@ -251,3 +251,51 @@ test('a final-round archive that fails at its deadline tells the parent', async 
   assert.ok(notices.some((e) => (e.data ?? '').includes('failed at its final-round deadline')), 'the parent was told');
   turnAlive.delete(d.id);
 });
+
+// S-2452: a standing child is never archived with its parent. It moves to the archived agent's live parent
+// (else the chief of staff) when that parent can control it here, and stays unarchived with the reason when not.
+async function setChiefOfStaff(name) {
+  writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [], chiefOfStaff: name }));
+  (await import('../src/settings.ts')).settingsChanged();
+}
+
+test('a standing idle child is moved to the archived agent\'s parent and not archived; a plain idle child still cascades', async () => {
+  const boss = agent();
+  const mgr = agent({ parent: boss.id });
+  const standing = agent({ parent: mgr.id });
+  db.updateAgent(standing.id, { standing: 1 });
+  const idle = agent({ parent: mgr.id });
+  const result = await lifecycle.archiveCascade(db.getAgent(mgr.id));
+  assert.equal(db.getAgent(standing.id).lifecycle, 'active', 'the standing child is not archived');
+  assert.deepEqual(db.parentsOf(db.getAgent(standing.id)), [boss.id]);
+  assert.equal(db.getAgent(idle.id).lifecycle, 'archived', 'a non-standing idle child still cascades');
+  assert.match(result, new RegExp(`moved standing ${standing.name} to ${boss.name}`));
+  assert.match(result, new RegExp(`also archived idle ${idle.name}`));
+});
+
+test('a standing child whose new parent is registered on another machine stays unarchived, and the result says why', async () => {
+  const mgr = agent({ parent: 'remote-boss' });
+  const standing = agent({ parent: mgr.id });
+  db.updateAgent(standing.id, { standing: 1 });
+  const result = await lifecycle.archiveCascade(db.getAgent(mgr.id));
+  assert.equal(db.getAgent(standing.id).lifecycle, 'active');
+  assert.deepEqual(db.parentsOf(db.getAgent(standing.id)), [mgr.id]);
+  assert.match(result, new RegExp(`kept standing ${standing.name} \\(remote-boss can't control it on this machine\\) unarchived`));
+  assert.doesNotMatch(result, /moved standing/);
+});
+
+test('a standing child of an archived agent with no parent moves to the chief of staff', async () => {
+  const cos = agent();
+  await setChiefOfStaff(cos.name);
+  try {
+    const mgr = agent();
+    const standing = agent({ parent: mgr.id });
+    db.updateAgent(standing.id, { standing: 1 });
+    const result = await lifecycle.archiveCascade(db.getAgent(mgr.id));
+    assert.equal(db.getAgent(standing.id).lifecycle, 'active');
+    assert.deepEqual(db.parentsOf(db.getAgent(standing.id)), [cos.id]);
+    assert.match(result, new RegExp(`moved standing ${standing.name} to ${cos.name}`));
+  } finally {
+    await setChiefOfStaff(null);
+  }
+});

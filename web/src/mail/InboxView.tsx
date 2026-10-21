@@ -7,25 +7,33 @@
 // thread's latest mail to you: its kind, who wrote, the subject, one line of what it says, its ITSA,
 // its age, and a dot while it is unread. Empty, loading and error are words only.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { inboxThread, openInboxThread, setThreadArchived, setThreadDeferred, stepInbox, triageInboxThread, undoInboxTriage } from '../actions'
+import { inboxThread, openAgent, openInboxThread, openWorld, setThreadArchived, setThreadDeferred, stepInbox, toggleInboxUnread, triageInboxThread, undoInboxTriage } from '../actions'
 import { api } from '../api'
 import { bottomHandle } from '../bottom-slot'
 import { ago, baseSubject, plainSubject } from '../format'
 import { Icon } from '../Icon'
-import { useDeferred, useToAnswerCount, useWaiting, type WaitingRow } from '../itsa/WaitingList'
+import { AskBlockLine } from '../itsa/AskBlockLine'
+import { openItsa } from '../itsa/itsa'
+import { isPlainWait, useDeferred, useToAnswerCount, useWaiting, type WaitingRow } from '../itsa/WaitingList'
+import { HistorySide } from '../HistorySide'
+import { DelegatedGroup } from '../MailSide'
 import { currentWorld, isPhone, useShell } from '../shell/layout'
 import { hasPendingPermission, isUnreadForHuman, useData } from '../store'
 import type { Thread } from '../types'
 import { cardKind } from './cardKind'
+import { DigestCard } from './DigestCard'
+import { useDigest } from './digest'
 import { sameLine } from './cardSummary'
 import { bodyLines, cardFrom, cardMail, cardText, KIND } from './MailCard'
-import { FILTERS, filtered, grouped, hitGroup, isAwaiting, needsIds, type Group, type InboxFilter, type SearchHit } from './inbox-model'
+import { FILTERS, filtered, grouped, hitGroup, isAwaiting, needsIds, unreadCount, waitThread, type Group, type InboxFilter, type SearchHit } from './inbox-model'
 import { setInboxOrder } from './inbox-order'
 import { swipeRow } from './swipeRow'
 import { Avatar, nameFor } from './ThreadPanel'
 
 // The list's scroll, kept while another page or a thread shows (a phone's back returns to it).
 let savedScroll = 0
+// The filter and the search, kept the same way on the phone: a pushed thread unmounts the page, and back returns to the list as it was.
+const kept: { filter: InboxFilter; query: string } = { filter: 'all', query: '' }
 // The reach of a swipe, as the sidebar's.
 const REVEAL = 96
 const SEARCH_MS = 250
@@ -62,26 +70,53 @@ const EMPTY: Record<InboxFilter, string> = {
 // `selected` marks a row open without a pane (the stories' selected row); the page itself reads the open thread from the shell.
 export function InboxView({ selected }: { selected?: string }) {
   const d = useData()
-  const { humanThreads, humanArchived, humanDeferred, loaded, decisions, attention, itsas } = d
+  const { humanThreads, humanArchived, humanDeferred, loaded, decisions, attention, itsas, delegateDialogs } = d
   useShell()
   const waiting = useWaiting()
   const deferred = useDeferred()
   const toAnswerN = useToAnswerCount()
-  const [filter, setFilter] = useState<InboxFilter>('all')
-  const [query, setQuery] = useState('')
+  // The phone's page only: the desktop's page starts on All with no search, as it did before.
+  const phone = isPhone()
+  const [filter, setFilterState] = useState<InboxFilter>(phone ? kept.filter : 'all')
+  const [query, setQueryState] = useState(phone ? kept.query : '')
+  const setFilter = (f: InboxFilter) => { if (phone) kept.filter = f; setFilterState(f) }
+  const setQuery = (q: string) => { if (phone) kept.query = q; setQueryState(q) }
+  // The history list (the Mail list's History, S-1456) takes the list's place; the list stays mounted under it.
+  const [history, setHistory] = useState(false)
   const search = useSearch(query)
+  // The Away digest card (S-2822): shown while a window is set and not dismissed; its Needs line scrolls to the Needs you group below.
+  const [digest, dismissDigest] = useDigest()
+  // The Needs line goes to the Needs you group: when the list shows no such group, the list resets to All first, then scrolls once it draws.
+  const [needsAt, setNeedsAt] = useState(0)
+  useEffect(() => {
+    if (needsAt) list.current?.querySelector<HTMLElement>('[data-group="needs"]')?.scrollIntoView?.({ block: 'start' })
+  }, [needsAt])
+  const goNeeds = () => {
+    if (!history && list.current?.querySelector('[data-group="needs"]')) return setNeedsAt(needsAt + 1)
+    setHistory(false)
+    setFilter('all')
+    setQuery('')
+    setNeedsAt(needsAt + 1)
+  }
   const list = useRef<HTMLDivElement>(null)
   const searchBox = useRef<HTMLInputElement>(null)
 
   const lists = { humanThreads, humanArchived, humanDeferred }
   const needs = needsIds(waiting, lists)
-  const unreadN = humanThreads.filter(isUnreadForHuman).length
+  const unreadN = unreadCount(lists, waiting, deferred)
   const awaitingN = [...humanThreads, ...humanArchived, ...humanDeferred].filter(isAwaiting).length
-  const count = { toanswer: toAnswerN, unread: unreadN, all: 0, awaiting: awaitingN, deferred: humanDeferred.length, archived: humanArchived.length }
+  const count = { toanswer: toAnswerN, unread: unreadN, all: 0, awaiting: awaitingN, deferred: filtered('deferred', lists, waiting, deferred).threads.length, archived: humanArchived.length }
   const searching = query.trim() !== ''
   const shown = filtered(filter, lists, waiting, deferred)
   const groups: Group[] = searching ? (search.hits && search.q === query.trim() ? hitGroup(search.hits, lists) : []) : grouped(shown.threads, needs)
-  const loose = searching ? [] : shown.loose
+  // The All list shows what waits on you with no thread in any list (an ITSA's ask whose thread is elsewhere, say), and
+  // what is deferred that way under Decide later, as the Mail list did. Plain waits are To answer's alone.
+  const threadIds = new Set([...humanThreads, ...humanArchived, ...humanDeferred].map((t) => t.thread_id))
+  const orphan = (w: WaitingRow) => !threadIds.has(waitThread(w) ?? '')
+  const inAll = filter === 'all' && !searching
+  const alsoWaiting = phone && inAll ? waiting.filter((w) => !isPlainWait(w) && orphan(w)) : []
+  const decideLater = phone && inAll ? deferred.filter(orphan) : []
+  const loose = searching ? [] : [...shown.loose, ...alsoWaiting]
 
   // The order the rows show in, for advancing to the next thread when the open one is archived or deferred.
   const order = groups.flatMap((g) => g.threads.map((t) => t.thread_id))
@@ -90,9 +125,12 @@ export function InboxView({ selected }: { selected?: string }) {
 
   const archivedIds = new Set(humanArchived.map((t) => t.thread_id))
   const deferredIds = new Set(humanDeferred.map((t) => t.thread_id))
+  // A deferred ask's thread is in the Deferred list but isn't deferred itself: its row offers no Undefer and no defer swipe
+  // (the ask is cleared by the human's reply), so a tap answers it.
+  const askDeferredIds = new Set(filtered('deferred', lists, waiting, deferred).threads.map((t) => t.thread_id).filter((id) => !deferredIds.has(id)))
   // Archive and defer by swipe (a touch only): the sidebar's rules. What waits on you can't be archived, but can be deferred.
-  const swipes = useRef({ archivedIds, deferredIds })
-  swipes.current = { archivedIds, deferredIds }
+  const swipes = useRef({ archivedIds, deferredIds, askDeferredIds })
+  swipes.current = { archivedIds, deferredIds, askDeferredIds }
   useEffect(() => {
     if (!list.current) return
     return swipeRow(list.current, REVEAL, (row) => {
@@ -100,7 +138,7 @@ export function InboxView({ selected }: { selected?: string }) {
       if (tid && !row.classList.contains('ask')) setThreadArchived(tid, !swipes.current.archivedIds.has(tid))
     }, (row) => {
       const tid = row.dataset.thread
-      if (tid) setThreadDeferred(tid, !swipes.current.deferredIds.has(tid))
+      if (tid && !swipes.current.askDeferredIds.has(tid)) setThreadDeferred(tid, !swipes.current.deferredIds.has(tid))
     })
   }, [])
 
@@ -121,14 +159,15 @@ export function InboxView({ selected }: { selected?: string }) {
     list.current?.querySelector<HTMLElement>(`[data-thread="${openTid}"]`)?.scrollIntoView?.({ block: 'nearest' })
   }, [openTid])
   // The desktop keys (S-2189), while the page shows: j/k step the rows, e archives and d defers the open thread,
-  // r focuses its reply, / searches and z undoes the last triage. Typing in a field, a held Ctrl, Meta, Alt or
-  // Shift, an open menu, and the phone all leave the keys to what they are.
+  // u toggles its unread state (S-2246), r focuses its reply, / searches and z undoes the last triage. Typing in a field,
+  // a held Ctrl, Meta, Alt or Shift, an open menu, and the phone all leave the keys to what they are.
   useEffect(() => {
     const keys: Record<string, () => void> = {
       j: () => stepInbox(1),
       k: () => stepInbox(-1),
       e: () => { const tid = inboxThread(); if (tid) void triageInboxThread(tid, 'archive') },
       d: () => { const tid = inboxThread(); if (tid) void triageInboxThread(tid, 'defer') },
+      u: () => { const tid = inboxThread(); if (tid) void toggleInboxUnread(tid) },
       r: () => { if (inboxThread()) bottomHandle()?.focus() },
       '/': () => searchBox.current?.focus(),
       z: () => void undoInboxTriage(),
@@ -168,10 +207,12 @@ export function InboxView({ selected }: { selected?: string }) {
     const itsa = itsaOf(t)
     const unread = isUnreadForHuman(t)
     const last = t.mails.at(-1)!
-    const go = () => open(t.thread_id)
+    // On a phone an ask that lives in its own thread opens its ITSA, as the Mail list did: the ITSA's view holds the thread and its actions.
+    const askItsa = attention.find((x) => x.ask_thread_id === t.thread_id && x.thread_id === t.thread_id)
+    const go = () => (isPhone() && askItsa ? openItsa(askItsa.id) : open(t.thread_id))
     return (
       <div className="mrow-wrap" key={t.thread_id}>
-        <div className="mrow-act defer" aria-hidden="true"><Icon name={deferredIds.has(t.thread_id) ? 'alarm-clock-off' : 'alarm-clock'} size="xs" />{deferredIds.has(t.thread_id) ? 'Undefer' : 'Defer'}</div>
+        {askDeferredIds.has(t.thread_id) ? null : <div className="mrow-act defer" aria-hidden="true"><Icon name={deferredIds.has(t.thread_id) ? 'alarm-clock-off' : 'alarm-clock'} size="xs" />{deferredIds.has(t.thread_id) ? 'Undefer' : 'Defer'}</div>}
         <div className="mrow-act" aria-hidden="true"><Icon name={archivedIds.has(t.thread_id) ? 'archive-restore' : 'archive'} size="xs" />{archivedIds.has(t.thread_id) ? 'Unarchive' : 'Archive'}</div>
         <div className={`mrow irow${unread ? ' unread' : ''}${ask ? ' ask' : ''}${t.thread_id === openTid ? ' sel' : ''}`} data-thread={t.thread_id} data-inbox-row role="button" tabIndex={0}
           aria-pressed={t.thread_id === openTid}
@@ -186,7 +227,8 @@ export function InboxView({ selected }: { selected?: string }) {
             <span className="t">{ago(last.created_at)}</span>
             {unread ? <span className="dot" role="img" aria-label="Unread" /> : null}
           </div>
-          {summary && !sameLine(summary, baseSubject(t.mails[0].subject)) ? <div className="ir-sum">{summary}</div> : <div className="ir-sum" />}
+          {/* The ask's line sits on the second line, where a long subject can't push it out of view. */}
+          <div className="ir-sum">{phone && ask ? <AskBlockLine thread={t.thread_id} short /> : null}{phone && ask && summary ? ' · ' : null}{summary && !sameLine(summary, baseSubject(t.mails[0].subject)) ? summary : null}</div>
         </div>
       </div>)
   }
@@ -201,7 +243,7 @@ export function InboxView({ selected }: { selected?: string }) {
     </div>)
 
   const parts = [waiting.length ? <span key="w" className="asks">{waiting.length} to answer</span> : null, unreadN ? <span key="u">{unreadN} unread</span> : null].filter(Boolean)
-  const rows = groups.some((g) => g.threads.length) || loose.length
+  const rows = groups.some((g) => g.threads.length) || loose.length || decideLater.length
   const q = query.trim()
   let state: string | null = null
   if (!loaded.mail) state = d.error ? `Couldn't load your mail: ${d.error}` : 'Loading mail…'
@@ -217,7 +259,19 @@ export function InboxView({ selected }: { selected?: string }) {
         <span className="inbox-count" data-inbox-count>{parts.length ? parts.map((p, i) => <span key={i}>{i ? ' · ' : ''}{p}</span>) : `${humanThreads.length} threads`}</span>
         <input className="inbox-search" type="search" aria-label="Search mail" placeholder="Search mail" value={query} data-inbox-search ref={searchBox}
           onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') { setQuery(''); e.currentTarget.blur() } }} />
+        {/* The Mail list's other entries (S-2054): Swipe as a mode of this page, and the history of what was shown. */}
+        {phone ? <>
+          <button type="button" className="inbox-mode" data-swipe-toggle aria-pressed={currentWorld() === 'w:swipe'} title="Your inbox as cards: swipe left to archive, right to leave, up to defer"
+            onClick={() => openWorld('swipe')}>Swipe</button>
+          <button type="button" className="inbox-mode" data-history-toggle aria-pressed={history} title={history ? 'Back to your mail' : 'The pages, agents, threads and issues you visited'}
+            onClick={() => setHistory(!history)}>{history ? 'Inbox' : 'History'}</button>
+        </> : null}
       </div>
+      {digest ? <DigestCard digest={digest} onDismiss={dismissDigest}
+        onNeeds={goNeeds}
+        onItsa={(key) => { const id = itsas.find((x) => x.key === key)?.id; if (id) openItsa(id) }}
+        agentId={(name) => d.agents.find((a) => a.name === name || a.id === name)?.id}
+        onAgent={(id) => openAgent(id)} /> : null}
       <div className="inbox-chips" role="group" aria-label="Mail lists">
         {FILTERS.map((f) => (
           <button key={f.id} type="button" className="inbox-chip" data-filter={f.id} aria-pressed={!searching && filter === f.id} title={f.tip}
@@ -225,7 +279,9 @@ export function InboxView({ selected }: { selected?: string }) {
             {f.label}{count[f.id] ? <span className="n"> {count[f.id]}</span> : null}
           </button>))}
       </div>
-      <div className="inbox-list" ref={list} onScroll={onScroll} data-inbox-list>
+      {history ? <div className="inbox-list"><HistorySide bare /></div> : null}
+      <div className="inbox-list" ref={list} hidden={history} onScroll={onScroll} data-inbox-list>
+        {phone && inAll ? <DelegatedGroup delegated={delegateDialogs} /> : null}
         {groups.map((g) => (
           <section className="inbox-group" key={g.key} data-group={g.key} aria-label={g.label}>
             <h3 className="inbox-group-h">{g.label}<span className="n"> {g.threads.length}</span></h3>
@@ -235,9 +291,13 @@ export function InboxView({ selected }: { selected?: string }) {
           <h3 className="inbox-group-h">Also waiting<span className="n"> {loose.length}</span></h3>
           {loose.map(looseRow)}
         </section> : null}
+        {decideLater.length ? <section className="inbox-group" data-group="decide-later" aria-label="Decide later">
+          <h3 className="inbox-group-h">Decide later<span className="n"> {decideLater.length}</span></h3>
+          {decideLater.map(looseRow)}
+        </section> : null}
         {state ? <div className="inbox-state muted" data-inbox-state={stateKind} role={stateKind === 'error' ? 'alert' : 'status'}>{state}</div> : null}
       </div>
-      <div className="inbox-keys" data-inbox-keys>j/k move · e archive · d defer · r reply</div>
+      <div className="inbox-keys" data-inbox-keys>j/k move · e archive · d defer · u unread · r reply</div>
     </div>
   )
 }

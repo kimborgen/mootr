@@ -1,7 +1,8 @@
 // The Work page's link facts as plain functions: what a link is, how it is labelled, the PR
 // state from the watch, the review and tests recorded on a branch link, and an issue's cost.
 // No browser imports, so the unit tests run in node.
-import type { ItsaLink, LinkMeta } from '../types'
+import { costShort, costTitle } from '../format'
+import type { CostMode, CostModes, ItsaLink, LinkMeta } from '../types'
 
 export type LinkKind = 'branch' | 'github' | 'linear' | 'test' | 'link'
 // Each kind is its own Work column (S-363), in this order; the column id is the kind.
@@ -17,12 +18,14 @@ export interface WatchState {
   updated_at?: string | null
 }
 
-// One issue's row from GET /api/usage/issues (src/issue-costs.ts).
+// One issue's row from GET /api/usage/issues (src/issue-costs.ts). `cost` holds the own and total
+// in every display unit; `mode` is the Settings unit (cost.display.mode) the Work page shows.
 export interface IssueCost {
   key: string
   own: { cost_usd: number }
   total: { cost_usd: number }
   weekly_percent: number | null
+  cost?: { mode: CostMode; own: CostModes; total: CostModes } | null
 }
 export interface IssueCosts { note: string; issues: IssueCost[] }
 
@@ -118,14 +121,23 @@ export function costOf(report: IssueCosts | null | undefined, key: string): Issu
   return report?.issues.find((i) => i.key === key) ?? null
 }
 
-// `$1.23`; a sub-cent amount reads `<$0.01`.
-export function fmtUsd(usd: number): string {
-  return usd > 0 && usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`
+// An issue's own or total cost in the Settings unit, or null when the report has none.
+export function issueCost(c: IssueCost | null | undefined, part: 'own' | 'total'): number | null {
+  return c?.cost?.[part][c.cost.mode] ?? null
 }
 
-// The cost cell's tooltip: own and total, and that the Claude and Codex dollars are estimates.
-export function costTitle(c: IssueCost, note: string): string {
-  return `Own ${fmtUsd(c.own.cost_usd)}, total ${fmtUsd(c.total.cost_usd)} with sub-issues. ${note}`
+// The cost as the sidebar writes it (costShort): `$1.2`, `14%`. `–` when the report has no figure in
+// the unit (as the sidebar does); blank when there is no report row, or it is zero.
+export function fmtIssueCost(c: IssueCost | null | undefined, part: 'own' | 'total'): string {
+  if (!c) return ''
+  const v = issueCost(c, part)
+  if (v == null) return costShort(null, 'api')
+  return v ? costShort(v, c.cost!.mode) : ''
+}
+
+// The cost's tooltip, as the sidebar's costTitle: own, and the tree (the issue with its sub-issues).
+export function issueCostTitle(c: IssueCost): string | undefined {
+  return c.cost ? costTitle({ mode: c.cost.mode, own: c.cost.own, tree: c.cost.total }, true) : undefined
 }
 
 // The window share, `3%`, or null when the share is not known.

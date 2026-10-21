@@ -77,7 +77,7 @@ export const DEV_CHANGE: Process = {
     review: { kind: 'agent', lane: 'reviewer', statuses: ['in_review'] },
     verdict: { kind: 'exclusive', lane: 'reviewer', label: 'Approved?' },
     approve: { kind: 'human', lane: 'human', ask: 'approve', statuses: ['needs_approval'], label: 'Human approves' },
-    merge: { kind: 'script', lane: 'manager', run: 'scripts/merge-pr.mjs', statuses: ['ready_to_merge', 'merging'], label: 'Merge the pull request' },
+    merge: { kind: 'script', lane: 'manager', run: 'npm run build', statuses: ['ready_to_merge', 'merging'], label: 'Merge the pull request' },
     deploy: { kind: 'wait', lane: 'watcher', event: 'deploy', statuses: ['deploying'], label: 'Deploy finishes' },
     done: { kind: 'end', lane: 'watcher', status: 'done', label: 'Deployed' },
   },

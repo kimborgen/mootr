@@ -4,10 +4,11 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempHome } from '../test/tmphome.mjs';
+import { setEnvVar, withMootrTwins } from '../src/env.ts';
 
 const home = tempHome('stam-activity-bench-');
-process.env.STAM_HOME = home;
-for (const k of ['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT']) delete process.env[k];
+setEnvVar('HOME', home);
+for (const k of withMootrTwins(['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT'])) delete process.env[k];
 writeFileSync(join(home, 'settings.json'), JSON.stringify({ cost: { accounts: { claude: { match: { harness: 'claude' } }, codex: { match: { harness: 'codex' } }, openrouter: { match: { harness: 'opencode' }, paid: true } } } }));
 
 const db = await import('../src/db.ts');

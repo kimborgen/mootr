@@ -54,6 +54,15 @@ export function mayEditItsa(me: string, itsaId: string): boolean {
   return isMember(me, x, !isOpenBoard(x.kind));
 }
 
+// The fix named when an agent may not post to an ITSA (S-2424): ask its owner, or the agent that spawned
+// the refused one, to add it with itsa_set participants. Names only who exists.
+function joinAsk(me: string, x: itsa.Itsa, name: (id: string) => string): string {
+  const owner = x.owner && x.owner !== HUMAN ? `the owner, ${name(x.owner)}` : null;
+  const spawner = db.getAgent(me)?.parent_id;
+  const asked = [owner, spawner ? `the agent that spawned you (${name(spawner)})` : null].filter(Boolean);
+  return `Ask ${asked.length ? asked.join(', or ') : 'one of them'} to add you with itsa_set participants.`;
+}
+
 // Why an agent may not read, post to, or change an ITSA: who may, by name, and how to join. A participant
 // of an open board (a feedback report or retro item) may post to it but not change it (S-480), so for a
 // change those participants aren't named as may.
@@ -64,7 +73,7 @@ export function itsaRefusal(me: string, itsaId: string, verb: string): string {
   const boardOnly = verb === 'change' && isOpenBoard(x.kind);
   const who = [...new Set([...owners, ...(boardOnly ? [] : itsa.participants(x.id))])].filter((p) => p !== HUMAN).map(name);
   const may = boardOnly ? 'only its owner, the owners of its parent ITSAs, the chief of staff, the assistant, and the human may change it' : 'only its owner and participants, the owners of its parent ITSAs, the chief of staff, the assistant, and the human may';
-  const how = boardOnly ? 'Ask one of them to make the change.' : 'Ask one of them to add you as a participant.';
+  const how = boardOnly ? 'Ask one of them to make the change.' : verb === 'post to' ? joinAsk(me, x, name) : 'Ask one of them to add you as a participant.';
   return `${name(me)} can't ${verb} ${x.key}: ${may}${who.length ? ` (${who.join(', ')})` : ''}. ${how}`;
 }
 

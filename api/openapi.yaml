@@ -1,0 +1,63 @@
+openapi: 3.0.3
+info:
+  title: stam daemon API
+  version: 0.1.0
+  description: >
+    The contract of the stam daemon's HTTP API (S-2194 plan, section 3). It describes what the TypeScript
+    daemon does today; a shape that breaks a codegen rule is kept and marked `x-legacy`.
+    Split by family: `paths/` holds one path item per file, `schemas/` one schema per file.
+    `api/openapi.bundled.yaml` is the generated single-file form the code generators read
+    (`node scripts/api-gen.mjs`).
+servers:
+  - url: http://127.0.0.1:7878
+security:
+  - bearer: []
+paths:
+  /api/health:
+    $ref: ./paths/health.yaml
+  /api/agents:
+    $ref: ./paths/agents.yaml
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: The daemon token (`STAM_HOME/token`), an agent's launch token, or the peer token.
+  schemas:
+    Error:
+      $ref: ./schemas/Error.yaml
+    HumanOnMachineRefusal:
+      $ref: ./schemas/HumanOnMachineRefusal.yaml
+    Health:
+      $ref: ./schemas/Health.yaml
+    Agent:
+      $ref: ./schemas/Agent.yaml
+    AgentBlocker:
+      $ref: ./schemas/AgentBlocker.yaml
+    AgentCost:
+      $ref: ./schemas/AgentCost.yaml
+    AgentCostModes:
+      $ref: ./schemas/AgentCostModes.yaml
+    AgentLoad:
+      $ref: ./schemas/AgentLoad.yaml
+    AgentRaw:
+      $ref: ./schemas/AgentRaw.yaml
+    AgentRawAccount:
+      $ref: ./schemas/AgentRawAccount.yaml
+    AgentResting:
+      $ref: ./schemas/AgentResting.yaml
+    AgentWait:
+      $ref: ./schemas/AgentWait.yaml
+  responses:
+    Error:
+      description: The error envelope.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    HumanOnMachine:
+      description: The write is the human's, on the machine that owns the agent (`refusal` and `origin` say where).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HumanOnMachineRefusal'

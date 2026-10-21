@@ -44,11 +44,12 @@ const fake = createServer((req, res) => {
     answer(res, req, body);
   });
 });
-let llm;
+let llm, secrets;
 before(() => new Promise((r) => fake.listen(0, '127.0.0.1', () => { process.env.STAM_OPENROUTER_URL = `http://127.0.0.1:${fake.address().port}`; r(); })));
 before(async () => {
   writeFileSync(join(home, 'opencode.env'), 'OPENROUTER_API_KEY=sk-test\n');
   llm = await import('../src/llm/index.ts');
+  secrets = await import('../src/secrets.ts');
 });
 after(() => { fake.close(); rmSync(home, { recursive: true, force: true }); });
 
@@ -100,14 +101,17 @@ test('one poll uses one key: a rotation while /credits is pending does not reach
   try {
     const pending = or.balance(snapshot);
     await reached;
-    // The key rotates while the server holds /credits; the poll's /key call still uses the snapshot.
-    writeFileSync(join(home, 'opencode.env'), 'OPENROUTER_API_KEY=sk-rotated\n');
+    // The key rotates in the secret store (S-2114) while the server holds /credits; the poll's /key
+    // call still uses the snapshot.
+    secrets.set('openrouter', { value: 'sk-rotated' });
+    assert.equal(or.apiKey(), 'sk-rotated', 'the effective key rotated');
     release();
     await pending;
     await or.keyLimit(snapshot);
   } finally {
+    release();
     hold = null;
-    writeFileSync(join(home, 'opencode.env'), 'OPENROUTER_API_KEY=sk-test\n');
+    secrets.set('openrouter', { value: 'sk-test' });
   }
   assert.deepEqual(seen.map((r) => [r.url, r.auth]), [['/credits', 'Bearer sk-test'], ['/key', 'Bearer sk-test']]);
 });
@@ -119,6 +123,10 @@ test('balance, keyLimit and decisions', async () => {
   seen.length = 0;
   assert.deepEqual(await or.decisions({ model: 'm', state: 's', questions: {} }, { timeoutMs: 1000 }), { answers: {} });
   assert.equal(seen[0].url, '/decisions');
+  // The caller's key snapshot is the key used, not a second read of the key source.
+  seen.length = 0;
+  await or.decisions({ model: 'm', state: 's', questions: {} }, { timeoutMs: 1000, key: 'sk-snapshot' });
+  assert.equal(seen[0].auth, 'Bearer sk-snapshot');
   mode = 'limited';
   try {
     assert.equal(await or.balance(), null);

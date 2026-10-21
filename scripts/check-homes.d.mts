@@ -1,0 +1,10 @@
+export const CHECK_PREFIX: string;
+export const CHECK_HOME_MAX_AGE_MS: number;
+export const checkRoot: () => string;
+export const checkRoots: () => string[];
+export function heldHomes(homes: string[], proc?: string): { held: Set<string>; unsure: string[] };
+export function sweepCheckHomes(opts?: { roots?: string[]; now?: number; maxAgeMs?: number; log?: (line: string) => void; proc?: string }): string[];
+export const OWNER_FILE: string;
+export const real: (path: string) => string;
+export function procStart(pid: number | string, proc?: string): string;
+export function writeOwner(home: string, pid?: number, proc?: string): void;

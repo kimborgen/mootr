@@ -1,0 +1,8 @@
+# oapi-codegen config for api/openapi.bundled.yaml; run by `node scripts/api-gen.mjs` from go/ (S-2388); the output path is relative to go/.
+package: api
+output: internal/api/api.gen.go
+generate:
+  models: true
+  std-http-server: true
+output-options:
+  skip-prune: true

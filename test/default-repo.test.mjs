@@ -53,7 +53,7 @@ test('prOpen.repo defaults to the first configured repo', () => {
 test('default file roots are the folder holding the running checkout plus attachments and worktrees; a registered repo adds none', () => {
   const parent = dr.derivedRepoParent();
   assert.deepEqual(files.defaultRoots(), [parent, join(stamHome, 'attachments'), join(stamHome, 'worktrees')]);
-  // Kim's layout: a checkout at ~/projects/stam2 opens ~/projects.
+  // A layout with a checkout at ~/projects/stam2 opens ~/projects.
   assert.equal(dr.derivedRepoParent(join(home, 'projects', 'stam2')), realpathSync(join(home, 'projects')));
   // An outside repo in itsa.repos does not open its siblings.
   const siblings = join(home, 'srv', 'repos');
@@ -68,7 +68,7 @@ test('storage remote: a named setting wins; else `storage` only with a storage p
   assert.equal(st.storageRemoteFallback(['origin', 'storage']), '', 'a fresh install with no storage peer');
   assert.equal(st.storageRemoteFallback(['origin']), '');
   st.setSetting('peers', [{ name: 'storage', url: 'http://storage:7878', token: 't' }]);
-  assert.equal(st.storageRemoteFallback(['origin', 'storage']), 'storage', 'Kim: storage peer and remote');
+  assert.equal(st.storageRemoteFallback(['origin', 'storage']), 'storage', 'the storage peer and remote');
   assert.equal(st.storageRemoteFallback(['origin']), '');
   st.setSetting('itsa', { ...st.settings().itsa, prOpen: { ...st.settings().itsa.prOpen, storage: 'backup' } });
   assert.equal(st.storageRemoteFallback(['origin']), 'backup');

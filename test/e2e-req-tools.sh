@@ -95,12 +95,7 @@ d = json.load(sys.stdin)
 v = d["verdicts"]
 assert len(v) == 1 and v[0]["verdict"] == "violates", v
 ' || fail "the stored verdict isn't a violation"
-WAIVERS=$(python3 - "$STAM_HOME" <<'PY'
-import sqlite3, sys, glob
-db = sqlite3.connect(sys.argv[1] + "/stam.db")
-print(db.execute("select count(*) from req_waivers where kind = 'false_positive' and reason = 'the stub says so'").fetchone()[0])
-PY
-)
+WAIVERS=$(get /api/test/req-waivers | python3 -c "import json,sys; print(sum(w['kind'] == 'false_positive' and w['reason'] == 'the stub says so' for w in json.load(sys.stdin)))")
 [ "$WAIVERS" = 1 ] || fail "the waiver wasn't stored ($WAIVERS)"
 # The false positive demoted the requirement; the preview recorded nothing (still one verdict).
 get /api/requirements/R-1 | python3 -c '
@@ -112,12 +107,7 @@ assert (p["violates"], p["false_positives"], p["rate"]) == (1, 1, 1.0), p
 assert d["verdicts"][0]["waiver"]["kind"] == "false_positive", d["verdicts"]
 assert len(d["verdicts"]) == 1, d["verdicts"]
 ' || fail "R-1 wasn't demoted to observe with its precision shown"
-DEMOTED=$(python3 - "$STAM_HOME" <<'PY'
-import sqlite3, sys
-db = sqlite3.connect(sys.argv[1] + "/stam.db")
-print(db.execute("select count(*) from events where type = 'req:demoted'").fetchone()[0])
-PY
-)
+DEMOTED=$(get "/api/test/events?type=req:demoted" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
 [ "$DEMOTED" = 1 ] || fail "no req:demoted event ($DEMOTED)"
 # API level, with the body the MCP shim sends (an agent's `by` beside the fields): under `any`
 # approval an agent moves a draft to in force by naming its rev, and not without it; under `human`

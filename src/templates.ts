@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { ROOT, STAM_HOME } from './config.ts';
-import { settings, mayMailHuman } from './settings.ts';
+import { settings, mayMailHuman, peerShared } from './settings.ts';
 import { agentTypes, typeTemplate } from './agent-types.ts';
 import { hasBlocks, blocksText, composedText } from './blocks.ts';
 
@@ -12,21 +12,35 @@ import { hasBlocks, blocksText, composedText } from './blocks.ts';
 // template built from blocks, not to a user override, which is the whole file.
 export function template(name: string, type?: string | null): string {
   const blocks = type ? agentTypes()[type]?.blocks : undefined;
-  for (const dir of [join(STAM_HOME, 'templates'), join(ROOT, 'templates')]) {
-    try {
-      return readFileSync(join(dir, `${name}.md`), 'utf8');
-    } catch {}
-    if (dir !== join(STAM_HOME, 'templates') && hasBlocks(name)) return blocks ? composedText(name, blocks) : blocksText(name);
-  }
+  const user = userTemplate(name);
+  if (user !== null) return user;
+  try {
+    return readFileSync(join(ROOT, 'templates', `${name}.md`), 'utf8');
+  } catch {}
+  if (hasBlocks(name)) return blocks ? composedText(name, blocks) : blocksText(name);
   // A type the user added has no shipped instructions: empty until they write some.
   if (isTypeTemplate(name)) return '';
   throw new Error(`no template ${name}`);
 }
 
+// The user's override of a template, or null. A type's template (type-NAME) lives on the settings
+// home (S-417): a non-home daemon with the home's cached copy reads that, and ignores its own file,
+// so the home's removal or edit reaches it; else the file in STAM_HOME/templates.
+export const SHARED_TEMPLATE = /^type-[\w-]+$/;
+export function userTemplate(name: string): string | null {
+  const shared = SHARED_TEMPLATE.test(name) ? peerShared()?.templates : undefined;
+  if (shared) return shared[name] ?? null;
+  try {
+    return readFileSync(join(STAM_HOME, 'templates', `${name}.md`), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
 // Whether `name` is rendered from its blocks, so a type's composition applies: not when the user
 // (STAM_HOME/templates) or the repo's templates folder overrides it with a whole file.
 export const rendersFromBlocks = (name: string): boolean =>
-  hasBlocks(name) && !existsSync(join(STAM_HOME, 'templates', `${name}.md`)) && !existsSync(join(ROOT, 'templates', `${name}.md`));
+  hasBlocks(name) && userTemplate(name) === null && !existsSync(join(ROOT, 'templates', `${name}.md`));
 
 const isTypeTemplate = (name: string) => Object.keys(agentTypes()).some((t) => typeTemplate(t) === name);
 
@@ -81,7 +95,7 @@ export function listTemplates(): { name: string; text: string; overridden: boole
   const names = [...new Set([...shipped.filter((n) => !n.startsWith('type-') || isTypeTemplate(n)), ...Object.keys(agentTypes()).map(typeTemplate)])];
   return names.map((name) => {
     const file = join(ROOT, 'templates', `${name}.md`);
-    return { name, text: template(name), overridden: existsSync(join(STAM_HOME, 'templates', `${name}.md`)), default: existsSync(file) ? readFileSync(file, 'utf8') : hasBlocks(name) ? blocksText(name) : '' };
+    return { name, text: template(name), overridden: userTemplate(name) !== null, default: existsSync(file) ? readFileSync(file, 'utf8') : hasBlocks(name) ? blocksText(name) : '' };
   });
 }
 

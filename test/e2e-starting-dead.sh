@@ -7,25 +7,21 @@
 set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 daemon_home sd
-SEED="$TEST_TMP/seed-starting.mjs"
-cat >"$SEED" <<'EOF'
-const db = await import(process.env.ROOT + '/src/db.ts');
-db.open();
-const ws = JSON.stringify({ spec: { kind: 'dir', path: '/tmp' }, cwd: '/tmp' });
-const agent = (id, name, activity, created, pending) => {
-  db.createAgent({ id, name, role: 'dev', machine: 'sd', harness: 'claude', model: null, effort: null, cwd: '/tmp', parent_id: id === 'sup' ? null : 'sup', session_id: null });
-  db.updateAgent(id, { lifecycle: 'active', activity, activity_detail: 'with prompt', workspace: ws, created_at: created, ...(pending ? { pending_action: JSON.stringify(pending) } : {}) });
-};
-agent('sup', 'sup', 'idle', new Date().toISOString(), null);
-// 20 minutes old: past the 10-minute deadline, so reconcile marks it dead and archives it.
-agent('stuck-old', 'stuck-old', 'starting', new Date(Date.now() - 20 * 60_000).toISOString(), { type: 'archive', force: false });
-// 90 seconds old: past the old 60 s grace but under the 10-minute deadline; it must stay starting.
-agent('stuck-recent', 'stuck-recent', 'starting', new Date(Date.now() - 90_000).toISOString(), { type: 'archive', force: false });
-// An active agent with no session: the first reconcile tick marks it, so the test can wait on a tick.
-agent('marker', 'marker', 'idle', new Date().toISOString(), null);
-EOF
+# Seeded before the daemon starts (test-seed.json, read once at startup by a test daemon).
+node -e '
+const ws = { spec: { kind: "dir", path: "/tmp" }, cwd: "/tmp" };
+const agent = (id, activity, created, pending) => ({ agent: id, create: { machine: "sd" }, ...(id === "sup" ? {} : { parent: "sup" }), lifecycle: "active", activity, activity_detail: "with prompt", workspace: ws, created_at: created, ...(pending ? { pending_action: pending } : {}) });
+const agents = [
+  agent("sup", "idle", new Date().toISOString()),
+  // 20 minutes old: past the 10-minute deadline, so reconcile marks it dead and archives it.
+  agent("stuck-old", "starting", new Date(Date.now() - 20 * 60_000).toISOString(), { type: "archive", force: false }),
+  // 90 seconds old: past the old 60 s grace but under the 10-minute deadline; it must stay starting.
+  agent("stuck-recent", "starting", new Date(Date.now() - 90_000).toISOString(), { type: "archive", force: false }),
+  // An active agent with no session: the first reconcile tick marks it, so the test can wait on a tick.
+  agent("marker", "idle", new Date().toISOString()),
+];
+console.log(JSON.stringify({ agents }));' >"$TEST_TMP/sd/test-seed.json"
 printf '{ "peers": [], "startingTimeoutMinutes": 10 }\n' >"$TEST_TMP/sd/settings.json"
-ROOT="$ROOT" STAM_HOME="$TEST_TMP/sd" node "$SEED"
 use sd
 daemon_up sd
 fail() { echo "FAIL: $1"; exit 1; }

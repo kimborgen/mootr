@@ -65,4 +65,22 @@ describe('the history on the browser history', () => {
     expect(shell.currentWorld()).toBe('x1')
     expect(historyState().entries).toEqual(before.entries)
   })
+  it('a jump to the shown row calls no history.go, since go(0) reloads the page', () => {
+    const go = vi.spyOn(history, 'go').mockImplementation(() => {})
+    jumpToEntry(historyState().marker)
+    expect(go).not.toHaveBeenCalled()
+    go.mockRestore()
+  })
+  it('back onto a dead entry with a live one at the same position calls no history.go(0)', async () => {
+    shell.showAgentWorld('x1'); await tick()
+    shell.showAgentWorld('dead1'); await tick()
+    const go = vi.spyOn(history, 'go').mockImplementation(() => {})
+    // Back onto the dead entry's position from above lands on x1's position, a live entry there.
+    const n = historyState().entries.find((e) => e.key === 'x1')!.pos
+    const stam = { ...(history.state as { stam: object }).stam, current: 'dead1' }
+    window.dispatchEvent(new PopStateEvent('popstate', { state: { stam, n } }))
+    await tick()
+    expect(go).not.toHaveBeenCalled()
+    go.mockRestore()
+  })
 })

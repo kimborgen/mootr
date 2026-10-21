@@ -1,20 +1,21 @@
 // The merge gate's CPU cap (S-2107): the whole gate process tree (the node gate, its gates, vitest workers, headless Chrome)
-// runs in one systemd scope with CPUQuota=STAM_GATE_CPU_QUOTA (default 100%, one CPU), niced, with one vitest worker.
+// runs in one systemd scope with CPUQuota=STAM_GATE_CPU_QUOTA (default 200%, two CPUs; 100% at first, raised after it slowed big trains, S-2107), niced, with one vitest worker.
 // Where systemd-run --user can't start a scope (not installed, no user bus, a container) it runs niced only and says so.
 // STAM_GATE_CPU_QUOTA=0 or off disables the scope; the nice stays. Only the merge gate is capped, never the deploy path.
 import { spawnSync } from 'node:child_process';
+import { envVar } from '../src/env.ts';
 
 const NICE = ['nice', '-n', '10'];
-const DEFAULT_QUOTA = '100%';
+const DEFAULT_QUOTA = '200%';
 
 // The quota as a systemd percentage ("100%"), or null when the cap is off. Only whole percents from 1 to 10000 count; anything
 // else logs and uses the default.
 export function quotaOf(env = process.env, log = (m) => console.error(m)) {
-  const raw = String(env.STAM_GATE_CPU_QUOTA ?? DEFAULT_QUOTA).trim().toLowerCase();
+  const raw = String(envVar('GATE_CPU_QUOTA', env) ?? DEFAULT_QUOTA).trim().toLowerCase();
   if (raw === '0' || raw === '0%' || raw === 'off') return null;
   const m = /^(\d{1,5})%?$/.exec(raw);
   if (m && Number(m[1]) >= 1 && Number(m[1]) <= 10_000) return `${Number(m[1])}%`;
-  log(`gate cpu cap: STAM_GATE_CPU_QUOTA=${env.STAM_GATE_CPU_QUOTA} isn't a whole percent from 1 to 10000; using ${DEFAULT_QUOTA}`);
+  log(`gate cpu cap: STAM_GATE_CPU_QUOTA=${envVar('GATE_CPU_QUOTA', env)} isn't a whole percent from 1 to 10000; using ${DEFAULT_QUOTA}`);
   return DEFAULT_QUOTA;
 }
 

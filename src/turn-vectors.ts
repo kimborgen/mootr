@@ -17,6 +17,7 @@ import { unreadBytes } from './adapters/claude-view.ts';
 import type { TailRequest, TailResult } from './turn-read-worker.ts';
 import { settings } from './settings.ts';
 import { enqueue, source } from './vectors.ts';
+import { gzippedOnly } from './transcript-gz.ts';
 
 // Messages read at a turn end: enough to hold the latest turns, however many tool calls they made.
 const RECENT_MESSAGES = 120;
@@ -188,6 +189,9 @@ async function readMessages(a: db.Agent, since: number, newestOnly: boolean): Pr
 // when it has no view.
 async function readTurns(a: db.Agent, since: number, newestOnly: boolean): Promise<{ turns: Turn[]; bytes: number }> {
   const cur = db.getAgent(a.id) ?? a;
+  // A gzipped transcript (an archived agent's) is not read, as that would restore it: turns not yet embedded
+  // stay out of turn search until the agent is restored.
+  if (gzippedOnly(cur.transcript_path)) return { turns: [], bytes: 0 };
   const { messages, more, bytes } = await readMessages(cur, since, newestOnly);
   const turns = turnsOf(a.id, messages, more, RUNNING.has(cur.activity ?? ''), cur.parent_id)
     .filter((t) => t.at >= since)

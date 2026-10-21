@@ -52,12 +52,15 @@ export async function lookupDecl(q: DeclQuery, o: LookupOptions = {}): Promise<D
 }
 
 // Whether a name has a declaration, for the Ctrl/Cmd hover underline: answers kept per query, a building index says no.
+// `from` only ranks matches, never filters them, so the answer is the same wherever in the file it is asked from: the
+// query is kept and asked without it, one entry per name (S-2104 review).
 const known = new Map<string, Promise<boolean>>()
 export function hasDecl(q: DeclQuery): Promise<boolean> {
-  const key = declUrl(q)
+  const bare: DeclQuery = 'repo' in q ? { repo: q.repo, sha: q.sha, name: q.name } : { host: q.host, file: q.file, name: q.name }
+  const key = declUrl(bare)
   let hit = known.get(key)
   if (!hit) {
-    hit = lookupDecl(q, { maxPolls: 0 }).then((r) => r.state === 'ready' && r.matches.length > 0, () => { known.delete(key); return false })
+    hit = lookupDecl(bare, { maxPolls: 0 }).then((r) => r.state === 'ready' && r.matches.length > 0, () => { known.delete(key); return false })
     known.set(key, hit)
     while (known.size > 500) known.delete(known.keys().next().value!)
   }

@@ -27,9 +27,18 @@ const state = {
   key: { status: 200, limit: null, limit_remaining: null },
 };
 const hits = [];
-const server = createServer((req, res) => {
+// Each call's path and Authorization header; while `holdCredits` is set, /credits waits for it (the call is pending at the server).
+const calls = [];
+let holdCredits = null;
+let onCredits = () => {};
+const server = createServer(async (req, res) => {
   hits.push(req.url);
+  calls.push([req.url, req.headers.authorization]);
   res.setHeader('content-type', 'application/json');
+  if (req.url === '/api/v1/credits' && holdCredits) {
+    onCredits();
+    await holdCredits;
+  }
   if (req.url === '/api/v1/credits') {
     res.writeHead(state.credits.status);
     res.end(state.credits.status === 200 ? JSON.stringify({ data: { total_credits: state.credits.total_credits, total_usage: state.credits.total_usage } }) : '{}');
@@ -71,6 +80,28 @@ test('pollCredits > stores the balance as a subscription entry', async () => {
   assert.equal(c.key_limit, null);
   assert.equal(lowMails(), before, 'above the threshold, so no warning');
   assert.ok(hits.includes('/api/v1/credits') && hits.includes('/api/v1/key'));
+});
+
+test('pollCredits > one poll uses one key: a rotation while /credits is pending does not reach /key', async () => {
+  setCredits({});
+  setKey({});
+  reset();
+  calls.length = 0;
+  let release;
+  holdCredits = new Promise((r) => (release = r));
+  const reached = new Promise((r) => (onCredits = r));
+  try {
+    const poll = credits.pollCredits();
+    await reached;
+    // The key rotates while the server holds /credits; the poll's /key call still uses the key it started with.
+    writeFileSync(join(home, 'opencode.env'), 'OPENROUTER_API_KEY=rotated-key\n');
+    release();
+    await poll;
+  } finally {
+    holdCredits = null;
+    writeFileSync(join(home, 'opencode.env'), 'OPENROUTER_API_KEY=test-key\n');
+  }
+  assert.deepEqual(calls, [['/api/v1/credits', 'Bearer test-key'], ['/api/v1/key', 'Bearer test-key']]);
 });
 
 test('pollCredits > a key limit caps the remaining balance', async () => {
@@ -180,7 +211,9 @@ test('pollCredits > keeps a warning pending until a sender can send it', async (
 });
 
 test('pollCredits > no key, no call, no entry', async () => {
+  // The key was imported into the secret store at first read (S-2114): no key means neither file.
   rmSync(join(home, 'opencode.env'));
+  rmSync(join(home, 'secrets.json'), { force: true });
   reset();
   const count = hits.length;
   await credits.pollCredits();

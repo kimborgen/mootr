@@ -43,8 +43,8 @@ afterEach(async () => {
 // A PR #1 that is open on head `sha1`, with one in-progress check run.
 function seedOpenPr(head = 'sha1') {
   fake.update({
-    issues: { 'o/r#1': { number: 1, title: 'PR one', state: 'open', html_url: 'https://github.com/o/r/pull/1', user: { login: 'kim' }, pull_request: { url: 'x' } } },
-    pulls: { 'o/r#1': { number: 1, title: 'PR one', state: 'open', merged: false, draft: false, html_url: 'https://github.com/o/r/pull/1', user: { login: 'kim' }, head: { sha: head, ref: 'feature' }, base: { ref: 'main' } } },
+    issues: { 'o/r#1': { number: 1, title: 'PR one', state: 'open', html_url: 'https://github.com/o/r/pull/1', user: { login: 'octocat' }, pull_request: { url: 'x' } } },
+    pulls: { 'o/r#1': { number: 1, title: 'PR one', state: 'open', merged: false, draft: false, html_url: 'https://github.com/o/r/pull/1', user: { login: 'octocat' }, head: { sha: head, ref: 'feature' }, base: { ref: 'main' } } },
   });
 }
 
@@ -113,7 +113,7 @@ test('a review, a comment, and a merge each emit once with stable dedupe keys', 
   fake.update({ checkRuns: { 'o/r@sha1': [{ name: 'build', status: 'completed', conclusion: 'success' }] }, statuses: { 'o/r@sha1': { state: 'success', statuses: [] } } });
   let held = (await poll('github:o/r#1', { state: null, etags: {} })).held;
 
-  fake.update({ reviews: { 'o/r#1': [{ id: 7, state: 'APPROVED', user: { login: 'kim' }, submitted_at: '2026-10-11T10:00:00Z' }] } });
+  fake.update({ reviews: { 'o/r#1': [{ id: 7, state: 'APPROVED', user: { login: 'octocat' }, submitted_at: '2026-10-11T10:00:00Z' }] } });
   let r = await poll('github:o/r#1', held);
   const review = r.events.find((e) => e.type === 'review.submitted');
   assert.ok(review, `review.submitted expected: ${types(r)}`);
@@ -138,7 +138,7 @@ test('a review, a comment, and a merge each emit once with stable dedupe keys', 
 
   // The merged event's subjects name the PR and its repo, and the actor is the GitHub login.
   assert.deepEqual(merged.subjects, ['github:o/r#1', 'github:o/r']);
-  assert.equal(merged.actor, 'kim');
+  assert.equal(merged.actor, 'octocat');
 });
 
 test('an issue emits opened, closed, and reopened', async () => {
@@ -146,7 +146,7 @@ test('an issue emits opened, closed, and reopened', async () => {
   // so a later open is `opened`.
   let held = (await poll('github:o/r#5', { state: null, etags: {} })).held;
   assert.equal(held.state.absent, true, 'a missing issue is recorded as absent');
-  fake.update({ issues: { 'o/r#5': { number: 5, title: 'Bug', state: 'open', html_url: 'https://github.com/o/r/issues/5', user: { login: 'kim' } } } });
+  fake.update({ issues: { 'o/r#5': { number: 5, title: 'Bug', state: 'open', html_url: 'https://github.com/o/r/issues/5', user: { login: 'octocat' } } } });
   let r = await poll('github:o/r#5', held);
   assert.ok(types(r).includes('issue.opened'), `issue.opened expected: ${types(r)}`);
   held = r.held;
@@ -160,10 +160,10 @@ test('an issue emits opened, closed, and reopened', async () => {
 });
 
 test('a repository event emits once, mapped to a push with its branch and count', async () => {
-  fake.update({ events: { 'o/r': [{ id: 100, type: 'PushEvent', actor: { login: 'kim' }, payload: { ref: 'refs/heads/main', commits: [{}, {}] }, created_at: '2026-10-11T10:00:00Z' }] } });
+  fake.update({ events: { 'o/r': [{ id: 100, type: 'PushEvent', actor: { login: 'octocat' }, payload: { ref: 'refs/heads/main', commits: [{}, {}] }, created_at: '2026-10-11T10:00:00Z' }] } });
   let held = (await poll('github:o/r', { state: null, etags: {} })).held;
   assert.deepEqual((await poll('github:o/r', held)).events, [], 'the first poll of a repo is silent');
-  fake.update({ events: { 'o/r': [{ id: 101, type: 'PushEvent', actor: { login: 'kim' }, payload: { ref: 'refs/heads/main', commits: [{}] }, created_at: '2026-10-11T11:00:00Z' }, ...fake.data.events['o/r']] } });
+  fake.update({ events: { 'o/r': [{ id: 101, type: 'PushEvent', actor: { login: 'octocat' }, payload: { ref: 'refs/heads/main', commits: [{}] }, created_at: '2026-10-11T11:00:00Z' }, ...fake.data.events['o/r']] } });
   const r = await poll('github:o/r', held);
   const push = r.events.find((e) => e.type === 'push');
   assert.ok(push, `push expected: ${types(r)}`);
@@ -198,7 +198,7 @@ test('tick ingests changes for watched subjects, and a low rate limit backs it o
 
 test('stateFor returns a pull request’s fields and an issue’s, for the dashboard', async () => {
   seedOpenPr();
-  fake.update({ checkRuns: { 'o/r@sha1': [{ name: 'build', status: 'completed', conclusion: 'success' }] }, statuses: { 'o/r@sha1': { state: 'success', statuses: [] } }, reviews: { 'o/r#1': [{ id: 1, state: 'APPROVED', user: { login: 'kim' }, submitted_at: '2026-10-11T10:00:00Z' }] } });
+  fake.update({ checkRuns: { 'o/r@sha1': [{ name: 'build', status: 'completed', conclusion: 'success' }] }, statuses: { 'o/r@sha1': { state: 'success', statuses: [] } }, reviews: { 'o/r#1': [{ id: 1, state: 'APPROVED', user: { login: 'octocat' }, submitted_at: '2026-10-11T10:00:00Z' }] } });
   db.setWatchState('github:o/r#1', (await poll('github:o/r#1', { state: null, etags: {} })).state, {});
   const view = github.stateFor(['github:o/r#1', 'github:o/r#9']);
   assert.equal(view['github:o/r#1'].state, 'open');
@@ -215,7 +215,7 @@ test('stateFor returns a pull request’s fields and an issue’s, for the dashb
 test('a change again later is a new event: close, reopen, and close again emit three', async () => {
   // Each change moves the issue's updated_at, so the dedupe key names the change, not just the type.
   let held = (await poll('github:o/r#6', { state: null, etags: {} })).held;
-  fake.update({ issues: { 'o/r#6': { number: 6, title: 'Flaky', state: 'open', updated_at: '2026-10-11T10:00:00Z', html_url: 'https://github.com/o/r/issues/6', user: { login: 'kim' } } } });
+  fake.update({ issues: { 'o/r#6': { number: 6, title: 'Flaky', state: 'open', updated_at: '2026-10-11T10:00:00Z', html_url: 'https://github.com/o/r/issues/6', user: { login: 'octocat' } } } });
   held = (await poll('github:o/r#6', held)).held;
   const events = [];
   for (const [state, at] of [['closed', '2026-10-11T11:00:00Z'], ['open', '2026-10-11T12:00:00Z'], ['closed', '2026-10-11T13:00:00Z']]) {
@@ -249,7 +249,7 @@ test('checks fail, a re-run fails again: two checks.completed, each with its own
 
 test('a busy repo: page 1 all new reads page 2, each event emits once, and a 304 on page 1 fetches nothing more', async () => {
   // Two events a page: page 1 is all new, so page 2 is read; its last event is the old one, so the read stops there.
-  const ev = (id) => ({ id, type: 'PushEvent', actor: { login: 'kim' }, payload: { ref: 'refs/heads/main', commits: [{}] }, created_at: '2026-10-11T10:00:00Z' });
+  const ev = (id) => ({ id, type: 'PushEvent', actor: { login: 'octocat' }, payload: { ref: 'refs/heads/main', commits: [{}] }, created_at: '2026-10-11T10:00:00Z' });
   fake.update({ pageSize: 2, events: { 'o/r': [ev(100)] } });
   let held = (await poll('github:o/r', { state: null, etags: {} })).held;
   assert.equal(held.state.lastEventId, 100);
@@ -325,8 +325,8 @@ test('a comment carries when it happened, and a review comment names the agent t
 
   // Every agent posts as one GitHub account; the review script's text names the stam agent.
   fake.update({ comments: { 'o/r#1': [
-    { id: 9, user: { login: 'kim' }, body: 'please rebase', created_at: '2026-10-11T11:00:00Z', updated_at: '2026-10-11T11:00:00Z' },
-    { id: 10, user: { login: 'kim' }, body: 'Review (aminj): request_changes. not yet', created_at: '2026-10-11T11:05:00Z', updated_at: '2026-10-11T11:05:00Z' },
+    { id: 9, user: { login: 'octocat' }, body: 'please rebase', created_at: '2026-10-11T11:00:00Z', updated_at: '2026-10-11T11:00:00Z' },
+    { id: 10, user: { login: 'octocat' }, body: 'Review (aminj): request_changes. not yet', created_at: '2026-10-11T11:05:00Z', updated_at: '2026-10-11T11:05:00Z' },
   ] } });
   const r = await poll('github:o/r#1', held);
   const comments = r.events.filter((e) => e.type === 'comment.created');
@@ -384,7 +384,7 @@ test('a PR the first poll finds open mirrors once; a later poll with the same he
 });
 
 test('a first poll of a closed PR or an issue does not mirror', async () => {
-  fake.update({ pulls: { 'o/r#1': { number: 1, title: 'PR one', state: 'closed', merged: false, draft: false, html_url: 'https://github.com/o/r/pull/1', user: { login: 'kim' }, head: { sha: 'sha1', ref: 'feature' }, base: { ref: 'main' } } }, issues: { 'o/r#1': { number: 1, title: 'PR one', state: 'closed', html_url: 'https://github.com/o/r/pull/1', user: { login: 'kim' }, pull_request: { url: 'x' } } } });
+  fake.update({ pulls: { 'o/r#1': { number: 1, title: 'PR one', state: 'closed', merged: false, draft: false, html_url: 'https://github.com/o/r/pull/1', user: { login: 'octocat' }, head: { sha: 'sha1', ref: 'feature' }, base: { ref: 'main' } } }, issues: { 'o/r#1': { number: 1, title: 'PR one', state: 'closed', html_url: 'https://github.com/o/r/pull/1', user: { login: 'octocat' }, pull_request: { url: 'x' } } } });
   const closed = await poll('github:o/r#1', { state: null, etags: {} });
   assert.equal(github.mirrorsHead(null, closed), false, 'a closed PR is not mirrored on first sight');
   assert.equal(github.mirrorsHead(null, { events: [], state: { type: 'issue', state: 'open' } }), false, 'an issue has no head to mirror');

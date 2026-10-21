@@ -8,7 +8,7 @@ import { api, ApiError } from '../api'
 import { closeImage, ImageViewer } from '../ImageViewer'
 import { closeSpawnPanel } from '../spawn'
 import { getData } from '../store'
-import { hideMenu, MenuLayer } from '../ui/menu'
+import { clearNotice, hideMenu, MenuLayer, setStanding } from '../ui/menu'
 import { AGENTS, applyState, installFixtures } from './fixtures'
 import { OnMount, pendingStepError } from './helpers'
 import isolateSource from '../../public/stories-isolate.js?raw'
@@ -114,7 +114,7 @@ describe('every state', () => {
       // A step that never succeeds fails the state with its last error, not silently at unmount.
       await act(async () => { await vi.waitFor(() => { const p = pendingStepError(); if (p) throw p.err }, { timeout: 2000 }) })
     } finally {
-      act(() => { hideMenu(); closeImage(); closeSpawnPanel(); root.unmount() })
+      act(() => { hideMenu(); clearNotice(); setStanding(null); closeImage(); closeSpawnPanel(); root.unmount() })
       host.remove()
     }
   })

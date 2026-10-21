@@ -6,7 +6,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Icon } from '../Icon'
-import { ModelPicker } from './ModelPicker'
+import { ProviderModelPicker, usableProviders, type ProviderCfg } from './ProvidersSettings'
 
 type Json = string | number | boolean | null | Json[] | { [k: string]: Json }
 export interface TinyExtra { path: string; kind: 'bool' | 'number'; label: string; help: string; unit?: string; min?: number; max?: number; step?: number }
@@ -136,6 +136,10 @@ export function TinyModelsSettings({ s, disabled = false, why, set, initial }: {
   const on = isOn(m, s)
   const model = modelOf(m, s)
   const optionalModel = !m.toggle && !m.usedBy
+  // The configured providers (Settings › Model providers, S-2115) a step can use besides OpenRouter: complete ones only.
+  const ids = usableProviders(((s as { providers?: Record<string, ProviderCfg> } | null)?.providers) ?? {})
+  const via = ids.length ? ' From OpenRouter or a provider under Model providers.' : ''
+
   return (
     <>
       <p><button type="button" className="btn" onClick={() => open(null)}><Icon name="chevron-left" size="xs" />All tiny models</button></p>
@@ -150,8 +154,8 @@ export function TinyModelsSettings({ s, disabled = false, why, set, initial }: {
                 : <span className="chip">{on ? 'On' : 'Off'}</span>}
             </Row>
           )}
-        <Row label="Model" help={m.id === 'activityClassify' ? 'It uses the decision model, shared with the mail checks.' : optionalModel ? 'An OpenRouter model. A small, cheap one is enough, such as google/gemma-3-4b-it. Empty: off.' : 'An OpenRouter model id. A cheap one is enough.'}>
-          <ModelPicker kind="openrouter" value={model} placeholder={optionalModel ? 'Off' : 'Default'} label={`${m.label} model`} disabled={disabled} title={title} onChange={(v) => set(m.modelPath, v)} />
+        <Row label="Model" help={m.id === 'activityClassify' ? 'It uses the decision model, shared with the mail checks.' : optionalModel ? (via ? `A small, cheap model is enough, such as google/gemma-3-4b-it.${via} Empty: off.` : 'An OpenRouter model. A small, cheap one is enough, such as google/gemma-3-4b-it. Empty: off.') : via ? `A cheap model is enough.${via}` : 'An OpenRouter model id. A cheap one is enough.'}>
+          <ProviderModelPicker ids={ids} value={model} placeholder={optionalModel ? 'Off' : 'Default'} label={`${m.label} model`} disabled={disabled} title={title} onChange={(v) => set(m.modelPath, v)} />
         </Row>
         {m.extras.map((x) => (
           <Row key={x.path} label={x.label} help={x.help}>

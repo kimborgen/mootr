@@ -213,6 +213,8 @@ test('with the step off, no key or a spent system budget nothing is asked or fai
   const env = join(home, 'opencode.env');
   const key = readFileSync(env, 'utf8');
   rmSync(env);
+  // The key was imported into the secret store (S-2114): no key means neither file.
+  rmSync(join(home, 'secrets.json'), { force: true });
   try {
     assert.deepEqual(await tn.toolNames('claude', ['off_key'], 500), { enabled: false, labels: {}, pending: [] });
   } finally {
@@ -247,4 +249,21 @@ test('names are not made in bulk: a batch is capped, and a settings change asks 
   setOn(true);
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(calls(), after);
+});
+
+test('a key with an internal newline is refused before any call, and no error or event quotes it (S-2117)', async () => {
+  const leaky = 'sk-or-leak\nsecret-part';
+  const before = calls();
+  process.env.OPENROUTER_API_KEY = leaky;
+  try {
+    assert.deepEqual((await tn.toolNames('claude', ['leak_probe'], 500)).labels, {});
+    await until(() => events('tool-name:error').some((e) => e.tool === 'leak_probe'), 'the refusal recorded');
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+  }
+  assert.equal(calls(), before);
+  const failure = events('tool-name:error').find((e) => e.tool === 'leak_probe');
+  assert.equal(failure.error, 'invalid API key');
+  assert.ok(!JSON.stringify(events('tool-name:error')).includes('secret-part'));
+  assert.equal(db.getToolName('claude', 'leak_probe'), undefined);
 });

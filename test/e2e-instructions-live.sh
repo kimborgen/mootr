@@ -19,6 +19,9 @@ printf '# Workspace\n\nThe workspace codeword is ROOTWORD-%s.\n' "$T" > "$WS/CLA
 printf '# service-a\n\nThe service-a codeword is SUBWORD-%s.\n' "$T" > "$WS/service-a/AGENTS.md"
 printf -- '---\nname: stam-test-%s\ndescription: Gives the stam test phrase. Use when asked for the stam test phrase.\n---\n\nThe stam test phrase is SKILLWORD-%s.\n' "$T" "$T" > "$SKILL/SKILL.md"
 printf 'Every agent: the team motto is MOTTO-%s.\n' "$T" > "$STAM_HOME/instructions.md"
+# The Claude Code agent runs the `fast` preset (Haiku), which may not mail the human by default
+# (settings.humanMail.models, src/mail.ts humanMailBlock); this home lets it, and skips the mail gate.
+printf '{ "peers": [], "humanMail": { "when": "necessary", "models": { "claude-haiku-5-5": true } }, "decisions": { "mailGate": false } }\n' >"$STAM_HOME/settings.json"
 daemon_up main  # writes OpenCode's config, which links the new skill
 
 ASK="Answer from your instructions and skills, reading files where they point you: what are (1) the workspace codeword, (2) the service-a codeword, (3) the stam test phrase, and (4) the team motto? Mail all four to human with subject"

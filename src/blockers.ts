@@ -65,7 +65,7 @@ export function blocked(): { agent_id: string; agent: string; lifecycle: string;
 // An active agent is paused with stam as the owner; any other state only records it.
 export function addBlocker(
   agent: string | db.Agent,
-  b: { kind: BlockerKind; account?: string; reason: string; clear?: Record<string, unknown> | null },
+  b: { kind: BlockerKind; account?: string; reason: string; clear?: Record<string, unknown> | null; clears?: { names: string[]; at: number } },
 ): Promise<Blocker> {
   if (!BLOCKER_KINDS.includes(b.kind)) return Promise.reject(new Error(`unknown blocker kind ${b.kind}`));
   const a = mustAgent(agent);
@@ -73,12 +73,16 @@ export function addBlocker(
   return lifecycle.serial(a.id, async () => {
     // A refresh of an existing blocker keeps its `since`; only a new one notifies the manager.
     const existed = blockers(a.id).some((x) => x.kind === b.kind && x.account === account);
-    db.open()
-      .prepare(
-        `INSERT INTO blockers (agent_id, kind, account, reason, since, clear) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (agent_id, kind, account) DO UPDATE SET reason = excluded.reason, clear = excluded.clear`,
-      )
-      .run(a.id, b.kind, account, b.reason, new Date().toISOString(), b.clear ? JSON.stringify(b.clear) : null);
+    // The windows this change cleared (a partial clear) are recorded in the same transaction.
+    db.transaction(() => {
+      db.open()
+        .prepare(
+          `INSERT INTO blockers (agent_id, kind, account, reason, since, clear) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (agent_id, kind, account) DO UPDATE SET reason = excluded.reason, clear = excluded.clear`,
+        )
+        .run(a.id, b.kind, account, b.reason, new Date().toISOString(), b.clear ? JSON.stringify(b.clear) : null);
+      if (b.clears) db.recordWindowClears(account, b.clears.names, b.clears.at);
+    });
     db.addEvent(a.id, 'blocker:add', { kind: b.kind, account, reason: b.reason });
     if (db.getAgent(a.id)!.lifecycle === 'active') await lifecycle.pauseNow(a.id, null);
     const result = blockers(a.id).find((x) => x.kind === b.kind && x.account === account)!;
@@ -90,12 +94,16 @@ export function addBlocker(
 // Removes a blocker. When it was the last and no one else paused the agent, unpauses it
 // with cost-resumed.md naming what cleared; `cleared` says how, such as "a fresh reading".
 // Returns whether the agent was unpaused.
-export function clearBlocker(agent: string | db.Agent, kind: BlockerKind, account = '', cleared = ''): Promise<boolean> {
+export function clearBlocker(agent: string | db.Agent, kind: BlockerKind, account = '', cleared = '', clears?: { names: string[]; at: number }): Promise<boolean> {
   const a = mustAgent(agent);
   return lifecycle.serial(a.id, async () => {
     const gone = blockers(a.id).find((x) => x.kind === kind && x.account === account);
     if (!gone) return false;
-    db.open().prepare('DELETE FROM blockers WHERE agent_id = ? AND kind = ? AND account = ?').run(a.id, kind, account);
+    // The clear and its window history commit together.
+    db.transaction(() => {
+      db.open().prepare('DELETE FROM blockers WHERE agent_id = ? AND kind = ? AND account = ?').run(a.id, kind, account);
+      if (clears) db.recordWindowClears(account, clears.names, clears.at);
+    });
     db.addEvent(a.id, 'blocker:clear', { kind, account, cleared });
     // The blocked agent's manager hears the blocker cleared, whoever cleared it.
     blockerChanged(a.id, kind, account, 'clear', cleared || gone.reason, new Date().toISOString());

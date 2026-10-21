@@ -67,8 +67,11 @@ for (const size of sizes) {
   await p.goto(origin + '/#token=' + token);
   await p.waitForSelector('#tree .node', { timeout: 20000 });
   const nav = p.locator('[data-nav="mail"]');
-  if (await nav.isVisible()) await press(nav);
-  await press(p.locator(`#mail-side .mrow[data-thread="${tid}"]`));
+  // The phone's Inbox page lists the thread as the same row; the desktop keeps the sidebar list.
+  const onPhone = await nav.isVisible();
+  if (onPhone) await press(nav);
+  const side = onPhone ? '#inbox-view' : '#mail-side';
+  await press(p.locator(`${side} .mrow[data-thread="${tid}"]`));
   const line = p.locator('.thread-view:visible .msg-withdrawn');
   await line.waitFor();
   check(tag, (await line.count()) === 1, 'the thread shows one withdrawn line', await line.count());

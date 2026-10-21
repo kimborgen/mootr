@@ -133,7 +133,7 @@ test('startTriggers: only real stored-event triggers, none for examples, timers 
   assert.deepEqual(w, [{ subscriber_id: 'process:dev-change:request', filter: { source: 'github', subjects: ['github:example/repo'], types: ['issues.opened'] }, note: 'dev-change start: github' }]);
 });
 
-const evt = (id) => ({ id, source: 'github', type: 'issues.opened', actor: 'kim', url: 'https://github.com/example/repo/issues/5', summary: 'Issue 5', dedupe_key: `k${id}` });
+const evt = (id) => ({ id, source: 'github', type: 'issues.opened', actor: 'octocat', url: 'https://github.com/example/repo/issues/5', summary: 'Issue 5', dedupe_key: `k${id}` });
 function startHarness(mode) {
   const made = [];
   const logs = [];
@@ -186,7 +186,7 @@ test('a real repo IssuesEvent reaches the start listener through ingest', async 
   const subj = gh.parseSubject('github:example/repo');
   assert.ok(subj, 'the repo subject is pollable');
   assert.equal(gh.parseSubject('github:example/repo#*'), null);
-  const raw = (id, action) => ({ id: String(id), type: 'IssuesEvent', actor: { login: 'kim' }, payload: { action, issue: { number: 9, title: 'Fix it' } } });
+  const raw = (id, action) => ({ id: String(id), type: 'IssuesEvent', actor: { login: 'octocat' }, payload: { action, issue: { number: 9, title: 'Fix it' } } });
   assert.equal(gh.repoEvent(raw(1, 'closed'), subj).type, 'issues.closed');
   const h = startHarness('on');
   watch.syncProcessSubscriptions(run.startTriggers([p]));

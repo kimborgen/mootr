@@ -8,3 +8,7 @@ HANDOVER.md
 .check-shots/
 node_modules.old-*
 node_modules.new-*
+go/bin/
+# a PR-body draft left in the worktree root must not be committed by git add -A (S-2045)
+/tmp-*.md
+.tmp/

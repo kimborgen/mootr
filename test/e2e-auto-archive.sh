@@ -14,6 +14,8 @@ export STAM_AUTO_ARCHIVE_QUIET_MS=0
 isolate
 TOKEN=$(cat "$STAM_HOME/token")
 api() { curl -s -X "$1" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' "$STAM_URL$2" ${3:+-d "$3"}; }
+# tapi: api for /api/test/* routes; -f fails at the call when the gate answers 404.
+tapi() { curl -sf -X "$1" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' "$STAM_URL$2" ${3:+-d "$3"}; }
 hapi() { curl -s -X "$1" -H "authorization: Bearer $TOKEN" -H 'x-stam-human: 1' -H 'content-type: application/json' "$STAM_URL$2" ${3:+-d "$3"}; }
 field() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
 reg() { api POST /api/register "{\"name\":\"$1\",\"role\":\"$1\",\"harness\":\"claude\"}" | field '["id"]'; }
@@ -96,7 +98,7 @@ K5=$(newitsa "Before the switch")
 T5=$(mail "{\"from\":\"alice\",\"to\":[\"human\"],\"subject\":\"Old result\",\"body\":\"Done.\",\"itsa\":\"$K5\",\"new_thread\":true}")
 readall "$T5"
 close "$K5"
-python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE kv SET value='99999999999999' WHERE key='autoArchive.since'\"); c.commit()" "$STAM_HOME/stam.db"
+tapi POST /api/test/kv '{"key":"autoArchive.since","value":"99999999999999"}' >/dev/null
 pass >/dev/null
 archived "$T5" && fail "a thread from before the switch was archived without the sweep"
 pass true all | grep -q "\"$T5\"" || fail "the sweep's dry run doesn't list $T5"
@@ -105,6 +107,6 @@ archived "$T5" || fail "the sweep didn't archive $T5"
 
 echo "-- a test daemon never runs the one-time full pass (test/lib.sh's default delay)"
 [ "$STAM_AUTO_ARCHIVE_FULL_DELAY_MS" = 2147483647 ] || fail "lib.sh's full-pass delay is $STAM_AUTO_ARCHIVE_FULL_DELAY_MS"
-python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); sys.exit(1 if c.execute(\"SELECT 1 FROM kv WHERE key='autoArchive.fullPassDone3'\").fetchone() else 0)" "$STAM_HOME/stam.db" || fail "the test daemon ran the full pass"
+[ "$(tapi GET '/api/test/kv?key=autoArchive.fullPassDone3')" = '{"value":null}' ] || fail "the test daemon ran the full pass"
 
 echo "ok: auto-archive"

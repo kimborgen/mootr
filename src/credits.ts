@@ -20,9 +20,8 @@ const TURN_COOLDOWN_MS = 60_000;
 let lastPoll = 0;
 let polling = false;
 
-// The key OpenCode uses; providerEnv in adapters/opencode.ts reads the same file. Read by the LLM
-// layer's OpenRouter adapter (src/llm/openrouter.ts) and exported for the stam model calls that
-// check it first.
+// stam's own OpenRouter key, through the secret store (S-2114): the LLM layer's OpenRouter adapter
+// (src/llm/openrouter.ts) reads it, and it is exported for the stam model calls that check it first.
 export const apiKey = openRouterKey;
 
 // An agent that spends OpenRouter credit.

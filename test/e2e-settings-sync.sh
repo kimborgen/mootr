@@ -31,11 +31,13 @@ save("lone", {"home": "home", "peers": [peer("home")]})
 PY
 fail() { echo "FAIL: $1"; exit 1; }
 jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
-# eff DAEMON EXPR: a value of the daemon's settings() as its daemon reads them (EXPR in JS, on s).
-eff() { on "$1" node --input-type=module -e "const { settings } = await import('$ROOT/src/settings.ts'); const s = settings(); console.log(JSON.stringify($2));" 2>/dev/null; }
+# eff DAEMON EXPR: a value of the daemon's effective settings as it reads them (a test route; EXPR in JS, on s).
+eff() { curl -sf -m 5 -H "authorization: Bearer $(tok "$1")" "$(url "$1")/api/test/settings" | node -e "let t = ''; process.stdin.on('data', (c) => (t += c)).on('end', () => { const s = JSON.parse(t); console.log(JSON.stringify($2)); })"; }
 url() { on "$1" sh -c 'echo "$STAM_URL"'; }
 tok() { cat "$TEST_TMP/$1/token"; }
 api() { curl -s -m 5 -X "$2" -H "authorization: Bearer $(tok "$1")" -H 'content-type: application/json' ${4:+-d "$4"} "$(url "$1")$3"; }
+# tapi: api for /api/test/* routes; -f fails at the call when the gate answers 404.
+tapi() { curl -sf -m 5 -X "$2" -H "authorization: Bearer $(tok "$1")" -H 'content-type: application/json' ${4:+-d "$4"} "$(url "$1")$3"; }
 ptok() { cat "$TEST_TMP/$1/peer-token"; }
 # A call with x-stam-local is a peer's, so it carries the peer token (S-1064).
 code() { _t=$(tok "$1"); case "$3" in *x-stam-local*) _t=$(ptok "$1") ;; esac; curl -s -m 5 -o /dev/null -w '%{http_code}' -H "authorization: Bearer $_t" $3 "$(url "$1")$2"; }
@@ -62,9 +64,7 @@ echo "-- only a peer fetches the shared settings, and only from the home"
 # An agent's own token, with x-stam-local set, is still not a peer.
 AGENT=$(api home POST /api/register '{"name":"tok","role":"test","harness":"claude"}' | jget "d['id']")
 AGENT_TOKEN=agent-token-$AGENT
-on home node --input-type=module -e "
-  const { DatabaseSync } = await import('node:sqlite'); const { createHash } = await import('node:crypto');
-  new DatabaseSync(process.env.STAM_HOME + '/stam.db').prepare('UPDATE agents SET token_hash = ? WHERE id = ?').run(createHash('sha256').update('$AGENT_TOKEN').digest('hex'), '$AGENT');" 2>/dev/null
+tapi home POST /api/test/agent "{\"agent\":\"$AGENT\",\"token\":\"$AGENT_TOKEN\"}" >/dev/null
 [ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "authorization: Bearer $AGENT_TOKEN" "$(url home)/api/agents/$AGENT")" = 200 ] || fail "the agent's token isn't accepted at all"
 [ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "authorization: Bearer $AGENT_TOKEN" -H 'x-stam-local: 1' "$(url home)/api/config/settings/shared")" = 403 ] || fail "an agent's token fetched the shared settings"
 SHARED=$(curl -s -H "authorization: Bearer $(ptok home)" -H 'x-stam-local: 1' "$(url home)/api/config/settings/shared")

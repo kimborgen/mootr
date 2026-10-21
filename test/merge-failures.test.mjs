@@ -50,6 +50,20 @@ test('--json prints the entries, and a missing log is an empty list', () => {
   assert.match(empty.stdout, /^0 failed trains, 0 culprit PRs/);
 });
 
+test('a flaky train gets a flaky column and count, even when it merged', () => {
+  const flakyHome = tempDir('stam-merge-failures-flaky-');
+  mkdirSync(flakyHome, { recursive: true });
+  const merged = { ...entry(ago(60_000), ['20', '21'], [], null), gateFailed: false, outcomes: [{ pr: 20, state: 'merged', kind: 'merged', message: 'm' }, { pr: 21, state: 'merged', kind: 'merged', message: 'm' }], flaky: ['run alpha'] };
+  const plain = entry(ago(30_000), ['22'], [], null, [], 'preflight');
+  writeFileSync(join(flakyHome, 'merge-train-failures.jsonl'), [JSON.stringify(merged), JSON.stringify(plain)].join('\n') + '\n');
+  const r = spawnSync(process.execPath, [SCRIPT], { env: { ...process.env, STAM_HOME: flakyHome }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^time +prs +kind +failing +culprit +flaky$/m);
+  assert.match(r.stdout, /#20 #21 +- +- +- +run alpha$/m);
+  assert.match(r.stdout, /#22 +preflight +- +- +-$/m);
+  assert.match(r.stdout, /^0 failed trains, 0 culprit PRs, since the start of the log; 2 without a gate failure \(1 preflight\); 1 flaky$/m);
+});
+
 test('a bad, missing or empty --since is a usage error', () => {
   assert.equal(run('--since', 'soon').status, 2);
   const missing = run('--since');

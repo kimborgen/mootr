@@ -1,0 +1,20 @@
+{
+"fixture": "system-notice",
+"cases": [
+  {"name":"empty mail","input":{},"output":false},
+  {"name":"notice 1","input":{"notice":1},"output":true},
+  {"name":"notice 0","input":{"notice":0},"output":false},
+  {"name":"notice true","input":{"notice":true},"output":true},
+  {"name":"notice false","input":{"notice":false},"output":false},
+  {"name":"notice null","input":{"notice":null},"output":false},
+  {"name":"from a system sender","input":{"from_id":"system:deploy-watch"},"output":true},
+  {"name":"from a system sender, notice 0","input":{"from_id":"system:watch","notice":0},"output":true},
+  {"name":"from an agent","input":{"from_id":"ay9tn"},"output":false},
+  {"name":"from the human","input":{"from_id":"human"},"output":false},
+  {"name":"null sender","input":{"from_id":null},"output":false},
+  {"name":"from a sender named system","input":{"from_id":"system"},"output":false},
+  {"name":"upper-case System prefix","input":{"from_id":"System:x"},"output":false},
+  {"name":"system prefix mid-id","input":{"from_id":"x:system:y"},"output":false},
+  {"name":"agent with a notice","input":{"from_id":"ay9tn","notice":1},"output":true}
+]
+}

@@ -10,7 +10,7 @@ export const stories: Story[] = [{
   name: 'Classify since',
   group: 'Settings',
   what: 'A date field and a button that label the open activity items from that date on with the decision model, not only new ones. It spends OpenRouter credit, up to the daily cap, and needs the classifier on. The backfill runs in the background: the control polls its progress every 3 seconds while it runs, and says how many are labelled and left, and why it stopped.',
-  when: 'Settings, Activity, in the Classify since row. It reads `GET /api/activity/classify-model` when it mounts and starts a run with `POST /api/activity/classify-model`. The daemon answers only the human, so it works through stam\'s Tailscale address. On a peer it is read-only like the other shared settings.',
+  when: 'Settings, Activity, in the Classify since row. It reads `GET /api/activity/classify-model` when it mounts and starts a run with `POST /api/activity/classify-model`. The daemon answers only the human, so it works in a page that is the human: through tailscale serve, or logged in locally. On a peer it is read-only like the other shared settings.',
   code: ['web/src/views/ClassifySince.tsx#ClassifySince', 'web/src/views/ClassifySince.tsx#progressText'],
   rules: [
     'The date is the start of that day in this browser\'s time zone, sent as an ISO time.',

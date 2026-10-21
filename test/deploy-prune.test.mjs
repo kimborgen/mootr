@@ -7,6 +7,7 @@
 // Run with `node --test test/deploy-prune.test.mjs`.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import './scrub-env.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';

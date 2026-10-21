@@ -72,7 +72,8 @@ stop() { kill $DAEMON 2>/dev/null; wait $DAEMON 2>/dev/null || true; stop_record
 trap stop EXIT
 trap 'exit 130' INT TERM HUP
 for _i in $(seq 1 180); do grep -q '^URL=' "$LOG" && break; kill -0 $DAEMON 2>/dev/null || break; sleep 1; done
-grep -q '^URL=' "$LOG" || { cat "$LOG"; echo "FAIL: the check daemon didn't start"; exit 1; }
+# A failed web build (daemon.sh's BUILD_FAILED=1) reads as a build failure, with its output last (S-2162).
+grep -q '^URL=' "$LOG" || { sed '/^BUILD_FAILED=1$/d' "$LOG"; grep -q '^BUILD_FAILED=1$' "$LOG" && echo "FAIL: the web build failed (see the error above)" || echo "FAIL: the check daemon didn't start"; exit 1; }
 echo "screenshots: $OUT"
 rc=0
 node "web/check/$CHECK.mjs" "$(sed -n 's/^URL=//p' "$LOG")" "$OUT" "$@" || rc=$?

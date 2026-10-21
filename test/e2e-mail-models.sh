@@ -37,9 +37,7 @@ echo "$R" | grep -q "^200 \|^201 " || fail "a plain child's mail to the human wa
 echo "$R" | grep -q "Meant for your user" || fail "the rerouted mail isn't marked for the parent: $R"
 
 # A manager may mail the human directly, so only it meets the per-model block (S-139) that follows.
-node --no-warnings -e '
-const { DatabaseSync } = require("node:sqlite");
-new DatabaseSync(process.argv[1]).prepare("UPDATE agents SET type = ? WHERE id = ?").run("manager", process.argv[2]);' "$STAM_HOME/stam.db" "$HK"
+api POST /api/test/agent "{\"agent\":\"$HK\",\"type\":\"manager\"}" >/dev/null
 
 # 1. The child's mail to the human is refused, naming its parent; mail to its parent works.
 R=$(call POST /api/mail "{\"from\":\"$HK\",\"to\":[\"human\"],\"subject\":\"Done\",\"body\":\"Finished.\"}")

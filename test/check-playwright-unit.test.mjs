@@ -5,6 +5,7 @@
 // touches the real node_modules. Run with `node --test test/check-playwright-unit.test.mjs`.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import './scrub-env.mjs';
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

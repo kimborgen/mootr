@@ -1,0 +1,22 @@
+process: flow
+title: Flow
+applies_to: { kind: [work] }
+lanes:
+  human: { type: human }
+  dev: { type: developer }
+  watcher: { type: script }
+nodes:
+  begin: { kind: start, lane: human, triggers: [{ source: manual }] }
+  think: { kind: agent, lane: dev }
+  draft: { kind: human, lane: human, ask: answer }
+  review: { kind: human, lane: human, ask: approve }
+  hold: { kind: human, lane: human, ask: decide }
+  merge: { kind: script, lane: watcher, run: scripts/ship.mjs }
+  done: { kind: end, lane: human, status: done }
+edges:
+  - [begin, think]
+  - [think, draft]
+  - [draft, review, { when: answered }]
+  - [review, merge, { when: answered }]
+  - [review, hold]
+  - [merge, done]

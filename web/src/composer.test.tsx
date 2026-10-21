@@ -838,16 +838,21 @@ describe('the prompt input where the view takes no prompts', () => {
     const onStop = vi.fn()
     await mount(<Composer target={target} onSend={async () => {}} onStop={onStop} />)
     await typeText('Check the build')
-    await act(async () => { host.querySelector<HTMLButtonElement>('.cmp-send')!.click() })
-    await flush()
-    // The box is empty now; the button stays Send, disabled, for the guard, so the second click does nothing.
-    const btn = host.querySelector<HTMLButtonElement>('.cmp-send')!
-    expect(btn.getAttribute('aria-label')).toBe('Send')
-    expect(btn.disabled).toBe(true)
-    await act(async () => { btn.click() })
-    expect(onStop).not.toHaveBeenCalled()
-    // After the guard's interval the empty box's button is Stop.
-    await act(async () => { await new Promise((r) => setTimeout(r, 450)) })
-    expect(host.querySelector('.cmp-send')!.getAttribute('aria-label')).toBe('Stop')
+    vi.useFakeTimers()
+    try {
+      await act(async () => { host.querySelector<HTMLButtonElement>('.cmp-send')!.click() })
+      // The box is empty now; the button stays Send, disabled, for the guard, so the second click does nothing.
+      const btn = host.querySelector<HTMLButtonElement>('.cmp-send')!
+      expect(btn.getAttribute('aria-label')).toBe('Send')
+      expect(btn.disabled).toBe(true)
+      await act(async () => { btn.click() })
+      expect(onStop).not.toHaveBeenCalled()
+      // Still Send past the old 400 ms guard: the window is the 500 ms OS double-click interval.
+      await act(async () => { vi.advanceTimersByTime(450) })
+      expect(host.querySelector('.cmp-send')!.getAttribute('aria-label')).toBe('Send')
+      // After the guard's interval the empty box's button is Stop.
+      await act(async () => { vi.advanceTimersByTime(50) })
+      expect(host.querySelector('.cmp-send')!.getAttribute('aria-label')).toBe('Stop')
+    } finally { vi.useRealTimers() }
   })
 })

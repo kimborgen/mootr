@@ -106,7 +106,7 @@ function metrics(text: string): string | false {
 // --- Diff ---------------------------------------------------------------------------
 // A unified diff: a header with the counts over one scroller of folds, one per file.
 const DIFF_OPEN_ROWS = 18;
-function diff(text: string): string {
+function diff(text: string, info = ''): string {
   const files = parsePatch(text);
   const total = files.reduce((n, x) => n + x.rows.length, 0);
   const add = files.reduce((n, x) => n + x.add, 0), del = files.reduce((n, x) => n + x.del, 0);
@@ -118,8 +118,10 @@ function diff(text: string): string {
     return `<details class="mb-file"${total <= DIFF_OPEN_ROWS || i === 0 ? ' open' : ''}><summary>${icon('chevron-right', 'xs')}<span class="mb-path">${dir ? `<span class="mb-dir">${esc(dir)}</span>` : ''}<span class="mb-name">${esc(name)}</span></span><span class="mb-count"><span class="add">+${x.add}</span> <span class="del">−${x.del}</span></span></summary><pre><code>${x.rows.map(row).join('')}</code></pre></details>`;
   };
   const n = files.length, label = `${n} file${n === 1 ? '' : 's'}`;
-  // The header is a sibling of the folds, never inside a summary. Its Open slot stays hidden until a viewer can take the patch.
-  return `<div class="mb-diff"><div class="mb-dhead"><span class="mb-dsum">${label} · <span class="add">+${add}</span> <span class="del">−${del}</span></span><span class="mb-dopen" hidden></span></div><div class="mb-dscroll" role="region" tabindex="0" aria-label="Diff, ${label}">${files.map(fold).join('')}</div></div>`;
+  // The header is a sibling of the folds, never inside a summary. Its Open slot stays hidden in the markup and holds the
+  // button once the page wires it (S-2105); the fence's own text, its info string, and the file it shows first travel
+  // with the block, so the button knows what to open and where to land without the page re-reading the markdown.
+  return `<div class="mb-diff" data-patch="${esc(text)}"${info ? ` data-info="${esc(info)}"` : ''} data-first="${esc(files[0]?.path ?? '')}"><div class="mb-dhead"><span class="mb-dsum">${label} · <span class="add">+${add}</span> <span class="del">−${del}</span></span><span class="mb-dopen" hidden></span></div><div class="mb-dscroll" role="region" tabindex="0" aria-label="Diff, ${label}">${files.map(fold).join('')}</div></div>`;
 }
 
 // --- Checklist --------------------------------------------------------------------
@@ -1022,10 +1024,16 @@ function parser(): Marked {
   return marker;
 }
 function component({ text, lang }: Tokens.Code): string | false {
-  const name = String(lang ?? '').trim().toLowerCase();
+  const info = String(lang ?? '').trim();
+  const name = info.toLowerCase();
+  // Only a diff fence takes an argument — `diff REPO#N` names the PR it belongs to (S-2105) — so for every other
+  // component the whole info string is still its name, and `tests foo` or `metrics x` stay plain code.
+  if (name === 'diff' || name === 'patch' || name.startsWith('diff ') || name.startsWith('patch ')) {
+    const [, ...arg] = info.split(/\s+/);
+    return diff(text, arg.join(' '));
+  }
   if (name === 'decision') return decision(text, decisions++);
   if (name === 'metrics') return metrics(text);
-  if (name === 'diff' || name === 'patch') return diff(text);
   if (name === 'yesno' || name === 'question') return decision(text, decisions++);
   if (name === 'checklist' || name === 'status') return checklist(text);
   if (name === 'tests' || name === 'test') return tests(text);

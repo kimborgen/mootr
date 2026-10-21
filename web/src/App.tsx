@@ -3,27 +3,30 @@
 // in the bottom bar, the executive assistant dropping down from the top (Alt+C), and the
 // prompt that suggests where a message goes, centred over the page (Alt+A).
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { agentMenu, assistantOpts, enterTree, exitTree, newShell, nextTopTarget, openAssistant, openWorld, paneAgent, sendToAgentByMail, sendToChief, setTopTarget, toggleThreadArchived, toggleThreadDeferred, topTarget, topTargets, topView, treeItem } from './actions'
+import { threadKey } from './thread-keys'
+import { agentMenu, assistantOpts, enterTree, exitTree, newShell, nextTopTarget, openAssistant, leaveMail, openMail, openWorld, paneAgent, sendToAgentByMail, sendToChief, setTopTarget, toggleThreadArchived, toggleThreadDeferred, topTarget, topTargets, topView, treeItem } from './actions'
 import { api } from './api'
 import { Composer, type ComposerHandle, type SendPayload } from './Composer'
 import { live, model, stateLabel } from './format'
 import { Glyph, glyphHtml, PlainGlyph } from './Glyph'
 import { Icon } from './Icon'
 import { closeImage, ImageViewer, installImageViewer } from './ImageViewer'
-import { MailSide } from './MailSide'
 import { MachinesSide } from './MachinesSide'
 import { closeSearch, SearchPalette, toggleSearch } from './Search'
 import { closeSuggest, openSuggest, SuggestBar, SuggestModal, toggleSuggest } from './SuggestModal'
 import { IssuesSide } from './itsa/IssuesSide'
 import { ReqSide } from './req/ReqSide'
-import { useWaiting } from './itsa/WaitingList'
+import { useDeferred, useWaiting } from './itsa/WaitingList'
+import { PageButtons } from './PageButtons'
+import { unreadCount } from './mail/inbox-model'
 import * as shell from './shell/layout'
 import { getBottomSlot, setBottomHandle, useBottomSlotVersion } from './bottom-slot'
 import { bottomTarget } from './composer-target'
+import { useBottomColumn } from './bottom-column'
 import { useLive } from './views/ownview-live'
 import { inputMain } from './image-tab'
 import { MainWorld } from './shell/MainWorld'
-import { byId, chiefsOfStaff, getData, isArchivedThread, isDeferredThread, isUnreadForHuman, threadWaitsOnHuman, useData } from './store'
+import { byId, chiefsOfStaff, getData, isArchivedThread, isDeferredThread, threadWaitsOnHuman, useData } from './store'
 import { hidesInput, retheme, setHideInput, TermSession } from './term/TermSession'
 import { SpawnPanel, spawnMenu } from './spawn'
 import { SidebarPanes } from './SidebarPanes'
@@ -182,6 +185,7 @@ function Bottom() {
   useUi()
   useBottomSlotVersion()
   const composer = useRef<ComposerHandle>(null)
+  const bottom = useRef<HTMLElement>(null)
   useEffect(() => { setBottomHandle({ focus: () => composer.current?.focus(), restore: (d, k) => composer.current?.restore(d, k) }); return () => setBottomHandle(null) }, [])
   const pick = usePick(inputMain()?.startsWith('view:') ? inputMain()!.slice(5) : '')
   const t = paneTarget(pick)
@@ -197,8 +201,10 @@ function Bottom() {
   // Nothing in the main world takes input (or nothing is selected): the bar suggests a recipient (S-1474).
   const bt = bottomTarget(shell.activeIn('main'))
   const hidden = phone ? bt.kind !== 'none' && !(t.kind === 'agent' || t.kind === 'shell' || t.kind === 'chief' || t.kind === 'rapid') : !shell.worldOpen('bottom')
+  // On a desktop a conversation or a thread takes the focused pane's column (S-2284).
+  useBottomColumn(bottom, !phone && (t.key.startsWith('view:') || t.key.startsWith('thread:')))
   return (
-    <section className={'world' + (t.kind === 'thread' && !toAsst ? ' yield' : '') + (!phone && t.key.startsWith('view:') ? ' conv' : '')} id="w-bottom" aria-label="Bottom" hidden={hidden}>
+    <section ref={bottom} className={'world' + (t.kind === 'thread' && !toAsst ? ' yield' : '') + (!phone && t.key.startsWith('view:') ? ' conv' : '') + (!phone && t.key.startsWith('thread:') ? ' conv mail' : '')} id="w-bottom" aria-label="Bottom" hidden={hidden}>
       {keys ? <KeyRow viewKey={t.key} /> : null}
       {bt?.kind === 'none' ? <SuggestBar composerRef={composer} context={bt.context} /> : <div hidden={keys} style={{ display: 'contents' }}>
         <Composer ref={composer} target={t.slot ? t.slot.target : { key: t.key || 'none', enabled: t.enabled, label: t.label, placeholder: t.placeholder, name: t.name, to: mailTo?.id }} onSend={(p) => sendToPane(t, p)} assistant={assistantOpts} onAssistantChange={setToAsst}
@@ -289,25 +295,30 @@ export function TopWorld() {
 // (named for what it shows), and the assistant. Each keeps its place: the tree and the
 // lists cover main without changing it, and main comes back as it was.
 function MobileNav() {
-  const { humanThreads } = useData()
+  const { humanThreads, humanArchived, humanDeferred } = useData()
   const { topOpen } = useUi()
   const on = shell.phoneShows()
   const cw = shell.currentWorld()
   const world = !cw ? null : viewMeta(cw.startsWith('t:') ? 'thread:' + cw.slice(2) : cw.startsWith('w:') ? cw.slice(2) : 'agent:' + cw)
-  const unread = humanThreads.filter(isUnreadForHuman).length
-  // What waits on you, counted once (`useWaiting`): the Mail, Issues and Work badges agree.
-  const waiting = useWaiting().length
+  // What waits on you, counted once (`useWaiting`): the Mail, Issues and Work badges agree. Unread is the Inbox page's own count.
+  const waitingRows = useWaiting()
+  const unread = unreadCount({ humanThreads, humanArchived, humanDeferred }, waitingRows, useDeferred())
+  const waiting = waitingRows.length
   const onWork = cw === 'w:work'
-  const go = (side: 'left' | 'mail' | 'issues' | null) => { openAssistant(false); closeSearch(); closeSuggest(); shell.phoneShow(side) }
+  const onMail = cw === 'w:inbox'
+  // The Inbox page is Mail's, so the Main slot keeps its own name and icon there.
+  const onOwn = onWork || onMail
+  const go = (side: 'left' | 'issues' | null) => { openAssistant(false); closeSearch(); closeSuggest(); shell.phoneShow(side) }
   const goWork = () => { openAssistant(false); closeSearch(); closeSuggest(); shell.phoneShow(null); openWorld('work') }
+  const goMail = () => { openAssistant(false); closeSearch(); closeSuggest(); openMail() }
   return (
     <nav id="mobile-nav" aria-label="Navigation">
       <button data-nav="left" className={on === 'left' && !topOpen ? 'on' : ''} onClick={() => go('left')}><Icon name="users" /><span className="nl">Agents</span></button>
-      <button data-nav="mail" className={on === 'mail' && !topOpen ? 'on' : ''} onClick={() => go('mail')}><Icon name="mail" /><span className="nl">Mail</span>
+      <button data-nav="mail" className={onMail && !topOpen ? 'on' : ''} onClick={goMail}><Icon name="mail" /><span className="nl">Mail</span>
         {waiting ? <span className="badge warn" title={`${waiting} waiting on you`}>{waiting}</span> : unread ? <span className="badge" title={`${unread} unread`}>{unread}</span> : null}</button>
       <button data-nav="issues" className={on === 'issues' && !topOpen ? 'on' : ''} onClick={() => go('issues')}><Icon name="list-checks" /><span className="nl">Issues</span>
         {waiting ? <span className="badge warn" title={`${waiting} waiting on you`}>{waiting}</span> : null}</button>
-      <button data-nav="main" className={!on && !topOpen ? 'on' : ''} onClick={() => go(null)}>{!onWork && world?.icon ? world.icon : <Icon name="terminal" />}<span className="nl">{!onWork && world?.title ? world.title : 'Main'}</span></button>
+      <button data-nav="main" className={!on && !topOpen ? 'on' : ''} onClick={() => { go(null); leaveMail() }}>{!onOwn && world?.icon ? world.icon : <Icon name="terminal" />}<span className="nl">{!onOwn && world?.title ? world.title : 'Main'}</span></button>
       <button data-nav="work" className={onWork ? 'on' : ''} onClick={goWork}><Icon name="layout-list" /><span className="nl">Work</span>
         {waiting ? <span className="badge warn" title={`${waiting} waiting on you`}>{waiting}</span> : null}</button>
       <button data-nav="assistant" className={topOpen ? 'on' : ''} onClick={() => openAssistant()}><Icon name="bot" /><span className="nl">Assistant</span></button>
@@ -423,16 +434,17 @@ export function App() {
       const term = top?.querySelector('.term-view')
       if (top && !term?.contains(document.activeElement)) { e.preventDefault(); openAssistant(false) }
     }
-    // `e` archives the open mail thread, or unarchives it when it is archived; never while
-    // typing, and not with a menu open over it.
+    // `e` archives the open mail thread, or unarchives it when it is archived, and `d` defers it, or
+    // undefers it; never while typing, and not with a menu open over it.
     const archive = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== 'e' || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return
+      const cw = shell.currentWorld()
+      const act = threadKey(e.key.toLowerCase(), cw)
+      if (!act) return
       const target = e.target as HTMLElement | null
       if (target?.closest('input, textarea, select, [contenteditable=true]') || document.querySelector('.menu, .spawn-panel')) return
-      const cw = shell.currentWorld()
-      if (!cw?.startsWith('t:')) return
       e.preventDefault()
-      void toggleThreadArchived(cw.slice(2))
+      void (act === 'archive' ? toggleThreadArchived : toggleThreadDeferred)(cw!.slice(2))
     }
     const resize = () => { shell.changed(); shell.resizeAll() }
     const offViewer = installImageViewer()
@@ -444,7 +456,7 @@ export function App() {
     return () => { offViewer(); document.removeEventListener('contextmenu', menu); removeEventListener('keydown', keys, true); removeEventListener('keydown', escape); removeEventListener('keydown', archive); removeEventListener('resize', resize) }
   }, [])
   const phone = shell.isPhone()
-  const leftOpen = phone ? st.mobile === 'left' || st.mobile === 'mail' || st.mobile === 'issues' : st.open.left
+  const leftOpen = phone ? st.mobile === 'left' || st.mobile === 'issues' : st.open.left
   return <>
     <div id="shell">
       <section className={'world' + (phone && leftOpen ? ` mobile-open phone-${st.mobile}` : '')} id="w-left" aria-label="Agents" ref={left} hidden={!leftOpen} style={phone ? undefined : { width: shell.clampSize('left') }}>
@@ -458,11 +470,11 @@ export function App() {
           <Tree />
           <IssuesSide leftRef={left} />
           <ReqSide />
-          <MailSide leftRef={left} />
           <MachinesSide />
         </> : <SidebarPanes left={left} />}
         <div className="tree-footer">
           <ThemeButton />
+          <PageButtons />
           <button className="icon-btn" id="open-config" title="Settings" aria-label="Settings" onClick={() => openWorld('config')}><Icon name="settings" /></button>
           <button className="icon-btn" id="open-usage" title="Usage and spend" aria-label="Usage" onClick={() => openWorld('usage')}><Icon name="chart-column" /></button>
           <button className="icon-btn" id="open-system" title="The whole system: every agent in its tree" aria-label="System view" onClick={() => openWorld('system')}><Icon name="network" /></button>

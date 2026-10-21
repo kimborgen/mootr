@@ -11,7 +11,18 @@
 // the next N requests get 429 (Retry-After: 0), then the file is decremented, so a test can seed
 // a rate limit that clears (S-252). A STUB:FAIL state gets 500 with Retry-After: 0, and a STUB:WAIT
 // state gets 500 with Retry-After: 3600 (S-253: a run asleep on a retry). POST /chat/completions
-// answers mail titles and tool summaries (see chat below).
+// answers mail titles and tool summaries (see chat below). It also stands in for an OpenAI-compatible
+// server (any */chat/completions, GET */models, and GET */key for a key check) and an Azure OpenAI resource (/openai/deployments/NAME/
+// chat/completions?api-version=V and /openai/v1/chat/completions): each chat call writes its method, url,
+// auth headers and body to DIR/last-request; an Azure path without the right `api-key` header, or any other
+// path with a `Bearer` key other than `sk-bad`, gets 401 when DIR/key holds a key and it differs. A
+// complete()-based decision (the prompt starts "You answer questions about a piece of state") is answered
+// as the decisions endpoint would: P=0.NN gives a noul, CHOICE=<key> a choice, a score is P.
+// It also stands in for Amazon Bedrock (S-2117): POST /model/MODEL/converse records its url, auth and
+// x-amz-* headers and body in DIR/last-request and answers in the Converse shape (a forced tool call for
+// a decision); with DIR/key it gets 401 unless the bearer key or the SigV4 access key id is that key. And
+// for the EC2 instance metadata service (IMDSv2): PUT /latest/api/token, then the role `stub-role` with
+// access key id AKIDROLE under /latest/meta-data/iam/security-credentials/; each call bumps DIR/imds.
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -31,7 +42,39 @@ const server = createServer((req, res) => {
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
   req.on('end', () => {
-    if (req.method === 'POST' && /\/chat\/completions$/.test(req.url ?? '')) return chat(res, Buffer.concat(chunks).toString());
+    const path = (req.url ?? '').split('?')[0];
+    // A key check (S-2115): a GET that carries a key other than DIR/key's gets 401, like a chat call;
+    // one with no key is answered as before. GET */key is OpenRouter's key endpoint.
+    if (req.method === 'GET' && /\/(models|key)$/.test(path)) {
+      const want = existsSync(join(dir, 'key')) ? readFileSync(join(dir, 'key'), 'utf8').trim() : '';
+      const got = path.startsWith('/openai/') ? req.headers['api-key'] : req.headers.authorization?.replace(/^Bearer /, '');
+      if (want && got !== undefined && got !== want) return res.writeHead(401).end('{}');
+      res.setHeader('content-type', 'application/json');
+      return res.end(JSON.stringify(path.endsWith('/key') ? { data: { limit: null, limit_remaining: null } } : { data: [{ id: 'stub-model-a' }, { id: 'stub-model-b' }] }));
+    }
+    if (path.startsWith('/latest/')) return imds(req, res, path);
+    if (req.method === 'POST' && /^\/model\/[^/]+\/converse$/.test(path)) {
+      const raw = Buffer.concat(chunks).toString();
+      const h = req.headers;
+      writeFileSync(join(dir, 'last-request'), JSON.stringify({ method: req.method, url: req.url, authorization: h.authorization, amzDate: h['x-amz-date'], securityToken: h['x-amz-security-token'], body: raw ? JSON.parse(raw) : null }));
+      const want = existsSync(join(dir, 'key')) ? readFileSync(join(dir, 'key'), 'utf8').trim() : '';
+      const got = h.authorization?.match(/^Bearer (.*)$/)?.[1] ?? h.authorization?.match(/^AWS4-HMAC-SHA256 Credential=([^/]+)\//)?.[1];
+      if (want && got !== want) return res.writeHead(401).end('{}');
+      // The Converse body as a chat body, for chat() to answer.
+      const b = raw ? JSON.parse(raw) : {};
+      const flat = (blocks) => (blocks ?? []).map((x) => x.text ?? '').join('\n');
+      const messages = [...(b.system?.length ? [{ role: 'system', content: flat(b.system) }] : []), ...(b.messages ?? []).map((m) => ({ role: m.role, content: flat(m.content) }))];
+      res.converse = { tool: b.toolConfig?.toolChoice?.tool?.name };
+      return chat(res, JSON.stringify({ messages }));
+    }
+    if (req.method === 'POST' && /\/chat\/completions$/.test(path)) {
+      const raw = Buffer.concat(chunks).toString();
+      writeFileSync(join(dir, 'last-request'), JSON.stringify({ method: req.method, url: req.url, authorization: req.headers.authorization, apiKey: req.headers['api-key'], body: raw ? JSON.parse(raw) : null }));
+      const want = existsSync(join(dir, 'key')) ? readFileSync(join(dir, 'key'), 'utf8').trim() : '';
+      const got = path.startsWith('/openai/') ? req.headers['api-key'] : req.headers.authorization?.replace(/^Bearer /, '');
+      if (want && got !== want) return res.writeHead(401).end('{}');
+      return chat(res, raw);
+    }
     if (req.method !== 'POST' || !/\/decisions$/.test(req.url ?? '')) {
       res.writeHead(404).end('{}');
       return;
@@ -132,6 +175,22 @@ function chat(res, raw) {
     writeFileSync(join(dir, 'last-system'), String((JSON.parse(raw).messages ?? []).find((m) => m.role === 'system')?.content ?? ''));
   } catch {}
   if (text.includes('STUB:FAIL')) return res.writeHead(500).end('{}');
+  if (text.startsWith('You answer questions about a piece of state')) {
+    // Failure markers: STUB:BADJSON (not JSON), STUB:REFUSAL, STUB:TRUNC (finish_reason length), and for a
+    // choice STUB:NOPROBS (no probabilities), STUB:BADPROB (one out of range), STUB:SKEW (sums to 0.5).
+    if (text.includes('STUB:BADJSON')) return answer(res, 'not json');
+    if (text.includes('STUB:REFUSAL')) return answer(res, JSON.stringify(decisionAnswers(text)), { refusal: 'I cannot help with that.' });
+    if (text.includes('STUB:TRUNC')) return answer(res, JSON.stringify(decisionAnswers(text)), {}, 'length');
+    const out = decisionAnswers(text);
+    for (const a of Object.values(out)) {
+      if (!a.probabilities) continue;
+      const keys = Object.keys(a.probabilities);
+      if (text.includes('STUB:NOPROBS')) delete a.probabilities;
+      else if (text.includes('STUB:BADPROB')) a.probabilities[keys[0]] = 1.5;
+      else if (text.includes('STUB:SKEW')) for (const k of keys) a.probabilities[k] = 0.25;
+    }
+    return answer(res, JSON.stringify(out));
+  }
   // Held like a decision with STUB:HANG, until DIR/release.
   if (text.includes('STUB:HANG') && existsSync(join(dir, 'hang'))) return void held.push(res);
   // A tool summary (S-1481) answers the URL-decoded TOOLSUM=... marker as it is, so a test can seed
@@ -159,15 +218,57 @@ function chat(res, raw) {
   }
   answer(res, content);
 }
-function answer(res, content) {
+// A decision by completion (askByCompletion in src/decide.ts): one entry per `- name (type)` line.
+function decisionAnswers(text) {
+  const p = Number(text.match(/P=(0\.\d+)/)?.[1] ?? 0.1);
+  const out = {};
+  for (const m of text.matchAll(/^- (\S+) \((noul|choice|score)\)/gm)) {
+    const [, name, type] = m;
+    if (type === 'noul') out[name] = { noul: p };
+    else if (type === 'score') out[name] = { score: p, confidence: 0.9 };
+    else {
+      const block = text.slice(m.index).split(/\n- /)[0];
+      const keys = [...block.matchAll(/^ {4}(\S+): /gm)].map((k) => k[1]);
+      const picked = text.match(/CHOICE=([\w.-]+)/)?.[1];
+      const choice = keys.includes(picked) ? picked : keys[0];
+      out[name] = { choice, probabilities: Object.fromEntries(keys.map((k) => [k, k === choice ? 0.9 : 0.1 / Math.max(1, keys.length - 1)])), confidence: 0.9 };
+    }
+  }
+  return out;
+}
+function answer(res, content, message = {}, finish = 'stop') {
   res.setHeader('content-type', 'application/json');
+  if (res.converse) {
+    // A refusal reads as a content filter, a truncated answer as max_tokens; a decision is a tool call.
+    let input;
+    try {
+      input = res.converse.tool ? JSON.parse(content) : undefined;
+    } catch {}
+    const stopReason = message.refusal ? 'content_filtered' : finish === 'length' ? 'max_tokens' : input ? 'tool_use' : 'end_turn';
+    const block = input ? { toolUse: { toolUseId: 'tooluse-stub', name: res.converse.tool, input } } : { text: content };
+    return res.end(JSON.stringify({ output: { message: { role: 'assistant', content: [block] } }, stopReason, usage: { inputTokens: 31, outputTokens: 5, totalTokens: 36 } }));
+  }
   res.end(
     JSON.stringify({
       model: 'google/gemma-3-4b-it-stub',
-      choices: [{ message: { role: 'assistant', content } }],
+      choices: [{ message: { role: 'assistant', content, ...message }, finish_reason: finish }],
       usage: { prompt_tokens: 30, completion_tokens: 4, cost: 0.000002 },
     }),
   );
+}
+
+// The EC2 instance metadata service, IMDSv2: a token first, then the role and its credentials.
+function imds(req, res, path) {
+  const file = join(dir, 'imds');
+  writeFileSync(file, String((existsSync(file) ? Number(readFileSync(file, 'utf8')) : 0) + 1));
+  if (req.method === 'PUT' && path === '/latest/api/token') return res.end('imds-token');
+  if (req.headers['x-aws-ec2-metadata-token'] !== 'imds-token') return res.writeHead(401).end();
+  if (path === '/latest/meta-data/iam/security-credentials/') return res.end('stub-role\n');
+  if (path === '/latest/meta-data/iam/security-credentials/stub-role') {
+    res.setHeader('content-type', 'application/json');
+    return res.end(JSON.stringify({ Code: 'Success', AccessKeyId: 'AKIDROLE', SecretAccessKey: 'role-secret', Token: 'role-session', Expiration: new Date(Date.now() + 3600_000).toISOString() }));
+  }
+  res.writeHead(404).end();
 }
 
 // Exits when the process that started it is gone (a test killed hard runs no trap), S-668.

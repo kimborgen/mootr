@@ -1,0 +1,25 @@
+{
+"fixture": "stub-embedder",
+"cases": [
+  {"name":"(empty)","input":{"text":""},"output":{"dim":256,"idx":[],"val":[]}},
+  {"name":"a the of","input":{"text":"a the of"},"output":{"dim":256,"idx":[],"val":[]}},
+  {"name":"database","input":{"text":"database"},"output":{"dim":256,"idx":[184],"val":[1]}},
+  {"name":"Database","input":{"text":"Database"},"output":{"dim":256,"idx":[184],"val":[1]}},
+  {"name":"databases","input":{"text":"databases"},"output":{"dim":256,"idx":[184],"val":[1]}},
+  {"name":"Users keep getting redirected back to...","input":{"text":"Users keep getting redirected back to sign-in"},"output":{"dim":256,"idx":[25,72,162,164,177,242],"val":[0.40824830532073975,0.40824830532073975,0.40824830532073975,0.40824830532073975,0.40824830532073975,0.40824830532073975]}},
+  {"name":"The migration failed while running","input":{"text":"The migration failed while running"},"output":{"dim":256,"idx":[43,44,109,206],"val":[0.5,0.5,0.5,0.5]}},
+  {"name":"jumped jumping jumps","input":{"text":"jumped jumping jumps"},"output":{"dim":256,"idx":[13],"val":[1]}},
+  {"name":"class glass pass","input":{"text":"class glass pass"},"output":{"dim":256,"idx":[24,43,255],"val":[0.5773502588272095,0.5773502588272095,0.5773502588272095]}},
+  {"name":"ed ing s","input":{"text":"ed ing s"},"output":{"dim":256,"idx":[130,204,251],"val":[0.5773502588272095,0.5773502588272095,0.5773502588272095]}},
+  {"name":"running","input":{"text":"running"},"output":{"dim":256,"idx":[44],"val":[1]}},
+  {"name":"runs","input":{"text":"runs"},"output":{"dim":256,"idx":[202],"val":[1]}},
+  {"name":"Fix the login redirect loop for SSO u...","input":{"text":"Fix the login redirect loop for SSO users"},"output":{"dim":256,"idx":[50,107,120,177,228,242],"val":[0.40824830532073975,0.40824830532073975,0.40824830532073975,0.40824830532073975,0.40824830532073975,0.40824830532073975]}},
+  {"name":"review the pull request and merge whe...","input":{"text":"review the pull request and merge when the gates pass"},"output":{"dim":256,"idx":[18,24,39,126,178,225],"val":[0.40824830532073975,0.40824830532073975,0.40824830532073975,0.40824830532073975,0.40824830532073975,0.40824830532073975]}},
+  {"name":"abc123 def456 abc123","input":{"text":"abc123 def456 abc123"},"output":{"dim":256,"idx":[5,195],"val":[0.8944271802902222,0.4472135901451111]}},
+  {"name":"under_score-dash.dot/slash","input":{"text":"under_score-dash.dot/slash"},"output":{"dim":256,"idx":[32,149,205,234,245],"val":[0.4472135901451111,0.4472135901451111,0.4472135901451111,0.4472135901451111,0.4472135901451111]}},
+  {"name":"ÅÆØ ünïcode wörds and emoji 🎉 tést","input":{"text":"ÅÆØ ünïcode wörds and emoji 🎉 tést"},"output":{"dim":256,"idx":[49,54,61,66,163,176,244],"val":[0.37796446681022644,0.37796446681022644,0.37796446681022644,0.37796446681022644,0.37796446681022644,0.37796446681022644,0.37796446681022644]}},
+  {"name":"The deploy watcher holds the release ...","input":{"text":"The deploy watcher holds the release until the hold file is cleared, then deploys storage and closes the ITSA."},"output":{"dim":256,"idx":[34,35,67,79,102,126,159,168,184],"val":[0.22360679507255554,0.22360679507255554,0.22360679507255554,0.22360679507255554,0.22360679507255554,0.670820415019989,0.22360679507255554,0.22360679507255554,0.4472135901451111]}},
+  {"name":"tests tests tests tests","input":{"text":"tests tests tests tests"},"output":{"dim":256,"idx":[229],"val":[1]}},
+  {"name":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...","input":{"text":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"},"output":{"dim":256,"idx":[65,197],"val":[0.7071067690849304,0.7071067690849304]}}
+]
+}

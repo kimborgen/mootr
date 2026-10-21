@@ -12,6 +12,8 @@ import { typeTemplate, agentTypes, defaultReviewer, fallbackChain, reviewerTypes
 import { typeTarget } from './reviewer-chain.ts';
 import { queueNotice, tellAnywhere, sendMail, HUMAN } from './mail.ts';
 import { requestWaitedOn, settledNamed } from './waits.ts';
+import { itsaAskSettled } from './itsa-human.ts';
+import { envVar } from './env.ts';
 
 export interface Visibility {
   // Whom the agent may mail: everyone, its tree (ancestors, descendants, and siblings
@@ -128,8 +130,8 @@ export function typePrompt(a: db.Agent): string {
 
 // Who merges an approved PR (S-1357): under process.run `on` the runner does, on the verdict for the PR's current head.
 export const mergeLine = () => settings().process.run === 'on'
-  ? "Wait for the reviewer's `stam/review` status on the PR's current head; the process runner then merges it with `scripts/merge-pr.mjs` and, if merge-pr refuses, moves the stage back to code and mails you. Don't run `merge-pr.mjs` yourself unless the runner's refusal mail says the fault is fixed and asks you to."
-  : "Wait for the reviewer's `stam/review` status, and check it is on the PR's current head; then merge with `node scripts/merge-pr.mjs N` on the ITSA home.";
+  ? "Wait for the reviewer's `stam/review` status on the PR's current head; the process runner then merges it, and if the merge is refused moves the stage back to code and mails you. Don't call the `pr_merge` tool yourself unless the runner's refusal mail says the fault is fixed and asks you to."
+  : "Wait for the reviewer's `stam/review` status, and check it is on the PR's current head; then merge with the `pr_merge` tool (it mails you the result). Retarget a stacked PR to `main` first.";
 
 // The type's slot in segments: its template text, then (S-891) the "Skills available" block when the
 // type names skills, then its memory block, so notes stay last. Without skills, one segment with
@@ -249,7 +251,7 @@ function tell(id: string, text: string, want?: (p: db.Agent) => boolean): void {
 // answer, for up to a day. 'failed' when it never got through, or the daemon refused it.
 const RETRY_FOR_MS = 24 * 3600_000;
 async function deliver(id: string, text: string, want?: (p: db.Agent) => boolean): Promise<'told' | 'absent' | 'failed'> {
-  const every = Number(process.env.STAM_PEER_RETRY_MS) || 30_000;
+  const every = Number(envVar('PEER_RETRY_MS')) || 30_000;
   for (const start = Date.now(); Date.now() - start < RETRY_FOR_MS; await new Promise((r) => setTimeout(r, every))) {
     try {
       const r = await tellAnywhere(id, text, want);
@@ -416,6 +418,11 @@ function settleRequestAsks(): void {
     for (const w of db.listWaits(a.id)) {
       if (w.source !== 'declared' || w.kind !== 'human') continue;
       const thread = threadOf(w);
+      // A wait tied to an ITSA's ask (S-3080) settles once that ITSA has left its human status, as a withdrawn or answered ask does.
+      if (w.target && !db.getPermissionRequest(w.target)) {
+        if (itsaAskSettled(w.target)) db.clearWait(w.id);
+        continue;
+      }
       // A note naming only a settled request, with no thread, is refused now (waits.ts); one from before is stale.
       const r = w.target ? db.getPermissionRequest(w.target) : requestWaitedOn(a.id, w.detail ?? '', thread, w.since) ?? (thread ? undefined : settledNamed(a.id, w.detail ?? ''));
       if (!r) continue;
