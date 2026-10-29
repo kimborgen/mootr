@@ -1,8 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import type { Field } from '../itsa/fields'
+import { fieldApplies, type Field } from '../itsa/fields'
 import type { Itsa } from '../types'
-import { cardFields, fieldColumn, fieldColumns, fmtDay, isEmpty, linkHost, withFieldFit } from './field-columns'
+import { fieldColumn, fieldColumns, fmtDay, isEmpty, linkHost, valueOf, withFieldFit } from './field-columns'
 
 let n = 0
 const field = (over: Partial<Field>): Field => ({
@@ -20,6 +20,17 @@ describe('field columns', () => {
     expect(fieldColumn(field({ width: 's' })).width).toBe('calc(var(--space-12))')
     expect(fieldColumn(field({ type: 'number' })).align).toBe('end')
     expect(fieldColumn(field({ hint: null })).hint).toBeUndefined()
+  })
+
+  it('a field limited to kinds shows no value on another kind', () => {
+    const f = field({ key: 'stage', kinds: ['issue'] })
+    const issue = { id: 'i', key: 'S-1', kind: 'Issue', fields: { stage: 'dev' } } as unknown as Itsa
+    const project = { id: 'p', key: 'S-2', kind: 'project', fields: { stage: 'dev' } } as unknown as Itsa
+    expect(valueOf(issue, f)).toBe('dev')
+    expect(valueOf(project, f)).toBeUndefined()
+    expect(renderToStaticMarkup(<>{fieldColumn(f).render({ it: project, depth: 0, context: false }, { now: 0, extras: {} as never })}</>)).toBe('')
+    expect(fieldApplies(field({ kinds: null }), null)).toBe(true)
+    expect(fieldApplies(f, undefined)).toBe(false)
   })
 
   it('orders the columns by field position', () => {
@@ -111,15 +122,5 @@ describe('field columns', () => {
     }
     expect(cell(field({ key: 'e' }), '')).toBe('')
     expect([isEmpty(0), isEmpty(false), isEmpty('x')]).toEqual([false, true, false])
-  })
-})
-
-describe('the phone card', () => {
-  it('shows only the fields with a value, chips apart from meta, in the given order', () => {
-    const a = field({ key: 'a', card: 'chip' }), b = field({ key: 'b', card: 'meta' }), c = field({ key: 'c', card: 'chip' }), d = field({ key: 'd', type: 'check' })
-    const { chips, meta } = cardFields(itsa({ a: 'x', b: 'y', d: false }), [a, b, c, d])
-    expect(chips.map((x) => x.f.key)).toEqual(['a'])
-    expect(meta.map((x) => x.f.key)).toEqual(['b'])
-    expect(cardFields(itsa({}), [a, b])).toEqual({ chips: [], meta: [] })
   })
 })

@@ -5,7 +5,7 @@
 // a Go test package that runs node calls testenv.Scrub (go/internal/testenv). Free: `node --test test/mootr-env-guard.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname, extname } from 'node:path';
 import { withMootrTwins } from '../src/env.ts';
 import { SCRUBBED } from './scrub-env.mjs';
@@ -46,12 +46,46 @@ function walk(dir, keep) {
 }
 const rel = (p) => p.slice(ROOT.length + 1);
 
+// Node files the guard exempts by exact path, each with the reason it needs no scrub. A file not listed here is checked by its
+// content, whatever its name. The guard fails a listed file that is gone, has no reason, or that the content check doesn't flag,
+// so a rename or a fixed spawn can't leave a stale entry.
+export const NODE_EXEMPT = new Map([
+  ['test/tmphome.test.mjs', 'tests the tempHome helper: spawns node with the parent env on purpose, to check its cleanup'],
+  ['test/mootr-isolation.test.mjs', 'tests the scrubbers: sets MOOTR_ sentinels in the parent and checks that a child drops them'],
+  ['web/check/chromium-lock.mjs', 're-runs a check under the lock with the env its parent gave it; STAM_URL and the rest must survive'],
+]);
+// The rel paths of the files that the content check flags and the exemptions don't list. Pure, so the cases take fixtures.
+export function unscrubbedNodeFiles(files, exempt) {
+  return files.filter((f) => !exempt.has(f.rel) && nodeUnscrubbed(f.text)).map((f) => f.rel);
+}
+// The exempt entries that are stale: the file is gone (exists is false), the reason is empty, or the content check (flagged)
+// doesn't flag the file, so the exemption hides nothing.
+export function staleExempt(exempt, exists, flagged) {
+  return [...exempt].filter(([p, reason]) => !reason || !exists(p) || !flagged(p)).map(([p]) => p);
+}
+
 test('a node test that touches a home or spawns the CLI or a daemon scrubs both env names first', () => {
   const files = [...walk(join(ROOT, 'test'), (n) => n.endsWith('.mjs')), ...walk(join(ROOT, 'web/check'), (n) => n.endsWith('.mjs'))]
-    .filter((f) => !f.endsWith('test/tmphome.mjs') && !f.endsWith('test/scrub-env.mjs') && !/test\/(mootr-[a-z-]+|tmphome)\.test\.mjs$/.test(f) && !f.endsWith('web/check/chromium-lock.mjs'));
-  // Exempt: the tests of the scrubbers themselves (they set sentinels on purpose), and chromium-lock.mjs, which only re-runs a
-  // check under the lock with the env its parent gave it (STAM_URL and the rest must survive).
-  assert.deepEqual(files.filter((f) => nodeUnscrubbed(readFileSync(f, 'utf8'))).map(rel), []);
+    .map((p) => ({ rel: rel(p), text: readFileSync(p, 'utf8') }));
+  assert.deepEqual(unscrubbedNodeFiles(files, NODE_EXEMPT), []);
+});
+
+test('a node exemption whose file is gone, has no reason, or is not flagged by content fails the guard', () => {
+  const flaggedNow = (p) => nodeUnscrubbed(readFileSync(join(ROOT, p), 'utf8'));
+  assert.deepEqual(staleExempt(NODE_EXEMPT, (p) => existsSync(join(ROOT, p)), flaggedNow), []);
+  assert.deepEqual(staleExempt(new Map([['test/gone.test.mjs', 'was a helper']]), () => false, () => true), ['test/gone.test.mjs']);
+  assert.deepEqual(staleExempt(new Map([['test/x.mjs', '']]), () => true, () => true), ['test/x.mjs'], 'an entry with no reason');
+  assert.deepEqual(staleExempt(new Map([['test/y.mjs', 'was a spawn']]), () => true, () => false), ['test/y.mjs'], 'an entry the content check does not flag');
+});
+
+test('the node exemption is by exact path, so a new file is flagged whatever its name', () => {
+  const spawnsCli = "import { spawnSync } from 'node:child_process';\nspawnSync(process.execPath, [join(ROOT, 'src/cli.ts'), 'prune']);\n";
+  const files = [
+    { rel: 'test/mootr-renamed.test.mjs', text: spawnsCli },
+    { rel: 'test/other/mootr-isolation.test.mjs', text: spawnsCli },
+    { rel: 'test/mootr-isolation.test.mjs', text: spawnsCli },
+  ];
+  assert.deepEqual(unscrubbedNodeFiles(files, NODE_EXEMPT), ['test/mootr-renamed.test.mjs', 'test/other/mootr-isolation.test.mjs']);
 });
 
 test('a shell test that sets a home or runs a daemon sources test/lib.sh', () => {

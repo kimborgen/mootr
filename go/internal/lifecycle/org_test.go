@@ -12,6 +12,23 @@ import (
 	"stam/internal/db"
 )
 
+// withoutClock drops a notice's clock line (S-3468). TestNoticeClock checks that line on its own, against a fixed clock,
+// so the routing checks here read the notice text alone.
+func withoutClock(s string) string {
+	if i := strings.LastIndex(s, "\nnow "); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+func noClocks(notices []string) []string {
+	out := make([]string, len(notices))
+	for i, n := range notices {
+		out[i] = withoutClock(n)
+	}
+	return out
+}
+
 // orgAgent makes an idle active agent row under parent ("" for none), with no harness.
 func (l *live) orgAgent(id, parent string) {
 	l.t.Helper()
@@ -75,11 +92,11 @@ func TestOrgChildrenWaits(t *testing.T) {
 		t.Errorf("alo1: %s %q", a.Activity, detailOf(a))
 	}
 	want3 := l.render("child-turn-finished", map[string]string{"child": "n-alo3", "last": "(not reported)"})
-	if got := l.life.Notices("alo2"); len(got) != 1 || got[0] != want3 {
+	if got := noClocks(l.life.Notices("alo2")); len(got) != 1 || got[0] != want3 {
 		t.Errorf("alo2's notices %q", got)
 	}
 	// alo2 waited on its child within one idle period and started no turn: alo1 is owed nothing.
-	if got := l.life.Notices("alo1"); len(got) != 0 {
+	if got := noClocks(l.life.Notices("alo1")); len(got) != 0 {
 		t.Errorf("alo1's notices %q", got)
 	}
 	// Once per idle period: more quiet writes, and a waiting spell that doesn't end the idle period, tell nobody again.
@@ -93,15 +110,15 @@ func TestOrgChildrenWaits(t *testing.T) {
 		t.Fatal(err)
 	}
 	l.orgSettle()
-	if n := len(l.life.Notices("alo2")); n != 1 {
-		t.Errorf("alo2 has %d notices, want 1: %q", n, l.life.Notices("alo2"))
+	if n := len(noClocks(l.life.Notices("alo2"))); n != 1 {
+		t.Errorf("alo2 has %d notices, want 1: %q", n, noClocks(l.life.Notices("alo2")))
 	}
 	// Errored ends the idle period (idle_since clears): the parent hears of the error, and of the next quiet turn.
 	l.set("alo3", db.Field{Col: "activity", Val: "errored"})
 	l.set("alo3", db.Field{Col: "activity", Val: "idle"})
 	l.orgSettle()
-	if n := len(l.life.Notices("alo2")); n != 3 {
-		t.Errorf("alo2 has %d notices, want 3: %q", n, l.life.Notices("alo2"))
+	if n := len(noClocks(l.life.Notices("alo2"))); n != 3 {
+		t.Errorf("alo2 has %d notices, want 3: %q", n, noClocks(l.life.Notices("alo2")))
 	}
 }
 
@@ -128,18 +145,18 @@ func TestOrgTrouble(t *testing.T) {
 	l.set("alb4", db.Field{Col: "activity", Val: "blocked"}, db.Field{Col: "activity_detail", Val: "x"})
 	l.orgSettle()
 	blocked := l.render("agent-blocked", map[string]string{"agent": "n-alb2", "relation": "your child", "detail": "a dialog"})
-	if got := l.life.Notices("alb1"); len(got) != 1 || got[0] != blocked {
+	if got := noClocks(l.life.Notices("alb1")); len(got) != 1 || got[0] != blocked {
 		t.Errorf("parent's notices %q", got)
 	}
 	errored := l.render("agent-errored", map[string]string{"agent": "n-alb3", "relation": "an agent without a parent", "detail": "crashed"})
 	mu.Lock()
-	if len(mailed) != 1 || mailed[0] != "alb3|n-alb3 errored|"+errored {
+	if len(mailed) != 1 || withoutClock(mailed[0]) != "alb3|n-alb3 errored|"+errored {
 		t.Errorf("mailed %q", mailed)
 	}
 	mu.Unlock()
 	want4 := l.render("agent-blocked", map[string]string{"agent": "n-alb4", "relation": "your child", "detail": "x"})
 	l.until("the peer parent's notice", func() bool { return len(peer.sent()) == 1 })
-	if got := peer.sent(); got[0] != "apeer9||"+want4 {
+	if got := peer.sent(); withoutClock(got[0]) != "apeer9||"+want4 {
 		t.Errorf("sent to the peer %q", got)
 	}
 	// With a chief of staff, an orphan's trouble goes to it.
@@ -147,7 +164,7 @@ func TestOrgTrouble(t *testing.T) {
 	l.set("alb3", db.Field{Col: "activity", Val: "blocked"}, db.Field{Col: "activity_detail", Val: "again"})
 	l.orgSettle()
 	again := l.render("agent-blocked", map[string]string{"agent": "n-alb3", "relation": "an agent without a parent", "detail": "again"})
-	if got := l.life.Notices("alb1"); len(got) != 2 || got[1] != again {
+	if got := noClocks(l.life.Notices("alb1")); len(got) != 2 || got[1] != again {
 		t.Errorf("chief of staff's notices %q", got)
 	}
 }
@@ -175,17 +192,17 @@ func TestOrgTurnNotices(t *testing.T) {
 		t.Errorf("alt7 %s", a.Activity)
 	}
 	want := l.render("child-turn-finished", map[string]string{"child": "n-alt7", "last": "done now"})
-	if got := l.life.Notices("alt5"); len(got) != 1 || got[0] != want {
+	if got := noClocks(l.life.Notices("alt5")); len(got) != 1 || got[0] != want {
 		t.Errorf("turn parent's notices %q", got)
 	}
-	if got := l.life.Notices("alt6"); len(got) != 0 {
+	if got := noClocks(l.life.Notices("alt6")); len(got) != 0 {
 		t.Errorf("none parent's notices %q", got)
 	}
 	// Going idle without finishing a turn (an interrupt) is no turn.
 	l.set("alt7", db.Field{Col: "activity", Val: "working"})
 	l.set("alt7", db.Field{Col: "activity", Val: "idle"}, db.Field{Col: "activity_detail", Val: "interrupted"})
 	l.orgSettle()
-	if got := l.life.Notices("alt5"); len(got) != 1 {
+	if got := noClocks(l.life.Notices("alt5")); len(got) != 1 {
 		t.Errorf("turn parent's notices after an interrupt %q", got)
 	}
 }
@@ -254,7 +271,7 @@ func TestOrgRecoverTreeIdle(t *testing.T) {
 	l.life.StartOrg()
 	l.orgSettle()
 	want := l.render("child-turn-finished", map[string]string{"child": "n-alq2", "last": "(not reported)"})
-	if got := l.life.Notices("alq1"); len(got) != 1 || got[0] != want {
+	if got := noClocks(l.life.Notices("alq1")); len(got) != 1 || got[0] != want {
 		t.Errorf("notices %q", got)
 	}
 	if a := l.agent("alq2"); a.IdleNotified == nil || a.IdleSince == nil || *a.IdleNotified != *a.IdleSince {
@@ -302,17 +319,17 @@ func TestOrgTreeIdleOwed(t *testing.T) {
 	if a := l.agent("ali2"); a.Activity != "waiting" {
 		t.Errorf("ali2: %s %q", a.Activity, detailOf(a))
 	}
-	if got := l.life.Notices("ali1"); len(got) != 0 {
+	if got := noClocks(l.life.Notices("ali1")); len(got) != 0 {
 		t.Errorf("ali1 heard while ali3 was busy: %q", got)
 	}
 	l.turnEnds("ali3")
 	l.orgSettle()
 	want3 := l.render("child-turn-finished", map[string]string{"child": "n-ali3", "last": "(not reported)"})
-	if got := l.life.Notices("ali2"); len(got) != 1 || got[0] != want3 {
+	if got := noClocks(l.life.Notices("ali2")); len(got) != 1 || got[0] != want3 {
 		t.Errorf("ali2's notices %q", got)
 	}
 	want2 := l.render("child-turn-finished", map[string]string{"child": "n-ali2", "last": "(not reported)"})
-	if got := l.life.Notices("ali1"); len(got) != 1 || got[0] != want2 {
+	if got := noClocks(l.life.Notices("ali1")); len(got) != 1 || got[0] != want2 {
 		t.Errorf("ali1's notices %q", got)
 	}
 	if got := l.children("ali1"); got != "" {
@@ -353,7 +370,7 @@ func TestOrgRestingWaits(t *testing.T) {
 		t.Errorf("children wait after %q", got)
 	}
 	want := l.render("child-turn-finished", map[string]string{"child": "n-alw2", "last": "(not reported)"})
-	if got := l.life.Notices("alw1"); len(got) != 1 || got[0] != want {
+	if got := noClocks(l.life.Notices("alw1")); len(got) != 1 || got[0] != want {
 		t.Errorf("notices %q", got)
 	}
 	// Its children wait is a wait too: a busy child makes it busy to its parent, one more busy agent there.
@@ -389,14 +406,19 @@ func TestOrgForget(t *testing.T) {
 	}
 	// alg1 owes its parent a notice, held while its subtree is busy.
 	l.set("alg1", db.Field{Col: "idle_notified", Val: nil})
+	unowned := ""
+	l.life.SetUnown(func(_ context.Context, a db.Agent, how string) error { unowned = a.ID + " " + how; return nil })
 	if _, err := l.life.Forget(l.ctx, l.agent("alg2")); err != nil {
 		t.Fatal(err)
+	}
+	if unowned != "alg2 forgotten" {
+		t.Errorf("the forget unowned %q, want alg2's ITSAs", unowned)
 	}
 	l.orgSettle()
 	if a := l.agent("alg1"); l.children("alg1") != "" || a.Activity != "idle" {
 		t.Errorf("alg1 after the forget: %q %s", l.children("alg1"), a.Activity)
 	}
-	if got := l.life.Notices("alg4"); len(got) != 1 {
+	if got := noClocks(l.life.Notices("alg4")); len(got) != 1 {
 		t.Errorf("alg1's parent heard %q", got)
 	}
 }
@@ -437,12 +459,12 @@ func TestOrgConcurrent(t *testing.T) {
 	if a := l.agent("alc0"); l.children("alc0") != "" || a.Activity != "idle" {
 		t.Errorf("alc0: %q %s", l.children("alc0"), a.Activity)
 	}
-	if got := len(l.life.Notices("alt0")); got != 3*n {
+	if got := len(noClocks(l.life.Notices("alt0"))); got != 3*n {
 		t.Errorf("the turn parent heard %d turns, want %d", got, 3*n)
 	}
 	// Each child's last idle period is told once; earlier ones may be told or not, depending on when the parent was
 	// quiet, but never twice.
-	if got := len(l.life.Notices("alc0")); got < n || got > 3*n {
+	if got := len(noClocks(l.life.Notices("alc0"))); got < n || got > 3*n {
 		t.Errorf("the tree-idle parent heard %d notices", got)
 	}
 	for _, id := range ids {
@@ -464,7 +486,7 @@ func TestOrgBusySubtreeGuard(t *testing.T) {
 	if err := l.life.announceTreeIdle(l.ctx, l.agent("alh2")); err != nil {
 		t.Fatal(err)
 	}
-	if got := l.life.Notices("alh1"); len(got) != 0 {
+	if got := noClocks(l.life.Notices("alh1")); len(got) != 0 {
 		t.Errorf("told with a busy child: %q", got)
 	}
 	if a := l.agent("alh2"); a.IdleNotified != nil {
@@ -474,7 +496,7 @@ func TestOrgBusySubtreeGuard(t *testing.T) {
 	if err := l.life.announceTreeIdle(l.ctx, l.agent("alh2")); err != nil {
 		t.Fatal(err)
 	}
-	if got := l.life.Notices("alh1"); len(got) != 1 {
+	if got := noClocks(l.life.Notices("alh1")); len(got) != 1 {
 		t.Errorf("once quiet: %q", got)
 	}
 }
@@ -561,12 +583,12 @@ func TestOrgPeerDelivery(t *testing.T) {
 	l.life.StartOrg()
 	// Gone everywhere: the chief of staff hears instead.
 	l.set("ald1", db.Field{Col: "activity", Val: "blocked"}, db.Field{Col: "activity_detail", Val: "one"})
-	l.until("the fallback", func() bool { return len(l.life.Notices("ald4")) == 1 })
+	l.until("the fallback", func() bool { return len(noClocks(l.life.Notices("ald4"))) == 1 })
 	// A machine that doesn't answer: retried while the org goes on with other changes.
 	l.set("ald2", db.Field{Col: "activity", Val: "blocked"}, db.Field{Col: "activity_detail", Val: "two"})
 	l.until("a few tries", func() bool { return peer.tries() >= 4 })
 	l.set("ald5", db.Field{Col: "activity", Val: "errored"}, db.Field{Col: "activity_detail", Val: "local"})
-	l.until("a local notice meanwhile", func() bool { return len(l.life.Notices("ald4")) == 2 })
+	l.until("a local notice meanwhile", func() bool { return len(noClocks(l.life.Notices("ald4"))) == 2 })
 	// Its machine answers: told, and no event.
 	peer.set("apeer2", "told")
 	l.until("the retried notice", func() bool { return len(peer.sent()) == 1 })
@@ -659,5 +681,30 @@ func TestOrgOwnerStops(t *testing.T) {
 	want := map[string]bool{"als1 n-als1 was shut down": true, "als4 n-als4 errored": true, "als5 n-als5 errored": true}
 	if r := reports(); len(r) != 3 || !want[r[0]] || !want[r[1]] || !want[r[2]] {
 		t.Errorf("reports %q", r)
+	}
+}
+
+// TestForgetTellsEventsTheAgentIsGone (S-4317): forgetting an agent runs the same hook an archive does, once, after the
+// agent's row is gone and with no lifecycle lock held.
+func TestForgetTellsEventsTheAgentIsGone(t *testing.T) {
+	l := newLive(t)
+	l.setSettings(`{"itsa":{"home":"test-machine"}}`)
+	l.orgAgent("alf1", "")
+	l.set("alf1", db.Field{Col: "lifecycle", Val: "shut_down"})
+	l.life.SetUnown(func(context.Context, db.Agent, string) error { return nil })
+	var gone []string
+	l.life.SetAgentGone(func(ctx context.Context, id string) {
+		l.life.mu.Lock()
+		l.life.mu.Unlock()
+		l.life.orgMu.Lock()
+		l.life.orgMu.Unlock()
+		_, err := l.life.db.GetAgent(ctx, id)
+		gone = append(gone, id+" row gone: "+strconv.FormatBool(err != nil))
+	})
+	if _, err := l.life.Forget(l.ctx, l.agent("alf1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(gone) != 1 || gone[0] != "alf1 row gone: true" {
+		t.Errorf("the hook heard %v", gone)
 	}
 }

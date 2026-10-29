@@ -66,6 +66,15 @@ type thresholdEvent struct {
 // context:threshold and warns (1), tells the agent to round off and compact itself (2), or compacts it by force at
 // its turn end (3). The first report after a compaction is its measured size.
 func (l *Lifecycle) onContext(ctx context.Context, id string, tokens float64) {
+	l.contextAt(ctx, id, tokens, nil)
+}
+
+// contextAt is onContext for a size read for a session and launch (an OpenCode turn end, turnend.go), when there is a
+// binding: every write it makes (the measured size, the level) is made under the owner's guard and, in its own
+// transaction, only while the row still runs the bound session, and the first one refused ends it: a report a stop,
+// launch, archive or switch overtook moves no level, measures nothing, takes no measurement mark and requests no
+// compaction. The notice and a forced compaction follow only while the binding still holds.
+func (l *Lifecycle) contextAt(ctx context.Context, id string, tokens float64, b *turnBind) {
 	// A harness reports 0 before its first model call, as Claude Code does right after a compaction's relaunch: no
 	// size, so it neither measures nor lowers the level.
 	if !(tokens > 0) {
@@ -79,21 +88,42 @@ func (l *Lifecycle) onContext(ctx context.Context, id string, tokens float64) {
 	if a.TokensAfterCompaction != nil {
 		base = float64(*a.TokensAfterCompaction)
 	}
-	l.mu.Lock()
-	measure := l.measureNext[id]
-	delete(l.measureNext, id)
-	l.mu.Unlock()
-	if measure {
+	put := func(fields ...db.Field) bool {
+		if b == nil {
+			l.update(ctx, id, fields...)
+			return true
+		}
+		return b.update(ctx, fields...)
+	}
+	if b == nil {
+		l.mu.Lock()
+		measure := l.measureNext[id]
+		delete(l.measureNext, id)
+		l.mu.Unlock()
+		if measure {
+			base = tokens
+			l.update(ctx, id, db.Field{Col: "tokens_after_compaction", Val: sqlNumber(tokens)})
+			l.event(ctx, id, "compaction:measured", measuredEvent{Tokens: tokens})
+		}
+	} else if b.o.measure(b, func() (bool, error) {
+		// The OpenCode mark is the owner's: taken by a report of the marked session that still holds, and only once its
+		// size is written; any other report leaves it for the next one of its session.
+		return l.db.UpdateAgentIf(ctx, id, b.ok, db.Field{Col: "tokens_after_compaction", Val: sqlNumber(tokens)})
+	}) {
 		base = tokens
-		l.update(ctx, id, db.Field{Col: "tokens_after_compaction", Val: sqlNumber(tokens)})
 		l.event(ctx, id, "compaction:measured", measuredEvent{Tokens: tokens})
 	}
 	level, floor := l.levelOf(tokens, base)
 	if level == a.ContextLevel {
 		return
 	}
-	l.update(ctx, id, db.Field{Col: "context_level", Val: level})
-	if level < a.ContextLevel {
+	if !put(db.Field{Col: "context_level", Val: level}) || level < a.ContextLevel {
+		return
+	}
+	if b != nil {
+		l.turnAt(id, "context-level")
+	}
+	if b != nil && !b.still() {
 		return
 	}
 	set := l.settings.Get()
@@ -126,7 +156,15 @@ func (l *Lifecycle) onContext(ctx context.Context, id string, tokens float64) {
 			if err != nil {
 				return
 			}
-			if _, err := l.requestCompaction(l.ctx, fresh, "", prompt, "enforcement threshold"); err != nil {
+			l.turnAt(id, "context-forced")
+			var err2 error
+			if b != nil {
+				// An OpenCode agent's: the report's own session and generation, carried through (occompact.go).
+				_, err2 = l.ocRequest(l.ctx, fresh, "", prompt, "enforcement threshold", b)
+			} else {
+				_, err2 = l.requestCompaction(l.ctx, fresh, "", prompt, "enforcement threshold")
+			}
+			if err := err2; err != nil {
 				slog.Warn("lifecycle: forced compaction failed", "agent", id, "err", err)
 			}
 		}()
@@ -166,7 +204,7 @@ func restOwned(a db.Agent) bool {
 	if a.Lifecycle != "paused" {
 		return false
 	}
-	for _, o := range heldBy(a) {
+	for _, o := range pauseOwners(a) {
 		if o == restOwner {
 			return true
 		}

@@ -220,7 +220,6 @@ func TestItsaPostRules(t *testing.T) {
 		t.Errorf("stam's own post cleared declared waits on the stand-in: %d left of %d", n, waits)
 	}
 	for _, tc := range []struct{ body, what string }{
-		{`{"body":"x","attachments":[{"name":"a","content":"b"}]}`, "attachments"},
 		{`{"body":"x","to":"aw1"}`, "`to` that is not a list"},
 		{`{"body":"x","to":[5]}`, "`to` with an entry"},
 		{`{"body":"x","inferred":"a"}`, "`inferred` that is not a list"},

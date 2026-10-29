@@ -29,6 +29,7 @@ type events struct {
 		cost    float64
 		in, out int64
 	}
+	exact []float64
 }
 
 func (e *events) AddEvent(_ context.Context, agent, typ string, data any) error {
@@ -47,6 +48,13 @@ func (e *events) RecordDecideSpend(_ context.Context, purpose string, cost float
 		cost    float64
 		in, out int64
 	}{purpose, cost, in, out})
+	return nil
+}
+
+func (e *events) AddExactPending(_ context.Context, usd float64) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.exact = append(e.exact, usd)
 	return nil
 }
 
@@ -118,6 +126,8 @@ func TestAnswersAndSpend(t *testing.T) {
 		}
 		io.WriteString(w, `{"model":"served-model","answers":{"answer":{"type":"noul","noul":0.73},"bad":{"noul":1.5},"str":{"noul":"0.2"}},"usage":{"cost":0.01,"input_tokens":12,"output_tokens":3}}`)
 	}, config.Settings{}, nil)
+	changed := 0
+	c.o.LedgerChanged = func() { changed++ }
 	res, f := c.Decide(context.Background(), "state text", asked(), "decide:step:st1", time.Second)
 	if f != nil {
 		t.Fatalf("failure %+v", f)
@@ -139,6 +149,14 @@ func TestAnswersAndSpend(t *testing.T) {
 	if len(ev.events) != 1 || ev.events[0].typ != "decide" || ev.events[0].agent != "stam" ||
 		ev.events[0].data != `{"purpose":"decide:step:st1","model":"served-model","cost":0.01,"tokens_in":12,"tokens_out":3}` {
 		t.Errorf("events %+v", ev.events)
+	}
+	// A call with a cost has the budgets evaluated (src/budgets.ts ledgerChanged).
+	if changed != 1 {
+		t.Errorf("ledger changed %d times", changed)
+	}
+	// Its cost is billed money, for the reconciliation to take out of the bill (src/reconcile.ts addExactPending).
+	if len(ev.exact) != 1 || ev.exact[0] != 0.01 {
+		t.Errorf("exact pending %v", ev.exact)
 	}
 }
 
@@ -248,9 +266,13 @@ func TestRefusedBeforeTheCall(t *testing.T) {
 	if _, f := c.Decide(context.Background(), "s", asked(), "p", 0); f != nil {
 		t.Errorf("an OpenRouter id with a colon: %+v", f)
 	}
-	c, ev, _ = setup(t, h, config.Settings{SystemBudget: true}, nil)
-	if _, f := c.Decide(context.Background(), "s", asked(), "p", 0); f == nil || !strings.Contains(f.Error, "openrouter-system has a budget") || ev.types()[0] != "decide:error" {
-		t.Errorf("budget: %+v %+v", f, ev.events)
+	// A spent system budget: the held reason is the failure, with its event, and no call goes out (src/budgets.ts
+	// providerHeld, asked with the provider).
+	c, ev, _ = setup(t, h, config.Settings{}, nil)
+	var asked_ string
+	c.o.Held = func(p string) string { asked_ = p; return "the system day budget of $8 is spent" }
+	if _, f := c.Decide(context.Background(), "s", asked(), "p", 0); f == nil || f.Error != "the system day budget of $8 is spent" || ev.types()[0] != "decide:error" || asked_ != "openrouter" {
+		t.Errorf("budget: %+v %+v %q", f, ev.events, asked_)
 	}
 	if calls != 1 {
 		t.Errorf("%d calls reached the endpoint, want only the OpenRouter id's", calls)
@@ -268,57 +290,6 @@ func TestProvider(t *testing.T) {
 		if id, m := provider(tc.ref, []string{"myazure"}); id != tc.id || m != tc.model {
 			t.Errorf("%q -> %s %s", tc.ref, id, m)
 		}
-	}
-}
-
-// The key: the environment, then the secret store's value for that variable in the stam slot (first by name), then opencode.env.
-func TestKeyFor(t *testing.T) {
-	home := t.TempDir()
-	env := map[string]string{}
-	get := func(k string) string { return env[k] }
-	if keyFor(home, "OPENROUTER_API_KEY", get) != "" {
-		t.Error("a key from nothing")
-	}
-	write := func(name, text string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(home, name), []byte(text), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("opencode.env", "# c\nOPENROUTER_API_KEY=\"legacy\"\nOTHER=x\nlower=1\n")
-	if got := keyFor(home, "OPENROUTER_API_KEY", get); got != "legacy" {
-		t.Errorf("opencode.env: %q", got)
-	}
-	write("secrets.json", `{"secrets":{"b-key":{"value":"from-b","slot":"stam","env":"OPENROUTER_API_KEY"},"a-agent":{"value":"agent","slot":"agent","env":"OPENROUTER_API_KEY"},"a-key":{"value":"from-a","provider":"openrouter","env":"OPENROUTER_API_KEY"},"BAD NAME":{"value":"x","env":"OPENROUTER_API_KEY"},"empty":{"value":"","env":"OPENROUTER_API_KEY"}},"imported":["opencode.env"]}`)
-	if got := keyFor(home, "OPENROUTER_API_KEY", get); got != "from-a" {
-		t.Errorf("the store, first by name in the stam slot: %q", got)
-	}
-	env["OPENROUTER_API_KEY"] = "from-env"
-	if got := keyFor(home, "OPENROUTER_API_KEY", get); got != "from-env" {
-		t.Errorf("the environment first: %q", got)
-	}
-	// Once imported, opencode.env's key lines are the store's: a store without the key does not fall back to them.
-	delete(env, "OPENROUTER_API_KEY")
-	write("secrets.json", `{"secrets":{},"imported":["opencode.env"]}`)
-	if got := keyFor(home, "OPENROUTER_API_KEY", get); got != "" {
-		t.Errorf("an imported opencode.env: %q", got)
-	}
-	// A broken store reads as empty, and the legacy lines serve.
-	write("secrets.json", `{not json`)
-	if got := keyFor(home, "OPENROUTER_API_KEY", get); got != "legacy" {
-		t.Errorf("a broken store: %q", got)
-	}
-	// A symlink is not followed.
-	real := filepath.Join(t.TempDir(), "real.json")
-	if err := os.WriteFile(real, []byte(`{"secrets":{"k":{"value":"linked","env":"OPENROUTER_API_KEY"}}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	os.Remove(filepath.Join(home, "secrets.json"))
-	if err := os.Symlink(real, filepath.Join(home, "secrets.json")); err != nil {
-		t.Fatal(err)
-	}
-	if got := keyFor(home, "OPENROUTER_API_KEY", get); got != "legacy" {
-		t.Errorf("a symlinked store: %q", got)
 	}
 }
 

@@ -7,6 +7,7 @@
 // STAM_HOME and tmux socket, with no daemon, no network and no models:
 // `node --test test/compact-epipe.test.mjs`.
 import { test } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, writeFileSync } from 'node:fs';
@@ -22,7 +23,7 @@ const bin = join(home, 'claude');
 writeFileSync(bin, '#!/bin/sh\nexit 1\n');
 chmodSync(bin, 0o755);
 process.env.STAM_CLAUDE_BIN = bin;
-process.on('exit', () => spawnSync('tmux', ['-L', socket, 'kill-server']));
+process.on('exit', () => killTmuxServer(socket));
 
 test('a compactor that exits without reading stdin fails the compaction without an uncaught EPIPE', async () => {
   const uncaught = [];

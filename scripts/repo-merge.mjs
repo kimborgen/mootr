@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import { GATES_CONTEXT, RepoConfigError, readRepoConfig } from './repo-config.mjs';
 import { PR_FIELDS, RepoGateError, apiRepo, fallbackOf, fetchSha, gh, repoArgs, runRepoGate, trustedMain } from './repo-gate.mjs';
-import { envVar } from '../src/env.ts';
+import { envVar, withTwins } from '../src/env.ts';
 import { isMain } from './main-guard.mjs';
 
 export const REFUSED = 3;
@@ -85,7 +85,7 @@ export async function mergeRepoPr(pr, env = process.env) {
 
   const method = config.merge.method;
   if (config.merge.command) {
-    const code = sh(config.merge.command, repo, { ...env, ...{ STAM_PR: pr, STAM_PR_HEAD: head, STAM_BASE_SHA: baseSha, STAM_MERGE_METHOD: method } });
+    const code = sh(config.merge.command, repo, { ...env, ...withTwins({ STAM_PR: pr, STAM_PR_HEAD: head, STAM_BASE_SHA: baseSha, STAM_MERGE_METHOD: method }) });
     if (code !== 0) throw new RepoGateError(`merge.command exited ${code}`);
   } else {
     // --match-head-commit makes GitHub refuse the merge if the head moved since the checks.
@@ -96,7 +96,7 @@ export async function mergeRepoPr(pr, env = process.env) {
     sha = JSON.parse(gh(['pr', 'view', pr, ...repoArgs(config), '--json', 'mergeCommit'], repo)).mergeCommit?.oid ?? head;
   } catch {} // the merge is done; a failed read of its sha must not turn it into a failure
   if (config.deploy) {
-    const code = sh(config.deploy, repo, { ...env, ...{ STAM_PR: pr, STAM_PR_HEAD: head, STAM_BASE_SHA: baseSha, STAM_MERGE_METHOD: method, STAM_MERGE_SHA: sha } });
+    const code = sh(config.deploy, repo, { ...env, ...withTwins({ STAM_PR: pr, STAM_PR_HEAD: head, STAM_BASE_SHA: baseSha, STAM_MERGE_METHOD: method, STAM_MERGE_SHA: sha }) });
     if (code !== 0) throw new DeployError(`merged as ${sha}, but deploy exited ${code}`);
   }
   return { sha, deployed: Boolean(config.deploy) };

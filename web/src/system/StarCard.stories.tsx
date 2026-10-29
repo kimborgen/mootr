@@ -7,9 +7,10 @@ import { orbRadius } from './stars'
 import { activityOf, cardSig, type CardModel } from './SystemCard'
 import { StarCard } from './StarCard'
 
+const NO_EXTRAS = { costs: null, activity: null, watch: {}, fields: null, fieldsFailed: false, fieldsStart: 0 }
 const KEY = (n: string, status = 'in_progress') => itsa({ id: 'st-i-' + n, key: 'FX-' + n, title: 'Fixture ' + n, owner: 'st-' + n, status })
 function model(a: Agent | null, o: Partial<CardModel> = {}): CardModel {
-  return { id: a?.id ?? 'human', short: a ? shortName(a.name, 'fixture-cos') : 'You', agent: a, activity: a ? activityOf(a) : '', it: null, owns: 0, badges: [], unread: 0, ctx: 0, ctxLevel: 0, kids: 0, folded: null, hit: '', rollup: null, ...o }
+  return { id: a?.id ?? 'human', short: a ? shortName(a.name, 'fixture-cos') : 'You', agent: a, activity: a ? activityOf(a) : '', it: null, owns: 0, badges: [], unread: 0, ctx: 0, ctxLevel: 0, kids: 0, folded: null, hit: '', rollup: null, cx: { now: 0, extras: NO_EXTRAS }, cxSig: '', ...o }
 }
 const star = (id: string, name: string, o: Partial<Agent>) => worker('st-' + id, name, 'st-cos', o)
 

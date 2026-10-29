@@ -251,3 +251,16 @@ test('a list over the cap is cut to CAP and counted in its more map', () => {
   assert.equal(d.happened.more.spawned, 5, 'the 25 agents spawned in the window (digest-busy included), less the 20 kept');
   assert.equal(d.needsMore, undefined, 'a list that was not cut has no count');
 });
+
+test("an ask placed in another agent's thread (S-3827) leaves that agent's decision there its own row", () => {
+  const other = agent({ name: 'digest-thread-owner' });
+  const asker = agent({ name: 'digest-asker' });
+  mailToHuman(other, { id: 'm-home-root', thread: 'm-home-root', subject: 'Release plan', body: 'root' });
+  const req = db.createPermissionRequest(asker.id, 'push the tag', 'why', '');
+  db.createMail({ id: 'm-home-ask', from_id: asker.id, from_name: asker.name, subject: 'Permission: push the tag', body: 'ask', thread_id: 'm-home-root', reply_to: null, permission_id: req.id }, ['human']);
+  const decisionId = mailToHuman(other, { id: 'm-home-decision', thread: 'm-home-root', subject: 'Which date', body: 'decide' });
+  db.addDecisionMail(decisionId, 'm-home-root');
+  const refs = digest.digest().needs.map((r) => r.ref);
+  assert.ok(refs.includes(req.id), 'the ask shows');
+  assert.ok(refs.includes(decisionId), "the thread's decision shows too");
+});

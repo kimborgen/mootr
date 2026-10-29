@@ -79,6 +79,14 @@ describe('threadTitle', () => {
     expect(threadTitle([{ title: null }, {}])).toBeNull()
     expect(threadTitle([])).toBeNull()
   })
+  it("skips an ask placed in the thread, and its link line, so an ask doesn't rename the thread (S-3827)", () => {
+    expect(threadTitle([{ title: 'Branch cleanup' }, { title: 'Permission: Delete', permission_id: 'p1' }])).toBe('Branch cleanup')
+    expect(threadTitle([{ title: 'Work' }, { title: 'Ask link', kind: 'ask-link' }])).toBe('Work')
+    // The thread's own mail has no title: null, so the list falls back to the thread's subject, not the ask's title.
+    expect(threadTitle([{ title: null }, { title: 'Permission: Delete', permission_id: 'p1' }])).toBeNull()
+    // A thread of asks only keeps their title.
+    expect(threadTitle([{ title: 'Permission: Delete', permission_id: 'p1' }])).toBe('Permission: Delete')
+  })
 })
 
 describe('sidebar cost numbers (S-318)', () => {

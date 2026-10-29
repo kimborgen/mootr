@@ -70,6 +70,16 @@ func linkOut(r jsfmt.Value) jsfmt.Value {
 	return out
 }
 
+// JoinedNotOwned is the ITSAs the agent takes part in and doesn't own (src/itsa-owners.ts releaseReviewer's rows).
+func (d *DB) JoinedNotOwned(ctx context.Context, agentID string) ([]string, error) {
+	var out []string
+	err := d.Read(ctx, func(conn *sqlite.Conn) (err error) {
+		out, err = column(conn, "SELECT p.itsa_id FROM itsa_participants p JOIN itsas i ON i.id = p.itsa_id WHERE p.agent_id = ? AND p.left_at IS NULL AND (i.owner IS NULL OR i.owner <> ?)", agentID, agentID)
+		return err
+	})
+	return out, wrap("joined ITSAs", err)
+}
+
 // ItsaLinks is itsa.links for an id, in order of n.
 func (d *DB) ItsaLinks(ctx context.Context, id string) ([]jsfmt.Value, error) {
 	var out []jsfmt.Value
@@ -143,6 +153,8 @@ type ItsaFilter struct {
 	Participant   string
 	Kind          *string
 	Text          string
+	// Since is a created_at lower bound in created_at's form (server sinceTime).
+	Since *string
 }
 
 // Both lists order by creation time, then by rowid: two ITSAs made in the same millisecond keep the order they were made in.
@@ -184,6 +196,9 @@ func (d *DB) ListItsas(ctx context.Context, f ItsaFilter) ([]jsfmt.Value, error)
 		like := "%" + f.Text + "%"
 		where = append(where, "(key LIKE ? OR title LIKE ? OR summary LIKE ? OR body LIKE ?)")
 		args = append(args, like, like, like, like)
+	}
+	if f.Since != nil {
+		where, args = append(where, "created_at >= ?"), append(args, *f.Since)
 	}
 	query := "SELECT * FROM itsas"
 	if len(where) > 0 {
@@ -252,9 +267,10 @@ func nonNil(v []jsfmt.Value) []jsfmt.Value {
 
 // fieldValues is ItsaFieldValues on a connection already open.
 func fieldValues(conn *sqlite.Conn, id string) (map[string]jsfmt.Value, error) {
-	query, args := "SELECT v.itsa_id, f.key, v.value FROM itsa_field_values v JOIN itsa_fields f ON f.id = v.field_id ORDER BY f.position", []any(nil)
+	// A value whose field doesn't apply to the ITSA's kind is kept in the database but not read (S-3180).
+	query, args := "SELECT v.itsa_id, f.key, f.kinds, i.kind, v.value FROM itsa_field_values v JOIN itsa_fields f ON f.id = v.field_id JOIN itsas i ON i.id = v.itsa_id ORDER BY f.position", []any(nil)
 	if id != "" {
-		query, args = "SELECT v.itsa_id, f.key, v.value FROM itsa_field_values v JOIN itsa_fields f ON f.id = v.field_id WHERE v.itsa_id = ? ORDER BY f.position", []any{id}
+		query, args = "SELECT v.itsa_id, f.key, f.kinds, i.kind, v.value FROM itsa_field_values v JOIN itsa_fields f ON f.id = v.field_id JOIN itsas i ON i.id = v.itsa_id WHERE v.itsa_id = ? ORDER BY f.position", []any{id}
 	}
 	found, err := rows(conn, query, args...)
 	if err != nil {
@@ -262,6 +278,17 @@ func fieldValues(conn *sqlite.Conn, id string) (map[string]jsfmt.Value, error) {
 	}
 	out := map[string]jsfmt.Value{}
 	for _, r := range found {
+		kinds, kerr := parseKinds(r.Text("kinds"))
+		if kerr != nil {
+			return nil, fmt.Errorf("the kinds of field %s are not JSON", r.Text("key"))
+		}
+		applies, aerr := FieldApplies(kinds, r.Text("kind"))
+		if aerr != nil {
+			return nil, fmt.Errorf("the kinds of field %s: %w", r.Text("key"), aerr)
+		}
+		if !applies {
+			continue
+		}
 		v, perr := jsfmt.Parse([]byte(r.Text("value")))
 		if perr != nil {
 			return nil, fmt.Errorf("a field value of %s is not JSON", r.Text("itsa_id"))
@@ -276,14 +303,21 @@ func fieldValues(conn *sqlite.Conn, id string) (map[string]jsfmt.Value, error) {
 	return out, nil
 }
 
-// HasItsaField is whether a field with this key exists (the stage field that closing sets, which this daemon cannot).
-func (d *DB) HasItsaField(ctx context.Context, key string) (bool, error) {
-	n := 0
+// ItsaFieldKinds is the kinds of the field with this key or id, and whether there is one (the stage field that closing sets,
+// which this daemon cannot itself write: only the TS daemon's closing does, through this check and the process).
+func (d *DB) ItsaFieldKinds(ctx context.Context, key string) (jsfmt.Value, bool, error) {
+	var kinds jsfmt.Value
+	found := false
 	err := d.Read(ctx, func(conn *sqlite.Conn) error {
-		return sqlitex.Execute(conn, "SELECT COUNT(*) FROM itsa_fields WHERE id = ? OR key = ?", &sqlitex.ExecOptions{Args: []any{key, key},
-			ResultFunc: func(stmt *sqlite.Stmt) error { n = stmt.ColumnInt(0); return nil }})
+		fields, err := rows(conn, "SELECT kinds FROM itsa_fields WHERE id = ? OR key = ? ORDER BY id = ? DESC", key, key, key)
+		if err != nil || len(fields) == 0 {
+			return err
+		}
+		found = true
+		kinds, err = parseKinds(fields[0].Text("kinds"))
+		return err
 	})
-	return n > 0, wrap("ITSA field", err)
+	return kinds, found, wrap("ITSA field", err)
 }
 
 // --- writes ---
@@ -302,6 +336,28 @@ func newItsaID() string {
 		id = append(id, idAlphabet[int(x)%len(idAlphabet)])
 	}
 	return string(id)
+}
+
+// idTries bounds freshItsaID's draws, as short-id.ts ID_TRIES does.
+const idTries = 20
+
+// drawItsaID is the draw freshItsaID makes; a test swaps it to force a collision.
+var drawItsaID = newItsaID
+
+// freshItsaID is itsa.ts newId: a draw no row of table holds, picked inside the write
+// transaction. After idTries draws it fails with a clear error, never a UNIQUE one.
+func freshItsaID(conn *sqlite.Conn, prefix, table, what string) (string, error) {
+	for i := 0; i < idTries; i++ {
+		id := prefix + drawItsaID()[1:]
+		taken, err := rows(conn, "SELECT 1 FROM "+table+" WHERE id = ?", id)
+		if err != nil {
+			return "", err
+		}
+		if len(taken) == 0 {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("could not pick a free %s id in %d tries; the id space (%s + 4 characters) is nearly full", what, idTries, prefix)
 }
 
 var keySuffix = regexp.MustCompile(`-(\d+)$`)
@@ -383,10 +439,14 @@ type NewItsa struct {
 // CreateItsa is itsa.create's transaction: the row, its participants and its `created` event, with the next key.
 func (d *DB) CreateItsa(ctx context.Context, n NewItsa) (jsfmt.Value, error) {
 	var created jsfmt.Value
-	id, t := newItsaID(), now()
+	t := now()
 	// A refused field value is the caller's to read as it is, not a database failure to wrap.
 	var refused error
 	err := d.Write(ctx, func(conn *sqlite.Conn) error {
+		id, err := freshItsaID(conn, "i", "itsas", "ITSA")
+		if err != nil {
+			return err
+		}
 		key, err := nextItsaKey(conn, n.KeyPrefix)
 		if err != nil {
 			return err
@@ -428,7 +488,11 @@ func (d *DB) CreateItsa(ctx context.Context, n NewItsa) (jsfmt.Value, error) {
 			return err
 		}
 		if n.Fields != nil {
-			ch, changed, err := applyFieldValues(conn, id, *n.Fields, n.By)
+			kind := ""
+			if n.Kind != nil {
+				kind = *n.Kind
+			}
+			ch, changed, err := applyFieldValues(conn, id, *n.Fields, n.By, kind)
 			if err != nil {
 				refused = err
 				return err
@@ -519,6 +583,8 @@ type ItsaUpdate struct {
 	Participants      []string
 	SetParticipants   bool
 	EnsureParticipant string
+	// LeaveParticipant ends one member's part without removing its row (itsa.leaveParticipant, S-3015).
+	LeaveParticipant string
 	// Changes are written as events in order, except rank (a board reorder is no activity); Action is the human action that
 	// made a status change.
 	Changes []ItsaChange
@@ -565,6 +631,11 @@ func (d *DB) UpdateItsa(ctx context.Context, ref, actor string, plan func(tx Its
 			}
 		} else if u.EnsureParticipant != "" {
 			if err := rejoinItsa(conn, id, u.EnsureParticipant); err != nil {
+				return err
+			}
+		}
+		if u.LeaveParticipant != "" {
+			if err := runSQL(conn, "UPDATE itsa_participants SET left_at = ? WHERE itsa_id = ? AND agent_id = ?", now(), id, u.LeaveParticipant); err != nil {
 				return err
 			}
 		}

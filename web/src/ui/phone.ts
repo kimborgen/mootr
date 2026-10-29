@@ -57,7 +57,8 @@ export function initPhone() {
   }
   const focus = () => {
     const el = document.activeElement
-    const now = el && el !== document.body && el.matches(EDITABLE) ? el : null
+    // A disabled field takes no typing; Safari keeps it focused until its next style update.
+    const now = el && el !== document.body && el.matches(EDITABLE) && !el.matches(':disabled') ? el : null
     if (now === typing) return
     typing = now
     shrunk = false
@@ -67,6 +68,9 @@ export function initPhone() {
   }
   document.addEventListener('focusin', focus)
   document.addEventListener('focusout', () => setTimeout(focus, 0))
+  // Safari doesn't fire focusout when the focused field leaves the page or is disabled (a mail
+  // archived while its reply box has the focus), so the bottom navigation would stay away: look for that.
+  new MutationObserver(() => { if (typing && (document.activeElement !== typing || typing.matches(':disabled'))) focus() }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] })
 
   // A long touch opens the context menu where the finger is. Android sends contextmenu by
   // itself; iOS doesn't, so a press held without moving sends one, unless one came already.

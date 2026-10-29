@@ -44,10 +44,13 @@ const steps = JSON.parse(readFileSync(new URL('./ask-steps.json', import.meta.ur
 const ids = [];
 const sub = (v) => (typeof v === 'string' ? v.replace(/^#(\d+)$/, (_, n) => ids[Number(n)] ?? v) : Array.isArray(v) ? v.map(sub) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, sub(x)])) : v);
 // src/daemon.ts itsaRoute: a missing ITSA is 404, a status that moved 409, the rest 400.
-const statusOf = (msg) => (/^no ITSA |^no link |^no field /.test(msg) ? 404 : /^status changed/.test(msg) ? 409 : 400);
+const statusOf = (msg) => (/^no ITSA |^no link |^no field /.test(msg) ? 404 : /^status changed|^the text changed/.test(msg) ? 409 : 400);
 const results = [];
+// When each step began: a thread's order within one step depends on the millisecond, so the test compares it per step.
+const starts = [];
 for (const [i, step] of steps.entries()) {
   await new Promise((r) => setTimeout(r, 3));
+  starts.push(new Date().toISOString());
   try {
     let out;
     let id = null;
@@ -64,7 +67,7 @@ for (const [i, step] of steps.entries()) {
       await new Promise((r) => setTimeout(r, 25));
     }
     else if (step.op === 'post') out = await itsa.post(ref, { ...sub(step.input), by: step.by ?? 'human' });
-    else if (step.op === 'act') out = await human.act(ref, String(step.input?.action ?? ''), String(step.input?.text ?? ''));
+    else if (step.op === 'act') out = await human.act(ref, String(step.input?.action ?? ''), String(step.input?.text ?? ''), typeof step.input?.if_rev === 'string' ? step.input.if_rev : undefined);
     else if (step.op === 'attention') out = human.attention();
     else if (step.op === 'thread') {
       const x = itsa.must(ref);
@@ -89,6 +92,7 @@ const tables = {
   itsaEvents: d.prepare('SELECT itsa_id, actor, type, data FROM itsa_events ORDER BY id').all(),
   archive: d.prepare('SELECT mailbox_id, thread_id FROM thread_archive ORDER BY rowid').all(),
   archived: d.prepare('SELECT mailbox_id, thread_id, mail_id FROM thread_archive_mail ORDER BY rowid').all(),
+  shownRevs: d.prepare('SELECT m.subject, s.itsa_id, s.rev, s.at, s.len FROM itsa_shown_revs s JOIN mail m ON m.id = s.mail_id ORDER BY m.rowid').all(),
 };
-writeFileSync(`${home}/expect.json`, JSON.stringify({ results, tables }));
+writeFileSync(`${home}/expect.json`, JSON.stringify({ results, tables, starts }));
 process.exit(0);

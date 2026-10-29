@@ -2,4 +2,4 @@
 # mootr is the primary name of the CLI; bin/stam stays an alias. Same behaviour, but help and
 # usage text print the name the user invoked. The name goes to bin/stam one-shot, not exported.
 here=$(dirname "$(readlink -f "$0")")
-STAM_CLI_INVOKED=mootr exec "$here/stam" "$@"
+MOOTR_CLI_INVOKED=mootr STAM_CLI_INVOKED=mootr exec "$here/stam" "$@"

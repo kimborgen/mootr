@@ -57,7 +57,7 @@ trap 'exit 130' INT TERM HUP
 
 mkdir -p "$FAKE/fake"
 cat >"$FAKE/fake/test.env" <<EOF
-export STAM_HOME='$FAKE/fake' STAM_PORT=$FPORT STAM_URL=http://127.0.0.1:$FPORT STAM_TMUX_SOCKET=$FSOCK STAM_MACHINE=fake STAM_BIND=127.0.0.1 STAM_OPENCODE_PORT=$FOPORT
+export $(env_pair HOME "'$FAKE/fake'") $(env_pair PORT "$FPORT") $(env_pair URL "http://127.0.0.1:$FPORT") $(env_pair TMUX_SOCKET "$FSOCK") $(env_pair MACHINE fake) $(env_pair BIND 127.0.0.1) $(env_pair OPENCODE_PORT "$FOPORT")
 EOF
 printf '{ "peers": [] }\n' >"$FAKE/fake/settings.json"
 (umask 077 && python3 -c 'import secrets; print(secrets.token_urlsafe(24))' >"$FAKE/fake/token")
@@ -85,6 +85,7 @@ Description=fake test daemon (janitor test)
 [Service]
 ExecStart=/bin/sleep 300
 Environment=STAM_HOME=$FAKE/fake
+Environment=MOOTR_HOME=$FAKE/fake
 Restart=always
 
 [Install]
@@ -137,7 +138,7 @@ for why in timeout reset refused; do
     reset) url="http://127.0.0.1:$RESET_PORT"; ms=5000 ;;
     refused) url=$CLOSED_URL; ms=5000 ;;
   esac
-  if STAM_URL=$url STAM_JANITOR_TIMEOUT_MS=$ms "$STAM" janitor >"$TEST_TMP/janitor-$why.out" 2>&1; then
+  if STAM_URL=$url MOOTR_URL=$url STAM_JANITOR_TIMEOUT_MS=$ms "$STAM" janitor >"$TEST_TMP/janitor-$why.out" 2>&1; then
     fail "an unscoped janitor with no daemon to answer ($why) swept here: $(cat "$TEST_TMP/janitor-$why.out")"
   fi
   grep -q "an unscoped sweep, and the daemon didn't answer" "$TEST_TMP/janitor-$why.out" || fail "the $why refusal didn't name the missing daemon: $(cat "$TEST_TMP/janitor-$why.out")"
@@ -161,7 +162,7 @@ for spec in "empty:--only=" "root:--only /tmp" "base:--only $STAM_TEST_TMPDIR" \
   "symlink:--only $ALIAS_SCOPE" "missing:--only $STAM_TEST_TMPDIR/stam-test.zzmissing.$$"; do
   what=${spec%%:*}
   args=${spec#*:}
-  if STAM_URL=$CLOSED_URL STAM_JANITOR_TIMEOUT_MS=5000 "$STAM" janitor --dry-run $args >"$TEST_TMP/janitor-scope-$what.out" 2>&1; then
+  if STAM_URL=$CLOSED_URL MOOTR_URL=$CLOSED_URL STAM_JANITOR_TIMEOUT_MS=5000 "$STAM" janitor --dry-run $args >"$TEST_TMP/janitor-scope-$what.out" 2>&1; then
     fail "a janitor scoped to '$args' with no daemon swept here: $(cat "$TEST_TMP/janitor-scope-$what.out")"
   fi
   grep -q "is not a concrete test folder" "$TEST_TMP/janitor-scope-$what.out" || fail "the '$args' refusal didn't name the scope: $(cat "$TEST_TMP/janitor-scope-$what.out")"
@@ -175,7 +176,7 @@ tmux -L "$FSOCK" has-session -t =orphan 2>/dev/null || fail "a refused --only sw
 
 # A sweep of the folders it names touches only those, so it needs no registry and runs here.
 echo "== with no daemon, a sweep of named folders still runs here"
-STAM_URL="$CLOSED_URL" "$STAM" janitor --dry-run --only "$FAKE" >"$TEST_TMP/janitor-scoped.out" 2>&1 || fail "janitor --dry-run --only with no daemon: $(cat "$TEST_TMP/janitor-scoped.out")"
+STAM_URL="$CLOSED_URL" MOOTR_URL="$CLOSED_URL" "$STAM" janitor --dry-run --only "$FAKE" >"$TEST_TMP/janitor-scoped.out" 2>&1 || fail "janitor --dry-run --only with no daemon: $(cat "$TEST_TMP/janitor-scoped.out")"
 grep -q "would clean daemon $FPID" "$TEST_TMP/janitor-scoped.out" || fail "a scoped sweep with no daemon didn't see the daemon: $(cat "$TEST_TMP/janitor-scoped.out")"
 grep -q "would clean unit $SVC" "$TEST_TMP/janitor-scoped.out" || fail "a scoped sweep with no daemon didn't see the unit: $(cat "$TEST_TMP/janitor-scoped.out")"
 [ -f "$UNITF" ] || fail "the scoped dry run removed the unit"

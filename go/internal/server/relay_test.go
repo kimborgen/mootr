@@ -10,7 +10,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"stam/internal/clock"
 	"stam/internal/db"
 	"stam/internal/jsfmt"
 )
@@ -92,6 +94,10 @@ func farDaemon(t *testing.T) (*fixture, *peerServer) {
 var humanHdr = map[string]string{"X-Stam-Test-Human": humanKey, "X-Stam-Human": "1"}
 
 func TestRelayToAGoDaemon(t *testing.T) {
+	// The agent route's now (S-3468) is the clock, so both daemons answer the same bytes only with it fixed.
+	old := clock.Now
+	t.Cleanup(func() { clock.Now = old })
+	clock.Now = func() time.Time { return time.Date(2026, 10, 22, 2, 10, 30, 0, time.UTC) }
 	far, ps := farDaemon(t)
 	f := relayFixture(t, ps.ts.URL, "", nil)
 
@@ -356,6 +362,23 @@ func TestRelayViewStream(t *testing.T) {
 	}
 	if got := stub.last(t); got.query != "since=3" || got.header.Get("x-stam-local") != "1" {
 		t.Errorf("what far got: %+v", got)
+	}
+}
+
+// A refusal piped back from the agent view's stream reaches the caller with the bearer redacted (S-3994).
+func TestRelayViewRefusalScrubbed(t *testing.T) {
+	stub := newPeerServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/aboss":
+			writeJSON(w, 200, map[string]any{"id": "aboss", "name": "boss", "machine": "far", "lifecycle": "active"})
+		case "/api/agents/aboss/view":
+			writeJSON(w, 403, map[string]any{"error": "refused: " + r.Header.Get("authorization")})
+		}
+	}))
+	f := relayFixture(t, stub.ts.URL, "", nil)
+	rec := f.do(call{path: "/api/agents/aboss/view", token: sharedTok})
+	if rec.Code != 403 || strings.Contains(rec.Body.String(), peerTok) || errorOf(t, rec) != "refused: Bearer [redacted]" {
+		t.Errorf("the piped refusal: %d %q", rec.Code, rec.Body.String())
 	}
 }
 

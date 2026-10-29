@@ -107,14 +107,17 @@ unset STAM_TEST_LIGHT_SLOTS
 echo "== a light run under a held heavy slot runs at once"
 timeout 20 $SLOT sh -c "$SLOT --light echo light-nested" >"$WORK/o7" 2>&1 || fail "light nested waited: $(cat "$WORK/o7")"
 grep -q light-nested "$WORK/o7" || fail "light nested didn't run"
+echo "== a wrapped all-LIGHT test/run.sh takes the light pool while a heavy slot is held (S-3585)"
+export STAM_TEST_SLOTS=1
+LOG="$WORK/m.log"
+$SLOT sh "$WORK/worker.sh" "$LOG" heavy5 30 >/dev/null 2>&1 & P1=$!
+wait_for_line "$LOG" "start heavy5"
+timeout 20 $SLOT "$ROOT/test/run.sh" hit-classify >"$WORK/o8" 2>&1 || fail "wrapped LIGHT run.sh waited behind the heavy slot: $(cat "$WORK/o8")"
+grep -q "waiting for a test slot" "$WORK/o8" && fail "wrapped LIGHT run.sh queued: $(cat "$WORK/o8")"
+grep -q "hit-classify .*PASS" "$WORK/o8" || fail "wrapped LIGHT run.sh didn't pass: $(cat "$WORK/o8")"
+kill $P1 2>/dev/null || true; wait $P1 2>/dev/null || true; P1=
 echo "== test/run.sh's LIGHT names are plain node --test files"
-LIGHT=$(sed -n '/^LIGHT="$/,/"$/p' "$ROOT/test/run.sh" | sed 's/"$//' | grep -v '^LIGHT=')
-[ -n "$LIGHT" ] || fail "no LIGHT names"
-for n in $LIGHT; do
-  line=$(grep "^    $n) echo \"node --test test/[^ ]*\.test\.mjs\" ;;$" "$ROOT/test/run.sh") || fail "$n isn't a node --test entry"
-  f=$(echo "$line" | sed 's/.*node --test \(test\/[^"]*\)".*/\1/')
-  grep -v '^[[:space:]]*//' "$ROOT/$f" | grep -qE "lib\.sh|createServer\(|\.listen\(|['\"\`]tmux\b|['\"/]playwright|['\"/]chromium|chromium\.|(tsx|execPath)[^;]*cli\.ts|['\"/]stam-fast|fork\(|dist/(cli|daemon)|bin/stam['\"]|['\"]serve['\"]|-e['\"], DAEMON|spawn\(process\.execPath, \[[^]]*scripts/[^]]*\.mjs" && fail "$n ($f) looks like a daemon or browser test"
-done
+node "$ROOT/test/light-check.mjs" || fail "a LIGHT name isn't a plain daemon-free node --test file (the hits above)"
 echo "== STAM_TEST_NOSLOT=1 skips the slots"
 export STAM_TEST_SLOTS=1
 LOG="$WORK/d.log"

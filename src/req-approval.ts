@@ -15,10 +15,12 @@
 //
 // An approval applies to the draft that was shown. The ask records the requirement's `rev`, a
 // counter every edit bumps (table req_approvals); Approve passes it back, and the requirement
-// refuses the move when it changed since. The same ITSA is then refreshed with the new
+// refuses the move when it changed since. The web UI's Approve carries the revision of the ITSA's
+// text it showed (itsa-human.ts act, S-2998), so a page the refresh below made stale is refused. The same ITSA is then refreshed with the new
 // statement and asks again; an edit to a draft while its ask is open refreshes it the same way.
 import * as db from './db.ts';
 import * as itsa from './itsa.ts';
+import { shownText } from './itsa-human.ts';
 import { HUMAN } from './mail.ts';
 import { settings } from './settings.ts';
 import { chiefOfStaff } from './org.ts';
@@ -244,12 +246,16 @@ async function refreshBatch(x: itsa.Itsa, by: string): Promise<void> {
   const via = members[0]?.via ?? 'human';
   const drafts = draftsOf(members);
   if (!drafts.length) return;
-  stampBatch(x.id, drafts, via);
-  if (by === HUMAN) return;
+  if (by === HUMAN) return stampBatch(x.id, drafts, via);
   const sender = via === 'cos' || !x.owner || x.owner === HUMAN ? by : x.owner;
-  await itsa.set(x.id, { body: batchStatement(drafts, via) }, sender);
+  const set = await itsa.set(x.id, { body: batchStatement(drafts, via) }, sender);
   const mention = via === 'cos' && x.owner && db.getAgent(x.owner) ? `@${db.getAgent(x.owner)!.name} ` : '';
-  await itsa.post(x.id, { by: sender, body: `${mention}A draft in this batch changed. This is the batch now:\n\n${batchStatement(drafts, via)}` });
+  // It shows the text it set, and records that revision for a thread's Approve after it.
+  const shown = shownText(set.itsa);
+  await itsa.post(x.id, { by: sender, body: `${mention}A draft in this batch changed. This is the batch now:\n\n${shown.text}` }, { shown });
+  // The stamps move only once the new texts are shown (S-2998): an Approve before then still
+  // carries the old revs, which the drafts no longer have, so it asks again instead.
+  stampBatch(x.id, drafts, via);
   if (via === 'human' && x.status !== 'needs_approval') await itsa.set(x.id, { status: 'needs_approval' }, sender);
 }
 
@@ -335,14 +341,18 @@ export async function refresh(key: string, by: string): Promise<void> {
     const r = requirements.find(key);
     if (!x || !r || r.status !== 'draft') return;
     const via = stampOf(x.id)?.via ?? 'human';
-    setStamp(x.id, r, via);
-    if (by === HUMAN) return;
+    if (by === HUMAN) return setStamp(x.id, r, via);
     // A human ask is owned by the draft's author. A chief-of-staff ask is owned by the chief of
     // staff, so the editor posts, naming it, and the ask never moves to a human status.
     const sender = via === 'cos' || !x.owner || x.owner === HUMAN ? by : x.owner;
-    await itsa.set(x.id, { body: statement(r, via), summary: r.text ?? '' }, sender);
+    const set = await itsa.set(x.id, { body: statement(r, via), summary: r.text ?? '' }, sender);
     const mention = via === 'cos' && x.owner && db.getAgent(x.owner) ? `@${db.getAgent(x.owner)!.name} ` : '';
-    await itsa.post(x.id, { by: sender, body: `${mention}The draft changed. This is the text now:\n\n${statement(r, via)}` });
+    // It shows the text it set, and records that revision for a thread's Approve after it.
+    const shown = shownText(set.itsa);
+    await itsa.post(x.id, { by: sender, body: `${mention}The draft changed. This is the text now:\n\n${shown.text}` }, { shown });
+    // The stamp moves only once the new text is shown (S-2998): an Approve before then still
+    // carries the old rev, which the draft no longer has, so it asks again instead.
+    setStamp(x.id, r, via);
     if (via === 'human' && x.status !== 'needs_approval') await itsa.set(x.id, { status: 'needs_approval' }, sender);
   } catch (e) {
     log(`refreshing the ask for ${key}`, e);

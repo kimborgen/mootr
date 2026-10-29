@@ -34,7 +34,9 @@ const lastMessageMax = 4000
 // hook:EVENT event. After a tool call it answers the agent's in-turn notice as PostToolUse additionalContext (the
 // hook's stdout), and a turn end schedules the agent's push and runs its pending action (onIdle) in the background.
 // Not ported: the turn end's timeline ingest.
-func (l *Lifecycle) OnHook(ctx context.Context, harness string, a db.Agent, payload jsjson.Value) (*string, error) {
+//
+// ack receives the answer rows an in-turn response carried (S-3923): the hook's client acknowledges exactly those.
+func (l *Lifecycle) OnHook(ctx context.Context, harness string, a db.Agent, payload jsjson.Value, ack *[]int64) (*string, error) {
 	// The path's harness, else the agent's own, as `adapters[harness] ?? adapters[agent.harness]`.
 	h := harness
 	if !knownHarness(h) {
@@ -44,6 +46,11 @@ func (l *Lifecycle) OnHook(ctx context.Context, harness string, a db.Agent, payl
 		return nil, ErrNoHooks{Harness: h}
 	}
 	p, _ := payload.(*jsjson.Object)
+	// S-3454: the first prompt's wait ends on its UserPromptSubmit before anything below can fail, as TS's onHook does.
+	if v, _ := p.Get("hook_event_name"); v == "UserPromptSubmit" {
+		prompt, _ := p.Get("prompt")
+		l.firstPromptHook(a.ID, prompt)
+	}
 	var dialog *db.PermissionRequest
 	asked := false
 	pendingDialog := func() (string, bool) {
@@ -59,6 +66,14 @@ func (l *Lifecycle) OnHook(ctx context.Context, harness string, a db.Agent, payl
 		return dialog.Details, true
 	}
 	r := claude.OnHook(a, p, pendingDialog)
+	// The adapter's cost signal goes first, as TS's onHook records it before the daemon applies the result.
+	if r.CostSignal != nil {
+		l.costSignal(ctx, a, *r.CostSignal)
+	}
+	// The model answered: if this turn is its account's probe, the account works.
+	if v, _ := p.Get("hook_event_name"); v == "Stop" || v == "PostToolUse" {
+		l.turnSucceeded(ctx, a)
+	}
 	if err := l.applyHookWaits(ctx, a.ID, r.Waits); err != nil {
 		return nil, err
 	}
@@ -104,16 +119,23 @@ func (l *Lifecycle) OnHook(ctx context.Context, harness string, a db.Agent, payl
 	if err := l.hookDialog(ctx, a.ID, r); err != nil {
 		return nil, err
 	}
+	l.hookInputs(ctx, a.ID, ev, p, r.Activity)
 	if r.AfterTool {
-		if notice := l.InTurnNotice(ctx, a.ID); notice != "" {
+		if notice, rows := l.InTurnTake(ctx, a.ID); notice != "" {
 			l.event(ctx, a.ID, "mail:notice", nil)
 			out := claude.InTurnNotice(notice)
+			*ack = rows
 			return &out, nil
 		}
 	}
 	if r.TurnEnded {
 		l.SchedulePush(a.ID)
 		l.onIdleSoon(a.ID)
+	} else if r.Activity == "idle" && a.Activity != "idle" && !ownerPaused(a) {
+		// A harness that comes up idle (SessionStart) takes what queued while it started: a push that ran then found it
+		// not idle and left it waiting, with nothing else to wake it (S-4168). One an owner paused meanwhile waits for
+		// its resume, which pushes.
+		l.SchedulePush(a.ID)
 	}
 	return nil, nil
 }
@@ -123,6 +145,9 @@ func (l *Lifecycle) OnHook(ctx context.Context, harness string, a db.Agent, payl
 type Dialogs interface {
 	DialogShown(ctx context.Context, a db.Agent, d claude.Dialog) error
 	DialogClosed(ctx context.Context, a db.Agent) error
+	// DialogClosedIf closes the agent's pending dialog only when match accepts its details, checked and closed in one
+	// step (an OpenCode ask closes only the request for its own permission).
+	DialogClosedIf(ctx context.Context, a db.Agent, match func(details string) bool) error
 }
 
 // SetDialogs sets the handling of harness dialogs; without it, a dialog makes no request.
@@ -153,6 +178,63 @@ func (l *Lifecycle) hookDialog(ctx context.Context, id string, r claude.HookResu
 		return nil
 	}
 	return d.DialogClosed(ctx, a)
+}
+
+// Inputs is the handling of suggested input the hooks report (src/permissions.ts promptSubmitted and typeHeldInput),
+// which the server sets.
+type Inputs interface {
+	PromptSubmitted(ctx context.Context, agentID, prompt string)
+	TypeHeldInput(ctx context.Context, agentID string) error
+	// WithdrawPending withdraws the agent's suggestions still pending, when it stops, is archived or is forgotten (S-3830).
+	WithdrawPending(ctx context.Context, a db.Agent, note string) error
+}
+
+// SetInputs sets the handling of suggested input; without it, the hooks check and type none.
+func (l *Lifecycle) SetInputs(in Inputs) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.inputs = in
+}
+
+// withdrawInputs withdraws the suggestions an agent that stopped, was archived or was forgotten still has pending, so
+// no ask waits on an agent that can't answer it (src/permissions.ts withdrawPendingInputs). A failure is a
+// permission-error event.
+func (l *Lifecycle) withdrawInputs(ctx context.Context, a db.Agent, note string) {
+	l.mu.Lock()
+	in := l.inputs
+	l.mu.Unlock()
+	if in == nil {
+		return
+	}
+	if err := in.WithdrawPending(ctx, a, note); err != nil {
+		l.event(ctx, a.ID, "permission-error", "Error: "+err.Error())
+	}
+}
+
+// hookInputs is src/daemon.ts onHook's suggested-input steps (S-422): the prompt a typed suggestion submitted is
+// checked against its text, and a suggestion the human approved while the agent was busy is typed at its next idle or
+// wait, in the background (a failure is a permission-error event).
+func (l *Lifecycle) hookInputs(ctx context.Context, id, ev string, p *jsjson.Object, activity string) {
+	l.mu.Lock()
+	in := l.inputs
+	l.mu.Unlock()
+	if in == nil {
+		return
+	}
+	if ev == "UserPromptSubmit" && p != nil {
+		if prompt, ok := p.Get("prompt"); ok {
+			if text, ok := prompt.(string); ok {
+				in.PromptSubmitted(ctx, id, text)
+			}
+		}
+	}
+	if activity == "idle" || activity == "waiting" {
+		l.Go(func(lctx context.Context) {
+			if err := in.TypeHeldInput(lctx, id); err != nil {
+				l.event(lctx, id, "permission-error", "Error: "+err.Error())
+			}
+		})
+	}
 }
 
 // applyHookWaits is what src/adapters/claude.ts onHook does to the agent's hook waits before the daemon writes the hook's
@@ -317,7 +399,7 @@ func (l *Lifecycle) clientsOpen(ctx context.Context, id string) bool {
 // OnStatusLine is POST /api/statusline/:h/:id's work: a Claude Code report past the gate sets the agent's context size
 // and window, records its cost, tokens and subscription windows in the usage tables, then runs the context watcher
 // (onContext) and the cold-turn and cache-window measures on the session's transcript. It returns whether anyone views
-// the agent; only tmux clients count here, since the web terminal and view aren't ported.
+// the agent; only tmux clients count here (the server adds the web view and web terminals).
 func (l *Lifecycle) OnStatusLine(ctx context.Context, harness string, a db.Agent, payload jsjson.Value) (bool, error) {
 	if harness == "claude" {
 		p, _ := payload.(*jsjson.Object)
@@ -417,4 +499,18 @@ func sqlNumber(v jsjson.Value) any {
 		return x
 	}
 	return jsjson.Stringify(v, "")
+}
+
+// ownerPaused is whether a human or an agent paused the agent: a pause owner other than the rest. A rest takes the push
+// on coming up idle, and a cost pause has no owner (admit decides its turns, probes included).
+func ownerPaused(a db.Agent) bool {
+	if a.Lifecycle != "paused" {
+		return false
+	}
+	for _, o := range pauseOwners(a) {
+		if o != restOwner {
+			return true
+		}
+	}
+	return false
 }

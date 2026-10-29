@@ -14,7 +14,7 @@
 // The header's switch picks the layout: the Tree, or Cards on orbits round the chief of staff
 // (S-460, orbits.ts), or Stars, orbs sized by spend on rings round it (S-539, stars.ts,
 // StarCard.tsx), the same cards, wires, flights and panel.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { flushSync } from 'react-dom'
 import { AnimatePresence, MotionConfig } from 'motion/react'
 import { openInbox, openMail, selectAgent, selectIssue, selectThread, showView } from '../actions'
@@ -39,7 +39,7 @@ import { Deck } from './deck'
 import { stackCount } from './flights'
 import { hash } from '../api'
 import { FindBox, FindButton, FindDrop, type Find, useFind } from './Find'
-import { columnWidth, descendants, packLayout, type Laid } from './layout'
+import { agentBadgeRows, agentCardHeight, agentFootRows, columnWidth, descendants, nestedRows, packLayout, type Laid } from './layout'
 import { asMode, type Mode, modeOf, MODES, pickMode, type Px, saveMode, storedMode } from './modes'
 import { cardBadges, contextShare, type Badge, HUMAN, itsaCounts, type Move, ownedItsa, rollupOf, stateCounts, STATES, statesOf, statusMoves, systemNodes } from './model'
 import { Rise, Roll, TimingContext } from './Roll'
@@ -48,7 +48,9 @@ import { readTiming, type Timing, tokenMs } from './springs'
 import { shortName } from './names'
 import { lineWidth, Morph, nameFit, rebase, STAGE, type View } from './transition'
 import { StarCard } from './StarCard'
-import { activityOf, cardSig, type Exit, type ExitTo, type Far, SystemCard, type CardModel, type CardPlace } from './SystemCard'
+import { activityOf, cardSig, CardLayoutsContext, type CardLayouts, type Exit, type ExitTo, type Far, issueCxSig, SystemCard, type CardModel, type CardPlace } from './SystemCard'
+import { cardItemMap } from '../itsa/IssueCard'
+import { useCardLayout } from '../card-layout'
 import { meters, sparkPath, useSystemUsage } from './usage'
 import { roomOf, roomsRight, zoomCard, zoomCards, zoomStars } from './zoom'
 import { useCull, useFolds } from './useScale'
@@ -102,7 +104,7 @@ function readPx(host: HTMLElement): Px {
   const px: Px = {
     card: v('--sv-card-w'), cardH: v('--sv-card-h'), gapX: v('--sv-gap-x'), gapY: v('--sv-gap-y'), orbitGap: v('--sv-orbit-gap'), indent: v('--sv-indent'), rowGap: v('--sv-row-gap'),
     pad: v('--sv-pad'), sheetH: v('--sv-sheet-h'), landIn: v('--sv-land-in'),
-    chipMax: v('--sv-chip-max'), chipClear: v('--sv-chip-clear'), stackOver: v('--sv-stack-over'), stackOut: v('--sv-stack-out'),
+    issueRow: v('--space-4'), chipMax: v('--sv-chip-max'), chipClear: v('--sv-chip-clear'), stackOver: v('--sv-stack-over'), stackOut: v('--sv-stack-out'),
     orbMin: v('--sv-orb-min'), orbMax: v('--sv-orb-max'), orbHuman: v('--sv-orb-human'), starLabelW: v('--sv-star-label-w'), starLabelH: v('--sv-star-label-h'), starLabelGap: v('--sv-star-label-gap'), starGap: v('--sv-star-gap'),
     slowMs: (() => { probe.style.transitionDuration = 'var(--duration-slow)'; return durationMs(getComputedStyle(probe).transitionDuration) })(),
   }
@@ -146,6 +148,15 @@ export function SystemView({ viewKey }: { viewKey: string }) {
   const usage = useSystemUsage(shown)
   const cols = useWorkCols(extras.fields)
   const fields = useMemo(() => extras.fields ?? [], [extras.fields])
+  // The card layouts (S-1438): the agent card's, and the issue card the nested ITSA draws from. A card's height
+  // is the default card's, with its ISSUE row as tall as the nested rows the issue layout holds.
+  const agentLayout = useCardLayout('agent', fields)
+  const issueLayout = useCardLayout('issue', fields)
+  const issueRows = nestedRows(issueLayout, agentLayout)
+  const badgeRows = agentBadgeRows(agentLayout)
+  const footRows = agentFootRows(agentLayout)
+  // The context changes with a layout or a field only, never with a poll: each card's cell context rides on its model (cx).
+  const layouts = useMemo<CardLayouts>(() => ({ agent: agentLayout, issue: issueLayout, items: cardItemMap(fields), fields }), [agentLayout, issueLayout, fields])
   const stage = useRef<HTMLDivElement>(null)
   const world = useRef<HTMLDivElement>(null)
   // Mode transitions (S-572): the morph that stages them, and what it reads before a switch.
@@ -169,8 +180,10 @@ export function SystemView({ viewKey }: { viewKey: string }) {
     if (linked.current) { saveMode(m, narrow); linked.current = null }
     if (m !== modeNow.current) setModeState(m)
   }, [narrow, size.w])
-  const [px, setPx] = useState<Px | null>(null)
+  const [basePx, setPx] = useState<Px | null>(null)
   useLayoutEffect(() => { if (stage.current) setPx(readPx(stage.current)) }, [])
+  // The measured px, with the card's height for the issue rows the layout holds (agentCardHeight).
+  const px = useMemo(() => basePx && { ...basePx, cardH: agentCardHeight(basePx.cardH, basePx.issueRow, issueRows, badgeRows, footRows) }, [basePx, issueRows, badgeRows, footRows])
   // A switch is measured before it renders, so the transition (transition.ts) starts from what
   // shows now, mid-way or at rest.
   const setMode = useCallback((m: Mode) => {
@@ -300,7 +313,8 @@ export function SystemView({ viewKey }: { viewKey: string }) {
       const hit = deck.current?.hits.get(n.id)
       out.set(n.id, {
         id: n.id, short: shortName(a?.name ?? 'You', n.parent && n.parent !== HUMAN ? agentsBy.get(n.parent)?.name : null), agent: a, activity: a ? activityOf(a) : '', it: own?.it ?? null, owns: own?.count ?? 0,
-        badges: own ? cardBadges(own.it, cols, fields) : a ? [] : humanBadges,
+        cx: { now: Date.now(), extras }, cxSig: issueCxSig(own?.it ?? null, extras),
+        badges: own ? cardBadges(own.it, agentLayout.slots.BADGES ?? [], fields) : a ? [] : humanBadges,
         unread: stackCount(base, deck.current?.holds.get(n.id)), hit: hit ? (hit.warn ? 'warn' : 'mail') : '',
         ctx: a ? contextShare(a, d.thresholds.enforceTokens) : 0, ctxLevel: a?.context_level ?? 0,
         // The human's card doesn't fold: folding everything shows nothing.
@@ -310,7 +324,7 @@ export function SystemView({ viewKey }: { viewKey: string }) {
       })
     }
     return out
-  }, [nodes, folded, d.agents, d.itsas, d.unread, d.thresholds, cols, fields, statusOf, humanBadges, flightTick, recent.size, doneStatus]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [nodes, folded, d.agents, d.itsas, d.unread, d.thresholds, agentLayout, fields, extras, statusOf, humanBadges, flightTick, recent.size, doneStatus]) // eslint-disable-line react-hooks/exhaustive-deps
   shownModels.current = models
   // Each card's signature, worked out once per model, for the cards drawn.
   const sigs = useMemo(() => new Map<string, string>(), [models])
@@ -771,8 +785,9 @@ export function SystemView({ viewKey }: { viewKey: string }) {
   }
   const selModel = sel ? models.get(sel) ?? null : null
   return (
-    <MotionConfig reducedMotion="user"><TimingContext.Provider value={timing}>
-    <div className={'sv' + (narrow ? ' narrow' : '') + (selModel ? ' has-panel' : '')} data-mode={shape} data-focus={focus ?? undefined} data-moving={moving || undefined} onKeyDown={key}>
+    <MotionConfig reducedMotion="user"><TimingContext.Provider value={timing}><CardLayoutsContext.Provider value={layouts}>
+    <div className={'sv' + (narrow ? ' narrow' : '') + (selModel ? ' has-panel' : '')} data-mode={shape} data-focus={focus ?? undefined} data-moving={moving || undefined} onKeyDown={key}
+      style={{ '--sv-issue-h': `calc(var(--space-4) * ${issueRows})`, '--sv-badges-h': `calc(var(--space-4) * ${badgeRows})`, '--sv-foot-h': `calc(var(--space-4) * ${footRows})` } as CSSProperties}>
       <i ref={probe} className="sv-probe" aria-hidden="true" />
       <Header narrow={narrow} onFit={fit} usage={usage} mode={mode} onMode={setMode} find={find} focus={focus ? models.get(focus)?.agent?.name ?? null : null} onLeaveFocus={leaveFocus} />
       <div className="sv-body">
@@ -799,7 +814,7 @@ export function SystemView({ viewKey }: { viewKey: string }) {
           onFocus={selModel.agent && nodes.some((n) => n.parent === selModel.id) && focus !== selModel.id ? () => focusOn(selModel.id) : undefined} /> : null}
       </div>
     </div>
-    </TimingContext.Provider></MotionConfig>
+    </CardLayoutsContext.Provider></TimingContext.Provider></MotionConfig>
   )
 }
 

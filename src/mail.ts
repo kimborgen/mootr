@@ -7,11 +7,11 @@ import { adapters } from './adapters/index.ts';
 import { peers, peerByName, findAgentPeer, locateAgent, peerHits, pickAgent, isLive, peerCall, ensureUp, fanOut, fanOutReport, refuseAmbiguousId, type AgentHit, type Peer, type Via } from './peers.ts';
 import { checkCanMail, chiefOfStaff, reachable } from './org.ts';
 import { descendantsOf } from './tree.ts';
-import { mayReadMail } from './mail-visibility.ts';
+import { mayReadMail, isPlacedAsk, ASK_REPLY } from './mail-visibility.ts';
 import { linkMail } from './mail-itsas.ts';
 import { mayMailHuman, settings } from './settings.ts';
 import { apiKey } from './credits.ts';
-import { capturePaneAnsi, hasSession } from './tmux.ts';
+import { capturePaneAnsiAsync, hasSessionAsync } from './tmux.ts';
 import { admit } from './admission.ts';
 import { onHumanMail } from './webpush.ts';
 import { maybeCheckMail, gateMail, gateFailures } from './mail-check.ts';
@@ -53,6 +53,9 @@ export interface SendInput {
   permission_id?: string;
   // Set by a peer daemon forwarding mail, which resolved the thread on its side.
   thread_id?: string;
+  // Set by stam on an ask placed in its home thread (S-3827, ask-home.ts): the mail joins thread_id, a thread it
+  // didn't start, with no reply_to, so the thread's people don't become recipients (asComment).
+  placed?: boolean;
   // Set by a peer daemon forwarding mail from one of its agents.
   forwarded?: { from_name: string };
   // A local script's name (the deploy watcher, S-436): the mail is from `system:NAME`, a sender no agent owns.
@@ -77,11 +80,14 @@ export interface SendInput {
   // The ITSA's home daemon sends for an agent on another machine: the sender is a peer's
   // agent (`forwarded` names it), but recipients are resolved here, local or remote.
   relay?: boolean;
+  // S-4163: the routing facts the peer that sent a relayed original attached from its own DB (relayRouteOf): whether the
+  // S-548 rule exempts its sender, and the parent its mail to the human reroutes to. Missing on an older peer.
+  relay_route?: RelayRoute;
   // The id the sending daemon gave this mail, set when it forwards: every daemon stores the
   // mail under it, so a thread merged from several daemons shows it once.
   mail_id?: string;
-  // Set on mail stam sends on its own behalf (sendFromStam): its sender is a stand-in agent,
-  // not the agent it really is, so such mail must never clear a declared wait (mail.ts).
+  // Set on mail stam sends on its own behalf: a stand-in agent's sender (the ITSA and permission notices) must never
+  // clear a declared wait (mail.ts), and a `system:NAME` sender is marked with it too.
   from_stam?: boolean;
   // The title the sending daemon's model gave the mail (S-297), on a forward that waited in the
   // outbox until the title was known. Taken only from a peer's forward.
@@ -168,18 +174,68 @@ export function readEpoch(from: string): string {
 // A ```pane block names an agent (or a terminal, sh-…); the sender's daemon fills in that
 // agent's screen as it is now, so the mail keeps the moment. Agents on another machine stay
 // a plain link.
-function capturePanes(body: string): string {
-  return body.replace(/```pane[^\S\n]*\n([^\n]*)\n(?:(?!```)[^\n]*\n)*?```/g, (all, ref: string) => {
-    const name = ref.trim().replace(/^@/, '');
-    const id = /^sh-/.test(name) ? name : db.getAgent(name)?.id;
-    if (!id || !hasSession(id)) return all;
-    try {
-      const screen = capturePaneAnsi(id).replace(/```/g, '`\u200b``');
-      return '```pane\n' + `${name}\ncaptured: ${new Date().toISOString()}\n---\n${screen}\n` + '```';
-    } catch {
-      return all;
-    }
-  });
+async function capturePanes(body: string): Promise<string> {
+  const blocks = [...body.matchAll(/```pane[^\S\n]*\n([^\n]*)\n(?:(?!```)[^\n]*\n)*?```/g)];
+  const screens = await Promise.all(
+    blocks.map(async ([all, ref]) => {
+      const name = ref.trim().replace(/^@/, '');
+      const id = /^sh-/.test(name) ? name : db.getAgent(name)?.id;
+      if (!id || !(await hasSessionAsync(id))) return all;
+      try {
+        const screen = (await capturePaneAnsiAsync(id)).replace(/```/g, '`\u200b``');
+        return '```pane\n' + `${name}\ncaptured: ${new Date().toISOString()}\n---\n${screen}\n` + '```';
+      } catch {
+        return all;
+      }
+    }),
+  );
+  let i = 0;
+  return body.replace(/```pane[^\S\n]*\n([^\n]*)\n(?:(?!```)[^\n]*\n)*?```/g, () => screens[i++]);
+}
+
+// S-4163: whether the sending agent owns every ITSA the mail is in, and the human takes part in each, so that its mail to the
+// human goes to them directly. The ITSAs are the one a post names (itsa_id), the one the `itsa` field names (about_itsa), the
+// one the mail replies to, and those whose thread the mail is in. Checked against the DB, never the sender's word alone.
+async function inOwnItsa(agentId: string, input: SendInput, replied: ReplyParent | undefined, threadId: string | undefined): Promise<boolean> {
+  const { ownsItsaWithHuman } = await import('./itsa.ts');
+  const itsas = [input.itsa_id, input.about_itsa, replied?.itsa_id, ...(threadId ? db.threadItsaIds(threadId) : [])];
+  return ownsItsaWithHuman(agentId, itsas.filter((id): id is string => !!id));
+}
+
+// S-548: the agents that mail the human directly: the chief of staff, the assistant, managers and coordinators.
+export function mailsHumanDirect(a: db.Agent): boolean {
+  return a.kind === 'assistant' || a.id === chiefOfStaff()?.id || a.type === 'manager' || a.type === 'coordinator';
+}
+
+// S-4163: the routing facts a relayed original carries from the sending daemon (relay_route): whether the S-548 rule exempts the
+// local agent (mailsHumanDirect) and the parent its mail to the human reroutes to. Read from this daemon's DB, never from the
+// agent's input. Undefined for an agent this daemon doesn't have.
+export type RelayRoute = { exempt: boolean; parent?: string };
+export function relayRouteOf(agentId: string | null | undefined): RelayRoute | undefined {
+  const a = agentId ? db.getAgent(agentId) : undefined;
+  if (!a) return undefined;
+  const parent = db.parentsOf(a)[0] ?? chiefOfStaff()?.id;
+  return { exempt: mailsHumanDirect(a), parent: parent && parent !== a.id ? parent : undefined };
+}
+
+// S-548, S-4163, S-4178: the agent a sender's mail to the human reroutes to, or undefined when it goes direct. This is the one
+// rule sendMail applies, and the ask pre-check (itsa.ts set) predicts with it, so the two can't disagree. `owns` is whether the
+// sender owns every ITSA the mail is in, with the human in each. A local sender reroutes to its first parent (else the chief of
+// staff) when that parent resolves. A relayed original has no row here: it reroutes to the parent its daemon named (`route`), and
+// is refused when that parent can't be reached; with no facts (an older peer) it goes direct, as on main.
+export async function humanRerouteTo(from: string, route: RelayRoute | undefined, owns: boolean, fromName: string): Promise<AgentHit | undefined> {
+  if (owns) return undefined;
+  const sender = db.getAgent(from);
+  if (sender) {
+    if (mailsHumanDirect(sender)) return undefined;
+    const parent = db.parentsOf(sender)[0] ?? chiefOfStaff()?.id;
+    const found = parent && parent !== sender.id ? await resolveRecipient(parent) : undefined;
+    return typeof found === 'object' ? found : undefined;
+  }
+  if (!route || route.exempt) return undefined;
+  const found = route.parent ? await resolveRecipient(route.parent) : undefined;
+  if (typeof found !== 'object') throw new RefusedError(`${fromName} can't mail your user through this ITSA, and its parent can't be reached from here. Mail its parent instead; it decides what reaches your user.`);
+  return found;
 }
 
 // An agent whose model may not mail the human (settings.humanMail.models): its name, model, and
@@ -234,9 +290,9 @@ export type SentMail = (db.Mail | { id: string; thread_id: string; to: string[];
 // daemon calling sendMail itself. POST /api/mail refuses them from an agent's token (S-466).
 // `inferred` is among them (S-608): an agent that named it could mark a recipient it named as
 // one the sender didn't, turning that recipient's refusal into a silent skip.
-export const DAEMON_FIELDS = ['forwarded', 'relay', 'thread_id', 'itsa_id', 'mail_id', 'from_stam', 'permission_id', 'interrupt', 'inferred', 'kind', 'health', 'auto_threaded', 'about_itsa', 'title', 'summary', 'system'] as const;
+export const DAEMON_FIELDS = ['forwarded', 'relay', 'relay_route', 'thread_id', 'placed', 'itsa_id', 'mail_id', 'from_stam', 'permission_id', 'interrupt', 'inferred', 'kind', 'health', 'auto_threaded', 'about_itsa', 'title', 'summary', 'system'] as const;
 
-export type ReplyParent = Pick<db.Mail, 'id' | 'thread_id' | 'subject' | 'from_id' | 'itsa_id'>;
+export type ReplyParent = Pick<db.Mail, 'id' | 'thread_id' | 'subject' | 'from_id' | 'itsa_id'> & Partial<Pick<db.Mail, 'permission_id' | 'kind'>>;
 
 // The mail a reply names: this daemon's copy, or the one a peer keeps (its recipient's machine).
 // Either is found only if the sending agent may see it (mail-visibility.ts; S-359 on a peer, S-466
@@ -251,6 +307,15 @@ async function parentOf(id: string, via?: Via): Promise<{ parent?: ReplyParent; 
   if (found.rows[0] || !via) return { parent: found.rows[0], unreachable: found.unreachable };
   const hidden = (await fanOut<{ thread_id: string }>(`/api/mail/${id}/thread`)).length > 0;
   return { unreachable: found.unreachable, hidden };
+}
+
+// The thread of mail `id` when `agentId` may read that mail, here or on a peer (as parentOf checks a reply_to);
+// null when nobody holds it, 'hidden' when the agent may not read it (S-3827: an ask's home thread).
+export async function readableThread(id: string, agentId: string): Promise<string | null | 'hidden'> {
+  const boss = agentId === chiefOfStaff()?.id || db.getAgent(agentId)?.kind === 'assistant';
+  const found = await parentOf(id, { agent: agentId, boss });
+  if (found.hidden) return 'hidden';
+  return found.parent ? (found.parent.thread_id ?? found.parent.id) : null;
 }
 
 // A send that can't succeed as asked, however often it is tried (S-542): POST /api/mail answers 400,
@@ -280,6 +345,8 @@ export async function sendMail(input: SendInput): Promise<SentMail> {
     fromName = input.system;
   }
   if (!from) throw new Error(`no sender ${input.from}`);
+  // A system sender is stam's own: its mail is a notice, never checked, gated or counted as an agent's (S-1239).
+  if (from.startsWith('system:') && !input.from_stam) input = { ...input, from_stam: true };
   // The human's mail to an agent nobody has any more (forgotten, say) is refused up front, in
   // words the human can act on: the web outbox shows the reason and keeps the text (S-542).
   // A recipient the human didn't name (the thread's people, inferred) is skipped below instead (S-603).
@@ -303,12 +370,14 @@ export async function sendMail(input: SendInput): Promise<SentMail> {
     if (!id) throw new Error(`no ITSA ${input.itsa}`);
     input = { ...input, about_itsa: id, itsa: undefined };
   }
-  if (!input.forwarded && input.body?.includes('```pane')) input = { ...input, body: capturePanes(input.body) };
+  if (!input.forwarded && input.body?.includes('```pane')) input = { ...input, body: await capturePanes(input.body) };
   if (!input.forwarded && /```(embed|video|audio|image|file|compare)/.test(input.body ?? '')) input = { ...input, ...embedFiles(input) };
   // Answering a mail in an ITSA's thread, named or guessed, is a comment on the ITSA: the
   // home daemon adds the participants as recipients, and the sender becomes a participant.
   const asComment = async (parent: ReplyParent | undefined) => {
     if (!parent?.itsa_id || input.itsa_id || input.forwarded) return undefined;
+    // S-4163: an explicit `itsa` that isn't the ITSA the reply is in would be dropped by the comment, so it is refused.
+    if (input.about_itsa && input.about_itsa !== parent.itsa_id) throw new RefusedError(`mail ${parent.id} is in another ITSA than the one you named: reply without itsa, or name the ITSA it is in`);
     const { postRouted } = await import('./itsa.ts');
     // An answer to the user's own mail reaches the user only when it names them, like any comment: mail between
     // agents in a thread the user started stays in the thread, out of the user's inbox (S-542; S-308 added the user always).
@@ -321,13 +390,25 @@ export async function sendMail(input: SendInput): Promise<SentMail> {
   const via: Via | undefined = from === HUMAN || from!.startsWith('system:') ? undefined : { agent: from!, boss: from === chiefOfStaff()?.id || db.getAgent(from!)?.kind === 'assistant' };
   const found = input.reply_to && !input.forwarded ? await parentOf(input.reply_to, via) : undefined;
   const replied = found?.parent;
+  // The human's reply to an ask placed in someone else's thread (S-3827) goes to the asker, plus whoever the human named,
+  // never to the thread's people the reply only inferred; and it is sealed like the ask, so it opens the thread to nobody.
+  // A reply under the human's own earlier reply to the ask goes to whom that one went.
+  if (from === HUMAN && !input.forwarded && replied && isPlacedAsk(replied)) {
+    const askers = replied.from_id === HUMAN ? db.mailRecipientIds(replied.id).filter((r) => r !== HUMAN) : [replied.from_id];
+    const to = [...new Set([...askers, ...input.to.filter((ref) => askers.includes(ref) || !inferred.has(ref))])];
+    input = { ...input, to, inferred: input.inferred?.filter((r) => askers.includes(r)), kind: ASK_REPLY };
+  } else if (!input.forwarded && replied && isPlacedAsk(replied) && !input.kind && !input.permission_id) {
+    // An agent's reply under it (the asker answering the human, say) is sealed the same way: only one who saw the ask
+    // can reply to it, and the reply makes its sender none of the thread's people.
+    input = { ...input, kind: ASK_REPLY };
+  }
   // An agent's reply to the human's mail reaches them only when it names them (S-542); the agent hears so.
   const hint = replied?.from_id === HUMAN && db.getAgent(from) && !input.from_stam && !input.permission_id && !input.to.includes(HUMAN) ? { misses_human: true as const } : {};
   if (input.reply_to) {
     const posted = await asComment(replied);
     if (posted) return { ...posted, ...hint };
   }
-  let threadId = input.forwarded || input.itsa_id ? input.thread_id : undefined;
+  let threadId = input.forwarded || input.itsa_id || input.placed ? input.thread_id : undefined;
   if (input.reply_to && !threadId) {
     const parent = replied;
     if (found?.hidden) throw new Error(`mail ${input.reply_to} isn't visible to you (you aren't in its thread), so you can't reply to it. Start a new thread with new_thread: true, or ask whoever pointed you to it to forward that mail to you.`);
@@ -401,12 +482,16 @@ export async function sendMail(input: SendInput): Promise<SentMail> {
   // S-548: only the chief of staff, the assistant, and managers mail the human directly; any other
   // agent's mail to the human goes to its first parent, who forwards it if it is needed. The parent
   // may be on a peer (a storage agent's parent runs on the home daemon), so it is resolved like any recipient.
+  // S-4163: the owner of the ITSA the mail is in mails the human directly, when the human takes part in it.
   let rerouted: string | undefined;
   const sender = db.getAgent(from);
-  if (sender && local.has(HUMAN) && !input.from_stam && !input.permission_id && !input.forwarded && sender.kind !== 'assistant' && sender.id !== chiefOfStaff()?.id && sender.type !== 'manager' && sender.type !== 'coordinator') {
-    const parent = db.parentsOf(sender)[0] ?? chiefOfStaff()?.id;
-    const found = parent && parent !== sender.id ? await resolveRecipient(parent) : undefined;
-    if (typeof found === 'object') {
+  // S-4163: a relayed original (an ITSA post an agent on a peer relays here) follows the S-548 rule with the routing facts its
+  // own daemon attached (relay_route). A relayed original from an agent here is routed as its own mail is (S-4163). The rule is
+  // humanRerouteTo, which the ask pre-check (itsa.ts set) calls too.
+  const relayedFromPeer = !sender && !!input.forwarded && !!input.relay;
+  if (local.has(HUMAN) && from !== HUMAN && !from.startsWith('system:') && !input.from_stam && !input.permission_id && (sender ? !input.forwarded || input.relay : relayedFromPeer)) {
+    const found = await humanRerouteTo(from, input.relay_route, await inOwnItsa(from, input, replied, threadId), fromName ?? from);
+    if (found) {
       local.delete(HUMAN);
       if (found.peer) addRemote(found.peer, found.agent.id);
       else local.add(db.forwardTarget(found.agent.id));
@@ -466,7 +551,7 @@ export async function sendMail(input: SendInput): Promise<SentMail> {
       name: a.name ?? (a.path ? basename(a.path) : 'attachment.txt'),
       content_b64: a.content_b64 ?? (a.path ? readFileSync(a.path).toString('base64') : Buffer.from(a.content ?? '').toString('base64')),
     }));
-    const payload = { ...input, from, to, inferred: to.filter((x) => inferredIds.has(x)), attachments, thread_id: threadId, mail_id: id, relay: undefined, title: undefined, summary: undefined, forwarded: { from_name: fromName } };
+    const payload = { ...input, from, to, inferred: to.filter((x) => inferredIds.has(x)), attachments, thread_id: threadId, mail_id: id, relay: undefined, relay_route: undefined, title: undefined, summary: undefined, forwarded: { from_name: fromName } };
     // Mail to 'all' skips the peer, as it always has; mail to named agents waits in the outbox (S-235).
     const named = to.filter((x) => x !== 'all');
     const queue = () => {
@@ -663,19 +748,15 @@ export function stamSender(): db.Agent | undefined {
   return db.firstActiveAgent();
 }
 
-// Mail from stam itself, with the mail it made. Undefined when no agent at all can stand in as sender.
-// `from_stam` marks it, so the stand-in sender doesn't clear a declared wait for its reply.
-export async function sendFromStamMail(to: string[], subject: string, body: string): Promise<SentMail | undefined> {
-  // With no running agent (low memory is when agents get paused or archived), the newest agent
-  // still stands in, so the mail reaches its recipients.
-  const sender = stamSender() ?? db.firstAgent();
-  if (!sender) return undefined;
-  return sendMail({ from: sender.id, to, subject, body, new_thread: true, from_stam: true });
+// Mail stam sends on its own behalf (cost notices, the retro digest, ring results, watch batches), from the
+// system sender `system:NAME` rather than a stand-in agent, so no agent seems to send it. It starts a new thread.
+export async function sendFromSystemMail(name: string, to: string[], subject: string, body: string): Promise<SentMail> {
+  return sendMail({ from: '', system: name, to, subject, body, new_thread: true });
 }
 
-// Mail from stam itself. Returns false when no agent at all can stand in as sender.
-export async function sendFromStam(to: string[], subject: string, body: string): Promise<boolean> {
-  return (await sendFromStamMail(to, subject, body)) !== undefined;
+export async function sendFromSystem(name: string, to: string[], subject: string, body: string): Promise<boolean> {
+  await sendFromSystemMail(name, to, subject, body);
+  return true;
 }
 
 // Logs the mail for each agent recipient and schedules the idle push.
@@ -710,7 +791,7 @@ function clearDeclaredWaits(mailId: string, from: string, to: string[], fromStam
         const want = db.getMail(String(data.thread))?.thread_id ?? String(data.thread);
         if (m.id !== String(data.thread) && thread !== want) continue;
       }
-      db.clearWait(w.id);
+      db.clearWait(w.id, 'reply');
     }
   }
 }
@@ -777,7 +858,7 @@ function storeMail(id: string, threadId: string, from: string, fromName: string,
   // A deferral (Decide later, S-353) keeps the decision listed, off the waiting list; any other reply from the human answers it.
   if (from === HUMAN) {
     if (isDeferralOnly(body, files.length)) db.setThreadDeferred(threadId, id);
-    else { db.clearThreadDeferred(threadId); db.clearDecisionMails(threadId); }
+    else { db.clearThreadDeferred(threadId); db.clearDecisionMails(threadId, chosenOption(body)); }
   } else {
     // Only mail to the human brings a deferred ask back: a note between agents doesn't reach the user (S-353).
     if (to.includes(HUMAN)) db.clearThreadDeferred(threadId);
@@ -798,6 +879,14 @@ function storeMail(id: string, threadId: string, from: string, fromName: string,
   maybeCheckRequirements(mail, to.includes(HUMAN), Boolean(input.from_stam));
   return mail;
 }
+
+// The option a decision reply names in the standard form `Chose **X**.` (src/decision-mail.ts answers), else null:
+// any other reply, a note, several choices or more than one such line records no label. Capped, so a long option can't fill a row.
+const CHOSE = /^Chose \*\*([^*\n]{1,80})\*\*\.$/gm;
+export const chosenOption = (body: string): string | null => {
+  const all = [...body.matchAll(CHOSE)];
+  return all.length === 1 ? all[0][1] : null;
+};
 
 // Observers of an agent's mail to the human, called after it is stored.
 type HumanMailObserver = (m: { id: string; from_id: string; subject: string; body: string; thread_id: string }) => void;
@@ -828,12 +917,55 @@ function senderName(id: string): string {
 // delivered when mail or another notice pushes a prompt, and takes no push by itself.
 // `onTaken` runs once when the notice leaves the queue, delivered; tool-changes.ts uses it to
 // record a passive notice as seen (S-1744).
-const notices = new Map<string, { text: string; idleOnly: boolean; ring?: boolean; passive?: boolean; onTaken?: () => void }[]>();
+// `row` (S-3923) is an answer's notice, its answer_notices row, written in the same transaction as the answer. The row
+// holds the text until the agent has been handed it, so a restart before then delivers it (restoreAnswerNotices), and a
+// handoff that was confirmed never comes back.
+type Notice = { text: string; idleOnly: boolean; ring?: boolean; passive?: boolean; onTaken?: () => void; row?: number };
+const notices = new Map<string, Notice[]>();
+// Rows an agent took in a turn, deleted once its next hook arrives: that hook proves the response carrying the text
+// was received. A crash before then replays the notice on the next start, so it is never lost.
+const unconfirmed = new Map<string, number[]>();
 
-export function queueNotice(agentId: string, text: string, opts: { idleOnly?: boolean; ring?: boolean; passive?: boolean; onTaken?: () => void } = {}): void {
-  notices.set(agentId, [...(notices.get(agentId) ?? []), { text, idleOnly: Boolean(opts.idleOnly), ring: opts.ring, passive: opts.passive, onTaken: opts.onTaken }]);
+export function queueNotice(agentId: string, text: string, opts: { idleOnly?: boolean; ring?: boolean; passive?: boolean; onTaken?: () => void; row?: number } = {}): void {
+  notices.set(agentId, [...(notices.get(agentId) ?? []), { text, idleOnly: Boolean(opts.idleOnly), ring: opts.ring, passive: opts.passive, onTaken: opts.onTaken, row: opts.row || undefined }]);
   db.addEvent(agentId, 'notice:queued', { text: text.slice(0, 120) });
   if (!opts.passive) schedulePush(agentId);
+}
+
+// Puts back the answer notices a restart found unread (S-3923), oldest first, each agent's queue as it was. A row for an
+// agent that is gone (archived, or forgotten) is dropped here; a resting agent keeps its rows.
+export function restoreAnswerNotices(): void {
+  for (const r of db.answerNotices()) {
+    const a = db.getAgent(r.agent_id);
+    if (!a || a.lifecycle === 'archived') {
+      db.deleteAnswerNotice(r.id);
+      continue;
+    }
+    notices.set(r.agent_id, [...(notices.get(r.agent_id) ?? []), { text: r.text, idleOnly: false, row: r.id }]);
+    schedulePush(r.agent_id);
+  }
+}
+
+// A notice a push delivered: the push returned ok, so its answer row goes now (S-3923).
+function handed(n: Notice): void {
+  n.onTaken?.();
+  if (n.row !== undefined) db.deleteAnswerNotice(n.row);
+}
+
+// The hook's client printed the response that carried this row, so the agent received it: the row goes (S-3923). A row
+// the agent doesn't hold unconfirmed is left alone.
+export function ackNotice(agentId: string, row: number): void {
+  const held = unconfirmed.get(agentId) ?? [];
+  if (!held.includes(row)) return;
+  db.deleteAnswerNotice(row);
+  unconfirmed.set(agentId, held.filter((r) => r !== row));
+}
+
+// An archived or forgotten agent's queued notices and answer rows go with it (S-3923).
+export function forgetAgentNotices(agentId: string): void {
+  notices.delete(agentId);
+  unconfirmed.delete(agentId);
+  db.deleteAnswerNoticesOf(agentId);
 }
 
 export const queuedNoticeCount = (agentId: string): number => notices.get(agentId)?.length ?? 0;
@@ -874,7 +1006,9 @@ export async function tellAnywhere(agentId: string, text: string, want?: (a: db.
 // Drops a queued notice that no longer applies, such as cost_switch's wrap-up request to an
 // agent whose turn ended before it saw it.
 export function dropNotice(agentId: string, text: string): void {
-  const kept = (notices.get(agentId) ?? []).filter((n) => n.text !== text);
+  const all = notices.get(agentId) ?? [];
+  const kept = all.filter((n) => n.text !== text);
+  for (const n of all) if (n.text === text && n.row !== undefined) db.deleteAnswerNotice(n.row);
   if (kept.length) notices.set(agentId, kept);
   else notices.delete(agentId);
 }
@@ -892,22 +1026,31 @@ export function moveRingNotices(from: string, to: string): number {
   return ring.length;
 }
 
-function takeNotices(agentId: string, includeIdleOnly: boolean): string[] {
+function takeNotices(agentId: string, includeIdleOnly: boolean): Notice[] {
   const all = notices.get(agentId) ?? [];
   const taken = all.filter((n) => includeIdleOnly || !n.idleOnly);
   const kept = all.filter((n) => !taken.includes(n));
   if (kept.length) notices.set(agentId, kept);
   else notices.delete(agentId);
   for (const n of taken) n.onTaken?.();
-  return taken.map((n) => n.text);
+  return taken;
 }
 
 // Text for a hook that runs after a tool call, or undefined when there's nothing new.
 export function inTurnNotice(agentId: string): string | undefined {
-  const parts = takeNotices(agentId, false);
+  return inTurnTake(agentId)?.text;
+}
+
+// The in-turn take of a hook (S-3923): its text, and the answer rows it carried. The rows stay until the hook's client
+// acknowledges them (ackNotice), since the response may not reach the agent.
+export function inTurnTake(agentId: string): { text: string; rows: number[] } | undefined {
+  const taken = takeNotices(agentId, false);
+  const rows = taken.flatMap((n) => (n.row !== undefined ? [n.row] : []));
+  unconfirmed.set(agentId, [...(unconfirmed.get(agentId) ?? []), ...rows]);
+  const parts = taken.map((n) => n.text);
   // ITSA comments and updates don't interrupt; they arrive with the idle batch (pushIfIdle).
   if (db.unreadCount(agentId, true)) parts.push(render('mail-notice', noticeList(agentId, true)));
-  return parts.length ? parts.join('\n\n') : undefined;
+  return parts.length ? { text: parts.join('\n\n'), rows } : undefined;
 }
 
 const timers = new Map<string, NodeJS.Timeout>();
@@ -962,7 +1105,7 @@ async function pushIfIdle(agentId: string): Promise<void> {
   const text = [...pending.map((n) => n.text), ...(hasMail ? [render('mail-prompt', noticeList(agentId))] : [])].join('\n\n');
   if (await adapters[a.harness]?.pushPrompt?.(a, text).catch(() => false)) {
     notices.delete(agentId);
-    for (const n of pending) n.onTaken?.();
+    for (const n of pending) handed(n);
     if (hasMail) db.markPushed(agentId);
     db.addEvent(agentId, 'pushed', { mail: hasMail, notices: pending.length });
   }

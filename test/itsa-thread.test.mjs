@@ -231,6 +231,15 @@ test('foldMails joins recipients of same-id copies and keeps read state and atta
   assert.equal(m.attachments[0].name, 'f.txt');
 });
 
+test('foldMails keeps the home\'s snapshot range through a forwarded copy of the same body, in either order (S-2998)', () => {
+  const copy = (extra = {}) => ({ id: 'mf2', from_id: 'a1', subject: 's', body: 'snap\n\nrest', created_at: '2026-01-01T00:00:00.000Z', recipients: [], attachments: [], ...extra });
+  const shown = { at: 0, len: 4 };
+  assert.deepEqual(db.foldMails([copy(), copy({ shown })])[0].shown, shown, 'the forwarded copy first');
+  assert.deepEqual(db.foldMails([copy({ shown }), copy()])[0].shown, shown, 'the home copy first');
+  // A copy whose body differs takes no range from another.
+  assert.equal(db.foldMails([copy({ body: 'other' }), copy({ shown })])[0].shown, undefined);
+});
+
 test('a post skips an archived or forgotten participant and still reaches the rest (S-281)', async () => {
   agent('b5', 'erin-s281');
   agent('b6', 'frank-s281');
@@ -248,7 +257,7 @@ test('a post skips an archived or forgotten participant and still reaches the re
 
 test('a participant on a peer that is down is kept, so its post is queued for it (S-281)', async () => {
   // A peer on a closed port refuses at once: the participant there can't be looked up.
-  writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [{ name: 'far', url: 'http://127.0.0.1:9', token: 't' }] }));
+  writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [{ name: 'far', url: 'http://127.0.0.1:9', token: 'test-peer-token' }] }));
   agent('c1', 'hank');
   const z = await itsa.create({ title: 'Down peer', by: 'human', owner: 'a1', participants: ['hank'] });
   db.open().prepare("INSERT INTO itsa_participants (itsa_id, agent_id) VALUES (?, 'far-s281')").run(z.id);

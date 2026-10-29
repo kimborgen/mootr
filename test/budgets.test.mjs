@@ -5,6 +5,7 @@
 // once, and unmanaged agents are never touched. The ledger is seeded and `now` is passed in;
 // no daemon, no network, no models, no sleeps: `node --test test/budgets.test.mjs`.
 import { test, before, after, beforeEach } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import { createServer } from 'node:http';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -57,7 +58,7 @@ before(async () => {
 });
 after(() => {
   server.close();
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -289,7 +290,7 @@ test('a mail that fails to send is retried on a timer with no later usage', asyn
   assert.equal(sent.length, 1, 'the retry sent it');
   await budgets.evaluateBudgets('openrouter', now);
   assert.equal(sent.length, 1, 'and recorded it');
-  budgets.setMailTesting({ send: mail.sendFromStam, delays: [60_000] });
+  budgets.setMailTesting({ send: (to, s, b) => mail.sendFromSystem('budgets', to, s, b), delays: [60_000] });
 });
 
 // Waits for the chained evaluations a ledger write started.

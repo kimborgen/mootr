@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Nightly Go parity run (S-2297, S-2194): checks out origin/main into its own scratch clone, builds go/, runs
-// scripts/go-parity.mjs over the FREE list with STAM_DAEMON=go, and publishes the result. Runs on storage only.
+// scripts/go-parity.mjs over the FREE list with STAM_DAEMON=go, and publishes the result. Runs on goHost() only (STAM_GO_PARITY_HOST, default storage).
 //
 //   node scripts/go-parity-nightly.mjs            one run (refused with exit 75 while another run holds the lock)
-//   node scripts/go-parity-nightly.mjs --install  write stam-go-parity.service and .timer to ~/.config/systemd/user, enable the timer
+//   node scripts/go-parity-nightly.mjs --install  write go-parity units (stam-* under a real stam home, mootr-* under a mootr one) to ~/.config/systemd/user, enable the timer
 //   node scripts/go-parity-nightly.mjs --status   print the last run's one-line summary
 //
 // Files, under STAM_GO_PARITY_DIR (default STAM_HOME/go-parity): parity.json (the per-test results, the shape of
@@ -22,12 +22,15 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { homedir, hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { daemonCounts } from './go-parity.mjs';
-import { envVar } from '../src/env.ts';
+import { daemonCounts, goHost } from './go-parity.mjs';
+import { envVar, withTwins } from '../src/env.ts';
+import { defaultHome } from '../src/default-home.ts';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import { isMain } from './main-guard.mjs';
+import { unitScript, unitToInstall } from './unit-names.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
-const UNIT = 'stam-go-parity';
+const NAME = 'go-parity';
 const ITSA = 'S-2194';
 export const OWNER = 'go-parity-ni'; // STAM_AGENT_ID go-parity-nightly, as test/lib.sh cuts it to 12 characters
 const LOCKED = 75;
@@ -53,7 +56,7 @@ export function summaryLine({ state, go_sha, pass, total, skip, na, delta, first
 }
 
 // The service and timer texts. The script path is the release symlink's, so a deploy swaps the code under the timer.
-export function unitTexts({ node, script, path }) {
+export function unitTexts({ node, script, path, unit = `mootr-${NAME}` }) {
   return {
     service: [
       '[Unit]', 'Description=Nightly Go parity run over the FREE tests (S-2297, S-2194)', '',
@@ -67,7 +70,7 @@ export function unitTexts({ node, script, path }) {
     timer: [
       '[Unit]', 'Description=Run the Go parity run every night (S-2297)', '',
       // 03:30 host time: outside working hours. Persistent: a night the machine was off runs at the next boot.
-      '[Timer]', 'OnCalendar=*-*-* 03:30:00', 'Persistent=true', `Unit=${UNIT}.service`, '',
+      '[Timer]', 'OnCalendar=*-*-* 03:30:00', 'Persistent=true', `Unit=${unit}.service`, '',
       '[Install]', 'WantedBy=timers.target', '',
     ].join('\n'),
   };
@@ -76,10 +79,11 @@ export function unitTexts({ node, script, path }) {
 export function install(env = process.env) {
   const dir = envVar('GO_PARITY_UNIT_DIR', env) || join(homedir(), '.config/systemd/user');
   mkdirSync(dir, { recursive: true });
-  const released = join(homedir(), '.local/share/stam/releases/current/scripts/go-parity-nightly.mjs');
-  const script = existsSync(released) ? released : SELF;
+  const home = envVar('HOME', env) || defaultHome();
+  const UNIT = unitToInstall(dir, NAME, home);
+  const script = unitScript(home, 'scripts/go-parity-nightly.mjs', SELF);
   const path = [dirname(process.execPath), join(homedir(), '.local/bin'), '/usr/local/bin', '/usr/bin', '/bin'].join(':');
-  const { service, timer } = unitTexts({ node: process.execPath, script, path });
+  const { service, timer } = unitTexts({ node: process.execPath, script, path, unit: UNIT });
   writeFileSync(join(dir, `${UNIT}.service`), service);
   writeFileSync(join(dir, `${UNIT}.timer`), timer);
   if (!envVar('GO_PARITY_UNIT_DIR', env)) {
@@ -124,7 +128,7 @@ export function sweepLeftovers(testTmp) {
       const dpid = Number(read(join(h, 'daemon.pid')).trim());
       if (dpid > 1 && read(`/proc/${dpid}/environ`, 'latin1').split('\0').includes(`STAM_HOME=${h}`)) process.kill(dpid, 'SIGKILL');
       const sock = /STAM_TMUX_SOCKET=(\S+)/.exec(read(join(h, 'test.env')))?.[1];
-      if (sock) spawnSync('tmux', ['-L', sock, 'kill-server'], { stdio: 'ignore' });
+      if (sock) killTmuxServer(sock);
     }
     rmSync(home, { recursive: true, force: true });
     removed.push(name);
@@ -152,7 +156,7 @@ function runLimited(cmd, args, opts, limitMs) {
 }
 
 async function run(env) {
-  const home = envVar('HOME', env) || join(homedir(), '.local/share/stam');
+  const home = envVar('HOME', env) || defaultHome();
   const dir = envVar('GO_PARITY_DIR', env) || join(home, 'go-parity');
   const repo = join(dir, 'repo');
   const testTmp = envVar('GO_PARITY_TESTTMP', env) || join(homedir(), '.cache/stam-test');
@@ -172,7 +176,7 @@ async function run(env) {
     git(repo, 'checkout', '--quiet', '--force', '--detach', 'origin/main');
     git(repo, 'clean', '-fdxq', '-e', 'node_modules');
     result.go_sha = git(repo, 'rev-parse', 'HEAD');
-    const runEnv = { ...env, TMPDIR: scratch, ...{ STAM_TEST_TMPDIR: testTmp, STAM_AGENT_ID: 'go-parity-nightly', STAM_GO_PARITY_ANYHOST: envVar('GO_PARITY_ANYHOST', env) || '' } };
+    const runEnv = { ...env, TMPDIR: scratch, ...withTwins({ STAM_TEST_TMPDIR: testTmp, STAM_AGENT_ID: 'go-parity-nightly', STAM_GO_PARITY_ANYHOST: envVar('GO_PARITY_ANYHOST', env) || '' }) };
     // The root dependencies: reinstalled when the lock changed, as scripts/ensure-deps.sh does for the live checkout.
     const lockFile = join(repo, 'package-lock.json');
     const lockSha = existsSync(lockFile) ? createHash('sha256').update(readFileSync(lockFile)).digest('hex') : null;
@@ -215,7 +219,7 @@ async function run(env) {
 
 // Posts the line on S-2194 with the deployed CLI. A failed post is logged, never fatal: the files hold the result.
 function post(env, note) {
-  const stam = join(homedir(), '.local/share/stam/releases/current');
+  const stam = join(defaultHome(), 'releases/current');
   const cmd = envVar('GO_PARITY_POST_CMD', env) ?? 'bin/stam itsa post "$PARITY_ITSA" "$PARITY_NOTE" --system go-parity';
   const r = spawnSync('sh', ['-c', cmd], { cwd: envVar('GO_PARITY_POST_CWD', env) || stam, env: { ...env, PARITY_ITSA: ITSA, PARITY_NOTE: note }, stdio: 'ignore', timeout: 60000 });
   if (r.status !== 0) console.error(`go-parity-nightly: posting on ${ITSA} failed (exit ${r.status})`);
@@ -223,14 +227,14 @@ function post(env, note) {
 
 function main(args, env = process.env) {
   if (args[0] === '--install') return install(env);
-  const dir = envVar('GO_PARITY_DIR', env) || join(envVar('HOME', env) || join(homedir(), '.local/share/stam'), 'go-parity');
+  const dir = envVar('GO_PARITY_DIR', env) || join(envVar('HOME', env) || defaultHome(), 'go-parity');
   if (args[0] === '--status') {
     const last = readJson(join(dir, 'last-run.json'));
     console.log(last ? `${last.finished_at} ${last.summary}` : 'no run yet');
     return;
   }
-  if (!envVar('GO_PARITY_ANYHOST', env) && hostname() !== 'storage') {
-    console.error(`go-parity-nightly: runs on storage only (this is ${hostname()})`);
+  if (!envVar('GO_PARITY_ANYHOST', env) && hostname() !== goHost(env)) {
+    console.error(`go-parity-nightly: runs on ${goHost(env)} only (this is ${hostname()})`);
     process.exit(2);
   }
   mkdirSync(dir, { recursive: true });

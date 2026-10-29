@@ -98,6 +98,16 @@ export const T_PERM = thread('fx-t-perm', [
 export const T_DIALOG = thread('fx-t-dialog', [
   mail('fm-51', 'fx-t-dialog', OPS, ['human'], 'Dialog: allow editing config.json', 'fixture-ops is stopped on a dialog.', { min: 6, read: false, permission_id: DIALOG.id, permission: DIALOG }),
 ])
+// A question dialog (AskUserQuestion, S-3978): its card offers one button per option, and Deny.
+const QUESTION: Permission = { ...DIALOG, id: 'fx-perm-q', action: 'Claude Code asks a question', details: JSON.stringify({ tool: 'AskUserQuestion', input: { questions: [{ question: 'Which folder should the migration use for the backup copy of the customer data?', options: [
+  { label: 'Shared backups', description: 'The team folder, kept for 30 days.' },
+  { label: 'Project backups', description: 'A new folder next to the project, removed when the migration ends.' },
+  { label: 'External drive', description: 'The drive mounts only while a backup runs, so the copy waits until it is connected and the migration pauses until then.' },
+  { label: 'No backup', description: 'Continue without a copy.' },
+] }] }, session: 'fx-session' }) }
+export const T_QUESTION = thread('fx-t-question', [
+  mail('fm-53', 'fx-t-question', OPS, ['human'], 'Dialog: which folder', 'fixture-ops is stopped on a question.', { min: 4, read: false, permission_id: QUESTION.id, permission: QUESTION }),
+])
 export const PERM_DONE: Permission = { ...PERM, id: 'fx-perm-3', status: 'approved', decided_by: 'human', decided_at: ago(4), note: 'Go ahead' }
 export const T_PERM_DONE = thread('fx-t-perm-done', [
   mail('fm-52', 'fx-t-perm-done', OPS, ['human'], 'Permission: run the tests', 'Run `npm test` in the project folder?', { min: 20, permission_id: PERM_DONE.id, permission: PERM_DONE }),

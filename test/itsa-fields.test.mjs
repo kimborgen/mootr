@@ -168,3 +168,119 @@ test('create applies fields in its transaction and records the event; a bad valu
   const ev = itsa.get(y.key).events.find((e) => e.type === 'fields');
   assert.deepEqual(JSON.parse(ev.data), { from: { n: null }, to: { n: 7 } });
 });
+
+// Field kinds (S-3180): a field limited to some ITSA kinds applies only to those.
+test('kinds are validated: a list of labels, an empty list is every kind', async () => {
+  await rejects(itsa.createField({ key: 'kk', label: 'K', type: 'text', kinds: 'issue' }, 'human'), /list of ITSA kinds/);
+  await rejects(itsa.createField({ key: 'kk', label: 'K', type: 'text', kinds: ['issue', '  '] }, 'human'), /needs a label/);
+  const every = await itsa.createField({ key: 'kk', label: 'K', type: 'text', kinds: [] }, 'human');
+  assert.equal(every.kinds, null);
+  const dedup = await itsa.updateField('kk', { kinds: [' Issue ', 'issue'] }, 'human');
+  assert.deepEqual(dedup.kinds, ['Issue']);
+  assert.equal((await itsa.updateField('kk', { kinds: null }, 'human')).kinds, null);
+  await itsa.removeField('kk', 'human');
+});
+
+test('a field limited to kinds applies to those kinds, matching the kind ignoring case', async () => {
+  const f = await itsa.createField({ key: 'scope', label: 'Scope', type: 'text', kinds: ['issue'] }, 'human');
+  assert.deepEqual(f.kinds, ['issue']);
+  const issue = await itsa.create({ title: 'An issue', kind: 'Issue', by: 'human', fields: { scope: 'core' } });
+  assert.equal(itsa.get(issue.key).fields.scope, 'core');
+  const project = await itsa.create({ title: 'A project', kind: 'project', by: 'human' });
+  await rejects(itsa.set(project.key, { fields: { scope: 'core' } }, 'human'), /scope applies only to issue ITSAs, not project ones/);
+  const bare = await itsa.create({ title: 'No kind', by: 'human' });
+  await rejects(itsa.set(bare.key, { fields: { scope: 'core' } }, 'human'), /not ITSAs with no kind/);
+  assert.equal(itsa.get(project.key).fields.scope, undefined);
+});
+
+test('a refused field writes none of the other fields in the same call', async () => {
+  const p = await itsa.create({ title: 'Mixed', kind: 'project', by: 'human', fields: { pr: 'https://example.com/p/1' } });
+  await rejects(itsa.set(p.key, { title: 'Changed', fields: { pr: 'https://example.com/p/2', scope: 'core' } }, 'human'), /scope/);
+  assert.equal(itsa.get(p.key).title, 'Mixed');
+  assert.equal(itsa.get(p.key).fields.pr, 'https://example.com/p/1');
+  await rejects(itsa.create({ title: 'Mixed new', kind: 'project', by: 'human', fields: { pr: 'https://example.com/p/3', scope: 'core' } }), /scope/);
+  assert.equal((await itsa.list()).find((r) => r.title === 'Mixed new'), undefined);
+});
+
+test('clearing a value on a kind it does not apply to is allowed; a value there is refused', async () => {
+  const p = await itsa.create({ title: 'Cleared', kind: 'project', by: 'human', fields: { pr: 'https://example.com/p/4' } });
+  await rejects(itsa.set(p.key, { fields: { scope: 'x' } }, 'human'), /applies only/);
+  const r = await itsa.set(p.key, { fields: { pr: null } }, 'human');
+  assert.deepEqual(r.changes.fields, { from: { pr: 'https://example.com/p/4' }, to: { pr: null } });
+  assert.equal(itsa.get(p.key).fields.pr, undefined);
+});
+
+test('narrowing kinds keeps existing values but hides them; widening shows them again', async () => {
+  const kept = itsa.get(x.key).fields.pr;
+  assert.ok(kept, 'X holds a pr value from the earlier tests');
+  await itsa.updateField('pr', { kinds: ['issue'] }, 'human');
+  assert.equal(itsa.get(x.key).fields.pr, undefined);
+  const row = db.open().prepare('SELECT value FROM itsa_field_values WHERE itsa_id = ? AND field_id = ?').get(x.id, itsa.findField('pr').id);
+  assert.equal(JSON.parse(row.value), kept);
+  await itsa.updateField('pr', { kinds: null }, 'human');
+  assert.equal(itsa.get(x.key).fields.pr, kept);
+});
+
+test('a stage limited to issue refuses a project, and an issue keeps its stage', async () => {
+  const stage = await itsa.createField({ key: 'stage', label: 'Stage', type: 'choice', options: [{ value: 'dev' }, { value: 'live' }], kinds: ['issue'] }, 'human');
+  try {
+    const project = await itsa.create({ title: 'Staged project', kind: 'project', by: 'human' });
+    await rejects(itsa.set(project.key, { fields: { stage: 'dev' } }, 'human'), /stage applies only to issue ITSAs, not project ones/);
+    const issue = await itsa.create({ title: 'Staged issue', kind: 'issue', by: 'human', fields: { stage: 'dev' } });
+    assert.equal(itsa.get(issue.key).fields.stage, 'dev');
+  } finally {
+    await itsa.removeField(stage.id, 'human');
+  }
+});
+
+test('closing a project writes no stage when stage is limited to issues; closing an issue still sets it', async () => {
+  const stage = await itsa.createField({ key: 'stage', label: 'Stage', type: 'choice', options: [{ value: 'dev' }, { value: 'live' }], kinds: ['issue'] }, 'human');
+  itsa.setCloseStage(() => 'live');
+  try {
+    const project = await itsa.create({ title: 'Closing project', kind: 'project', by: 'human' });
+    const closed = await itsa.set(project.key, { status: 'done' }, 'human');
+    assert.equal(closed.changes.status.to, 'done');
+    assert.equal(itsa.get(project.key).status, 'done');
+    assert.equal(itsa.get(project.key).fields.stage, undefined);
+    const issue = await itsa.create({ title: 'Closing issue', kind: 'issue', by: 'human' });
+    await itsa.set(issue.key, { status: 'done' }, 'human');
+    assert.equal(itsa.get(issue.key).fields.stage, 'live');
+  } finally {
+    itsa.setCloseStage(null);
+    await itsa.removeField(stage.id, 'human');
+  }
+});
+
+test('a kind change in the same set is checked against the new kind', async () => {
+  const stage = await itsa.createField({ key: 'stage', label: 'Stage', type: 'choice', options: [{ value: 'dev' }, { value: 'live' }], kinds: ['issue'] }, 'human');
+  try {
+    const becomes = await itsa.create({ title: 'Becomes an issue', kind: 'project', by: 'human' });
+    await itsa.set(becomes.key, { kind: 'issue', fields: { stage: 'dev' } }, 'human');
+    assert.equal(itsa.get(becomes.key).kind, 'issue');
+    assert.equal(itsa.get(becomes.key).fields.stage, 'dev');
+    const issue = await itsa.create({ title: 'Stops being an issue', kind: 'issue', by: 'human' });
+    await rejects(itsa.set(issue.key, { kind: 'project', fields: { stage: 'dev' } }, 'human'), /stage applies only to issue ITSAs, not project ones/);
+    assert.equal(itsa.get(issue.key).kind, 'issue');
+    assert.equal(itsa.get(issue.key).fields.stage, undefined);
+  } finally {
+    await itsa.removeField(stage.id, 'human');
+  }
+});
+
+test('backfill skips a kind the stage field does not apply to; an issue still gets its end node', async () => {
+  const stage = await itsa.createField({ key: 'stage', label: 'Stage', type: 'choice', options: [{ value: 'dev' }, { value: 'live' }] }, 'human');
+  try {
+    // Written before the field was limited to issues: a closed project holding a stage.
+    const project = await itsa.create({ title: 'Old project', kind: 'project', by: 'human' });
+    await itsa.set(project.key, { status: 'done', fields: { stage: 'dev' } }, 'human');
+    const issue = await itsa.create({ title: 'Old issue', kind: 'issue', by: 'human' });
+    await itsa.set(issue.key, { status: 'done', fields: { stage: 'dev' } }, 'human');
+    await itsa.updateField('stage', { kinds: ['issue'] }, 'human');
+    assert.equal(itsa.backfillClosedStage(() => 'live', ['project', 'issue']), 1);
+    const raw = db.open().prepare('SELECT value FROM itsa_field_values WHERE itsa_id = ? AND field_id = ?').get(project.id, stage.id);
+    assert.equal(raw.value, '"dev"');
+    assert.equal(itsa.get(issue.key).fields.stage, 'live');
+  } finally {
+    await itsa.removeField(stage.id, 'human');
+  }
+});

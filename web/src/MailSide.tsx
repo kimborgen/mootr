@@ -22,6 +22,8 @@ import { openedItsa, openItsa, StatusGlyph, statusLabel } from './itsa/itsa'
 import { AskBlockLine } from './itsa/AskBlockLine'
 import { isPlainWait, useDeferred, useToAnswerCount, useWaiting, type WaitingRow } from './itsa/WaitingList'
 import { unreadThreads as unreadThreadsOf } from './mail/inbox-model'
+import { NeedsYouList } from './mail/NeedsYouList'
+import { openAskCount } from './mail/needsYou'
 import { swipeRow } from './mail/swipeRow'
 import { nameFor } from './mail/ThreadPanel'
 import { HistorySide } from './HistorySide'
@@ -92,12 +94,12 @@ export function DelegatedGroup({ delegated }: { delegated: Permission[] }) {
 
 // In a sidebar pane (`pane`, S-1421) the pane sets the height, so there is no resize separator.
 export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLElement | null>; pane?: boolean }) {
-  const { humanThreads, humanArchived, humanDeferred, decisions, delegateDialogs, loaded } = useData()
+  const { humanThreads, humanArchived, humanDeferred, decisions, asks, delegateDialogs, loaded } = useData()
   useShell()
   const waiting = useWaiting()
   const deferred = useDeferred()
   // Which list the header shows: the inbox (with the attention list), the awaiting threads, the archived ones, or the deferred ones (S-976).
-  const [view, setView] = useState<'inbox' | 'awaiting' | 'archived' | 'deferred' | 'toanswer' | 'history'>('inbox')
+  const [view, setView] = useState<'inbox' | 'needsyou' | 'awaiting' | 'archived' | 'deferred' | 'toanswer' | 'history'>('inbox')
   const archived = view === 'archived'
   const archivedIds = new Set(humanArchived.map((t) => t.thread_id))
   const deferredIds = new Set(humanDeferred.map((t) => t.thread_id))
@@ -146,13 +148,15 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
   const delegated = view === 'inbox' ? delegateDialogs : []
   const pinned = (t: Thread) => att.some((a) => a.thread === t) || def.some((a) => a.thread === t)
   const awaitingAll = [...humanThreads, ...humanArchived, ...humanDeferred].filter(awaiting)
-  const shown = view === 'toanswer' ? [] : view === 'archived' ? humanArchived : view === 'deferred' ? humanDeferred : view === 'awaiting' ? awaitingAll : humanThreads.filter((t) => !pinned(t))
+  const shown = view === 'toanswer' || view === 'needsyou' ? [] : view === 'archived' ? humanArchived : view === 'deferred' ? humanDeferred : view === 'awaiting' ? awaitingAll : humanThreads.filter((t) => !pinned(t))
   // One count for the To answer toggle and its header, one for "waiting on you": the rows this inbox lists (the phone badges and the Issues header count `useWaiting()`, plain waits included).
   const toAnswerN = useToAnswerCount()
   const nAsk = att.length
   const count = [nAsk ? <span key="a" className="asks" title="Everything waiting on you is listed under To answer">{nAsk} waiting on you</span> : null, unreadThreads.length ? `${unreadThreads.length} unread` : null].filter(Boolean)
-  const countNode = view === 'toanswer' ? toAnswerN : view === 'archived' ? humanArchived.length : view === 'deferred' ? humanDeferred.length : view === 'awaiting' ? awaitingAll.length : count.length ? count.map((c, i) => <span key={i}>{i ? ' · ' : ''}{c}</span>) : String(humanThreads.length || '')
-  const pick = (v: 'awaiting' | 'archived' | 'deferred' | 'toanswer' | 'history') => { setView(view === v ? 'inbox' : v); if (list.current) list.current.scrollTop = 0 }
+  // The Needs you count: the open asks the list shows (the same list, so the number and the rows agree).
+  const needsN = openAskCount(asks)
+  const countNode = view === 'needsyou' ? needsN : view === 'toanswer' ? toAnswerN : view === 'archived' ? humanArchived.length : view === 'deferred' ? humanDeferred.length : view === 'awaiting' ? awaitingAll.length : count.length ? count.map((c, i) => <span key={i}>{i ? ' · ' : ''}{c}</span>) : String(humanThreads.length || '')
+  const pick = (v: 'needsyou' | 'awaiting' | 'archived' | 'deferred' | 'toanswer' | 'history') => { setView(view === v ? 'inbox' : v); if (list.current) list.current.scrollTop = 0 }
 
   // A thread's row. An ITSA waiting on you (x) marks its ask thread's row with its status, and
   // the row opens the ITSA, whose view holds that thread and the action bar; an ask that sits
@@ -221,7 +225,10 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
     <>
       {pane ? null : <div className="sep h side-sep" id="sep-mail" title="Drag to resize the mail list" onPointerDown={drag} />}
       <div className={'mail-side' + (pane ? ' in-pane' : '')} id="mail-side" ref={side} style={pane ? undefined : { height: height() }}>
-        <div className="section eyebrow"><Icon name="mail" size="xs" />{view === 'archived' ? 'Archived' : view === 'deferred' ? 'Deferred' : view === 'toanswer' ? 'To answer' : view === 'awaiting' ? 'Awaiting reply' : view === 'history' ? 'History' : 'Mail'}
+        {/* Needs you (S-3831) heads the rail, above the mail list: the open count, always shown. */}
+        <button className="needs-rail" data-needs-you aria-pressed={view === 'needsyou'} title={view === 'needsyou' ? 'Back to your mail' : 'Every ask waiting on you, and those settled in the last day'}
+          onClick={() => pick('needsyou')}>Needs you ({needsN})</button>
+        <div className="section eyebrow"><Icon name="mail" size="xs" />{view === 'needsyou' ? 'Needs you' : view === 'archived' ? 'Archived' : view === 'deferred' ? 'Deferred' : view === 'toanswer' ? 'To answer' : view === 'awaiting' ? 'Awaiting reply' : view === 'history' ? 'History' : 'Mail'}
           <span className="count">{countNode}</span>
         </div>
         <div className="mail-views" role="group" aria-label="Mail lists">
@@ -239,13 +246,14 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
             onClick={() => pick('history')}>{view === 'history' ? 'Inbox' : 'History'}</button>}
         </div>
         {view === 'history' ? <HistorySide bare /> : <div className="mail-side-list" ref={list}>
+          {view === 'needsyou' ? <NeedsYouList asks={asks} /> : null}
           {att.map((a) => attRow(a))}
           <DelegatedGroup delegated={delegated} />
           {def.length ? <details className="mail-deferred" data-deferred-group open={view === 'toanswer' || undefined}>
             <summary><Icon name="chevron-right" size="xs" />Decide later ({def.length})</summary>
             {def.map((a) => attRow(a, true))}
           </details> : null}
-          {shown.length ? shown.map((t) => threadRow(t)) : !loaded.mail ? <Loading className="mail-empty" /> : att.length || def.length || delegated.length ? null : <div className="mail-empty muted">{view === 'archived' ? 'Threads you archive show here.' : view === 'deferred' ? 'Threads you defer show here.' : view === 'toanswer' ? 'Nothing waits on your answer.' : view === 'awaiting' ? 'Threads waiting for an answer show here.' : 'Mail agents send you shows here.'}</div>}
+          {shown.length ? shown.map((t) => threadRow(t)) : !loaded.mail ? <Loading className="mail-empty" /> : att.length || def.length || delegated.length || view === 'needsyou' ? null : <div className="mail-empty muted">{view === 'archived' ? 'Threads you archive show here.' : view === 'deferred' ? 'Threads you defer show here.' : view === 'toanswer' ? 'Nothing waits on your answer.' : view === 'awaiting' ? 'Threads waiting for an answer show here.' : 'Mail agents send you shows here.'}</div>}
         </div>}
       </div>
     </>

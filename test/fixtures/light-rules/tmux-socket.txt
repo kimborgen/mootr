@@ -1,0 +1,2 @@
+import { killTmuxServer } from '../src/tmux-socket.ts';
+process.env.STAM_TMUX_SOCKET = sock;

@@ -4,6 +4,7 @@
 // paused, waiting or mailed agent, never unpushed or dirty work, and it fails closed. Throwaway STAM_HOME,
 // no daemon, no GitHub: `node --test test/auto-archive-queued.test.mjs`.
 import { test, before, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync, execFileSync } from 'node:child_process';
@@ -32,7 +33,7 @@ before(async () => {
   ({ createWorkspace } = await import('../src/workspace.ts'));
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 

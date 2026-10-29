@@ -1,17 +1,21 @@
 import { parseArgs } from 'node:util';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, openSync, readFileSync, writeFileSync, rmSync, existsSync, renameSync } from 'node:fs';
+import { mkdirSync, openSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname } from 'node:path';
 import { join } from 'node:path';
-import { MACHINE, PORT, RELEASES, ROOT, STAM_HOME } from './config.ts';
-import { api } from './client.ts';
+import { MACHINE, PORT, RELEASES, ROOT, STAM_HOME, rotateLeaseToken } from './config.ts';
+import { api, SWITCH_CALL_MS } from './client.ts';
 import { statuslineTtl, throttled } from './statusline-cache.ts';
 import * as tmux from './tmux.ts';
-import { SERVICE, UNIT, systemctl, waitHealthy } from './deploy.ts';
+import { SERVICE, UNIT, checkService, systemctl, waitHealthy } from './deploy.ts';
 import { unitText } from './unit.ts';
-import { envVar, setEnvVar, withMootrTwins } from './env.ts';
+import { installService as installServiceWith } from './service-install.ts';
+import { AGENT_IDENTITY, envVar, setEnvVar, withMootrTwins } from './env.ts';
 import { serviceEnv } from './test-env.ts';
+import { holdersText } from './developer-cap.ts';
+import { fieldsChange } from './itsa-fields-line.ts';
+import { windowLine } from './usage-line.ts';
 
 // The name the user invoked (bin/mootr or bin/stam sets it); help and usage text print it.
 const CLI = envVar('CLI_NAME') === 'stam' ? 'stam' : 'mootr';
@@ -33,14 +37,14 @@ const SPAWN_USAGE = named(`  stam spawn NAME [--type T] [--var KEY=VALUE]... [--
 
 const USAGE = named(`${CLI}: run and coordinate coding agents
 
-  stam daemon [run|start|stop|restart|status|install]
+  stam daemon [run|start|stop|restart|status|install [--replace-stamd]]
   stam deploy [REF] [--repo DIR]    build a committed ref (default HEAD) into a release, check it, and switch to it
                   [--build-only]    build and check only, and print the release folder
   stam prune                        remove releases beyond the newest five, current, previous, and any a process runs from
   stam rollback [RELEASE]           switch to the previous release, or a named one
   stam releases                     list releases
   stam deps relink [--force]        relink this worktree's node_modules from the lockfile cache (after a rebase changes package-lock.json); deps check only reports
-${SPAWN_USAGE}  stam ls
+${SPAWN_USAGE}  stam ls [--all]   live agents; --all adds stopped and archived ones
   stam registry                     agent types, presets, harnesses, and models
   stam doctor [--json]              check this machine for a first run (Node, tmux, git, a harness, STAM_HOME, the port), with no daemon needed; a fix line per problem; exits 1 on a failure
   stam onboarding                   what a fresh install still lacks, as JSON: harness logins, keys, network mode, repos, chief of staff
@@ -63,16 +67,18 @@ ${SPAWN_USAGE}  stam ls
   stam compact AGENT [INSTRUCTIONS] compact the conversation when the agent finishes its step
   stam kill AGENT                   quit the harness now
   stam forget AGENT                 remove a stopped agent from the registry
+  stam stats comms [--days N] [--json]  counts of mail, asks and waits over 1-30 days (default 7), never their text; an agent's token is refused
   stam retro --search WORDS | --plus-one S-N --details T | --kind K --title T --summary T --details T [--target T] [--evidence K] [--when T] | --final --effort reading=50,... | --digest   retro items: search first, +1 a match, or file one; --final records the effort split when archived (as an agent); --digest mails the digest now to the Retros owner (or the chief of staff), not from an agent
   stam ring [NAME [TOPIC]]          list rings, show one, or start one:
       --format rounds|fire|debate --members a,b --spawn PRESET_OR_MODEL,... [--moderator M [--decide]] [--rounds N]
   stam pr open BRANCH --title T --body-file FILE [--itsa REF]   open or update a branch's PR on the ITSA home (gh runs there)
-  stam itsa ls [--parent REF|root] [--subtree REF] [--status S] [--category C] [--owner REF] [--participant REF] [TEXT]
+  stam itsa ls [--parent REF|root] [--subtree REF] [--status S] [--category C] [--owner REF] [--participant REF] [--since T] [--json] [TEXT]
   stam itsa mails REF               JSON of the mails in an ITSA's own thread on this daemon
   stam itsa about-mails REF         JSON of the mails about an ITSA in other threads on this daemon
+  stam itsa incident REF            JSON {"marked":bool}: whether the ITSA or a parent is marked an incident
   stam itsa show REF                an ITSA: parent chain, children with roll-ups, links, participants
   stam itsa new TITLE [--parent REF] [--kind K] [--status S] [--owner REF] [--participant REF] [--summary T] [--body T] [--link URL]
-  stam itsa set REF [--title T] [--summary T] [--body T] [--kind K] [--status S] [--owner REF] [--participant REF] [--parent REF] [--field key=value]... [--system NAME]
+  stam itsa set REF [--title T] [--summary T] [--body T] [--kind K] [--status S] [--owner REF] [--participant REF]... (replaces the whole participant set) [--add-participant REF]... (adds each, keeping the others) [--parent REF] [--field key=value]... [--system NAME]
   stam itsa field ls|new KEY LABEL --type T [--option VALUE]... [--description T]|set KEY [--label T] [--type T] [--description T] [--option V]... (replaces the options, keeping label and tone of those you name again)|rm KEY|order KEY...   shared Work page columns
   stam itsa post REF BODY [--update HEALTH] [--to REF]... [--override WHY] [--system NAME]   comment, or update (on_track|at_risk|off_track), in the ITSA's thread
   stam itsa thread REF              the ITSA's thread: mails and status/owner events by time
@@ -117,6 +123,7 @@ ${SPAWN_USAGE}  stam ls
   stam mail inbox AGENT|human
   stam mail read [AGENT|human] [MAIL_ID...]
   stam mcp login|logout|status NAME   manage a remote MCP server's shared OAuth login
+  stam mcp lease-rotate               a new lease token for peers' MCP leases; the old one is refused at once
   stam mcp                            the MCP server agents talk to (stdio)
 
 The command is called mootr; its old name, stam, is still accepted as an alias.`);
@@ -213,35 +220,44 @@ async function printSummary(scope: string | undefined, days: string | undefined,
   for (const t of s.trees.slice(0, 5)) console.log(`  ${t.name}  ${t.agents} agent${t.agents === 1 ? '' : 's'} · working ${h(t.working_s)} · ${usd(t.cost_usd)}`);
 }
 
-async function installService() {
-  mkdirSync(dirname(UNIT), { recursive: true });
+async function installService(replace = false) {
+  // mootrd.service with Alias=stamd.service (S-3349); the choices and their refusals are src/service-install.ts.
   const path = [...new Set([join(homedir(), '.opencode', 'bin'), ...(process.env.PATH ?? '').split(':')])].join(':');
   const current = join(RELEASES, 'current');
   const deployed = existsSync(current);
-  if (!deployed) console.log(`no release yet, so ${SERVICE} runs this checkout; run stam deploy to switch it to a release`);
-  const env = serviceEnv(SERVICE_ENV, process.env);
-  const tmp = `${UNIT}.tmp-${process.pid}`;
-  writeFileSync(tmp, unitText({ dir: deployed ? current : ROOT, node: process.execPath, path, env, log: join(STAM_HOME, 'daemon.log') }));
-  renameSync(tmp, UNIT);
-  // Without linger, user services stop when the user's last login ends.
-  spawnSync('loginctl', ['enable-linger', process.env.USER ?? ''], { stdio: 'ignore' });
-  try {
-    process.kill(Number(readFileSync(join(STAM_HOME, 'daemon.pid'), 'utf8')));
-    rmSync(join(STAM_HOME, 'daemon.pid'));
-  } catch {}
-  systemctl('daemon-reload');
-  systemctl('enable', SERVICE);
-  // Restart, not start: a running daemon must pick up the new unit.
-  systemctl('restart', SERVICE);
-  console.log((await waitHealthy()) ? `${SERVICE} installed as a user service (${UNIT}) and running` : `${SERVICE} installed, but not answering; see daemon.log`);
+  await installServiceWith({
+    unitDir: dirname(UNIT),
+    home: STAM_HOME,
+    own: envVar('SERVICE'),
+    replace,
+    text: (service) => {
+      if (!deployed) console.log(`no release yet, so ${service} runs this checkout; run stam deploy to switch it to a release`);
+      // A test's STAM_SERVICE names its own unit, which has no alias.
+      return unitText({ dir: deployed ? current : ROOT, node: process.execPath, path, env: serviceEnv(SERVICE_ENV, process.env), log: join(STAM_HOME, 'daemon.log'), alias: service === 'mootrd' ? 'stamd.service' : undefined });
+    },
+    systemctl,
+    checkService,
+    // Without linger, user services stop when the user's last login ends.
+    linger: () => void spawnSync('loginctl', ['enable-linger', process.env.USER ?? ''], { stdio: 'ignore' }),
+    killPidFile: () => {
+      try {
+        process.kill(Number(readFileSync(join(STAM_HOME, 'daemon.pid'), 'utf8')));
+        rmSync(join(STAM_HOME, 'daemon.pid'));
+      } catch {}
+    },
+    healthy: waitHealthy,
+    log: (line) => console.log(line),
+  });
 }
 
-async function daemon(sub = 'run') {
+async function daemon(sub = 'run', replaceStamd = false) {
   const pidFile = join(STAM_HOME, 'daemon.pid');
-  if (sub === 'install') return installService();
+  if (sub === 'install') return installService(replaceStamd);
   // A daemon with its own home or port (a test instance) never touches the user's service,
   // unless it names its own service (STAM_SERVICE).
   const own = Boolean(envVar('SERVICE')) || (!envVar('HOME') && !envVar('PORT'));
+  // Before the existsSync: an EACCES on the unit dir must fail, not fall into the unmanaged daemon path below.
+  if (own && ['start', 'stop', 'restart'].includes(sub)) checkService();
   if (own && existsSync(UNIT) && ['start', 'stop', 'restart'].includes(sub)) {
     systemctl(sub, SERVICE);
     if (sub !== 'stop' && !(await waitHealthy())) throw new Error(`${SERVICE} not answering; see daemon.log`);
@@ -257,7 +273,7 @@ async function daemon(sub = 'run') {
     // A daemon an agent starts is no agent's: without its identity, an archive's sweep
     // (src/proctree.ts) never takes it for the agent's own, nor do its tmux server and agents.
     const env = { ...process.env };
-    for (const k of withMootrTwins(['STAM_AGENT_ID', 'STAM_AGENT_NAME', 'STAM_TOKEN'])) delete env[k];
+    for (const k of withMootrTwins(AGENT_IDENTITY)) delete env[k];
     const child = spawn(process.execPath, ['--no-warnings', process.argv[1], 'daemon', 'run'], {
       detached: true,
       stdio: ['ignore', log, log],
@@ -295,6 +311,16 @@ async function daemon(sub = 'run') {
   throw new Error(`unknown daemon command ${sub}`);
 }
 
+// Writes the hook's text and resolves once it is out; a closed or full stdout rejects (S-3923: no ack for text that didn't
+// print). On a pipe the write is async, so the callback is what says it went.
+function writeStdout(text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    // A failed write also emits 'error', after the callback; the listener stays so that event isn't unhandled.
+    process.stdout.once('error', reject);
+    process.stdout.write(text, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
 // Called by harness hooks. Must never fail the agent, so errors exit 0 silently. While the
 // daemon is down (a deploy restarts it) the hook retries for up to 30 s: a lost Stop left an
 // idle agent 'working', and its mail undelivered, for hours (S-188). Only a refused
@@ -307,7 +333,11 @@ async function hook(harness: string) {
     for (let deadline = Date.now() + 30_000; ; ) {
       try {
         const r = await api('POST', `/api/hook/${harness}/${id}`, JSON.parse(input), 3000);
-        if (r.stdout) process.stdout.write(r.stdout);
+        if (r.stdout) await writeStdout(r.stdout);
+        // The response is printed in full, so the notices it carried reached the agent: the daemon may delete their answer
+        // rows (S-3923). A failed write throws before this line and sends no ack. A failed acknowledgement keeps the rows,
+        // and a restart replays them.
+        for (const row of r.ack ?? []) await api('POST', `/api/notices/${id}/ack/${row}`, undefined, 3000).catch(() => {});
         return;
       } catch (e: any) {
         if (e?.cause?.code !== 'ECONNREFUSED' || Date.now() > deadline) return;
@@ -334,7 +364,7 @@ async function main() {
   if (!NO_HELP_CMDS.has(cmd) && wantsHelp(process.argv.slice(2))) return console.log(usageFor(cmd) || USAGE);
   switch (cmd) {
     case 'daemon':
-      return daemon(rest[0]);
+      return daemon(rest[0], rest.includes('--replace-stamd'));
     case 'hook':
       return hook(rest[0]);
     case 'deploy': {
@@ -370,8 +400,12 @@ async function main() {
       // `stam mcp` alone is the stdio server agents talk to; the subcommands manage a remote
       // server's shared login (S-50).
       if (sub === 'status') {
-        for (const s of (await api<any>('GET', '/api/mcp/status')).servers)
-          console.log(`${s.name.padEnd(16)} ${s.type.padEnd(6)} ${s.logged_in ? 'logged in' : 'not logged in'}${s.expires_at ? ` (expires ${new Date(s.expires_at).toISOString()})` : ''}`);
+        const page = await api<any>('GET', '/api/mcp/status');
+        // A peer's old grant from before the lease is a local login on this machine, not a logout (S-3177).
+        for (const s of page.servers)
+          console.log(`${s.name.padEnd(16)} ${s.type.padEnd(6)} ${s.local_grant ? 'local login on this machine' : s.logged_in ? 'logged in' : 'not logged in'}${s.expires_at ? ` (expires ${new Date(s.expires_at).toISOString()})` : ''}`);
+        // On a peer the home's logins are not listed while it is down: say so, and name it (S-3178).
+        if (page.home && !page.home.reachable) console.log(`${page.home.name} is unreachable: its MCP logins are not listed. ${page.home.error ?? ''}`.trimEnd());
         return;
       }
       if (sub === 'login') {
@@ -385,14 +419,17 @@ async function main() {
           return console.log(`Log in to ${name} from the web UI's Settings.`);
         }
       }
+      // A new lease token (S-3176): the old one is refused at once, the peers' copies stop working, and the
+      // peer token is unchanged. The token is written to the file only, never printed.
+      if (sub === 'lease-rotate') {
+        rotateLeaseToken();
+        return console.log(`rotated the MCP lease token (STAM_HOME/mcp-lease-token). Peers that lease from this home need the new value in settings.peers[].leaseToken.`);
+      }
       if (sub === 'logout') {
         if (!name) throw new Error('usage: stam mcp logout NAME');
-        try {
-          await api('POST', `/api/mcp/${name}/logout`);
-          return console.log(`logged out of ${name}`);
-        } catch {
-          return console.log(`Log out of ${name} from the web UI's Settings.`);
-        }
+        // The daemon's answer is the reason: a refusal, such as a peer's logout, prints as the daemon wrote it (S-3178).
+        await api('POST', `/api/mcp/${name}/logout`);
+        return console.log(`logged out of ${name}`);
       }
       const { runMcp } = await import('./mcp.ts');
       return runMcp();
@@ -408,6 +445,36 @@ async function main() {
       const r = runMigrate(!!v.apply);
       console.log(v.json ? JSON.stringify(r.result, null, 2) : r.text);
       if (r.code) process.exitCode = r.code;
+      return;
+    }
+    case 'stats': {
+      if (rest[0] !== 'comms') throw new Error('usage: stam stats comms [--days N] [--json]');
+      const { values: v } = parseArgs({ args: rest.slice(1), options: { days: { type: 'string' }, json: { type: 'boolean' } } });
+      const r = await api<any>('GET', `/api/stats/comms${v.days ? `?days=${encodeURIComponent(v.days)}` : ''}`);
+      if (v.json) return console.log(JSON.stringify(r, null, 2));
+      const table = (title: string, head: string[], rows: (string | number)[][]) => {
+        console.log(`\n${title}`);
+        if (!rows.length) return console.log('  none');
+        const widths = head.map((h, i) => Math.max(h.length, ...rows.map((x) => String(x[i]).length)));
+        for (const x of [head, ...rows]) console.log('  ' + x.map((c, i) => String(c).padEnd(widths[i])).join('  '));
+      };
+      const kv = (c: Record<string, number>) => Object.entries(c).map(([k, n]) => `${k} ${n}`).join(', ') || '-';
+      console.log(`Comms stats, last ${r.days} days (since ${r.since})`);
+      table('Mail deliveries by recipient', ['RECIPIENT', 'TYPE', 'TOTAL', 'UNREAD', 'KINDS', 'TOP SENDERS'],
+        r.deliveries.map((x: any) => [x.name, x.type, x.total, x.unread, kv(x.kinds), (x.topSenders ?? []).map((s: any) => `${s.sender} ${s.n}`).join(', ')]));
+      console.log(`\nMail to the human: ${r.human.received.total} (by sender: ${kv(r.human.received.bySender)}; by kind: ${kv(r.human.received.byKind)})`);
+      console.log(`Human threads: ${r.human.threads.total}, the human wrote in ${r.human.threads.repliedByHuman}`);
+      table('Permission requests', ['KIND', 'TOTAL', 'AUDIENCE', 'STATUS', 'DECIDED BY', 'DECIDED', 'P50 MIN', 'P90 MIN'],
+        r.permissions.map((x: any) => [x.kind, x.total, kv(x.audience), kv(x.status), kv(x.decidedBy), x.decidedMinutes.n, x.decidedMinutes.p50 ?? '-', x.decidedMinutes.p90 ?? '-']));
+      table('Pending asks now', ['KIND', 'COUNT', 'OLDEST MIN'], r.open.pendingAsks.map((x: any) => [x.kind, x.n, x.oldestMinutes ?? '-']));
+      table('ITSAs waiting on the human', ['KEY', 'STATUS', 'IN STATUS MIN'], r.open.itsasInHumanStatus.map((x: any) => [x.key, x.status, x.inStatusMinutes ?? '-']));
+      console.log(`\nOpen decision mails: ${r.open.decisionMails}; deferred threads: ${r.open.threadsDeferred}`);
+      console.log(`Waits on the human: ${r.waitsOnHuman.open} open (${r.waitsOnHuman.openedInWindow} opened in the window), mean open ${r.waitsOnHuman.meanOpenMinutes ?? '-'} min`);
+      const a = r.answers;
+      const sp = (x: any) => `${x.n} (p50 ${x.p50 ?? '-'} min, p90 ${x.p90 ?? '-'} min)`;
+      console.log(`Waits on the human closed: ${a.waitsClosed.total} (${kv(a.waitsClosed.byOutcome)}), time waited ${sp(a.waitsClosed.minutes)}`);
+      console.log(`Decisions: ${a.decisions.answered} answered (${a.decisions.withChoice} with a recorded choice), ${a.decisions.deferred} deferred; time to answer ${sp(a.decisions.answeredMinutes)}; all outcomes: ${kv(a.decisions.byOutcome)}`);
+      console.log(`Escalations to the human: ${a.escalations.total}, ask to escalation ${sp(a.escalations.minutesToEscalate)}`);
       return;
     }
     case 'retro': {
@@ -527,11 +594,12 @@ async function main() {
         const who = (x: { name: string }) => x.name;
         return console.log(`started ring ${a.ring.name} (${a.ring.id}); members ${a.members.map(who).join(', ')}${a.moderator ? `; moderator ${a.moderator.name}` : ''}; result by mail; see: stam ring ${a.ring.name}`);
       }
-      if (a.queued) return console.log(`queued ${a.name}: place ${a.place} of ${a.queue_length} for a developer slot on ${a.machine} (${a.cap} in use: ${a.holders.join(', ')}); it starts when a slot frees`);
+      if (a.queued) return console.log(`queued ${a.name}: place ${a.place} of ${a.queue_length} for a developer slot on ${a.machine} (${a.cap} in use: ${holdersText(a.holders, a.holder_info)}); it starts when a slot frees`);
       return console.log(`spawned ${a.name} (${a.id}); attach with: stam attach ${a.name}`);
     }
     case 'ls': {
-      const agents = await api<any[]>('GET', '/api/agents');
+      // Live agents; `stam ls --all` adds stopped and archived ones (S-3816).
+      const agents = await api<any[]>('GET', rest.includes('--all') ? '/api/agents?state=all' : '/api/agents');
       const rows = agents.map((a) => [
         a.id,
         a.name,
@@ -753,7 +821,7 @@ async function main() {
       return console.log(`ring ${r.name} (${r.id}) started; the result arrives in your inbox`);
     }
     case 'pr': {
-      // The PR relay (S-514), as the pr_open tool: stam pr open BRANCH --title T --body-file F [--itsa REF].
+      // The PR relay (S-514), as the pr_open tool: stam pr open BRANCH --title T --body-file F [--itsa REF]; --predict is its dry run (S-3287).
       const [sub, ...args] = rest;
       if (sub === 'review') {
         // The verdict relay (S-1061), as the pr_review tool: stam pr review N approve|request_changes "SUMMARY" --head SHA.
@@ -763,8 +831,14 @@ async function main() {
         const r = await api<any>('POST', '/api/pr/review', { pr, verdict, summary, head: rv.head, by: envVar('AGENT_ID') });
         return console.log(`Posted ${r.verdict} on PR #${r.pr} at ${String(r.head).slice(0, 7)}: ${r.line}`);
       }
-      const { values: v, positionals } = parseArgs({ args, allowPositionals: true, options: { title: { type: 'string' }, 'body-file': { type: 'string' }, itsa: { type: 'string' } } });
-      if (sub !== 'open' || positionals.length !== 1 || !v.title || !v['body-file']) throw new Error('usage: stam pr open BRANCH --title "TITLE" --body-file FILE [--itsa REF]');
+      const { values: v, positionals } = parseArgs({ args, allowPositionals: true, options: { title: { type: 'string' }, 'body-file': { type: 'string' }, itsa: { type: 'string' }, predict: { type: 'boolean' } } });
+      if (sub === 'open' && v.predict) {
+        // The dry run (S-3287): the NAME: PASS lines the body must carry; needs no title or body, pushes nothing to GitHub.
+        if (positionals.length !== 1) throw new Error('usage: stam pr open BRANCH --predict');
+        const { formatPrediction } = await import('./pr-predict-format.ts');
+        return console.log(formatPrediction(await api<any>('POST', '/api/pr/predict', { branch: positionals[0], by: envVar('AGENT_ID') }, 360_000)));
+      }
+      if (sub !== 'open' || positionals.length !== 1 || !v.title || !v['body-file']) throw new Error('usage: stam pr open BRANCH --title "TITLE" --body-file FILE [--itsa REF] | stam pr open BRANCH --predict');
       const r = await api<any>('POST', '/api/pr/open', { branch: positionals[0], title: v.title, body: readFileSync(v['body-file'], 'utf8'), itsa: v.itsa, by: envVar('AGENT_ID') });
       console.log(`${r.created ? 'Opened' : 'Updated'} PR #${r.number}: ${r.url}`);
       return r.warning ? console.log(`WARNING: ${r.warning}`) : undefined;
@@ -796,11 +870,11 @@ async function main() {
         args,
         allowPositionals: true,
         options: {
-          parent: { type: 'string' }, subtree: { type: 'string' }, status: { type: 'string' }, category: { type: 'string' },
-          owner: { type: 'string' }, participant: { type: 'string', multiple: true }, kind: { type: 'string' },
+          parent: { type: 'string' }, subtree: { type: 'string' }, status: { type: 'string' }, category: { type: 'string' }, since: { type: 'string' }, json: { type: 'boolean' },
+          owner: { type: 'string' }, participant: { type: 'string', multiple: true }, 'add-participant': { type: 'string', multiple: true }, kind: { type: 'string' },
           title: { type: 'string' }, summary: { type: 'string' }, body: { type: 'string' },
           link: { type: 'string', multiple: true }, update: { type: 'string' }, to: { type: 'string', multiple: true }, system: { type: 'string' }, override: { type: 'string' }, 'external-id': { type: 'string' }, repo: { type: 'string' }, remove: { type: 'string' },
-          field: { type: 'string', multiple: true }, type: { type: 'string' }, label: { type: 'string' }, description: { type: 'string' }, option: { type: 'string', multiple: true }, hint: { type: 'string' }, width: { type: 'string' }, align: { type: 'string' }, card: { type: 'string' },
+          field: { type: 'string', multiple: true }, 'if-status': { type: 'string' }, type: { type: 'string' }, label: { type: 'string' }, description: { type: 'string' }, option: { type: 'string', multiple: true }, hint: { type: 'string' }, width: { type: 'string' }, align: { type: 'string' }, card: { type: 'string' },
         },
       });
       // An ITSA action is the agent's own when the CLI runs inside one (STAM_AGENT_ID);
@@ -811,7 +885,11 @@ async function main() {
         for (const key of ['parent', 'subtree', 'status', 'category', 'owner', 'kind'] as const) if (v[key]) q.set(key, String(v[key]));
         if (v.participant?.length) q.set('participant', v.participant[0]);
         if (positionals.length) q.set('text', positionals.join(' '));
-        for (const x of await api<any[]>('GET', `/api/itsas${q.toString() ? '?' + q : ''}`))
+        // --since is passed as typed; the daemon reads it (an age or an ISO time) and refuses a bad one (S-1396).
+        if (v.since !== undefined) q.set('since', v.since);
+        const rows = await api<any[]>('GET', `/api/itsas${q.toString() ? '?' + q : ''}`);
+        if (v.json) return console.log(JSON.stringify(rows, null, 2));
+        for (const x of rows)
           console.log(`${x.key.padEnd(6)} ${x.status.padEnd(14)} ${(x.owner ?? '-').padEnd(16)} ${x.title}`);
         return;
       }
@@ -824,7 +902,7 @@ async function main() {
         if (!title) throw new Error('usage: stam itsa new TITLE [--parent REF] ...');
         const x = await api<any>('POST', '/api/itsas', {
           title, parent: v.parent, kind: v.kind, status: v.status, owner: v.owner, summary: v.summary, body: v.body,
-          participants: v.participant, links: (v.link ?? []).map((url) => ({ url })), by,
+          participants: v.participant, links: (v.link ?? []).map((url) => ({ url })), by, as_system: v.system,
         });
         return console.log(`${x.key}  ${x.title}`);
       }
@@ -833,6 +911,9 @@ async function main() {
         const patch: any = {};
         for (const key of ['title', 'summary', 'body', 'kind', 'status', 'owner', 'parent'] as const) if (v[key] !== undefined) patch[key] = v[key];
         if (v.participant) patch.participants = v.participant;
+        if (v['add-participant']?.length) patch.addParticipants = v['add-participant'];
+        // Compare-and-set (S-3802): refused, as "status changed", unless the ITSA is still in this status.
+        if (v['if-status'] !== undefined) patch.ifStatus = v['if-status'];
         if (v.field?.length) {
           // Values are typed by their field: a number field takes a finite number, a check true or false, the rest strings.
           const defs = await api<any[]>('GET', '/api/itsas/fields');
@@ -858,7 +939,7 @@ async function main() {
         if (!ref || !Object.keys(patch).length) throw new Error('usage: stam itsa set REF [--status S] [--owner REF] ...');
         // --system NAME acts as a local script (the deploy watcher, S-474), not as the human.
         const r = await api<any>('PATCH', `/api/itsas/${ref}`, { ...patch, by, as_system: v.system });
-        const changed = Object.entries(r.changes).map(([f, c]: [string, any]) => `${f}: ${c.from ?? '-'} -> ${c.to ?? '-'}`);
+        const changed = Object.entries(r.changes).map(([f, c]: [string, any]) => (f === 'fields' ? fieldsChange(c) : `${f}: ${c.from ?? '-'} -> ${c.to ?? '-'}`));
         console.log(`${r.itsa.key}: ${changed.join('; ') || 'nothing changed'}`);
         if (r.retro_offer) console.log(`\n${r.retro_offer}`);
         return;
@@ -922,6 +1003,11 @@ async function main() {
       if (sub === 'about-mails') {
         if (!positionals[0]) throw new Error('usage: stam itsa about-mails REF');
         return console.log(JSON.stringify(await api<any>('GET', `/api/itsas/${positionals[0]}/about-mails`)));
+      }
+      // Whether an ITSA or a parent is marked an incident, as JSON {"marked":bool}: scripts/merge-pr.mjs puts such a PR first in the queue (S-3324).
+      if (sub === 'incident') {
+        if (!positionals[0]) throw new Error('usage: stam itsa incident REF');
+        return console.log(JSON.stringify(await api<any>('GET', `/api/itsas/${positionals[0]}/incident`)));
       }
       if (sub === 'link') {
         const ref = positionals[0];
@@ -1108,7 +1194,7 @@ async function main() {
       const u = await api('GET', `/api/usage?days=${rest[0] ?? 14}`);
       for (const s of u.subscriptions)
         for (const [w, v] of Object.entries<any>(s.windows))
-          if (typeof v?.used_percentage === 'number') console.log(`${s.name} ${w}: ${v.used_percentage}% (resets ${new Date(v.resets_at * 1000).toISOString().slice(0, 16)}Z)`);
+          if (windowLine(s.name, w, v)) console.log(windowLine(s.name, w, v));
       console.log(`today: $${u.today.cost_usd ?? 0}, ${u.today.tokens_in ?? 0} tokens in, ${u.today.tokens_out ?? 0} out`);
       console.log('by model:');
       for (const r of u.by_model) console.log(`  ${`${r.harness}/${r.model}`.padEnd(56)} $${r.cost_usd}`);
@@ -1171,7 +1257,7 @@ async function main() {
       const [agent, preset] = positionals;
       if (!agent || !preset) throw new Error('usage: stam cost-switch AGENT PRESET [--soft-stop-minutes N]');
       const m = values['soft-stop-minutes'];
-      const r = await api('POST', '/api/cost/switch', { agent, preset, soft_stop_minutes: m != null ? Number(m) : undefined, by: envVar('AGENT_ID') });
+      const r = await api('POST', '/api/cost/switch', { agent, preset, soft_stop_minutes: m != null ? Number(m) : undefined, by: envVar('AGENT_ID') }, SWITCH_CALL_MS);
       if (r.status === 'quiescing') return console.log(`${r.from} is finishing its step (up to ${r.minutes} min); then it continues as ${r.to} on ${r.preset}`);
       return console.log(`${r.from} now continues as ${r.to} on ${r.preset}${r.interrupted ? ' (interrupted)' : ''}; moved ${r.moved.children.length} children, ${r.moved.threads} threads, ${r.moved.unread} unread`);
     }

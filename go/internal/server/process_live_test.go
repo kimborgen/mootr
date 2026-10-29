@@ -183,6 +183,9 @@ func TestScriptRunnerLive(t *testing.T) {
 			t.Errorf("%s: %q", tc.name, mails)
 		}
 	}
+	if n := f.count("SELECT COUNT(*) FROM mail WHERE subject LIKE 'merge run ended%' AND from_id != 'system:process'"); n != 0 {
+		t.Errorf("%d owner mails not from system:process", n)
+	}
 
 	// A run that never starts is logged, not mailed.
 	key = enter("fails to start")
@@ -247,6 +250,72 @@ func TestScriptRunnerGuards(t *testing.T) {
 	run("scripts/ship.mjs", "7")
 	if log.count() != 3 {
 		t.Errorf("after the run ended: %d runs", log.count())
+	}
+}
+
+// A second entry while the first run is held is ignored even when its goroutine would start only after that run ended:
+// the guard is checked at entry, not in the goroutine (S-4143). The goroutine-start seam forces that late start.
+func TestScriptRunnerLateDuplicate(t *testing.T) {
+	f, log, _ := scriptFixture(t, `{"process":{"run":"on"}}`)
+	key := f.createItsa(`{"title":"late","kind":"work"}`)
+	id := f.itsaID(key)
+	p := f.srv.processOf("work")
+	entry := process.EntryAction{Do: "run", Script: "scripts/ship.mjs", Args: []string{"7"}}
+	var starts atomic.Int32
+	late := make(chan struct{})
+	f.srv.runner.scriptStart = func() {
+		if starts.Add(1) == 2 {
+			<-late
+		}
+	}
+	log.hold = make(chan struct{})
+	f.srv.runScript(context.Background(), id, p, entry)
+	waitFor(t, func() bool { return log.count() == 1 }, "the first run to start")
+	f.srv.runScript(context.Background(), id, p, entry)
+	close(log.hold)
+	waitFor(t, func() bool {
+		f.srv.runner.mu.Lock()
+		defer f.srv.runner.mu.Unlock()
+		return !f.srv.runner.running[id+"#scripts/ship.mjs"]
+	}, "the first run to end")
+	close(late)
+	f.srv.WaitProcessRuns()
+	if n := log.count(); n != 1 {
+		t.Errorf("runs: %d, want 1: the entry made while the first ran started late and ran", n)
+	}
+}
+
+// The checks before a run read files (the checkout, its scripts/, the settings), so they run in the worker: an entry
+// returns while they are held, and a second entry meanwhile is already ignored (S-4143 review).
+func TestScriptRunnerEntryReturns(t *testing.T) {
+	f, log, _ := scriptFixture(t, `{"process":{"run":"on"}}`)
+	key := f.createItsa(`{"title":"slow checks","kind":"work"}`)
+	id := f.itsaID(key)
+	p := f.srv.processOf("work")
+	entry := process.EntryAction{Do: "run", Script: "scripts/ship.mjs", Args: []string{"7"}}
+	held, release := make(chan struct{}), make(chan struct{})
+	f.srv.runner.scriptStart = func() {
+		close(held)
+		<-release
+	}
+	returned := make(chan struct{})
+	go func() {
+		f.srv.runScript(context.Background(), id, p, entry)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("the entry waited for the held checks")
+	}
+	<-held
+	f.srv.runner.scriptStart = nil
+	f.srv.runScript(context.Background(), id, p, entry)
+	close(release)
+	f.srv.WaitProcessRuns()
+	if n := log.count(); n != 1 {
+		t.Errorf("runs: %d, want 1", n)
 	}
 }
 

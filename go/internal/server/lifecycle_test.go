@@ -31,15 +31,29 @@ func withLife(f *fixture) {
 // withLifeRoot is withLife with the templates under root, and push streams.
 func withLifeRoot(f *fixture, root string) {
 	f.t.Helper()
+	withLifeRootTmux(f, root, "/bin/false")
+}
+
+// withLifeRootTmux is withLifeRoot with the tmux binary bin. Pass sessionTmux(t) for a launch that must start and
+// stop sessions: /bin/true has every session, even a killed one, so an archive always fails (S-4167).
+func withLifeRootTmux(f *fixture, root, bin string) {
+	f.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	tpl := &templates.Set{Root: root, Home: f.home}
+	settings := config.NewSettingsFile(f.home, f.cfg.Machine)
+	// A launch renders the system prompt, which reads the settings and walks up to the user's home, and writes the
+	// agent's files under STAM_HOME: a test home and the fixture's.
+	userHome := f.t.TempDir()
+	tpl := &templates.Set{Root: root, Home: f.home, UserHome: userHome, Settings: settings.Get, Machine: f.cfg.Machine}
 	// No real claude or network: a compactor that runs fails at once, and recovery's network wait never answers.
-	life := lifecycle.New(ctx, lifecycle.Options{DB: f.db, Tmux: &tmux.Client{Socket: "stam-test-none", Bin: "/bin/false"},
-		Settings: config.NewSettingsFile(f.home, f.cfg.Machine), Machine: f.cfg.Machine,
-		Claude: claude.Env{Templates: tpl, ClaudeBin: "/bin/false"}, NetworkProbes: []string{"http://127.0.0.1:1/"},
+	life := lifecycle.New(ctx, lifecycle.Options{DB: f.db, Tmux: &tmux.Client{Socket: "stam-test-none", Bin: bin},
+		Settings: settings, Machine: f.cfg.Machine,
+		Claude: claude.Env{Templates: tpl, ClaudeBin: "/bin/false", Home: f.home, UserHome: userHome}, NetworkProbes: []string{"http://127.0.0.1:1/"},
 		Streams: push.New(), PushDebounce: 20 * time.Millisecond})
 	f.t.Cleanup(func() { cancel(); life.Wait() })
 	f.srv.life = life
+	life.SetUnown(f.srv.unownAgent)
+	life.SetStartingDead(f.srv.ringMemberDead)
+	life.SetAgentGone(f.srv.eventsAgentGone)
 	f.sql("UPDATE agents SET token_hash = ? WHERE id = 'aboss'", auth.Hash(bossTok))
 }
 
@@ -211,10 +225,8 @@ func TestSpawnRefusesUnported(t *testing.T) {
 	for _, tc := range []struct {
 		body, error string
 	}{
-		{`{"name":"x1","type":"developer","harness":"claude"}`, "spawn: type is not ported"},
-		{`{"name":"x1","itsa":"S-1","harness":"claude"}`, "spawn: itsa is not ported"},
+		{`{"name":"x1","brief":"x"}`, "spawn: brief is not ported"},
 		{`{"name":"x1","harness":"codex"}`, "spawn: codex is not ported"},
-		{`{"harness":"claude"}`, "a free name is not ported"},
 	} {
 		rec := f.do(call{method: "POST", path: "/api/agents", token: sharedTok, body: tc.body})
 		if rec.Code != 501 || !strings.Contains(rec.Body.String(), tc.error) {
@@ -235,8 +247,8 @@ func TestSpawnRefusesUnported(t *testing.T) {
 	}
 }
 
-// TestSpawnRefusesBeforeTheRow: a daemon with no lifecycle, and a spawn with a parent while settings.itsa.required
-// (TS joins it to the parent's ITSA), are refused before any row is made.
+// TestSpawnRefusesBeforeTheRow: a daemon with no lifecycle, and a spawn naming an ITSA that doesn't exist, are refused
+// before any row is made.
 func TestSpawnRefusesBeforeTheRow(t *testing.T) {
 	f := newFixture(t, nil)
 	body := `{"name":"x2","harness":"claude","cwd":"` + f.home + `"}`
@@ -244,10 +256,10 @@ func TestSpawnRefusesBeforeTheRow(t *testing.T) {
 		t.Errorf("spawn with no lifecycle: %d %s", rec.Code, rec.Body.String())
 	}
 	withLife(f)
-	body = `{"name":"x2","harness":"claude","parent":"aboss","cwd":"` + f.home + `"}`
+	body = `{"name":"x2","harness":"claude","parent":"aboss","itsa":"S-404","cwd":"` + f.home + `"}`
 	rec := f.do(call{method: "POST", path: "/api/agents", token: sharedTok, body: body})
-	if rec.Code != 501 || !strings.Contains(rec.Body.String(), "settings.itsa.required") {
-		t.Errorf("spawn with a parent: %d %s", rec.Code, rec.Body.String())
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "no ITSA S-404") {
+		t.Errorf("spawn naming no ITSA: %d %s", rec.Code, rec.Body.String())
 	}
 	if _, err := f.db.GetAgent(context.Background(), "x2"); err == nil {
 		t.Error("a refused spawn made a row")
@@ -283,7 +295,7 @@ func TestControlActions(t *testing.T) {
 	f.sql("UPDATE agents SET lifecycle = 'shut_down' WHERE id = 'achild'")
 	// The wrap-ups a restart and a shutdown render before they look at the agent.
 	must(t, os.MkdirAll(filepath.Join(f.home, "templates"), 0o700))
-	for _, name := range []string{"restart-prepare", "shutdown-prepare"} {
+	for _, name := range []string{"restart-prepare", "shutdown-prepare", "compacted-self"} {
 		must(t, os.WriteFile(filepath.Join(f.home, "templates", name+".md"), []byte("wrap up"), 0o600))
 	}
 	for _, tc := range []struct {
@@ -297,7 +309,7 @@ func TestControlActions(t *testing.T) {
 		{"the parent", bossTok, "/api/agents/achild/restart", `{"by":"aboss"}`, 409, `{"error":"child is shut_down"}`},
 		{"the agent itself", agentTok, "/api/agents/achild/restart", `{"by":"achild"}`, 409, `{"error":"child is shut_down"}`},
 		{"the shared token", sharedTok, "/api/agents/achild/shutdown", `{}`, 409, `{"error":"child is shut_down"}`},
-		{"a compact with a prompt", sharedTok, "/api/agents/achild/compact", `{"prompt":"go on"}`, 501, "not ported"},
+		{"a compact with a prompt", sharedTok, "/api/agents/achild/compact", `{"prompt":"go on"}`, 409, "child has no session to compact"},
 		{"a resume with no session", sharedTok, "/api/agents/achild/resume", `{}`, 409, `{"error":"child has no session to resume"}`},
 	} {
 		rec := f.do(call{method: "POST", path: tc.path, token: tc.token, body: tc.body})

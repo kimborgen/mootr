@@ -3,6 +3,7 @@
 // the edit form's state and the payload it sends to the fields API.
 import { fullOrder, loadStore, LOCKED, moveTo, saveStore, type Layout, type ViewStore } from '../work/views'
 import { fieldColId, fieldIdOf, type Field, type FieldTone, type FieldType } from '../itsa/fields'
+import type { CardLayout } from '../card-layout'
 
 export interface ColumnRow {
   id: string
@@ -86,15 +87,30 @@ export interface FieldForm {
   hint: string
   width: Field['width']
   align: Field['align']
+  // The kinds the field applies to; empty is every kind (S-3180).
+  kinds: string[]
+  // The phone card's slot, chip or detail line, until the card editor (S-1438 PR 6) replaces it.
   card: Field['card']
 }
+
+// Where a field shows: the Work table (its layout's columns) and the issue card's slots (cardLayouts), e.g. "Table · Card: badges".
+export function shownIn(f: Field, cols: string[], issue: CardLayout): string {
+  const id = fieldColId(f)
+  const where = cols.includes(id) ? ['Table'] : []
+  const slot = Object.keys(issue.slots).find((s) => issue.slots[s]?.includes(id))
+  if (slot) where.push(`Card: ${slot.toLowerCase()}`)
+  return where.length ? where.join(' · ') : 'Hidden'
+}
+
+export const appliesTo = (f: Pick<Field, 'kinds'>) => (f.kinds?.length ? f.kinds.join(', ') : 'All kinds')
+
 
 export function formOf(f?: Field | null): FieldForm {
   return {
     label: f?.label ?? '', key: f?.key ?? '', type: f?.type ?? 'text',
     options: f?.options?.map((o) => ({ ...o })) ?? [],
     description: f?.description ?? '', hint: f?.hint ?? '',
-    width: f?.width ?? 'm', align: f?.align ?? 'start', card: f?.card ?? 'meta',
+    width: f?.width ?? 'm', align: f?.align ?? 'start', kinds: f?.kinds ? [...f.kinds] : [], card: f?.card ?? 'meta',
   }
 }
 
@@ -129,6 +145,8 @@ export function payloadOf(form: FieldForm, taken: string[], current?: string) {
     hint: text(form.hint),
     width: form.width,
     align: form.align,
+    // Null is every kind, which the daemon stores as no kinds.
+    kinds: form.kinds.length ? form.kinds : null,
     card: form.card,
   }
 }

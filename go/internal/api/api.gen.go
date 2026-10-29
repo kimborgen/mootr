@@ -53,6 +53,16 @@ const (
 	ShutDown AgentLifecycle = "shut_down"
 )
 
+// Defines values for AgentOpenAskDetailKind.
+const (
+	Decision       AgentOpenAskDetailKind = "Decision"
+	HarnessDialog  AgentOpenAskDetailKind = "Harness dialog"
+	ITSA           AgentOpenAskDetailKind = "ITSA"
+	Permission     AgentOpenAskDetailKind = "Permission"
+	SettingsChange AgentOpenAskDetailKind = "Settings change"
+	SuggestedInput AgentOpenAskDetailKind = "Suggested input"
+)
+
 // Defines values for AgentPermissionMode.
 const (
 	Auto    AgentPermissionMode = "auto"
@@ -156,14 +166,24 @@ type Agent struct {
 	// Kind `assistant` for the human's executive assistant, else null.
 	Kind        *string        `json:"kind"`
 	LastMessage *string        `json:"last_message"`
+	LaunchedAt  *string        `json:"launched_at"`
 	Lifecycle   AgentLifecycle `json:"lifecycle"`
 
 	// Load A standing agent's load numbers (src/agent-load.ts), set for non-archived standing agents only.
-	Load     *AgentLoad `json:"load,omitempty"`
-	Machine  string     `json:"machine"`
-	Model    *string    `json:"model"`
-	Name     string     `json:"name"`
-	ParentId *string    `json:"parent_id"`
+	Load    *AgentLoad `json:"load,omitempty"`
+	Machine string     `json:"machine"`
+	Model   *string    `json:"model"`
+	Name    string     `json:"name"`
+
+	// OpenAsk The key of the open ask this agent waits on, as GET /api/asks keys it (S-3977); null when none. Set by the TS daemon only (the Go daemon does not port it yet).
+	OpenAsk *string `json:"open_ask"`
+
+	// OpenAskDetail The mail the open ask lives in and its kind, never its text (S-3982, src/asks.ts askDetail); null when none.
+	OpenAskDetail *struct {
+		Kind AgentOpenAskDetailKind `json:"kind"`
+		Mail *string                `json:"mail"`
+	} `json:"open_ask_detail"`
+	ParentId *string `json:"parent_id"`
 
 	// Parents Ids of every parent, not only `parent_id`.
 	Parents           []string               `json:"parents"`
@@ -176,6 +196,7 @@ type Agent struct {
 
 	// Resting What a resting agent rests for, and when it is expected to wake.
 	Resting               *AgentResting `json:"resting"`
+	ResumedAt             *string       `json:"resumed_at"`
 	Role                  string        `json:"role"`
 	SessionId             *string       `json:"session_id"`
 	Standing              AgentStanding `json:"standing"`
@@ -213,6 +234,9 @@ type AgentDefaultView string
 
 // AgentLifecycle defines model for Agent.Lifecycle.
 type AgentLifecycle string
+
+// AgentOpenAskDetailKind defines model for Agent.OpenAskDetail.Kind.
+type AgentOpenAskDetailKind string
 
 // AgentPermissionMode defines model for Agent.PermissionMode.
 type AgentPermissionMode string
@@ -374,11 +398,26 @@ type HumanOnMachineRefusal struct {
 // HumanOnMachineRefusalRefusal defines model for HumanOnMachineRefusal.Refusal.
 type HumanOnMachineRefusalRefusal string
 
+// MailTitlesShown defines model for MailTitlesShown.
+type MailTitlesShown struct {
+	// Enabled A title model is set (mail.titles.model); with none, nothing is asked and pending is empty.
+	Enabled bool `json:"enabled"`
+
+	// Pending The mails queued or being asked.
+	Pending []string `json:"pending"`
+}
+
 // HumanOnMachine The 409 refusal of a human-only write that belongs to another machine's UI.
 type HumanOnMachine = HumanOnMachineRefusal
 
 // ListAgentsParams defines parameters for ListAgents.
 type ListAgentsParams struct {
+	// State A comma list of lifecycle groups to list (live is active or paused, stopped is shut down, archived, all). Without it (or empty), and without ids, the list is live agents only; an unknown group is a 400.
+	State *string `form:"state,omitempty" json:"state,omitempty"`
+
+	// Ids Agent ids or names, comma-separated, added in any state. Without state, the list is only these.
+	Ids *string `form:"ids,omitempty" json:"ids,omitempty"`
+
 	// Q Keeps agents matching the text.
 	Q *string `form:"q,omitempty" json:"q,omitempty"`
 
@@ -388,6 +427,15 @@ type ListAgentsParams struct {
 	// As The agent whose visibility scopes the list.
 	As *string `form:"as,omitempty" json:"as,omitempty"`
 }
+
+// MailTitlesShownJSONBody defines parameters for MailTitlesShown.
+type MailTitlesShownJSONBody struct {
+	// Ids Mail ids, the first shown first; only the first 40 are looked at.
+	Ids []string `json:"ids"`
+}
+
+// MailTitlesShownJSONRequestBody defines body for MailTitlesShown for application/json ContentType.
+type MailTitlesShownJSONRequestBody MailTitlesShownJSONBody
 
 // Getter for additional properties for Error. Returns the specified
 // element and whether it was found
@@ -457,12 +505,15 @@ func (a Error) MarshalJSON() ([]byte, error) {
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
-	// Every agent on this machine and its peers, with the extras the web tree shows.
+	// The agents on this machine and its peers, with the extras the web tree shows; live agents unless state or ids asks for others (S-3816).
 	// (GET /api/agents)
 	ListAgents(w http.ResponseWriter, r *http.Request, params ListAgentsParams)
 	// Daemon health, polled by peers and the deploy watcher.
 	// (GET /api/health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
+	// The mails the human's view shows; a stale title or summary is queued to be asked again, and the answer comes at once (S-1843).
+	// (POST /api/mail-titles)
+	MailTitlesShown(w http.ResponseWriter, r *http.Request)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -487,6 +538,22 @@ func (siw *ServerInterfaceWrapper) ListAgents(w http.ResponseWriter, r *http.Req
 
 	// Parameter object where we will unmarshal all parameters from the context
 	var params ListAgentsParams
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "state", r.URL.Query(), &params.State)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		return
+	}
+
+	// ------------- Optional query parameter "ids" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "ids", r.URL.Query(), &params.Ids)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "ids", Err: err})
+		return
+	}
 
 	// ------------- Optional query parameter "q" -------------
 
@@ -534,6 +601,26 @@ func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetHealth(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// MailTitlesShown operation middleware
+func (siw *ServerInterfaceWrapper) MailTitlesShown(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.MailTitlesShown(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -665,6 +752,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 
 	m.HandleFunc("GET "+options.BaseURL+"/api/agents", wrapper.ListAgents)
 	m.HandleFunc("GET "+options.BaseURL+"/api/health", wrapper.GetHealth)
+	m.HandleFunc("POST "+options.BaseURL+"/api/mail-titles", wrapper.MailTitlesShown)
 
 	return m
 }

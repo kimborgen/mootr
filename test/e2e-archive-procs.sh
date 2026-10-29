@@ -22,7 +22,7 @@ cat >"$TEST_TMP/procs.json" <<EOF2
     { "shell": "(setsid sh $DIR/loop.sh $DIR/orphan.pid </dev/null >/dev/null 2>&1 &)" },
     { "reply": "DONE" } ] },
   { "match": "tree", "steps": [
-    { "shell": "STAM_AGENT_ID=another sh -c 'sh $DIR/loop.sh $DIR/under-other.pid & sh $DIR/loop.sh $DIR/other.pid' </dev/null >/dev/null 2>&1 & env -u STAM_AGENT_ID setsid sh $DIR/loop.sh $DIR/tree.pid </dev/null >/dev/null 2>&1" },
+    { "shell": "MOOTR_AGENT_ID=another STAM_AGENT_ID=another sh -c 'sh $DIR/loop.sh $DIR/under-other.pid & sh $DIR/loop.sh $DIR/other.pid' </dev/null >/dev/null 2>&1 & env -u STAM_AGENT_ID -u MOOTR_AGENT_ID setsid sh $DIR/loop.sh $DIR/tree.pid </dev/null >/dev/null 2>&1" },
     { "reply": "DONE" } ] }
 ] }
 EOF2
@@ -77,7 +77,7 @@ B="e2e-procs-b-$(date +%s)"
 tree=$(pid_of "$DIR/tree.pid")
 other=$(pid_of "$DIR/other.pid")
 under=$(pid_of "$DIR/under-other.pid")
-tr '\0' '\n' <"/proc/$tree/environ" | grep -q '^STAM_AGENT_ID=' && fail "the tree child still has STAM_AGENT_ID"
+tr '\0' '\n' <"/proc/$tree/environ" | grep -q '^\(MOOTR\|STAM\)_AGENT_ID=' && fail "the tree child still has an agent id"
 "$STAM" kill "$B" >/dev/null
 "$STAM" wait "$B" --until shut_down --timeout 20
 gone "$tree" "the tree child $tree outlived the shutdown of $B"

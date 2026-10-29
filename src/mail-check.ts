@@ -18,7 +18,7 @@ const strict = () => settings().humanMail.when === 'necessary';
 // A mail is checked once, on the daemon that stores it for the human.
 const checked = new Set<string>();
 
-// `fromStam` marks mail stam sent on its own behalf (src/mail.ts sendFromStam); together
+// `fromStam` marks mail stam sent on its own behalf (src/mail.ts, set on every system sender's mail); together
 // with the human's own mail and permission requests, those are never checked.
 export function maybeCheckMail(m: db.Mail, fromStam = false): void {
   if (fromStam || !settings().decisions.mailCheck) return;

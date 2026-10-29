@@ -40,9 +40,6 @@ func (s *Server) fieldRequest(r *http.Request, c auth.Resolved) (context.Context
 	if err != nil {
 		return nil, jsfmt.Value{}, "", err
 	}
-	if err := s.resolveItsaActors(ctx, c, &body); err != nil {
-		return nil, jsfmt.Value{}, "", err
-	}
 	human := s.isHuman(r, c)
 	by, err := itsaActor(body, human, systemBodyOK(c, human, body))
 	if err != nil {

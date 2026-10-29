@@ -4,14 +4,17 @@
 # as written (double spaces, a leading "! ", a trailing ";") and presses Enter. Refused, with
 # nothing typed: the agent's own token, another agent's, the parent's `by`, the assistant's, the
 # shared token with x-stam-human, a forged Tailscale-User-Login from loopback (401, no token), an answer a peer
-# forwarded, `stam authorize`, a wrong text_sha256, a replay, and an expired suggestion. A denial
-# types nothing; a newer suggestion withdraws the older one; a draft in the box holds the approval
-# without touching the draft, as a busy agent does, and it is typed once the box is free; a held
-# approval that expires types nothing and tells the human. Typing never submits anything but the
-# text: a completion menu under the box gets one Esc, or the text is erased; a suggestion replaced
-# or expired while stam types it, or a harness session changed after the approval, is erased
-# before Enter; and a submitted prompt other than the text is told to the human. Codex and
-# OpenCode agents are refused.
+# forwarded, `stam authorize`, a wrong text_sha256, a replay, and a denied suggestion. A denial
+# types nothing; a newer suggestion withdraws the older unanswered one, never an approval; a
+# suggestion has no expiry. A draft in the box holds the approval without touching the draft, as a
+# busy agent does, and it is typed once the box is free; an approval whose box didn't show the text
+# stays held and is typed once the box is clear; a held approval that expires types nothing and tells
+# the human. Every outcome is a line in the request's thread (S-3830). Typing never submits anything
+# but the text: a completion menu under the box gets one Esc, or the text is erased; a key the agent
+# types before Enter holds the approval; an approval that expires while stam types it, or a harness
+# session changed after the approval, is erased before Enter; a held approval survives a daemon
+# restart; and a submitted prompt other than the text is told to the human. Codex and OpenCode agents
+# are refused.
 # Fake Claude Code (test/fake-claude): no model, free. Waits on state.
 set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
@@ -32,6 +35,9 @@ BARRIER="$TEST_TMP/barrier"
 mkdir -p "$BARRIER"
 STAM_TEST_INPUT_BARRIER=$BARRIER
 export STAM_TEST_INPUT_BARRIER
+# The sweep retries a held approval whose box didn't match after this many ms (the default is a minute).
+STAM_TEST_MISMATCH_RETRY_MS=5000
+export STAM_TEST_MISMATCH_RETRY_MS
 isolate
 fail() { echo "FAIL: $1"; exit 1; }
 TOKEN=$(cat "$STAM_HOME/token")
@@ -128,6 +134,9 @@ wait_until last_typed "$KID" "$T1"
 bash_seen() { "$STAM" events kid | grep -q "input:submitted.*$P1.*transcript"; }
 wait_until bash_seen
 [ "$(req "$P1" status)" = approved ] || fail "$P1 is $(req "$P1" status)"
+# Every outcome is one line in the request's thread (S-3830): this one says what was typed.
+typed_note() { human GET "/api/agents/human/inbox?unread=0" | grep -q '\[stam\] Input for kid: typed'; }
+wait_until typed_note
 [ "$(approve "$P1" "$S1")" = 409 ] || fail "a replay was accepted"
 [ "$(typed "$LEAD")" = "$LEAD_TYPED" ] || fail "the lead's pane was typed into"
 "$STAM" wait kid --until idle --timeout 60 >/dev/null
@@ -146,10 +155,12 @@ P4=$(field id <"$TEST_TMP/body")
 [ "$(req "$P3" status)" = withdrawn ] || fail "the older suggestion $P3 is $(req "$P3" status)"
 [ "$(approve "$P3" "$(sha 'echo old')")" = 409 ] || fail "a withdrawn suggestion was approved"
 
-echo "-- an expired suggestion is refused"
+echo "-- a suggestion has no expiry: past its old TTL it stays pending until the parent denies it"
 expire "$P4"
-[ "$(approve "$P4" "$(sha 'echo new')")" = 409 ] || fail "an expired suggestion was approved"
-[ "$(req "$P4" status)" = expired ] || fail "$P4 is $(req "$P4" status)"
+# The sweep (every 5 s) runs once in this sleep: a pending suggestion past its old TTL must survive it.
+sleep 6
+[ "$(req "$P4" status)" = pending ] || fail "$P4 expired without an answer: $(req "$P4" status)"
+[ "$(code "$LT" POST "/api/permissions/$P4/answer" "{\"approve\":false,\"by\":\"$LEAD\",\"note\":\"no\"}")" = 200 ] || fail "the parent couldn't deny $P4"
 "$STAM" wait kid --until idle --timeout 60 >/dev/null
 [ "$(typed "$KID")" = "$(($BEFORE + 1))" ] || fail "denied, withdrawn, or expired text was typed"
 
@@ -238,14 +249,28 @@ P8=$(field id <"$TEST_TMP/body")
 [ "$(approve "$P8" "$(sha '/re')")" = 200 ] && field outcome <"$TEST_TMP/body" | grep -qx typed || fail "/re: $(cat "$TEST_TMP/body")"
 wait_until last_typed "$KID" '/re'
 "$STAM" wait kid --until idle --timeout 60 >/dev/null
-# A thumbs-up with a skin tone and an e with a combining accent: one backspace each, as Claude Code deletes.
-GRAPHEMES='see 👍🏽 é @@file'
+# A menu that Esc doesn't close: the approval is held, not sent, and typed only once the menu is gone.
+GRAPHEMES='see @@file'
 suggest "$KT" "$GRAPHEMES" >/dev/null
 P9=$(field id <"$TEST_TMP/body")
-[ "$(approve "$P9" "$(sha "$GRAPHEMES")")" = 200 ] && field outcome <"$TEST_TMP/body" | grep -qx failed || fail "a menu Esc doesn't close was sent: $(cat "$TEST_TMP/body")"
-[ "$(req "$P9" status)" = failed ] || fail "$P9 is $(req "$P9" status)"
+[ "$(approve "$P9" "$(sha "$GRAPHEMES")")" = 200 ] && field outcome <"$TEST_TMP/body" | grep -qx held && field why <"$TEST_TMP/body" | grep -qx mismatch || fail "a menu Esc doesn't close was sent: $(cat "$TEST_TMP/body")"
+[ "$(req "$P9" status)" = held ] || fail "$P9 is $(req "$P9" status) after a box that didn't match (S-3830)"
 wait_until empty_box
 [ "$(typed "$KID")" = "$(($N + 1))" ] || fail "the menu's item was submitted"
+# A held approval is no note to the human: busy and held are normal, and only the end state is told (S-3830).
+[ "$(human GET "/api/agents/human/inbox?unread=0" | grep -c '\[stam\] Input for kid: held')" = 0 ] || fail "a held approval was noted to the human"
+# While the menu is up, nothing is typed. Once it is gone (a test's no-menu file in the agent's folder, then a key to
+# redraw the box), the held approval is typed as approved, once.
+[ "$(typed "$KID")" = "$(($N + 1))" ] || fail "the held menu text was typed"
+touch "$DIR/no-menu"
+# Stam's own leftover under the menu is cleared by stam once the menu is gone: the human types nothing.
+human POST "/api/hook/claude/$KID" '{"hook_event_name":"Stop"}' >/dev/null
+wait_until last_typed "$KID" "$GRAPHEMES"
+[ "$(req "$P9" status)" = approved ] || fail "$P9 is $(req "$P9" status) once the menu was gone"
+[ "$(typed "$KID")" = "$(($N + 2))" ] || fail "the menu approval was typed more than once"
+rm "$DIR/no-menu"
+"$STAM" wait kid --until idle --timeout 60 >/dev/null
+N=$(typed "$KID")
 
 echo "-- a submitted prompt other than the text is told to the human"
 suggest "$KT" 'echo REWRITEME' >/dev/null
@@ -261,7 +286,7 @@ mismatch2() { [ "$(human GET "/api/agents/human/inbox?unread=0" | grep -o 'submi
 wait_until mismatch2
 "$STAM" wait kid --until idle --timeout 60 >/dev/null
 
-echo "-- a suggestion replaced while stam types it is erased before Enter"
+echo "-- a suggestion made while stam types an approval doesn't stop it: the approval is typed as approved (S-3830)"
 N=$(typed "$KID")
 suggest "$KT" 'echo replaced' >/dev/null
 P11=$(field id <"$TEST_TMP/body")
@@ -274,11 +299,16 @@ suggest "$KT" 'echo replacement' >/dev/null
 P12=$(field id <"$TEST_TMP/body")
 rm "$BARRIER/hold"
 wait "$BG"
-[ "$(cat "$TEST_TMP/bg.code")" = 200 ] && field outcome <"$TEST_TMP/body" | grep -qx cancelled || fail "replaced mid-typing: $(cat "$TEST_TMP/bg.code") $(cat "$TEST_TMP/body")"
-[ "$(req "$P11" status)" = withdrawn ] || fail "$P11 is $(req "$P11" status)"
+[ "$(cat "$TEST_TMP/bg.code")" = 200 ] && field outcome <"$TEST_TMP/body" | grep -qx typed || fail "a suggestion made mid-typing: $(cat "$TEST_TMP/bg.code") $(cat "$TEST_TMP/body")"
+wait_until last_typed "$KID" 'echo replaced'
+[ "$(req "$P11" status)" = approved ] || fail "$P11 is $(req "$P11" status)"
+[ "$(req "$P12" status)" = pending ] || fail "$P12 is $(req "$P12" status): a newer suggestion is only pending"
 wait_until empty_box
+# P12 is still pending, a human wait: the agent ends its turn waiting, not idle, and approvals are typed then too.
+"$STAM" wait kid --until idle,waiting --timeout 60 >/dev/null
+N=$(($N + 1))
 
-echo "-- a suggestion that expires while stam types it is erased before Enter"
+echo "-- an approval that expires while stam types it is erased before Enter"
 touch "$BARRIER/hold"
 rm -f "$BARRIER/at"
 approve_bg "$P12" "$(sha 'echo replacement')"
@@ -289,7 +319,7 @@ wait "$BG"
 field outcome <"$TEST_TMP/body" | grep -qx cancelled || fail "expired mid-typing: $(cat "$TEST_TMP/body")"
 [ "$(req "$P12" status)" = expired ] || fail "$P12 is $(req "$P12" status)"
 wait_until empty_box
-[ "$(typed "$KID")" = "$N" ] || fail "a replaced or expired suggestion was submitted"
+[ "$(typed "$KID")" = "$N" ] || fail "an expired approval was submitted"
 
 echo "-- an approval held across a harness session change is never typed"
 tmux -L "$STAM_TMUX_SOCKET" send-keys -t "=$KID:" -l 'draft3'
@@ -327,7 +357,7 @@ wait_until last_typed "$KID" "$TR"
 echo "-- stam's own leftover from a partial erase is cleared exactly once the box is free; a human's edit of it is not (S-534)"
 DROP="$STAM_HOME/agents/$KID/drop-bs"
 leave_ech() {
-  # An approval replaced while stam types it is erased, but three backspaces do nothing: 'ech' stays.
+  # An approval that expires while stam types it is erased, but three backspaces do nothing: 'ech' stays.
   echo 3 >"$DROP"
   suggest "$KT" "$1" >/dev/null
   _a=$(field id <"$TEST_TMP/body")
@@ -335,6 +365,8 @@ leave_ech() {
   rm -f "$BARRIER/at"
   approve_bg "$_a" "$(sha "$1")"
   wait_until at_barrier
+  # The approval expires while stam types it (its TTL is cut short): cancelled, and erased as far as DROP allows.
+  expire "$_a"
   suggest "$KT" "$2" >/dev/null
   PNEW=$(field id <"$TEST_TMP/body")
   rm "$BARRIER/hold"
@@ -368,6 +400,104 @@ wait_until has_echo
 tmux -L "$STAM_TMUX_SOCKET" send-keys -t "=$KID:" BSpace BSpace BSpace BSpace
 wait_until last_typed "$KID" 'echo human edit'
 "$STAM" wait kid --until idle --timeout 60 >/dev/null
+
+echo "-- the agent types into the box after stam's check and before Enter: nothing is sent, and the approval waits (S-3830)"
+N=$(typed "$KID")
+T14='echo interleaved'
+suggest "$KT" "$T14" >/dev/null
+P14=$(field id <"$TEST_TMP/body")
+touch "$BARRIER/hold"
+rm -f "$BARRIER/at"
+approve_bg "$P14" "$(sha "$T14")"
+wait_until at_barrier
+tmux -L "$STAM_TMUX_SOCKET" send-keys -t "=$KID:" -l X
+rm "$BARRIER/hold"
+wait "$BG"
+[ "$(cat "$TEST_TMP/bg.code")" = 200 ] && field outcome <"$TEST_TMP/body" | grep -qx held && field why <"$TEST_TMP/body" | grep -qx mismatch || fail "a key typed before Enter: $(cat "$TEST_TMP/bg.code") $(cat "$TEST_TMP/body")"
+[ "$(typed "$KID")" = "$N" ] || fail "stam sent the box with the agent's key in it"
+[ "$(req "$P14" status)" = held ] || fail "$P14 is $(req "$P14" status)"
+tmux -L "$STAM_TMUX_SOCKET" send-keys -t "=$KID:" BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace
+human POST "/api/hook/claude/$KID" '{"hook_event_name":"Stop"}' >/dev/null
+wait_until last_typed "$KID" "$T14"
+[ "$(typed "$KID")" = "$(($N + 1))" ] || fail "the approval was typed more than once"
+"$STAM" wait kid --until idle --timeout 60 >/dev/null
+N=$(typed "$KID")
+
+echo "-- a held approval survives a daemon restart and is typed once afterwards"
+tmux -L "$STAM_TMUX_SOCKET" send-keys -t "=$KID:" -l 'draft4'
+has_draft4() { input_line "$KID" | grep -q 'draft4'; }
+wait_until has_draft4
+T15='echo restarted'
+suggest "$KT" "$T15" >/dev/null
+P15=$(field id <"$TEST_TMP/body")
+[ "$(approve "$P15" "$(sha "$T15")")" = 200 ] && field outcome <"$TEST_TMP/body" | grep -qx held || fail "approve before the restart: $(cat "$TEST_TMP/body")"
+N=$(typed "$KID")
+daemon_stop main
+daemon_up main
+[ "$(req "$P15" status)" = held ] || fail "$P15 is $(req "$P15" status) after the restart"
+[ "$(typed "$KID")" = "$N" ] || fail "a restart typed over the draft"
+tmux -L "$STAM_TMUX_SOCKET" send-keys -t "=$KID:" BSpace BSpace BSpace BSpace BSpace BSpace
+human POST "/api/hook/claude/$KID" '{"hook_event_name":"Stop"}' >/dev/null
+wait_until last_typed "$KID" "$T15"
+[ "$(typed "$KID")" = "$(($N + 1))" ] || fail "the held approval was typed more than once after the restart"
+[ "$(req "$P15" status)" = approved ] || fail "$P15 is $(req "$P15" status)"
+"$STAM" wait kid --until idle --timeout 60 >/dev/null
+
+echo "-- two approvals for a busy agent: the first says to end the turn, the second is queued, and both are typed once, in order (S-3830)"
+N=$(typed "$KID")
+test_agent "$KID" activity working
+TA='echo first queued'
+TB='echo second queued'
+suggest "$KT" "$TA" >/dev/null
+PA=$(field id <"$TEST_TMP/body")
+[ "$(approve "$PA" "$(sha "$TA")")" = 200 ] && field outcome <"$TEST_TMP/body" | grep -qx held || fail "a busy approval: $(cat "$TEST_TMP/body")"
+"$STAM" events kid | grep 'input:held' | grep -q "$PA" || fail "a busy agent wasn't told to end its turn"
+suggest "$KT" "$TB" >/dev/null
+PB=$(field id <"$TEST_TMP/body")
+[ "$(approve "$PB" "$(sha "$TB")")" = 200 ] && field why <"$TEST_TMP/body" | grep -qx queued || fail "the second approval isn't queued: $(cat "$TEST_TMP/body")"
+human POST "/api/hook/claude/$KID" '{"hook_event_name":"Stop"}' >/dev/null
+wait_until last_typed "$KID" "$TA"
+"$STAM" wait kid --until idle --timeout 60 >/dev/null
+wait_until last_typed "$KID" "$TB"
+[ "$(req "$PA" status)" = approved ] && [ "$(req "$PB" status)" = approved ] || fail "queued approvals: $(req "$PA" status) $(req "$PB" status)"
+[ "$(typed "$KID")" = "$(($N + 2))" ] || fail "queued approvals weren't typed once each: $(typed "$KID")"
+"$STAM" wait kid --until idle --timeout 60 >/dev/null
+
+echo "-- an idle hook doesn't retype a held approval whose box didn't match: the sweep retries it later (S-3830)"
+N=$(typed "$KID")
+MT='see @@file2'
+suggest "$KT" "$MT" >/dev/null
+PM=$(field id <"$TEST_TMP/body")
+[ "$(approve "$PM" "$(sha "$MT")")" = 200 ] && field outcome <"$TEST_TMP/body" | grep -qx held || fail "a menu approval: $(cat "$TEST_TMP/body")"
+failed_n() { "$STAM" events kid | grep 'input:failed' | grep -c "$PM"; }
+[ "$(failed_n)" = 1 ] || fail "the menu's erase wasn't one failed attempt: $(failed_n)"
+human POST "/api/hook/claude/$KID" '{"hook_event_name":"Stop"}' >/dev/null
+sleep 3
+[ "$(failed_n)" = 1 ] || fail "the idle hook retyped a held mismatch: $(failed_n) attempts"
+touch "$DIR/no-menu"
+# A key makes the fake redraw its box without the menu.
+tmux -L "$STAM_TMUX_SOCKET" send-keys -t "=$KID:" Escape
+human POST "/api/hook/claude/$KID" '{"hook_event_name":"Stop"}' >/dev/null
+wait_until last_typed "$KID" "$MT"
+rm "$DIR/no-menu"
+[ "$(typed "$KID")" = "$(($N + 1))" ] || fail "the held menu approval was typed more than once"
+"$STAM" wait kid --until idle --timeout 60 >/dev/null
+
+echo "-- a pending suggestion is withdrawn, and its ask pulled, when its agent is shut down (S-3830)"
+SK=$(spawn sk ",\"parent\":\"$LEAD\"")
+"$STAM" wait sk --until idle --timeout 60 >/dev/null
+ST=$(token_of "$SK")
+suggest "$ST" 'echo shut' >/dev/null
+PS=$(field id <"$TEST_TMP/body")
+# A restart keeps the pending suggestion: only a real stop withdraws it (S-3830).
+"$STAM" restart sk --now >/dev/null
+restarted() { "$STAM" events sk | grep -q 'restarting:'; }
+wait_until restarted
+"$STAM" wait sk --until idle,waiting --timeout 60 >/dev/null
+[ "$(req "$PS" status)" = pending ] || fail "a restart withdrew $PS: $(req "$PS" status)"
+"$STAM" shutdown sk --now >/dev/null
+shut_withdrawn() { [ "$(req "$PS" status)" = withdrawn ]; }
+wait_until shut_withdrawn
 
 echo "-- Codex and OpenCode agents are refused"
 CX=$(spawn cx)

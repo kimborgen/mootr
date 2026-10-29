@@ -7,7 +7,7 @@
 // the merged attention list. See docs/itsa-design.md.
 import * as db from './db.ts';
 import * as itsa from './itsa.ts';
-import { HUMAN, stamSender } from './mail.ts';
+import { HUMAN, stamSender, type RelayRoute } from './mail.ts';
 import { render } from './templates.ts';
 import { withdrawQuietly } from './withdraw.ts';
 
@@ -27,9 +27,24 @@ function latestComment(m: db.Mail | undefined): string {
   return m.body.trim();
 }
 
+// The ITSA's text as a mail shows it (S-2998): its title, summary and body, in a <details> block,
+// and the revision of exactly that snapshot (itsa.revOf). The title and summary, plain text in the
+// ITSA view, are escaped, so markup in them can't hide the rest; the body is Markdown in both. A
+// body longer than ASK_TEXT_MAX (UTF-16 units, as JS counts) is cut, with a line to open the ITSA,
+// and has no revision: an Approve from that mail is then refused, and the ITSA view is the way to approve.
+export const ASK_TEXT_MAX = 4000;
+const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+export function shownText(x: Pick<itsa.Itsa, 'key' | 'title' | 'summary' | 'body'>): { text: string; rev?: string } {
+  const body = x.body ?? '';
+  const cut = body.length > ASK_TEXT_MAX;
+  const parts = [x.summary && escHtml(x.summary), cut ? `${body.slice(0, ASK_TEXT_MAX)}\n\n… Cut here: open ${x.key} to review all of it.` : body].filter((s): s is string => !!s && !!s.trim());
+  const text = [`<details><summary>What you approve: ${x.key} ${escHtml(x.title)}</summary>`, '', ...(parts.length ? parts.flatMap((s) => [s, '']) : ['(no summary or body)', '']), '</details>'].join('\n');
+  return cut ? { text } : { text, rev: itsa.revOf(x) };
+}
+
 // Mails the human about an ITSA that just entered a human status. The sender is the agent
 // that made the change, else the owner, else the agent standing in for stam.
-export async function askHuman(x: itsa.Itsa, actor: string): Promise<void> {
+export async function askHuman(x: itsa.Itsa, actor: string, route?: RelayRoute): Promise<void> {
   const st = itsa.statusOf(x.status);
   if (!st?.human) return;
   const isAgent = (id: string | null): id is string => !!id && id !== HUMAN;
@@ -40,17 +55,20 @@ export async function askHuman(x: itsa.Itsa, actor: string): Promise<void> {
   // The owner's comment this ask repeats: the ask replies to it, so the thread view can fold it.
   const repeated = latestMail(x, sender);
   const stamAsks = !isAgent(actor) && !isAgent(x.owner);
-  const body = render('itsa-human', {
+  // The ask shows the text it asks about, from this snapshot, and records its revision (S-2998). It
+  // comes first, so no markup in the owner's comment can hide it, and the title is escaped.
+  const shown = shownText(x);
+  const body = shown.text + '\n\n' + render('itsa-human', {
     // The mail reads as a mail to the human: it names who asks (stam itself when no agent owns the ITSA).
     asker: stamAsks ? 'stam' : db.getAgent(sender)?.name ?? sender,
     key: x.key,
-    title: x.title,
+    title: escHtml(x.title),
     status: x.status.replace(/_/g, ' '),
     latest: latestComment(repeated),
     actions: actions.length ? actions.join(', ') : 'reply here',
   });
   // A question stam asks in an agent's name (no agent owns the ITSA) is stam's own mail: it never starts a peer.
-  await itsa.post(x.id, { by: sender, body, subject: `${x.key} ${x.title}`, from_stam: stamAsks, reply_to: repeated?.id }, { ask: true });
+  await itsa.post(x.id, { by: sender, body, subject: `${x.key} ${x.title}`, from_stam: stamAsks, reply_to: repeated?.id, relay_route: route }, { ask: true, shown });
 }
 
 // Registered once with the daemon: a status change by an agent into a human status mails
@@ -86,7 +104,7 @@ export function itsaAskSettled(id: string): boolean {
   }
 }
 
-export function onStatus(x: itsa.Itsa, actor: string, from: string): void {
+export function onStatus(x: itsa.Itsa, actor: string, from: string, route?: RelayRoute): void {
   if (from === x.status) return;
   // Leaving a human status for a non-human one settles the ask whoever moved the ITSA, so the agent's wait on it
   // goes too (S-3080). A move between human statuses asks again, and the wait stays tied to the ITSA.
@@ -99,7 +117,11 @@ export function onStatus(x: itsa.Itsa, actor: string, from: string): void {
     const ask = lastAsk(x);
     if (ask) withdrawQuietly([ask.id], actor, `@${db.getAgent(actor)?.name ?? actor} moved ${x.key} to ${x.status}`, { keepThread: !!itsa.statusOf(x.status)?.human });
   }
-  askHuman(x, actor).catch((e) => log(`mail for ${x.key}`, e));
+  // An ask refused after the move committed (S-4178) is recorded on the ITSA, so the stuck ask can be seen, not only in a log.
+  askHuman(x, actor, route).catch((e) => {
+    log(`mail for ${x.key}`, e);
+    itsa.addEvent(x.id, null, 'ask_refused', { to: x.status, error: e instanceof Error ? e.message : String(e) });
+  });
 }
 
 export interface Attention extends itsa.Itsa {
@@ -156,15 +178,27 @@ export function attention(): Attention[] {
 // participants, interrupting the owner) is posted first: if delivery fails, nothing has
 // changed and the human can retry. The status then moves only if the ITSA is still in the
 // status the action was offered for (a stale button gets 409; the comment stays, which is
-// harmless). Returns the updated ITSA and the action taken.
-export async function act(ref: string, actionId: string, text: string): Promise<{ itsa: itsa.Itsa; action: itsa.HumanAction }> {
+// harmless). Returns the updated ITSA and the action taken. Approve's text is posted after its
+// move instead, so a refused Approve leaves no comment.
+//
+// Approve carries `ifRev`, the revision of the text it showed (itsa.revOf, S-2998): text that
+// changed since, or no revision at all (a page loaded before Approve sent one), refuses it before
+// anything is posted, and the status move checks it again in the same transaction. A mail thread,
+// which doesn't show the body, names the newest mail it shows instead (`shownMail`): the revision
+// is the one recorded on the ask or re-ask at or before it (itsa.shownRev).
+export async function act(ref: string, actionId: string, text: string, ifRev?: string, shownMail?: string): Promise<{ itsa: itsa.Itsa; action: itsa.HumanAction }> {
   const x = itsa.must(ref);
   const action = itsa.actionsOf(x.status).find((a) => a.id === actionId);
   if (!action) throw new Error(`${x.key} is in ${x.status}, which has no action ${actionId}`);
+  const approve = action.id === 'approve';
+  if (approve && !ifRev && shownMail) ifRev = itsa.shownRev(x.id, shownMail);
+  if (approve && (!ifRev || ifRev !== itsa.revOf(x))) throw new Error(`${itsa.TEXT_CHANGED}: ${ifRev ? `${x.key} changed since it was shown` : `Approve didn't say which text of ${x.key} it saw; reload it`}`);
   const body = String(text ?? '').trim();
   if (action.text === 'required' && !body) throw new Error(`${action.label} needs a comment: say what you want`);
   if (action.text === 'none' && body) throw new Error(`${action.label} takes no comment`);
-  if (body) await itsa.post(x.id, { by: HUMAN, body });
-  const r = await itsa.set(x.id, { status: action.to, ifStatus: x.status, action: action.id }, HUMAN);
+  // Approve's comment goes only after its guarded move succeeds, so a refusal leaves nothing behind.
+  if (body && !approve) await itsa.post(x.id, { by: HUMAN, body });
+  const r = await itsa.set(x.id, { status: action.to, ifStatus: x.status, action: action.id, ...(approve ? { ifRev } : {}) }, HUMAN);
+  if (body && approve) await itsa.post(x.id, { by: HUMAN, body });
   return { itsa: r.itsa, action };
 }

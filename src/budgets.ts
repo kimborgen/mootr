@@ -21,7 +21,7 @@ import { peersSpent } from './peer-spend.ts';
 import { accountFor, SYSTEM_ACCOUNT } from './accounts.ts';
 import { periodStart, paidSpentIn, paidSpentAll, STALE_MS } from './readings.ts';
 import * as blockers from './blockers.ts';
-import { sendFromStam, HUMAN } from './mail.ts';
+import { sendFromSystem, HUMAN } from './mail.ts';
 import { render } from './templates.ts';
 import * as costNotices from './cost-notices.ts';
 import { pollCreditsIfAny } from './credit-poller.ts';
@@ -82,9 +82,19 @@ export function spawnHeld(account: string, now: number = Date.now()): string | n
 // Why stam's own model calls (mail gate, summaries, decisions) may not run: the system account's
 // budget is spent. Agents' `openrouter` budget never holds them. Null when it isn't (or none is set).
 export function systemHeld(now: number = Date.now()): string | null {
-  const b = budgetOf(SYSTEM_ACCOUNT);
-  const spent = b ? spentIn(SYSTEM_ACCOUNT, b, now) : null;
-  return b && spent != null && spent >= b.usd ? `the system ${what(b)} of $${b.usd} is spent` : null;
+  return accountHeld(SYSTEM_ACCOUNT, now);
+}
+
+// The same for stam's own calls through another provider: its `<provider>-system` account (S-3245).
+// OpenRouter's is the system account itself.
+export function providerHeld(provider: string, now: number = Date.now()): string | null {
+  return accountHeld(provider === 'openrouter' ? SYSTEM_ACCOUNT : `${provider}-system`, now);
+}
+
+function accountHeld(account: string, now: number): string | null {
+  const b = budgetOf(account);
+  const spent = b ? spentIn(account, b, now) : null;
+  return b && spent != null && spent >= b.usd ? `the ${account === SYSTEM_ACCOUNT ? 'system' : account} ${what(b)} of $${b.usd} is spent` : null;
 }
 
 // The OpenRouter agents' account: it shares one credit with stam's own calls (openrouter-system).
@@ -306,7 +316,7 @@ async function mailHuman(scope: string, b: CostBudget, spent: number, now: numbe
 // A mail that couldn't be sent is tried again after 1, 2, 4, 8 and 16 minutes, then left to the
 // next evaluation. A restart starts over, since daemon start evaluates every scope and the
 // unsent mail isn't recorded.
-let send: (to: string[], subject: string, body: string) => Promise<boolean> = sendFromStam;
+let send: (to: string[], subject: string, body: string) => Promise<boolean> = (to, subject, body) => sendFromSystem('budgets', to, subject, body);
 let delays = [1, 2, 4, 8, 16].map((m) => m * 60_000);
 const tries = new Map<string, number>();
 function retry(scope: string, key: string): void {

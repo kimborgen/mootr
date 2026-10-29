@@ -198,6 +198,8 @@ SEED_AGENT_TOKENS="$AGENT_TOKENS" node "$HERE/seed.mjs" "$STAM_URL" "$(cat "$STA
 node "$HERE/seed-issues.mjs" "$STAM_HOME/stam.db" >&2
 # SEED_DRILL=1: trees, a project ITSA with child ITSAs and many agents, with spend, for the Usage drill-down (seed-drill.mjs).
 [ -z "$SEED_DRILL" ] || node "$HERE/seed-drill.mjs" "$STAM_HOME/stam.db" >&2
+# SEED_PHONE_LIST=1: 26 live agents in three trees 4 to 5 deep, five stopped and forty archived, across two machines (seed-phone-list.mjs, S-3281).
+[ -z "$SEED_PHONE_LIST" ] || node "$HERE/seed-phone-list.mjs" "$STAM_HOME/stam.db" >&2
 # Wait until the seeded mails to the human have their verdicts, so the checks find the marks.
 for _i in $(seq 1 50); do
   curl -sf -H "authorization: Bearer $(cat "$STAM_HOME/token")" "$STAM_URL/api/agents/human/threads?limit=60" | grep -q '"follows":true' && break

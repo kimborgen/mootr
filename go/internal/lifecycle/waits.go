@@ -38,8 +38,11 @@ func minutesFrom(t time.Time, n float64) string {
 // Declare is a wait_for on an agent or the human (src/waits.ts declare): On is "agent" or "human".
 type Declare struct {
 	On string
-	// Target is the awaited agent, here (On "agent"); "" for the human.
+	// Target is the awaited agent (On "agent"); "" for the human.
 	Target db.Agent
+	// Remote marks a Target on another machine (src/waits.ts peerTarget): only its id and name are known, and its nudge
+	// goes to the daemon that holds it.
+	Remote bool
 	// Thread is the mail thread to wait in, "" for any.
 	Thread string
 	Note   string
@@ -153,6 +156,14 @@ func (l *Lifecycle) DeclareWait(ctx context.Context, a db.Agent, d Declare) (db.
 		}
 		if msg, err := l.render("wait-for", map[string]string{"name": a.Name, "thread": in}); err != nil {
 			slog.Error("wait_for notice", "for", targetName, "err", err)
+		} else if d.Remote {
+			// Sent on to the target's daemon after the wait is declared, as TS's tellAnywhere is not awaited.
+			id := d.Target.ID
+			l.goBG(func(ctx context.Context) {
+				if l.tellAnywhere(ctx, id, msg) == "" {
+					slog.Error("wait_for notice: couldn't tell the agent on its machine", "for", targetName)
+				}
+			})
 		} else {
 			l.QueueNotice(ctx, d.Target.ID, msg, false)
 		}
@@ -253,7 +264,7 @@ func (l *Lifecycle) requestWaitedOn(ctx context.Context, agentID, note, thread, 
 		if t, ok := ts[thread]; ok {
 			th = t
 		}
-		id, err := l.db.RequestOfThread(ctx, th)
+		id, err := l.db.RequestOfThread(ctx, th, thread)
 		if err != nil || id == "" {
 			return nil, err
 		}

@@ -15,11 +15,12 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { envVar, setEnvVar } from '../src/env.ts';
+import { defaultHome } from '../src/default-home.ts';
 
 const { values } = parseArgs({
   options: { db: { type: 'string' }, n: { type: 'string', default: '20' }, gold: { type: 'string' } },
 });
-const dbPath = values.db ?? join(envVar('HOME') ?? join(homedir(), '.local/share/stam'), 'stam.db');
+const dbPath = values.db ?? join(envVar('HOME') ?? defaultHome(), 'stam.db');
 const n = Math.max(1, Number(values.n) || 20);
 // What one call costs on average (the real measured figure, S-204: about $0.00005 per item).
 const COST_PER_ITEM = 0.00005;
@@ -28,7 +29,7 @@ console.log(`classifying ${n} items with the decision model: about $${(n * COST_
 
 // A scratch STAM_HOME: the calls' usage goes there, and the real home's key and settings are copied.
 const home = mkdtempSync(join(tmpdir(), 'stam-activity-eval-'));
-const real = envVar('HOME') ?? join(homedir(), '.local/share/stam');
+const real = envVar('HOME') ?? defaultHome();
 for (const f of ['opencode.env', 'settings.json']) if (existsSync(join(real, f))) copyFileSync(join(real, f), join(home, f));
 setEnvVar('HOME', home);
 

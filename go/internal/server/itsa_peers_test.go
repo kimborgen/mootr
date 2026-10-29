@@ -47,13 +47,13 @@ func TestItsaIncidentMarkedMatchesTS(t *testing.T) {
 }
 
 // The peer hooks are a peer's alone: anything else is refused 403 first, as src/daemon.ts does before it proxies. A peer's
-// call is checked as TS checks it, then answered 501 where it would act for a spawn on another machine.
+// call is checked as TS checks it; TestPeerHook* test what each one does.
 func TestItsaPeerHooks(t *testing.T) {
 	f := newFixture(t, nil)
 	peer := map[string]string{"X-Stam-Local": "1"}
 	paths := []struct{ method, path string }{
 		{"POST", "/api/itsas/join-parent"}, {"POST", "/api/itsas/join"}, {"POST", "/api/itsas/leave"}, {"POST", "/api/itsas/may-participate"},
-		{"POST", "/api/itsas/owner-stopped"}, {"POST", "/api/itsas/unown-agent"}, {"GET", "/api/itsas/incident-marked"},
+		{"POST", "/api/itsas/owner-stopped"}, {"POST", "/api/itsas/unown-agent"}, {"POST", "/api/itsas/switch-owner"}, {"GET", "/api/itsas/incident-marked"},
 	}
 	for _, p := range paths {
 		// Whatever the method: the check is on the path, before the route table.
@@ -78,16 +78,18 @@ func TestItsaPeerHooks(t *testing.T) {
 		{"/api/itsas/join", `{"itsa":"S-1"}`, 400, "join needs itsa and agent"},
 		{"/api/itsas/leave", `{"agent":"a"}`, 400, "leave needs itsa and agent"},
 		{"/api/itsas/may-participate", `{}`, 400, "may-participate needs itsa"},
-		{"/api/itsas/join-parent", `{"agent":"a","parent":"b"}`, 501, "not ported"},
-		{"/api/itsas/join", `{"itsa":"S-1","agent":"a"}`, 501, "not ported"},
-		{"/api/itsas/leave", `{"itsa":"S-1","agent":"a"}`, 501, "not ported"},
-		{"/api/itsas/may-participate", `{"itsa":"S-1"}`, 501, "not ported"},
+		{"/api/itsas/join-parent", `{"agent":"a","parent":"b"}`, 200, `"key":null`},
+		{"/api/itsas/join", `{"itsa":"S-1","agent":"a"}`, 404, "no ITSA S-1"},
+		{"/api/itsas/leave", `{"itsa":"S-1","agent":"a"}`, 404, "no ITSA S-1"},
+		{"/api/itsas/may-participate", `{"itsa":"S-1"}`, 404, "no ITSA S-1"},
+		{"/api/itsas/switch-owner", `{"from":"a"}`, 400, "switch-owner needs from and to"},
+		{"/api/itsas/switch-owner", `{"from":"a","to":"b"}`, 403, "only a peer holding a switched agent"},
 		// An agent of this machine is no peer's to report.
 		{"/api/itsas/owner-stopped", `{"id":"achild","name":"child","what":"archived"}`, 403, "only a peer holding that agent can report its stop"},
 		{"/api/itsas/unown-agent", `{"id":"achild","name":"child"}`, 403, "only a peer holding that archived agent can unown its ITSAs"},
-		// One this daemon does not know needs the peers to say.
-		{"/api/itsas/owner-stopped", `{"id":"nobody","name":"n","what":"archived"}`, 501, "peers"},
-		{"/api/itsas/unown-agent", `{"id":"nobody","name":"n"}`, 501, "peers"},
+		// One no peer holds (this daemon has none).
+		{"/api/itsas/owner-stopped", `{"id":"nobody","name":"n","what":"archived"}`, 403, "only a peer holding that agent can report its stop"},
+		{"/api/itsas/unown-agent", `{"id":"nobody","name":"n"}`, 403, "only a peer holding that archived agent can unown its ITSAs"},
 	} {
 		rec := f.do(call{method: "POST", path: tc.path, token: peerTok, header: peer, body: tc.body})
 		if rec.Code != tc.code || !strings.Contains(rec.Body.String(), tc.msg) {

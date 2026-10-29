@@ -20,5 +20,9 @@
   {"op": "set", "ref": "#1", "by": "aw2", "input": {"status": "needs_approval", "owner": "aboss"}},
   {"op": "thread", "ref": "#2"},
   {"op": "thread", "ref": "#1"},
-  {"op": "attention"}
+  {"op": "attention"},
+  {"op": "create", "input": {"title": "Ærlig tekst 💡", "summary": "Første linje — med €", "body": "Brødtekst med 𝄞 og æøå", "owner": "aboss"}},
+  {"op": "post", "ref": "#22", "by": "aboss", "input": {"body": "klar til gjennomsyn ✓"}},
+  {"op": "set", "ref": "#22", "by": "aboss", "input": {"status": "needs_approval"}},
+  {"op": "thread", "ref": "#22"}
 ]

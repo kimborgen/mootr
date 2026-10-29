@@ -26,32 +26,63 @@ type Usage struct {
 // RecordUsage adds u to the agent's daily row and its sample bucket and stores its baseline (src/usage.ts report and
 // recordSample), in one transaction.
 func (d *DB) RecordUsage(ctx context.Context, u Usage) error {
+	return wrap("record usage", d.Write(ctx, func(conn *sqlite.Conn) error { return recordUsage(conn, u) }))
+}
+
+// UsageChange is what a report does to an agent, decided on its row as the write reads it: the growth recorded with
+// its baseline (Record), or the baseline alone (Baseline), or nothing when both are nil.
+type UsageChange struct {
+	Record   *Usage
+	Baseline *string
+}
+
+// RecordUsageWhile reads the agent's row in a transaction and, only while ok holds for it, makes the change plan decides
+// from that row, in the same transaction: so the baseline a report grows from is the one it replaces, and no write to the
+// row lands between the check and the commit. It reports whether ok held.
+func (d *DB) RecordUsageWhile(ctx context.Context, agentID string, ok func(Agent) bool, plan func(Agent) UsageChange) (held bool, err error) {
+	err = d.Write(ctx, func(conn *sqlite.Conn) error {
+		a, err := agentOn(conn, agentID)
+		if err != nil || !ok(a) {
+			return err
+		}
+		held = true
+		c := plan(a)
+		switch {
+		case c.Record != nil:
+			return recordUsage(conn, *c.Record)
+		case c.Baseline != nil:
+			return runSQL(conn, "UPDATE agents SET usage_last = ?, updated_at = ? WHERE id = ?", *c.Baseline, now(), agentID)
+		}
+		return nil
+	})
+	return held, wrap("record usage", err)
+}
+
+// recordUsage is RecordUsage's work inside a write.
+func recordUsage(conn *sqlite.Conn, u Usage) error {
 	model := ""
 	if u.Model != nil {
 		model = *u.Model
 	}
-	err := d.Write(ctx, func(conn *sqlite.Conn) error {
-		if err := runSQL(conn, "UPDATE agents SET usage_last = ?, updated_at = ? WHERE id = ?", u.Baseline, now(), u.AgentID); err != nil {
-			return err
-		}
-		err := runSQL(conn, `INSERT INTO usage (agent_id, day, harness, model, account, cost_usd, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, paid_estimate_usd, unreconciled_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (agent_id, day, account) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd,
-				tokens_in = tokens_in + excluded.tokens_in, tokens_out = tokens_out + excluded.tokens_out,
-				tokens_cache_read = tokens_cache_read + excluded.tokens_cache_read, tokens_cache_write = tokens_cache_write + excluded.tokens_cache_write,
-				paid_estimate_usd = paid_estimate_usd + excluded.paid_estimate_usd,
-				unreconciled_usd = unreconciled_usd + excluded.unreconciled_usd, model = excluded.model`,
-			u.AgentID, u.Day, u.Harness, sqlValue(u.Model), u.Account, u.Cost, u.In, u.Out, u.CacheRead, u.CacheWrite, u.PaidEstimate, u.Unreconciled)
-		if err != nil {
-			return err
-		}
-		return runSQL(conn, `INSERT INTO usage_samples (agent_id, account, harness, model, bucket, cost_usd, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (agent_id, bucket, account, model) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd,
-				tokens_in = tokens_in + excluded.tokens_in, tokens_out = tokens_out + excluded.tokens_out,
-				tokens_cache_read = tokens_cache_read + excluded.tokens_cache_read, tokens_cache_write = tokens_cache_write + excluded.tokens_cache_write,
-				harness = excluded.harness`,
-			u.AgentID, u.Account, u.Harness, model, u.Bucket, u.Cost, u.In, u.Out, u.CacheRead, u.CacheWrite)
-	})
-	return wrap("record usage", err)
+	if err := runSQL(conn, "UPDATE agents SET usage_last = ?, updated_at = ? WHERE id = ?", u.Baseline, now(), u.AgentID); err != nil {
+		return err
+	}
+	err := runSQL(conn, `INSERT INTO usage (agent_id, day, harness, model, account, cost_usd, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, paid_estimate_usd, unreconciled_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (agent_id, day, account) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd,
+			tokens_in = tokens_in + excluded.tokens_in, tokens_out = tokens_out + excluded.tokens_out,
+			tokens_cache_read = tokens_cache_read + excluded.tokens_cache_read, tokens_cache_write = tokens_cache_write + excluded.tokens_cache_write,
+			paid_estimate_usd = paid_estimate_usd + excluded.paid_estimate_usd,
+			unreconciled_usd = unreconciled_usd + excluded.unreconciled_usd, model = excluded.model`,
+		u.AgentID, u.Day, u.Harness, sqlValue(u.Model), u.Account, u.Cost, u.In, u.Out, u.CacheRead, u.CacheWrite, u.PaidEstimate, u.Unreconciled)
+	if err != nil {
+		return err
+	}
+	return runSQL(conn, `INSERT INTO usage_samples (agent_id, account, harness, model, bucket, cost_usd, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (agent_id, bucket, account, model) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd,
+			tokens_in = tokens_in + excluded.tokens_in, tokens_out = tokens_out + excluded.tokens_out,
+			tokens_cache_read = tokens_cache_read + excluded.tokens_cache_read, tokens_cache_write = tokens_cache_write + excluded.tokens_cache_write,
+			harness = excluded.harness`,
+		u.AgentID, u.Account, u.Harness, model, u.Bucket, u.Cost, u.In, u.Out, u.CacheRead, u.CacheWrite)
 }
 
 // PruneUsage drops the samples and window readings from before since (src/usage.ts pruneSamples).

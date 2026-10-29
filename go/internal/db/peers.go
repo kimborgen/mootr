@@ -153,3 +153,44 @@ func (d *DB) ForgetPeerAgent(ctx context.Context, ref string) error {
 	})
 	return wrap("forget peer agent", err)
 }
+
+// PeerParentsOf is src/db.ts peerParentsOf: the parents a peer last listed for its agent with this id; none when it isn't
+// remembered or listed none.
+func (d *DB) PeerParentsOf(ctx context.Context, id string) ([]string, error) {
+	var raw string
+	err := d.read(ctx, "SELECT ifnull(parents, '') FROM peer_agents WHERE id = ?", func(c *cols) { raw = c.text() }, id)
+	if err != nil || raw == "" {
+		return nil, wrap("peer parents", err)
+	}
+	var out []string
+	if json.Unmarshal([]byte(raw), &out) != nil {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// PeerAgentMatch is a remembered peer agent with the lifecycle it was last seen with ("" when unknown).
+type PeerAgentMatch struct {
+	PeerAgentRef
+	Lifecycle string
+}
+
+// PeerAgentsMatching is every remembered peer agent with this id or name, on any machine, so a caller can tell one agent
+// from two that share a name.
+func (d *DB) PeerAgentsMatching(ctx context.Context, ref string) ([]PeerAgentMatch, error) {
+	var out []PeerAgentMatch
+	err := d.read(ctx, "SELECT id, name, machine, ifnull(lifecycle, '') FROM peer_agents WHERE id = ? OR name = ? ORDER BY id",
+		func(c *cols) {
+			out = append(out, PeerAgentMatch{PeerAgentRef{ID: c.text(), Name: c.text(), Machine: c.text()}, c.text()})
+		}, ref, ref)
+	return out, wrap("peer agents matching", err)
+}
+
+// FindPeerAgent is src/db.ts findPeerAgent: the remembered peer agent with this id, else this name.
+func (d *DB) FindPeerAgent(ctx context.Context, ref string) (PeerAgentRef, bool, error) {
+	var out PeerAgentRef
+	found := false
+	err := d.read(ctx, "SELECT id, name, machine FROM peer_agents WHERE id = ? OR name = ? ORDER BY id = ? DESC LIMIT 1",
+		func(c *cols) { out, found = PeerAgentRef{ID: c.text(), Name: c.text(), Machine: c.text()}, true }, ref, ref, ref)
+	return out, found, wrap("find peer agent", err)
+}

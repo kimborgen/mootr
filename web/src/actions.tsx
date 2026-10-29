@@ -6,8 +6,10 @@ import { optimistic } from './optimistic'
 import { live, plainSubject } from './format'
 import { Glyph, PlainGlyph } from './Glyph'
 import * as shell from './shell/layout'
+import { inputMain } from './image-tab'
 import { spawnMenu } from './spawn'
 import { followsSettings } from './permission-modes'
+import { BULK_CONCURRENCY, applies, mapLimit, noteFor, notesOf, queuedOf, summarize, verbOf, type BulkAct, type BulkResult } from './agents-bulk'
 import { assistant, byId, chiefAssistants, chiefsOfStaff, childrenOf, getData, hasPendingPermission, isArchivedThread, isDeferredThread, refresh, refreshSlow, setData, threadWaitsOnHuman, type Data } from './store'
 import { showMenu, toast, type MenuItem } from './ui/menu'
 import { getUi, setUi } from './ui/state'
@@ -432,15 +434,41 @@ const ACTION_PENDING: Record<string, { pending: string; settled: (a: Agent, p?: 
   'reconnect-mcp': { pending: 'reconnecting', settled: settledNow },
 }
 
+// The outcome of one agent's request, for a bulk action to count: whether it succeeded, and why it didn't.
+export interface AgentResult { ok: boolean; reason?: string; result?: string }
+
+// Sends one agent's request and records its outcome in `out`. A refused request throws on, as `optimistic` expects.
+async function attempt<T>(req: () => Promise<T>, out: AgentResult): Promise<T> {
+  try {
+    const v = await req()
+    out.ok = true
+    return v
+  } catch (e) {
+    out.reason = (e as Error).message
+    throw e
+  }
+}
+
 // 'settings' makes the agent follow Settings › Permission modes again; the others are its own pick.
+export const modeLabel = (mode: 'auto' | 'bypass' | 'default' | 'settings') => (mode === 'bypass' ? 'bypass permissions: it runs every action without asking' : mode === 'default' ? 'ask mode: the harness asks before each action' : mode === 'settings' ? 'the mode Settings give it' : 'auto mode')
+
 export async function setMode(a: Agent, mode: 'auto' | 'bypass' | 'default' | 'settings') {
-  const to = mode === 'bypass' ? 'bypass permissions: it runs every action without asking' : mode === 'default' ? 'ask mode: the harness asks before each action' : mode === 'settings' ? 'the mode Settings give it' : 'auto mode'
-  if (!confirm(`Switch ${a.name} to ${to}? It restarts after its current step.`)) return false
-  await agentChange(a, {
-    pending: 'switching mode', patch: mode === 'settings' ? { permission_source: 'settings' } : { permission_mode: mode, permission_source: 'manual' }, settled: (p) => (mode === 'settings' ? followsSettings(p ?? {}) : p?.permission_mode === mode),
-    send: () => api('POST', `/api/agents/${a.id}/permission-mode`, { mode }).then(() => refresh()), failed: "Couldn't switch the mode",
-  })
+  if (!confirm(`Switch ${a.name} to ${modeLabel(mode)}? It restarts after its current step.`)) return false
+  await changeMode(a, mode)
   return true
+}
+
+// A permission mode change without its confirm. `quiet` leaves the toast and the refresh to the caller (a bulk change).
+export async function changeMode(a: Agent, mode: 'auto' | 'bypass' | 'default' | 'settings', quiet = false): Promise<AgentResult> {
+  const out: AgentResult = { ok: false }
+  const ok = await agentChange(a, {
+    pending: 'switching mode', patch: mode === 'settings' ? { permission_source: 'settings' } : { permission_mode: mode, permission_source: 'manual' }, settled: (p) => (mode === 'settings' ? followsSettings(p ?? {}) : p?.permission_mode === mode),
+    send: async () => {
+      await attempt(() => api('POST', `/api/agents/${a.id}/permission-mode`, { mode }), out)
+      if (!quiet) refresh()
+    }, failed: quiet ? '' : "Couldn't switch the mode",
+  })
+  return { ...out, ok }
 }
 
 export async function setChildNotices(a: Agent, value: string) {
@@ -450,16 +478,79 @@ export async function setChildNotices(a: Agent, value: string) {
   })
 }
 
-export async function agentAction(a: Agent, action: string, done?: string) {
+// `quiet` leaves the toast and the refresh to the caller (a bulk action); the outcome comes back either way.
+export async function agentAction(a: Agent, action: string, done?: string, quiet = false): Promise<AgentResult> {
   const p = ACTION_PENDING[action] ?? { pending: action, settled: settledNow }
-  await agentChange(a, {
-    pending: p.pending, settled: (x) => p.settled(a, x), failed: `Couldn't ${action.replace(/-/g, ' ')}`,
+  const out: AgentResult = { ok: false }
+  const ok = await agentChange(a, {
+    pending: p.pending, settled: (x) => p.settled(a, x), failed: quiet ? '' : `Couldn't ${action.replace(/-/g, ' ')}`,
     send: async () => {
-      const r = await api<{ result?: string }>('POST', `/api/agents/${a.id}/${action}`)
+      const r = await attempt(() => api<{ result?: string }>('POST', `/api/agents/${a.id}/${action}`), out)
+      out.result = r.result
+      if (quiet) return
       toast(`${a.name}: ${r.result ?? done ?? action}`)
       refresh()
     },
   })
+  return { ...out, ok }
+}
+
+// A bulk action on the Agents page (S-3117): its per-agent request for each agent it applies to, four at a time, then one
+// toast. It takes the checked ids and reads each agent now, so an agent that is no longer eligible is skipped.
+export async function bulkAction(ids: string[], act: BulkAct): Promise<void> {
+  const list = ids.map((id) => byId(id)).filter((a): a is Agent => !!a && applies(a, act))
+  const rs = act.kind === 'archive' ? await archiveAll(list) : await mapLimit(list, BULK_CONCURRENCY, (a) => runOne(a, act))
+  refresh()
+  const r = summarize(act, rs)
+  toast(r.text, r.err)
+}
+
+// One agent's request in a bulk action. An archive of an agent that is already archived counts as done: the bulk wants it so.
+async function runOne(a: Agent, act: BulkAct): Promise<BulkResult> {
+  const verb = verbOf(a, act)
+  const o = verb ? await agentAction(a, verb, undefined, true) : await changeMode(a, (act as Extract<BulkAct, { kind: 'mode' }>).mode, true)
+  if (act.kind === 'archive' && !o.ok && o.reason?.endsWith('is already archived')) return { id: a.id, name: a.name, ok: true, result: 'done' }
+  return { id: a.id, name: a.name, ...o }
+}
+
+// The checked agents above `a`, through every parent: a parent's archive cascades to all of its children.
+function checkedAbove(a: Agent, checked: Set<string>): string[] {
+  const out: string[] = []
+  const seen = new Set([a.id])
+  const queue = [...(a.parents ?? [])]
+  while (queue.length) {
+    const id = queue.shift()!
+    if (seen.has(id)) continue
+    seen.add(id)
+    if (checked.has(id)) out.push(id)
+    queue.push(...(byId(id)?.parents ?? []))
+  }
+  return out
+}
+
+// Archives the agents. A checked child of a checked parent is not sent: its parent's archive cascades to it, so its outcome
+// is read from the agents after that archive. It is reported as archived only when it is, queued when the daemon queued it,
+// and failed with the cascade's own note otherwise. A child whose parents' requests all failed is sent on its own.
+async function archiveAll(list: Agent[]): Promise<BulkResult[]> {
+  const checked = new Set(list.map((a) => a.id))
+  const above = new Map(list.map((a) => [a.id, checkedAbove(a, checked)]))
+  const top = list.filter((a) => above.get(a.id)!.length === 0)
+  const children = list.filter((a) => above.get(a.id)!.length > 0)
+  const topRs = await mapLimit(top, BULK_CONCURRENCY, (a) => runOne(a, { kind: 'archive' }))
+  const topById = new Map(topRs.map((r) => [r.id, r]))
+  const reached = children.filter((a) => above.get(a.id)!.some((p) => topById.get(p)?.ok))
+  const alone = children.filter((a) => !reached.includes(a))
+  const now = reached.length ? new Map((await api<Agent[]>('GET', `/api/agents?${new URLSearchParams({ ids: reached.map((a) => a.id).join(',') })}`)).map((a) => [a.id, a])) : new Map<string, Agent>()
+  const reachedRs = reached.map((c): BulkResult => {
+    const parent = above.get(c.id)!.map((p) => topById.get(p)).find((r) => r?.ok)!
+    if (now.get(c.id)?.lifecycle === 'archived') return { id: c.id, name: c.name, ok: true, result: 'done' }
+    if (queuedOf(parent)) return { id: c.id, name: c.name, ok: true, result: 'waiting for its parent to finish its step' }
+    const note = noteFor(notesOf(parent.result), c.name)
+    if (note.includes('final round')) return { id: c.id, name: c.name, ok: true, result: note }
+    return { id: c.id, name: c.name, ok: false, reason: note || "its parent's archive didn't reach it" }
+  })
+  const aloneRs = await mapLimit(alone, BULK_CONCURRENCY, (a) => runOne(a, { kind: 'archive' }))
+  return [...topRs, ...reachedRs, ...aloneRs]
 }
 
 export function agentMenu(a: Agent | undefined): MenuItem[] {
@@ -591,7 +682,7 @@ export async function answerPermission(id: string, approve: boolean, note = '', 
 // --- The executive assistant ----------------------------------------------------------
 // What the human has in front of them, so the assistant knows what "this" means.
 export function viewContext() {
-  const key = shell.activeIn('main') ?? ''
+  const key = inputMain() ?? ''
   const a = byId(key.split(':')[1])
   if (key.startsWith('agent:') && a) return `${a.name} (${a.id}), an agent's terminal`
   if (key.startsWith('view:') && a) return `${a.name} (${a.id}), mootr's view of an agent's conversation`

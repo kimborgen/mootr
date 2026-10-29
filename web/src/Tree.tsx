@@ -19,6 +19,7 @@ import { permThread, useData } from './store'
 import { useLongPress } from './ui/longpress'
 import { showMenu, type MenuItem } from './ui/menu'
 import { getUi, setUi, useUi } from './ui/state'
+import { OpenAskLink, openAskRow } from './mail/OpenAskLink'
 import { agentTooltip } from './views/registry'
 import { RestBadge, WaitMark } from './waits'
 import { isClosed, openItsa, StatusGlyph, statusLabel, toneVar, waitsOnHuman } from './itsa/itsa'
@@ -55,7 +56,7 @@ export function CostCell({ id, cost, parent, max, costMode }: { id: string; cost
   </span>
 }
 
-// The columns menu of a row's Work columns, from the sidebar's header button and the Agents page's (S-1428).
+// The columns menu of a row's Work columns, from the sidebar's header button.
 function colsItems(fields: Field[], picked: string[]): MenuItem[] {
   return [{ section: 'Work columns on each row' }, ...pickable(fields).map((c) => {
     const at = picked.indexOf(c.id)
@@ -64,8 +65,7 @@ function colsItems(fields: Field[], picked: string[]): MenuItem[] {
   }), 'sep', { label: 'None: show the role', checked: picked.length === 0, action: () => setSidebarCols([]) }]
 }
 
-// The tree's two header buttons: the columns on each row, and what the marks mean. The sidebar's tree header and the
-// Agents page's header both show them.
+// The tree's two header buttons: the columns on each row, and what the marks mean. The sidebar's tree header shows them.
 export function TreeTools() {
   const extras = useWorkExtras()
   const picked = liveCols(useSidebarCols(), extras.fields)
@@ -77,7 +77,7 @@ export function TreeTools() {
   </>
 }
 
-export function Tree({ page }: { page?: boolean }) {
+export function Tree() {
   const d = useData()
   const ui = useUi()
   useShell()
@@ -124,6 +124,8 @@ export function Tree({ page }: { page?: boolean }) {
     // The ITSAs this agent owns and hasn't closed: a chip with the key (a count when several),
     // in the colour of the one that needs attention most (waiting on you first).
     const owns = d.itsas.filter((x) => x.owner === a.id && !isClosed(x))
+    // The open ask this agent waits on, while its row is open in the Needs you list (S-3982, as the agent views have).
+    const ask = openAskRow(a.open_ask, d.asks)
     const shown = owns.find(waitsOnHuman) ?? owns[0]
     // Every owned issue's status, for the row's one-off nudge when any of them changes; the nudge
     // is stronger while one of them waits on the human.
@@ -144,6 +146,7 @@ export function Tree({ page }: { page?: boolean }) {
           ? <span className="wcols" role="row">{rowValues(shown, picked, fields).map((b, i) => <ColCell key={picked[i]} b={b} label={labelOf(picked[i])} />)}</span>
           : <span className="role" data-pending={a.pending || undefined} aria-live={a.pending ? 'polite' : undefined}>{a.pending ? `${a.pending}…` : a.role}</span>}
         <span className="meta">
+          {ask ? <OpenAskLink row={ask} /> : null}
           {shown ? <Stamp value={shown.status} className={`ichip${waitsOnHuman(shown) ? ' waits' : ''}`} data-owns={a.id} style={{ '--tc': toneVar(shown.status) } as CSSProperties}
             title={owns.length === 1 ? `Owns ${shown.key} ${shown.title} · ${statusLabel(shown.status)}${waitsOnHuman(shown) ? ': waits on you' : ''}` : `Owns ${owns.length} ITSAs: ${owns.map((x) => x.key).join(', ')}${owns.some(waitsOnHuman) ? `; ${owns.filter(waitsOnHuman).length} wait on you` : ''}`}>
             <StatusGlyph status={shown.status} />{owns.length === 1 ? shown.key : owns.length}</Stamp> : null}
@@ -210,10 +213,10 @@ export function Tree({ page }: { page?: boolean }) {
     else if (cur && e.key === 'ArrowLeft' && cur.querySelector('[data-chev="1"]') && !ui.collapsed[cur.dataset.id!]) fold(cur.dataset.id!, true)
   }
   return (
-    <div className="tree" id={page ? undefined : 'tree'} data-cols={picked.length || undefined} ref={el} tabIndex={0} role="tree" onClick={click} {...lp} onKeyDown={(e) => { lp.onKeyDown(e); if (!e.defaultPrevented) key(e) }}
+    <div className="tree" id="tree" data-cols={picked.length || undefined} ref={el} tabIndex={0} role="tree" onClick={click} {...lp} onKeyDown={(e) => { lp.onKeyDown(e); if (!e.defaultPrevented) key(e) }}
       onDragStart={(e) => { const node = (e.target as Element).closest<HTMLElement>('.node[data-id]'); if (!node) return; e.dataTransfer.setData('text/stam-agent', node.dataset.id!); e.dataTransfer.effectAllowed = 'copy' }}>
       {d.error && !agents.length ? <div className="pad muted">{d.error}{location.protocol === 'https:' ? '' : <>. Open the link that <code>stam web</code> prints.</>}</div> : <>
-        {page ? null : <div className="section eyebrow" data-section="running">Agents <span className="count">{running.length}</span><TreeTools /></div>}
+        <div className="section eyebrow" data-section="running">Agents <span className="count">{running.length}</span><TreeTools /></div>
         {runningRows}
         {!running.length ? (d.loaded.agents ? <div className="pad muted">No agents running. Press <Icon name="plus" size="xs" /> to add one.</div> : <Loading />) : null}
         {rings.length ? <>

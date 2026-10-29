@@ -6,6 +6,7 @@
 // with its own tmux socket and a fake harness that records prompts; no daemon, no network,
 // no models: `node --test test/admission.test.mjs`.
 import { test, before, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -53,7 +54,7 @@ before(async () => {
   };
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 

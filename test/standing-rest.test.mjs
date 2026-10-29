@@ -5,6 +5,7 @@
 // by a wake. Runs against a throwaway STAM_HOME and tmux socket with a fake harness; no daemon,
 // no models: `node --test test/standing-rest.test.mjs`.
 import { test, before, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -40,7 +41,7 @@ before(async () => {
   };
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -345,8 +346,11 @@ test('a wake prompt whose push rejects asynchronously is not a wake: it goes bac
     const a = agent();
     await rested(a);
     tmux.newSession(a.id, a.cwd, {}, ['sleep', '600']);
-    adapters.fake.pushPrompt = async (...args) => (++calls === 1 ? Promise.reject(new Error('push boom')) : ok(...args));
+    // Only this agent's first prompt fails: a push a timer left from an earlier test (the debounce is 2 s) can
+    // reach this shared stub during the wake, and must neither take the failure nor count as the wake's prompt.
+    adapters.fake.pushPrompt = async (agent, ...rest) => (agent.id === a.id && ++calls === 1 ? Promise.reject(new Error('push boom')) : ok(agent, ...rest));
     await lifecycle.wakeResting(a.id, 'test').catch(() => {});
+    assert.equal(calls, 1, 'the wake sent its prompt once');
     assert.equal(events(a.id, 'standing:wake-error').length, 1);
     assert.equal(lifecycle.isResting(db.getAgent(a.id)), true, 'back to rest after the rejected prompt');
     assert.deepEqual(m.pending().map((t) => t.ms), [1], 'the timed retry is scheduled');

@@ -8,21 +8,22 @@ import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
-import { STAM_URL, agentDir } from './config.ts';
+import { MACHINE, STAM_URL, agentDir } from './config.ts';
 import { mintAgentToken } from './agent-token.ts';
 import * as db from './db.ts';
 import * as tree from './tree.ts';
 import * as tmux from './tmux.ts';
+import { agentExec } from './agent-exec.ts';
 import { adapters } from './adapters/index.ts';
 import { render, renderWithRetro, withRetroReminder } from './templates.ts';
 import { branchIsBase, cleanupWorkspace, workspaceUnpushedRefusal, type Workspace } from './workspace.ts';
-import { markCompacted, idleCompactIfDue } from './context.ts';
+import { markCompacted, idleCompactIfDue, overCompactionThreshold } from './context.ts';
 import { markCold } from './cache-cold.ts';
 import { typeOf } from './agent-class.ts';
 import { compactorProcesses, dirProcesses, removeAgentScratchDirs, removeClaudeScratch, removeReviewDir, removeReviewTmpDir, reviewDirForLaunch, reviewTmpForSpawn, stopAndConfirm } from './proctree.ts';
 import { isReviewerType } from './agent-types.ts';
 import { admit, heldBy, type TurnKind } from './admission.ts';
-import { schedulePush, queueNotice, tellAnywhere, wakeableNoticeCount, onRestWake, tellStopped } from './mail.ts';
+import { schedulePush, queueNotice, tellAnywhere, wakeableNoticeCount, onRestWake, tellStopped, forgetAgentNotices } from './mail.ts';
 import { failLaunch } from './test-hooks.ts';
 import { switchFailed, type SwitchUndo } from './permission-modes.ts';
 import { registry } from './registry.ts';
@@ -32,8 +33,8 @@ import { isAssistant } from './mail-visibility.ts';
 import * as itsa from './itsa.ts';
 import { restoreTranscript } from './transcript-gz.ts';
 import * as costFallback from './cost-fallback.ts';
-import { withdrawStaleRequests } from './permissions.ts';
-import { envVar } from './env.ts';
+import { withdrawPendingInputs, withdrawStaleRequests } from './permissions.ts';
+import { envVar, goBinDir, withGoBinArgv } from './env.ts';
 import { networkUp } from './network-probes.ts';
 
 type Pending =
@@ -47,8 +48,12 @@ type Pending =
   // the sweep archives regardless of the agent's turn. `tries` counts deadline retries.
   | { type: 'archive'; force?: boolean; discard?: boolean; forceUnpushed?: boolean; at?: number; tries?: number; midTurn?: boolean; waited?: boolean }
   // `permission`: a mode switch's undo, applied if the relaunch fails (S-1967).
-  | { type: 'restart'; reason: string; permission?: SwitchUndo }
-  | { type: 'compact'; instructions?: string; prompt?: string; reason: string }
+  // `handoff`: the agent was asked to compact_self first (S-2241); `at` (epoch ms) is when an idle
+  // agent restarts without it.
+  | { type: 'restart'; reason: string; permission?: SwitchUndo; handoff?: boolean; at?: number }
+  // `restart`: a restart that was pending when the agent asked for this compaction; the compaction's
+  // relaunch carries it out, else it runs after the compaction (S-2241).
+  | { type: 'compact'; instructions?: string; prompt?: string; reason: string; restart?: RestartPending }
   // Set on a shut-down agent whose terminal went down with the tmux server; see recoverLost.
   // `interrupted`: the operation id of a compaction a daemon restart cut short (S-358), not a context exit.
   // `compacted`: its compaction already ran, so only the resume is left.
@@ -56,6 +61,8 @@ type Pending =
   // Reloads its MCP servers after a deploy changed stam's tools (tool-changes.ts).
   // `tries` failed so far; the next waits until `after` (ms since the epoch).
   | { type: 'reconnect-mcp'; tries?: number; after?: number };
+
+type RestartPending = { reason: string; permission?: SwitchUndo };
 
 const isIdle = (a: db.Agent) => a.activity === 'idle' || a.activity === 'waiting' || a.activity === 'errored';
 
@@ -100,6 +107,9 @@ function launchCurrent(id: string, gen: number): boolean {
 export function invalidateLaunch(id: string): void {
   launchSeq.set(id, (launchSeq.get(id) ?? 0) + 1);
 }
+// S-3250: the agents whose launch is still in its afterLaunch in this daemon, by generation. A daemon
+// restart drops them, which is how settleStart tells a launch the restart cut off from one still running.
+const launching = new Map<string, number>();
 
 // Starts the harness in a new tmux session: a fresh launch, or a resume of the
 // agent's conversation when `resume` is set. An agent that is held (isHeld) comes back
@@ -109,10 +119,27 @@ export function invalidateLaunch(id: string): void {
 // as a notice that goes in once the blockers clear. A deferred compaction stays pending
 // across the launch and runs when the agent next goes idle. `launched` settles when the
 // adapter's afterLaunch does: the prompt delivered (or kept back by the gate), or the error.
-export async function startHarness(a: db.Agent, prompt: string | undefined, resume: boolean, kind: TurnKind = resume ? 'resume' : 'spawn'): Promise<{ launched: Promise<void>; superseded?: boolean }> {
+// `mark` goes into the launch's spawn or resume event (S-3250: the stuck-start restart marks its own).
+export async function startHarness(a: db.Agent, prompt: string | undefined, resume: boolean, kind: TurnKind = resume ? 'resume' : 'spawn', mark?: Record<string, unknown>): Promise<{ launched: Promise<void>; superseded?: boolean }> {
   assertNotTakenOver(a);
   const gen = (launchSeq.get(a.id) ?? 0) + 1;
   launchSeq.set(a.id, gen);
+  // S-3250: the launch counts as running here from its generation on, so settleStart never reads a
+  // relaunch's old pane, still 'starting', as a launch that ended; superseded, failed or landed clears it.
+  launching.set(a.id, gen);
+  const landed = () => launching.get(a.id) === gen && launching.delete(a.id);
+  try {
+    const r = await launchAt(a, gen, prompt, resume, kind, mark);
+    if (r.superseded) landed();
+    else r.launched.then(landed, landed);
+    return r;
+  } catch (e) {
+    landed();
+    throw e;
+  }
+}
+
+async function launchAt(a: db.Agent, gen: number, prompt: string | undefined, resume: boolean, kind: TurnKind, mark?: Record<string, unknown>): Promise<{ launched: Promise<void>; superseded?: boolean }> {
   await releaseTurnStop(a);
   const adapter = adapterFor(a);
   const held = isHeld(a);
@@ -120,6 +147,8 @@ export async function startHarness(a: db.Agent, prompt: string | undefined, resu
     // Records the refusal when cost blockers are among what holds it.
     admit(a, kind);
     db.addEvent(a.id, 'launch-held', { owners: pauseOwners(a), blockers: db.blockerRows(a.id).map((b) => b.kind) });
+    // S-4304: a compaction's continue prompt isn't lost to the hold; it goes in when the agent is idle again.
+    if (kind === 'compact') queueNotice(a.id, prompt, { idleOnly: true });
     prompt = undefined;
   }
   if (failLaunch.has(a.name)) throw new Error(`test: launch of ${a.name} failed`);
@@ -140,15 +169,22 @@ export async function startHarness(a: db.Agent, prompt: string | undefined, resu
   const reviewDir = a.type && isReviewerType(a.type) ? reviewDirForLaunch(a.name) : null;
   const reviewTmp = reviewDir ? reviewTmpForSpawn(a.name, spec.env) : null;
   if (reviewTmp) mkdirSync(reviewTmp, { recursive: true });
-  tmux.newSession(a.id, a.cwd, { ...spec.env, ...(reviewDir ? { STAM_REVIEW_DIR: reviewDir } : {}), ...(reviewTmp ? { STAM_TEST_TMPDIR: reviewTmp } : {}), STAM_AGENT_ID: a.id, STAM_URL, STAM_TOKEN: token }, spec.argv);
+  // The Go bin dir goes first on the shell's PATH, for spawn and resume alike (S-3666; src/env.ts withGoBinArgv).
+  const goBin = goBinDir(spec.env.HOME ?? process.env.HOME);
+  agentExec(withGoBinArgv(spec.argv, goBin), { ...spec.env, ...(reviewDir ? { STAM_REVIEW_DIR: reviewDir } : {}), ...(reviewTmp ? { STAM_TEST_TMPDIR: reviewTmp } : {}), STAM_AGENT_ID: a.id, STAM_URL, STAM_TOKEN: token }, { mode: 'session', cwd: a.cwd, session: a.id });
   if (!launchCurrent(a.id, gen)) {
     tmux.killSession(a.id);
     return { launched: Promise.resolve(), superseded: true };
   }
   // 'with prompt' keeps the agent 'starting' until its first turn begins, so it never looks idle in between.
   const pending = a.pending_action && JSON.parse(a.pending_action).type === 'compact' ? a.pending_action : null;
-  db.updateAgent(a.id, { lifecycle: held ? 'paused' : 'active', activity: 'starting', activity_detail: prompt ? 'with prompt' : resume ? 'resuming' : null, pending_action: pending });
-  db.addEvent(a.id, resume ? 'resume' : 'spawn', { argv: spec.argv, prompt: Boolean(prompt) });
+  // The harness starts here, whatever asked for it (spawn, resume, restart, wake from rest), so these are
+  // the only writes of launched_at and resumed_at (S-3372). launched_at is the first start only; every
+  // later start, fresh or resumed, sets resumed_at.
+  const started = new Date().toISOString();
+  const launch = db.getAgent(a.id)?.launched_at == null ? { launched_at: started } : { resumed_at: started };
+  db.updateAgent(a.id, { lifecycle: held ? 'paused' : 'active', activity: 'starting', activity_detail: prompt ? 'with prompt' : resume ? 'resuming' : null, pending_action: pending, ...launch });
+  db.addEvent(a.id, resume ? 'resume' : 'spawn', { argv: spec.argv, prompt: Boolean(prompt), ...mark });
   if (resume) markCold(a, 'wake');
   const text = prompt;
   const gate = () => {
@@ -205,6 +241,12 @@ function quitHarness(a: db.Agent, detail: string): void {
   db.updateAgent(a.id, { lifecycle: 'shut_down', activity: 'unknown', activity_detail: detail, pending_action: null, paused_by: withoutRest(a) });
   db.addEvent(a.id, 'shutdown', { detail });
   stopTurn(a);
+}
+
+// A real stop, not a restart: the agent's pending suggestions are withdrawn with it (S-3830). A restart keeps them.
+function stopForGood(a: db.Agent, detail: string): void {
+  quitHarness(a, detail);
+  withdrawPendingInputs(a, 'the agent was shut down');
 }
 
 // One transition at a time per agent: an archive, a cost switch (rollback included) or a resume
@@ -272,24 +314,60 @@ export async function releaseTurnStop(a: db.Agent): Promise<void> {
   await entry.p.catch(() => {});
 }
 
+// S-4304: the reasons of a compaction that interrupts an agent's work (compact_self, the enforcement threshold).
+const INTERRUPTING_REASONS = new Set(['requested by the agent', 'enforcement threshold']);
+export const COMPACT_CONTINUE_PROMPT = '[stam] Your context was compacted. Continue your task from your compaction notes.';
+
 // A blocked agent isn't compacted: the compaction is a model turn. It stays pending and
 // runs at the end of the agent's first turn after its blockers clear.
-async function compactNow(a: db.Agent, p: { instructions?: string; prompt?: string; reason: string }): Promise<string | void> {
+async function compactNow(a: db.Agent, p: { instructions?: string; prompt?: string; reason: string; restart?: RestartPending }): Promise<string | void> {
   const adapter = adapterFor(a);
-  if (!adapter.compact) throw new Error(`${a.harness} agents can't be compacted by stam`);
+  if (!adapter.compact) {
+    // A restart that waited for this compaction still runs.
+    if (p.restart) await restartNow(a, p.restart);
+    throw new Error(`${a.harness} agents can't be compacted by stam`);
+  }
   const ok = admit(a, 'compact');
   if (!ok.ok) {
+    const { restart, ...compact } = p;
+    // S-2241: a restart that waited for this compaction runs now, as it would have without it (a held
+    // agent comes back paused); the compaction stays pending for after the blockers clear.
+    if (restart) {
+      await restartNow(a, restart);
+      db.updateAgent(a.id, { pending_action: JSON.stringify({ type: 'compact', ...compact }) });
+      db.addEvent(a.id, 'restart:compaction-held', { reason: restart.reason, blocked: ok.reason });
+      return `${a.name} is blocked (${ok.reason}); it restarted and compacts after it runs again`;
+    }
     db.updateAgent(a.id, { pending_action: JSON.stringify({ type: 'compact', ...p }) });
     return `${a.name} is blocked (${ok.reason}); it compacts after it runs again`;
   }
   db.updateAgent(a.id, { activity: 'working', activity_detail: `compacting: ${p.reason}` });
-  // The relaunch is inside the tracked run, so the agent counts as compacting until it is back.
-  await trackCompaction(a.id, p, async (op) => {
-    const { relaunch } = await adapter.compact!(a, p.instructions, { op });
-    markCompacted(a.id);
-    if (relaunch) await startHarness(db.getAgent(a.id)!, p.prompt, true, 'compact');
-    else if (p.prompt) await prompt(a, p.prompt, 'compact');
-  });
+  const { restart, ...data } = p;
+  // S-4304: a compaction that cut into work ends with a prompt, else the resumed agent sits idle and
+  // rests. An idle compaction (cache lifetime, before a long rest) has no work to continue.
+  if (!p.prompt && !restart && INTERRUPTING_REASONS.has(p.reason)) p = { ...p, prompt: COMPACT_CONTINUE_PROMPT };
+  // S-2241: a harness the compaction quit is launched afresh (its settings, MCP servers, permission
+  // mode and binary read again), so that launch is the restart; one still running restarts after.
+  let relaunched = false;
+  try {
+    // The relaunch is inside the tracked run, so the agent counts as compacting until it is back.
+    await trackCompaction(a.id, data, async (op) => {
+      const { relaunch } = await adapter.compact!(a, p.instructions, { op });
+      markCompacted(a.id);
+      if (relaunch) {
+        const text = restart ? [render('restarted', { reason: restart.reason }), p.prompt].filter(Boolean).join('\n\n') : p.prompt;
+        await startHarness(db.getAgent(a.id)!, text, true, 'compact');
+        relaunched = true;
+        if (restart) db.addEvent(a.id, 'restart:by-compaction', { reason: restart.reason });
+      } else if (p.prompt && !restart) await prompt(a, p.prompt, 'compact');
+    });
+  } catch (e) {
+    // A failed compaction never holds the restart back.
+    if (restart && !relaunched) await restartNow(db.getAgent(a.id)!, restart);
+    throw e;
+  }
+  // The compaction's prompt goes with the restart, so no turn it starts is cut off.
+  if (restart && !relaunched) await restartNow(db.getAgent(a.id)!, restart, p.prompt);
 }
 
 // Compacts when the agent's turn ends; without a wrap-up prompt, since the agent
@@ -301,7 +379,16 @@ export async function requestCompaction(a: db.Agent, p: { instructions?: string;
   }
   // S-257: a shut-down agent has no turn to wait for; it is compacted headless and resumed now.
   if (a.lifecycle === 'shut_down') return compactAndResume(a, p.instructions);
-  return whenIdle(a, { type: 'compact', ...p }, '');
+  // S-2241: a restart waiting for this turn's end goes with the compaction, not lost under it.
+  const restart = pendingRestart(db.getAgent(a.id) ?? a);
+  return whenIdle(a, { type: 'compact', ...p, ...(restart ? { restart } : {}) }, '');
+}
+
+// The restart pending for an agent, alone or carried by a pending compaction.
+function pendingRestart(a: db.Agent): RestartPending | null {
+  const p: Pending | null = a.pending_action ? JSON.parse(a.pending_action) : null;
+  if (p?.type === 'restart') return { reason: p.reason, ...(p.permission ? { permission: p.permission } : {}) };
+  return p?.type === 'compact' && p.restart ? p.restart : null;
 }
 
 // S-273: a compaction that is running, or just finished, isn't repeated. A request that arrives
@@ -434,7 +521,7 @@ async function runPending(a: db.Agent, p: Pending): Promise<string | void> {
     // S-1618: the turn ended without `retro_final` after the round was asked for (askShutdownRound
     // sets `at` or `midTurn`); a shutdown that didn't ask, such as a paused agent's, records nothing.
     if (p.midTurn || p.at !== undefined) noteRoundSkipped(a, 'turn_ended_no_round');
-    return quitHarness(a, 'shut down');
+    return stopForGood(a, 'shut down');
   }
   if (p.type === 'archive') {
     // The turn ended: the round was asked for in it; no `retro_final` means it wasn't filed.
@@ -443,14 +530,16 @@ async function runPending(a: db.Agent, p: Pending): Promise<string | void> {
   }
   if (p.type === 'compact') return compactNow(a, p);
   if (p.type === 'recover') return;
-  if (p.type === 'restart') {
-    quitHarness(a, `restarting: ${p.reason}`);
-    try {
-      await startHarness(db.getAgent(a.id)!, render('restarted', { reason: p.reason }), true, 'restart');
-    } catch (e) {
-      if (p.permission) switchFailed(a.id, p.permission, e);
-      throw e;
-    }
+  if (p.type === 'restart') await restartNow(a, p);
+}
+
+async function restartNow(a: db.Agent, p: RestartPending, then?: string): Promise<void> {
+  quitHarness(a, `restarting: ${p.reason}`);
+  try {
+    await startHarness(db.getAgent(a.id)!, [render('restarted', { reason: p.reason }), then].filter(Boolean).join('\n\n'), true, 'restart');
+  } catch (e) {
+    if (p.permission) switchFailed(a.id, p.permission, e);
+    throw e;
   }
 }
 
@@ -553,10 +642,47 @@ export function pause(a: db.Agent, owner: string): Promise<string> {
   return serial(a.id, () => pauseNow(a.id, owner));
 }
 
+// Asks the harness to stop its running turn (Claude Code Esc, OpenCode and Codex interrupt
+// calls). True when it confirmed; false when the adapter can't, or failed (recorded).
+async function interruptTurn(a: db.Agent): Promise<boolean> {
+  const adapter = adapters[a.harness];
+  if (!adapter?.interrupt) return false;
+  const ok = await adapter.interrupt(db.getAgent(a.id) ?? a).catch((e) => (db.addEvent(a.id, 'pause:interrupt-error', String(e)), false));
+  db.addEvent(a.id, 'pause:interrupt', { confirmed: ok });
+  return ok;
+}
+
+// Stops the running turn of an agent that is already paused, when a provider-down blocker
+// arrives. Within serial(). True when a turn was stopped.
+export async function stopRunningTurn(id: string): Promise<boolean> {
+  const a = db.getAgent(id);
+  if (!a || a.lifecycle !== 'paused' || !db.isBusy(a)) return false;
+  const ok = await interruptTurn(a);
+  if (ok) db.addEvent(id, 'pause:notice-skipped');
+  return ok;
+}
+
+// The resume text's catch-up for an agent whose turn was cut off by a pause before it got the
+// pause notice (templates/pause-missed.md); '' otherwise. Reads the newest pause events by type,
+// however many other events came since. The caller records it with markMissedGiven once the
+// resume succeeded, so a failed resume keeps it for the next attempt.
+export function missedPause(id: string): string {
+  for (const e of db.listEvents(id, 50, 'pause*').reverse()) {
+    if (e.type === 'pause:notice-given') return '';
+    if (e.type === 'pause' && !(e.data ?? '').includes('"already"')) return '';
+    if (e.type === 'pause:notice-skipped') return render('pause-missed', {});
+  }
+  return '';
+}
+
+export function markMissedGiven(id: string, missed: string): void {
+  if (missed) db.addEvent(id, 'pause:notice-given');
+}
+
 // Pauses within serial(). A null owner is stam pausing for cost blockers (blockers.ts). The
 // state is written before the agent is told, so a transition queued behind this one
 // sees it.
-export async function pauseNow(id: string, owner: string | null): Promise<string> {
+export async function pauseNow(id: string, owner: string | null, stopTurn = false): Promise<string> {
   const a = db.getAgent(id)!;
   const owners = pauseOwners(a);
   const next = owner && !owners.includes(owner) ? [...owners, owner] : owners;
@@ -568,6 +694,15 @@ export async function pauseNow(id: string, owner: string | null): Promise<string
   if (a.lifecycle !== 'active') throw new Error(`${a.name} is ${a.lifecycle}`);
   db.updateAgent(id, { lifecycle: 'paused', paused_by: next.length ? JSON.stringify(next) : null });
   db.addEvent(id, 'pause', { owner: owner ?? 'stam' });
+  // S-3631: `stopTurn` (a cost blocker whose provider is unusable, blockers.ts) stops a turn in
+  // flight, so the harness makes no more provider calls (a paused agent otherwise kept retrying an
+  // exhausted provider). Any other pause keeps today's behaviour: the turn finishes, since cutting
+  // it off mid-edit may leave work half done. The pause notice is skipped after a stopped turn,
+  // since it would start a turn of its own; the resume text carries it instead (missedPause).
+  if (stopTurn && db.isBusy(a) && (await interruptTurn(a))) {
+    db.addEvent(id, 'pause:notice-skipped');
+    return 'paused';
+  }
   await prompt(a, render('pause', {}), null);
   return 'paused';
 }
@@ -601,7 +736,10 @@ export function unpause(a: db.Agent, opts: { by: string; force?: boolean } = { b
       if (human) throw new Error(`${msg}. Unpause with force to override its cost blockers.`);
       return msg;
     }
-    return resumeNow(a.id, render('unpause', {}));
+    const missed = missedPause(a.id);
+    const r = await resumeNow(a.id, render('unpause', { missed }));
+    markMissedGiven(a.id, missed);
+    return r;
   });
 }
 
@@ -1059,7 +1197,7 @@ export function explicitShutdown(a: db.Agent, now = false): Promise<string> {
 
 export function shutdown(a: db.Agent, now = false): Promise<string> {
   if (now) {
-    quitHarness(a, 'shut down');
+    stopForGood(a, 'shut down');
     return Promise.resolve('done');
   }
   // S-1402: an active agent that hasn't filed its final round is asked for it, idle or not: the
@@ -1140,7 +1278,7 @@ export async function runPendingOnDead(a: db.Agent): Promise<void> {
   db.updateAgent(a.id, { pending_action: null });
   if (p.type === 'archive') noteRoundSkipped(a, 'harness_gone');
   if (p.type === 'archive') return archiveNowPending(db.getAgent(a.id)!, p, 'because its harness is gone');
-  quitHarness(db.getAgent(a.id)!, 'shut down');
+  stopForGood(db.getAgent(a.id)!, 'shut down');
 }
 
 // S-578: whether an agent has sat in 'starting' past settings.startingTimeoutMinutes with no
@@ -1150,6 +1288,10 @@ export function startingStuck(a: db.Agent, paneAlive: boolean, now = Date.now())
   const since = Date.parse(a.created_at);
   return Number.isFinite(since) && now - since >= settings().startingTimeoutMinutes * 60_000;
 }
+
+// Called with an agent markStartingDead has just marked never started (S-3070): the daemon registers
+// the ring's reaction, which lifecycle can't import (a ring may fall back to spawning a reviewer).
+export const startingDeadListeners: ((a: db.Agent) => void)[] = [];
 
 // Marks such an agent stopped, tells its parent, and runs a pending archive at once. A harness
 // still running a turn with no pane, or one that can't be asked, is left alone.
@@ -1173,7 +1315,81 @@ export async function markStartingDead(a: db.Agent): Promise<void> {
   db.addEvent(now.id, 'starting:dead', { after_ms: Number.isFinite(since) ? Date.now() - since : null });
   const parent = db.parentsOf(now)[0] ?? chiefOfStaff()?.id;
   if (parent) queueNotice(parent, `${now.name} never started: no harness process after ${Math.round(settings().startingTimeoutMinutes)} minutes; stam marked it stopped.`);
+  for (const f of startingDeadListeners) {
+    try {
+      f(db.getAgent(now.id)!);
+    } catch (e) {
+      db.addEvent(now.id, 'pending-error', String(e));
+    }
+  }
   await runPendingOnDead(db.getAgent(now.id)!);
+}
+
+// S-3250: a launch with no prompt (a resume, or a spawn without one) leaves 'starting' on the harness's
+// SessionStart hook. A daemon restart seconds after the launch lost that hook (it retries only a refused
+// connection): the launch's afterLaunch died with the old daemon, and the agent sat 'starting / resuming'
+// for hours, its mail unread. Once no launch of it runs in this daemon and the harness sits at an empty
+// prompt (adapter.atPrompt), it is ready: it goes idle as SessionStart would, and its mail goes in.
+// It does only what SessionStart does (no onIdle: no pending action runs, the rest clock stays), and
+// only for an agent the watchdog would also act on: active, not held, taken over, stopping or compacting.
+export async function settleStart(a: db.Agent, paneAlive: boolean): Promise<boolean> {
+  if (a.activity !== 'starting' || a.activity_detail === 'with prompt' || !paneAlive || launching.has(a.id)) return false;
+  if (!restartable(a)) return false;
+  // A relaunch during the probe starts another harness: the screen read belongs to the one before it.
+  const gen = launchSeq.get(a.id) ?? 0;
+  if (!(await adapters[a.harness]?.atPrompt?.(a))) return false;
+  // The screen was read while the loop ran on: settle only an agent still as it was.
+  const cur = db.getAgent(a.id);
+  if (!cur || (launchSeq.get(a.id) ?? 0) !== gen || cur.activity !== 'starting' || cur.activity_detail === 'with prompt' || launching.has(a.id) || !restartable(cur)) return false;
+  a = cur;
+  db.addEvent(a.id, 'starting:settled', { detail: a.activity_detail });
+  db.updateAgent(a.id, { activity: 'idle', activity_detail: 'ready' });
+  schedulePush(a.id);
+  return true;
+}
+
+function restartable(a: db.Agent): boolean {
+  return a.lifecycle === 'active' && !isHeld(a) && !takenOverBy(a) && !pendingStop(a) && !compactionRunning(a.id);
+}
+
+// S-3250: the safety net for any other start that never reaches a turn. Past settings.stuckStartMinutes
+// since its last launch (or a restart of it), still 'starting' with a live pane, the agent is restarted
+// once; a start that the restart made and that gets stuck too leaves it errored, which tells its parents.
+// The count lives in events, so it survives a daemon restart and resets with each launch it didn't make.
+// A paused, held (a pause owner or a cost blocker), taken-over or compacting agent, one with a pending
+// stop, or one on another machine is left alone. S-3250: a launch still in its afterLaunch here is left
+// alone until twice the bound, so a slow but live start is not restarted under itself; a hung one is not.
+const START_MARKS = ['spawn', 'resume', 'starting:restart'];
+export function startStalled(a: db.Agent, paneAlive: boolean, now = Date.now()): boolean {
+  const minutes = settings().stuckStartMinutes;
+  if (!minutes || a.activity !== 'starting' || !paneAlive || a.machine !== MACHINE || !restartable(a)) return false;
+  const since = Date.parse(db.lastEventAt(a.id, START_MARKS) ?? a.updated_at);
+  if (!Number.isFinite(since)) return false;
+  const bound = minutes * 60_000;
+  if (launching.has(a.id) && now - since < 2 * bound) return false;
+  return now - since >= bound;
+}
+
+// In the agent's serial queue, rechecked there: of two calls (reconcile ticks every 5 s), the second sees the first's launch.
+export function restartStalledStart(a: db.Agent, now = Date.now()): Promise<void> {
+  return serial(a.id, async () => {
+    const cur = db.getAgent(a.id);
+    if (!cur || !startStalled(cur, harnessRunning(cur), now)) return;
+    const minutes = settings().stuckStartMinutes;
+    const last = db.lastEvent(cur.id, START_MARKS);
+    const data = last?.data ? JSON.parse(last.data) : null;
+    // This start is the restart's own, or one a daemon restart cut off before it launched.
+    if (last?.type === 'starting:restart' || data?.stuck) {
+      db.addEvent(cur.id, 'starting:stuck', { restarted: true, minutes });
+      db.updateAgent(cur.id, { activity: 'errored', activity_detail: `never reached a turn, even after a restart (${minutes} min each)` });
+      return;
+    }
+    db.addEvent(cur.id, 'starting:restart', { minutes, detail: cur.activity_detail });
+    // A spawn whose first prompt never went in has no conversation to resume: it starts afresh with it.
+    const fresh = last?.type === 'spawn' && !db.hasEvent(cur.id, 'first-prompt:delivered');
+    const text = fresh ? (cur.first_prompt ?? undefined) : render('restarted', { reason: `it never reached a turn in ${minutes} minutes of starting` });
+    await startHarness(cur, text, !fresh, fresh ? 'spawn' : 'restart', { stuck: true });
+  });
 }
 
 // S-759: whether a spawn's first prompt was never delivered. A daemon restart during the spawn
@@ -1454,7 +1670,7 @@ export async function runDueArchives(now = Date.now(), agents: db.Agent[] = db.l
         db.updateAgent(a.id, { pending_action: null });
         db.addEvent(a.id, 'shutdown:final-round-timeout', { at: p.at });
         noteRoundSkipped(fresh, 'deadline_no_round');
-        quitHarness(fresh, 'shut down');
+        stopForGood(fresh, 'shut down');
       }
       continue;
     }
@@ -1721,6 +1937,7 @@ async function archiveLocked(a: db.Agent, opts: { force?: boolean; discard?: boo
   d.exec('BEGIN');
   try {
     db.updateAgent(a.id, { lifecycle: 'archived', activity: 'unknown', activity_detail: result, pending_action: null, paused_by: withoutRest(a) });
+    forgetAgentNotices(a.id);
     forgetLessons(a.id);
     restForget(a.id);
     // An archived grantee loses the workspaces shared with it; an archived owner's grants stay (S-896).
@@ -1741,6 +1958,7 @@ async function archiveLocked(a: db.Agent, opts: { force?: boolean; discard?: boo
     d.exec('ROLLBACK');
     throw e;
   }
+  withdrawPendingInputs(a, 'the agent was archived');
   // The agent's Claude Code scratch dir under /tmp/claude-<uid>, once the archive has gone through (S-604).
   if (a.harness === 'claude') {
     const msg = removeClaudeScratch(a.cwd, db.listAgents().filter((b) => b.id !== a.id && b.lifecycle !== 'archived').map((b) => b.cwd));
@@ -1849,8 +2067,65 @@ export async function upgradeHarness(name: string, command?: string): Promise<{ 
   return { from, to, output, agents };
 }
 
-export function restart(a: db.Agent, reason: string, permission?: SwitchUndo): Promise<string> {
-  return whenIdle(a, { type: 'restart', reason, ...(permission ? { permission } : {}) }, render('restart-prepare', { reason }));
+export async function restart(a: db.Agent, reason: string, permission?: SwitchUndo): Promise<string> {
+  const pending: Pending = { type: 'restart', reason, ...(permission ? { permission } : {}) };
+  const cur = db.getAgent(a.id) ?? a;
+  const p: Pending | null = cur.pending_action ? JSON.parse(cur.pending_action) : null;
+  // A restart asked for while a handoff restart waits joins it: no second ask, the same deadline.
+  if ((p?.type === 'restart' && p.handoff) || (p?.type === 'compact' && p.restart)) {
+    const was = p.type === 'restart' ? p : p.restart!;
+    const merged: RestartPending = { reason: was.reason.split('; ').includes(reason) ? was.reason : `${was.reason}; ${reason}`, ...(permission ?? was.permission ? { permission: permission ?? was.permission } : {}) };
+    const next: Pending = p.type === 'restart' ? { ...p, ...merged } : { ...p, restart: merged };
+    db.updateAgent(a.id, { pending_action: JSON.stringify(next) });
+    db.addEvent(a.id, 'restart:merged', { reason });
+    return `waiting for ${a.name} to finish its step`;
+  }
+  if (handoffWanted(cur)) return askHandoff(cur, { ...pending, handoff: true });
+  return whenIdle(a, pending, render('restart-prepare', { reason }));
+}
+
+// S-2241: a restart throws the prompt cache away, and the agent re-reads its whole context
+// uncached. A harness whose compaction relaunches it (Claude Code), running, not compacting,
+// with its context over the compaction threshold, is first asked to hand off with compact_self
+// while the cache is warm. Only restart() asks: never the idle or rest sweeps.
+function handoffWanted(a: db.Agent): boolean {
+  if (a.lifecycle !== 'active' && a.lifecycle !== 'paused') return false;
+  if (!adapters[a.harness]?.compactQuits || db.restOwned(a) || compactionBusy(a.id)) return false;
+  return overCompactionThreshold(a);
+}
+
+// The handoff window: as long as a cost switch gives an agent to wrap up.
+function handoffMs(): number {
+  return Math.max(0, settings().cost.softStopMinutes ?? 10) * 60_000;
+}
+
+// Asks for the handoff, idle or working, and stores the restart with its deadline. Fails open: an
+// ask that can't be sent to an idle agent restarts it now, and runDueRestarts restarts an agent
+// still idle at the deadline.
+async function askHandoff(a: db.Agent, pending: Pending & { type: 'restart' }): Promise<string> {
+  const minutes = handoffMs() / 60_000;
+  const p: Pending = { ...pending, at: Date.now() + handoffMs() };
+  db.updateAgent(a.id, { pending_action: JSON.stringify(p) });
+  const text = `${render('restart-prepare', { reason: pending.reason })}\n\n${render('restart-handoff', { tokens: `${Math.round((a.context_tokens ?? 0) / 1000)}k`, minutes })}`;
+  const sent = await prompt(a, text).catch(() => false);
+  db.addEvent(a.id, 'restart:handoff', { reason: pending.reason, tokens: a.context_tokens, at: p.at, sent });
+  const now = db.getAgent(a.id);
+  if (!sent && now && isIdle(now) && now.pending_action === JSON.stringify(p)) return (await runPending(now, p)) || 'done';
+  return `waiting for ${a.name} to hand off and finish its step`;
+}
+
+// Handoff restarts past their deadline whose agent is idle: the ask got no turn. A working agent
+// restarts when its turn ends, as any restart does. Called each reconcile tick.
+export async function runDueRestarts(now = Date.now(), agents: db.Agent[] = db.listPendingAgents()): Promise<void> {
+  for (const a of agents) {
+    const p: Pending | null = a.pending_action ? JSON.parse(a.pending_action) : null;
+    if (p?.type !== 'restart' || !p.handoff || typeof p.at !== 'number' || p.at > now) continue;
+    // Re-read: the pending may have run or been replaced since the list was read.
+    const fresh = db.getAgent(a.id);
+    if (!fresh || fresh.pending_action !== a.pending_action || !isIdle(fresh)) continue;
+    db.addEvent(a.id, 'restart:handoff-timeout', { at: p.at });
+    await runPending(fresh, p).catch((e) => db.addEvent(a.id, 'restart-error', String(e)));
+  }
 }
 
 // --- Coming back after the tmux server went down (a reboot, or the server crashing) ---

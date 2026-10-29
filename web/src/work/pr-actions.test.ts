@@ -12,9 +12,9 @@ describe('the cell menu entries for a PR', () => {
       { label: 'Open on GitHub', hint: 'PR #14', url: 'https://github.com/example/repo/pull/14' },
     ])
   })
-  it('names each PR of a row, and skips issues and unserved repos', () => {
+  it('names each PR of a row, and skips issues; an unserved repo offers GitHub only', () => {
     const e = prEntries([gh(1, 'https://github.com/example/repo/pull/1'), gh(2, 'https://github.com/example/repo/issues/2'), gh(3, 'https://github.com/o/r/pull/3'), gh(4, 'https://github.com/example/repo/pull/4')], repos)
-    expect(e.map((x) => `${x.label} ${x.hint}`)).toEqual(['View diff PR #1', 'Open on GitHub PR #1', 'View diff PR #4', 'Open on GitHub PR #4'])
+    expect(e.map((x) => `${x.label} ${x.hint}`)).toEqual(['View diff PR #1', 'Open on GitHub PR #1', 'Open on GitHub PR #3', 'View diff PR #4', 'Open on GitHub PR #4'])
   })
-  it('offers nothing before the repos are known', () => expect(prEntries([gh(1, 'https://github.com/example/repo/pull/1')], [])).toEqual([]))
+  it('before the repos are known it still offers the GitHub page', () => expect(prEntries([gh(1, 'https://github.com/example/repo/pull/1')], []).map((x) => x.label)).toEqual(['Open on GitHub']))
 })

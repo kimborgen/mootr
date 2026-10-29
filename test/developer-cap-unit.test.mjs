@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const { incidentRefusal, homeSaysMarked, chainMarked, mayMarkIncident, demoteRevoked, developerCapRefusal, developerHolders, reserveSlot, releaseSlot, enqueueWaiter, grantSlots, queuedWaiters, queuePlace, dropWaiter, restoreQueue, saveQueueFile, loadQueueFile, hostHasRoom, roomRefusal, hostReadingFrom, cancelState, mayCancelWaiter, findDuplicate, spawnerKey, IDLE_HOLD_MS, SLOT_MIN_FREE_BYTES } = await import('../src/developer-cap.ts');
+const { incidentRefusal, homeSaysMarked, chainMarked, mayMarkIncident, demoteRevoked, developerCapRefusal, developerHolders, holderInfo, holdersText, reserveSlot, releaseSlot, enqueueWaiter, grantSlots, queuedWaiters, queuePlace, dropWaiter, restoreQueue, saveQueueFile, loadQueueFile, hostHasRoom, roomRefusal, hostReadingFrom, cancelState, mayCancelWaiter, findDuplicate, spawnerKey, IDLE_HOLD_MS, SLOT_MIN_FREE_BYTES } = await import('../src/developer-cap.ts');
 
 // Host readings for grantSlots (S-2120): a quiet machine, and one over the load limit, one short of memory.
 const room = { load1: 1, freeBytes: 8 * 1024 ** 3 };
@@ -98,6 +98,38 @@ test('an untyped worktree spawn is capped and counted; an untyped plain director
   assert.deepEqual(developerHolders([untyped, { ...untyped, name: 'p', workspace: JSON.stringify({}) }], types, 'm1'), ['u']);
   assert.match(developerCapRefusal([untyped], types, undefined, true, 1, 'm1'), /1 of 1/);
   assert.equal(developerCapRefusal([untyped], types, undefined, false, 1, 'm1'), null);
+});
+
+// S-3106: a queued reply shows each holder's age and activity; a missing or unparsable created_at lists without an age.
+test('holderInfo gives each holder its age and activity, and the text shows them', () => {
+  const now = Date.parse('2026-10-22T12:00:00Z');
+  const ago = (ms) => new Date(now - ms).toISOString();
+  const agents = [
+    { ...dev('card-editor-dev'), created_at: ago(2 * 3600_000 + 10 * 60_000), activity: 'working', activity_detail: null },
+    { ...dev('incident-prio-dev'), created_at: ago(25 * 60_000), activity: 'idle', activity_detail: 'ready', idle_since: ago(1000) },
+    { ...dev('long-detail-dev'), created_at: 'not a date', activity: 'working', activity_detail: 'reading a very long file path' },
+    { ...dev('no-date-dev'), created_at: null, activity: 'working' },
+  ];
+  const info = holderInfo(agents, types, 'm1', now);
+  assert.deepEqual(info, [
+    { name: 'card-editor-dev', age_ms: 2 * 3600_000 + 10 * 60_000, activity: 'working' },
+    { name: 'incident-prio-dev', age_ms: 25 * 60_000, activity: 'idle ready' },
+    { name: 'long-detail-dev', age_ms: null, activity: 'working' },
+    { name: 'no-date-dev', age_ms: null, activity: 'working' },
+  ]);
+  assert.deepEqual(info.map((h) => h.name), developerHolders(agents, types, 'm1', now));
+  assert.equal(holdersText(info.map((h) => h.name), info), 'card-editor-dev (2h10m, working), incident-prio-dev (25m, idle ready), long-detail-dev (working), no-date-dev (working)');
+});
+
+test('a spawn in flight shows as starting, and a reply from an older peer keeps the names', () => {
+  reserveSlot('c');
+  const info = holderInfo([dev('a')], types, 'm1');
+  assert.deepEqual(info.at(-1), { name: 'c', age_ms: null, activity: 'starting' });
+  assert.equal(holdersText(info.map((h) => h.name), info), 'a, c (starting)');
+  releaseSlot('c');
+  assert.equal(holdersText(['a', 'b'], undefined), 'a, b');
+  assert.equal(holdersText(['a'], [{ name: 'a', age_ms: 40_000, activity: null }]), 'a (40s)');
+  assert.equal(holdersText(['a'], [{ name: 'a', age_ms: null, activity: null }]), 'a');
 });
 
 // The slot queue (S-2053).

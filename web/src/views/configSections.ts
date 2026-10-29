@@ -12,7 +12,7 @@ export const SECTIONS = [
   { key: 'tiny', label: 'Tiny models', icon: 'cpu' },
   { key: 'providers', label: 'Model providers', icon: 'network' },
   { key: 'requirements', label: 'Requirements', icon: 'scale' },
-  { key: 'workcols', label: 'Work columns', icon: 'columns-2' },
+  { key: 'workcols', label: 'Fields and cards', icon: 'columns-2' },
   { key: 'mail', label: 'Mail to you', icon: 'mail' },
   { key: 'activity', label: 'Activity', icon: 'gauge' },
   { key: 'notifications', label: 'Notifications', icon: 'bell' },

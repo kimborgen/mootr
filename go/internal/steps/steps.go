@@ -15,7 +15,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
-	"math/big"
 	"regexp"
 	"strings"
 	"sync"
@@ -647,22 +646,8 @@ func (s *Store) CheckTool(ctx context.Context, agentID, tool string, args jsfmt.
 // ToFixed2 is p.toFixed(2) for a probability.
 func ToFixed2(p float64) string { return ToFixed(p, 2) }
 
-// ToFixed is p.toFixed(digits) for a non-negative number below 1e21: the exact decimal expansion of the double, rounded half
-// up (strconv rounds an exact tie to even, JavaScript up).
-func ToFixed(p float64, digits int) string {
-	text := new(big.Float).SetFloat64(p).Text('f', 120)
-	whole, frac, _ := strings.Cut(text, ".")
-	frac = (frac + strings.Repeat("0", digits+1))[:max(len(frac), digits+1)]
-	n, _ := new(big.Int).SetString(whole+frac[:digits], 10)
-	if frac[digits] >= '5' {
-		n.Add(n, big.NewInt(1))
-	}
-	d := n.String()
-	for len(d) < digits+1 {
-		d = "0" + d
-	}
-	return d[:len(d)-digits] + "." + d[len(d)-digits:]
-}
+// ToFixed is p.toFixed(digits) (jsjson.ToFixed).
+func ToFixed(p float64, digits int) string { return jsjson.ToFixed(p, digits) }
 
 // --- The tool-call history ---
 

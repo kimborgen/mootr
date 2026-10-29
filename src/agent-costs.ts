@@ -32,7 +32,7 @@ export function resetAgentCostsMemo(): void {
 }
 
 // Every agent's raw own and tree spend per account.
-export function agentRaw(agents: db.Agent[], now: number = Date.now()): Map<string, AgentRaw> {
+export function agentRaw(agents: Pick<db.Agent, 'id' | 'parent_id'>[], now: number = Date.now()): Map<string, AgentRaw> {
   const key = JSON.stringify(settings().cost.accounts ?? {});
   // The agents and their parent links, so a reparent, adopt or forget shows at once.
   const edges = tree.edges(agents);
@@ -70,6 +70,14 @@ export function agentRaw(agents: db.Agent[], now: number = Date.now()): Map<stri
   for (const id of ids) out.set(id, { own: own.get(id)!, tree: sums.get(id)! });
   memo = { at: now, key, graph, raw: out };
   return out;
+}
+
+// The listed rows and every agent's raw spend from one synchronous read, so an agent created while the caller awaited
+// something else is in both: `read` runs first, and the links (a superset of any rows read) after it (S-3840).
+export function listWithRaw(read: () => db.Agent[], now: number = Date.now()): { listed: db.Agent[]; raws: Map<string, AgentRaw> } {
+  const listed = read();
+  const raws = agentRaw(db.agentLinks(), now);
+  return { listed, raws };
 }
 
 // Raw spend into the modes, with this daemon's prices and mode.

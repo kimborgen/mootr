@@ -28,6 +28,7 @@ import { useWatchMailTitle } from './mail-titles'
 import * as mb from './mailblocks'
 import { askFocus, focusIn, focusScrollTop, onFocus, openScrollTop, settleFocus } from './mailFocus'
 import { touchRank } from './touchRank'
+import { askQuestion } from '../perm/question'
 
 export const nameFor = (id: string, fallback?: string | null) => (id === 'human' ? 'you' : byId(id)?.name ?? fallback ?? id)
 export function Avatar({ id }: { id: string }) {
@@ -101,7 +102,7 @@ export function resolveMailMedia(el: HTMLElement, m: Mail) {
 // A body: the mail components' HTML, then everything that finishes it in place.
 export function MailBody({ m, thread, canAnswer }: { m: Mail; thread: Mail[]; canAnswer: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
-  const html = useMemo(() => mb.renderMail(m.body), [m.body])
+  const html = useMemo(() => mb.renderMail(m.body, m.shown), [m.body, m.shown?.at, m.shown?.len])
   const fb = useFileBase(agentBase(m.from_id))
   const repos = useDiffRepos()
   useLayoutEffect(() => {
@@ -159,12 +160,24 @@ function cardClickOnce(e: React.MouseEvent, mails: Mail[], threadKey: string): b
   return true
 }
 
+// The comment typed on a permission card, by request id (S-3829). It is kept while the card is out of view, so a fold or a
+// move to another thread doesn't lose it, and the send reads it, so a comment typed after Approve was tapped still goes.
+const permComments = new Map<string, string>()
+const permCommentListeners = new Set<() => void>()
+export const permComment = (id: string): string | undefined => permComments.get(id)
+export const clearPermComment = (id: string) => permComments.delete(id)
+// Each keystroke tells the listeners (the reply preview shows the comment as it is typed, S-3927).
+export const setPermComment = (id: string, text: string) => { permComments.set(id, text); permCommentListeners.forEach((f) => f()) }
+export const onPermComment = (f: () => void) => { permCommentListeners.add(f); return () => { permCommentListeners.delete(f) } }
+
 export type Stage =
   | { kind: 'rank'; mailId: string; block: HTMLElement; order: string[] }
   | { kind: 'choice' | 'pick' | 'defer'; mailId: string; block: HTMLElement; label: string }
   | { kind: 'own'; mailId: string; block: HTMLElement }
   | { kind: 'unnote'; mailId: string; block: HTMLElement }
-  | { kind: 'perm'; mailId: string; id: string; approve: boolean; action: string }
+  // `note`: the comment typed on the card when Approve or Deny was tapped (S-3829).
+  // `choice`: the option a question dialog's card answers with (S-3978); the answer's note is that label alone.
+  | { kind: 'perm'; mailId: string; id: string; approve: boolean; action: string; note?: string; choice?: string }
   | { kind: 'itsa'; mailId: string; itsa: string; action: string; label: string }
 
 // The ITSA's mail that asks the human to act: its buttons stage the ITSA's action.
@@ -340,7 +353,7 @@ export function ThreadPanel({ className, mails, threadKey, unread = [], head, on
       const ia = t.closest<HTMLElement>('[data-itsa-act]')
       if (ia) return onStage({ kind: 'itsa', mailId, itsa: ia.dataset.itsa!, action: ia.dataset.itsaAct!, label: ia.dataset.label ?? ia.dataset.itsaAct! })
       const ap = t.closest<HTMLElement>('[data-perm]')
-      if (ap) return onStage({ kind: 'perm', mailId, id: ap.dataset.perm!, approve: ap.dataset.approve === '1', action: ap.dataset.action || (ap.closest('.msg')?.querySelector('.md')?.textContent?.trim().split('\n')[0] ?? '') })
+      if (ap) return onStage({ kind: 'perm', mailId, id: ap.dataset.perm!, approve: ap.dataset.approve === '1', action: ap.dataset.action || (ap.closest('.msg')?.querySelector('.md')?.textContent?.trim().split('\n')[0] ?? ''), note: ap.closest('.perm')?.querySelector<HTMLInputElement>('[data-perm-note]')?.value.trim(), choice: ap.dataset.permChoice })
     }
   }
 
@@ -475,6 +488,8 @@ export function Card({ m, threadKey, humanView, first, thread, canAnswer, ask, f
   const mailRef = useRef<HTMLElement>(null)
   useWatchMailTitle(m.id, mailRef)
   const p = m.permission
+  // A pending question dialog's card leads with its question and options (S-3978); its mail body would repeat that.
+  const question = p?.dialog && p.status === 'pending' ? askQuestion(p.details) : undefined
   const fold = (e: React.MouseEvent) => { if (!(e.target as Element).closest('a') && !getSelection()?.toString()) onFold() }
   const subj = !first && baseSubject(m.subject) !== baseSubject(thread[0]?.subject)
   // A message shows the ITSAs it names itself (a sender's `itsa`, or a key in its text), inline on the sender line, and only
@@ -500,7 +515,7 @@ export function Card({ m, threadKey, humanView, first, thread, canAnswer, ask, f
       {humanView && between(m) ? <div className="msg-between-note"><Icon name="users" size="xs" />Between agents, not addressed to you</div> : null}
       {m.superseded_by ? <SupersededBy m={m} thread={thread} /> : null}
       {subj ? <div className="msg-subj">{m.subject}</div> : null}
-      {m.body && p?.kind !== 'input' ? <MailBody m={m} thread={thread} canAnswer={canAnswer} /> : null}
+      {m.body && p?.kind !== 'input' && !(question && canAnswer) ? <MailBody m={m} thread={thread} canAnswer={canAnswer} /> : null}
       <MailAttachments m={m} />
       {ask ? <div className="perm pending itsa-ask" data-itsa-ask><span className="perm-label"><Icon name="user" size="xs" />Waiting on you</span><span className="spacer" />
         <AskBlockLine thread={m.thread_id} />
@@ -508,10 +523,19 @@ export function Card({ m, threadKey, humanView, first, thread, canAnswer, ask, f
       {!p ? null : p.kind === 'input' ? <InputSuggestion p={p} canAnswer={canAnswer} thread={m.thread_id ?? undefined}
         note={<p className="muted input-note">Only you can approve it, from mootr's web UI on {p.machine}. An agent reviewing it can only deny it.</p>} />
         : p.status === 'pending'
-        ? <div className="perm pending" data-perm-pending><span className="perm-label"><Icon name="shield-alert" size="xs" />Waiting for your approval</span><span className="spacer" />
+        ? <div className="perm pending" data-perm-pending><span className="perm-label"><Icon name="shield-alert" size="xs" />{question ? 'Waiting for your answer' : 'Waiting for your approval'}</span><span className="spacer" />
           <AskBlockLine thread={m.thread_id} />
-          {canAnswer
-            ? <><button className="btn" data-approve="1" data-perm={p.id} data-action={p.action ?? ''}><Icon name="check" />Approve</button><button className="btn" data-approve="0" data-perm={p.id} data-action={p.action ?? ''}>Deny</button></>
+          {canAnswer && question
+            // A question dialog: the question, then one button per option with its description, and Skip. The answer is the option alone, so no comment.
+            ? <><span className="perm-question">{question.question}</span>
+              <div className="perm-choices">{question.options.map((o, i) => <button key={i} className="btn perm-choice" data-approve="1" data-perm={p.id} data-perm-choice={o.label} data-action={p.action ?? ''}>
+                <span className="perm-choice-label">{o.label}</span>{o.description ? <span className="perm-choice-desc">{o.description}</span> : null}</button>)}</div>
+              <button className="btn" data-approve="0" data-perm={p.id} data-action={p.action ?? ''}>Skip question</button></>
+            : canAnswer
+            ? <><input className="perm-comment" data-perm-note={p.id} aria-label="Comment on this request" placeholder="Add a comment…" maxLength={2000}
+                defaultValue={permComments.get(p.id) ?? ''} onInput={(e) => setPermComment(p.id, e.currentTarget.value)} />
+              {p.dialog ? <span className="perm-hint muted">The agent reads this after Yes is typed.</span> : null}
+              <button className="btn" data-approve="1" data-perm={p.id} data-action={p.action ?? ''}><Icon name="check" />Approve</button><button className="btn" data-approve="0" data-perm={p.id} data-action={p.action ?? ''}>Deny</button></>
             : <span className="muted">Open the thread to answer.</span>}</div>
         : <div className={`perm ${p.status}`}><Icon name={p.status === 'approved' ? 'check' : p.status === 'denied' ? 'x' : 'info'} size="xs" />
           <span>{p.status === 'approved' ? 'Approved' : p.status === 'denied' ? 'Denied' : 'Withdrawn'}{p.decided_by ? ` by ${nameFor(p.decided_by)}` : ''}{p.decided_at ? ` · ${ago(p.decided_at)}` : ''}{p.note && !/^(I authorize|Denied)$/.test(p.note) ? `: ${p.note}` : ''}</span></div>}

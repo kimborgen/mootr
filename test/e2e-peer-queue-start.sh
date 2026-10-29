@@ -61,9 +61,9 @@ echo "-- old is archived and gone is shut down on twin, and main learns both"
 api twin POST "/api/agents/$OLD/shutdown" '{"now":true}' >/dev/null
 api twin POST "/api/agents/$OLD/archive" '{}' >/dev/null
 api twin POST "/api/agents/$GONE/shutdown" '{"now":true}' >/dev/null
-api GET /api/agents >/dev/null
-api GET /api/agents | jget "len([a for a in d if a['id']=='$OLD' and a['lifecycle']=='archived'])" | grep -qx 1 || fail "main doesn't see old archived"
-api GET /api/agents | jget "len([a for a in d if a['id']=='$GONE' and a['lifecycle']=='shut_down'])" | grep -qx 1 || fail "main doesn't see gone shut down"
+api GET "/api/agents?state=all" >/dev/null
+api GET "/api/agents?state=all" | jget "len([a for a in d if a['id']=='$OLD' and a['lifecycle']=='archived'])" | grep -qx 1 || fail "main doesn't see old archived"
+api GET "/api/agents?state=all" | jget "len([a for a in d if a['id']=='$GONE' and a['lifecycle']=='shut_down'])" | grep -qx 1 || fail "main doesn't see gone shut down"
 
 echo "-- a broadcast to a stopped twin queues nothing and starts nothing"
 daemon_stop twin

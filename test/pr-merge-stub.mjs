@@ -6,6 +6,7 @@
 //   refuse  prints the merge script's refusal line and exits 3
 //   fail    prints a few lines and exits 1
 //   hold    waits until N.release exists, then merges
+//   cancelled  waits until N.release exists, then exits 79 (the train dropped the PR on a cancel's claim, S-3679)
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -14,9 +15,13 @@ const pr = process.argv[2];
 appendFileSync(join(dir, 'calls'), `${pr}\n`);
 const mode = existsSync(join(dir, `${pr}.mode`)) ? readFileSync(join(dir, `${pr}.mode`), 'utf8').trim() : 'merge';
 console.log(`merge PR ${pr}: started worker ${process.pid}, log /tmp/stub.log`);
-if (mode === 'hold') {
+if (mode === 'hold' || mode === 'cancelled') {
   console.log('waiting: 2nd in the merge queue');
   while (!existsSync(join(dir, `${pr}.release`))) await new Promise((r) => setTimeout(r, 50));
+}
+if (mode === 'cancelled') {
+  console.error('merge cancelled: PR #' + pr + ' was cancelled before its merge; it was not merged');
+  process.exit(79);
 }
 if (mode === 'refuse') {
   console.error('merge refused: PR #' + pr + ' gates failed: tsc');

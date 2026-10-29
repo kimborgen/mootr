@@ -23,7 +23,7 @@
 // proxies /api/requirements there. Approving a draft into `in_force` is gated by
 // settings.requirements.approval: only the human, the chief of staff (or the human), or
 // anyone. An agent never approves its own draft unless the setting is `any`.
-import { randomBytes } from 'node:crypto';
+import { freshId } from './short-id.ts';
 import * as db from './db.ts';
 import { settings } from './settings.ts';
 import { HUMAN, tellAnywhere } from './mail.ts';
@@ -299,8 +299,7 @@ function nextKey(): string {
 }
 
 function newId(): string {
-  const alphabet = 'abcdefghijkmnpqrstuvwxyz23456789';
-  return 'r' + [...randomBytes(4)].map((b) => alphabet[b % alphabet.length]).join('');
+  return freshId('r', (id) => !!db.open().prepare('SELECT 1 FROM requirements WHERE id = ?').get(id), 'requirement');
 }
 
 const oneOf = <T extends string>(list: readonly T[], v: unknown, what: string): T => {
@@ -671,18 +670,29 @@ export async function create(input: CreateInput): Promise<Requirement> {
   // Creating a requirement in force is the draft -> in_force move: the same gate applies.
   if (status === 'in_force') await assertMayApprove(null, by);
   const parentId = input.parent === undefined || input.parent === null || input.parent === '' ? null : validateParent(null, input.parent);
-  const id = newId();
-  const key = nextKey();
-  const t = now();
-  db.open()
-    .prepare(
-      `INSERT INTO requirements (id, key, parent_id, level, title, text, rationale, source, verification, scope, severity, mode, threshold, status, owner, version, created_by, text_by, created_at, updated_at)
+  // The writer lock first, so the id check, the key counter and the insert are one step another
+  // process cannot get between; a failure rolls the counter back too.
+  const d = db.open();
+  d.exec('BEGIN IMMEDIATE');
+  let id: string;
+  try {
+    id = newId();
+    const key = nextKey();
+    const t = now();
+    d
+      .prepare(
+        `INSERT INTO requirements (id, key, parent_id, level, title, text, rationale, source, verification, scope, severity, mode, threshold, status, owner, version, created_by, text_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
-    )
-    .run(
-      id, key, parentId, trimmedOrNull(input.level), title, textOrNull(input.text), textOrNull(input.rationale), textOrNull(input.source),
-      verification ? JSON.stringify(verification) : null, scope ? JSON.stringify(scope) : null, severity, mode, threshold, status, owner, by, by, t, t,
-    );
+      )
+      .run(
+        id, key, parentId, trimmedOrNull(input.level), title, textOrNull(input.text), textOrNull(input.rationale), textOrNull(input.source),
+        verification ? JSON.stringify(verification) : null, scope ? JSON.stringify(scope) : null, severity, mode, threshold, status, owner, by, by, t, t,
+      );
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
   rebuildEnforcedTools();
   return must(id);
 }

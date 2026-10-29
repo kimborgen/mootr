@@ -98,6 +98,24 @@ test('list filters by parent, subtree, status, category, owner, participant, and
   assert.ok((await itsa.list({ parent: 'root' })).map((x) => x.key).includes(other.key));
 });
 
+test('list since filters on created_at, by an age or an ISO time, and refuses a bad time', async () => {
+  const old = await itsa.create({ title: 'Long ago', by: 'human' });
+  const fresh = await itsa.create({ title: 'Just now', by: 'human' });
+  db.open().prepare('UPDATE itsas SET created_at = ? WHERE id = ?').run('2020-01-02T03:04:05.000Z', old.id);
+  const since = async (s) => (await itsa.list({ since: s })).map((x) => x.key);
+  assert.ok((await since('24h')).includes(fresh.key));
+  assert.ok(!(await since('24h')).includes(old.key), 'an ITSA from 2020 is not in the last day');
+  assert.ok((await since('2d')).includes(fresh.key));
+  assert.ok((await since('2020-01-02T03:04:05Z')).includes(old.key), 'created exactly at the time is included');
+  assert.ok(!(await since('2020-01-02T03:04:06Z')).includes(old.key), 'created a second before the time is not');
+  assert.ok((await since('2019-12-31')).includes(old.key), 'a date is midnight UTC');
+  assert.equal(itsa.sinceTime('2020-01-02T04:04:05+01:00'), '2020-01-02T03:04:05.000Z', 'an offset is read to UTC');
+  for (const bad of ['yesterday', '24', '10000d', '2026-02-30', '2026-10-21T08:00:00']) {
+    assert.throws(() => itsa.sinceTime(bad), /since expects an ISO time/, bad);
+    await assert.rejects(() => itsa.list({ since: bad }), /since expects an ISO time/, bad);
+  }
+});
+
 test('set changes fields, records an event per change, and manages closed_at', async () => {
   const before = itsa.events(leaf.id).length;
   const r = await itsa.set(leaf.id, { status: 'done', summary: 'shipped' }, 'alice');
@@ -160,6 +178,24 @@ test('a rejected mutation leaves no partial write', async () => {
   await assert.rejects(() => itsa.set(x.id, { title: 'Changed', participants: ['ghost'] }, 'human'), /no agent ghost/);
   assert.equal(itsa.must(x.id).title, 'Atomic', 'a rejected set changed the title');
   assert.ok(!itsa.events(x.id).some((e) => e.type === 'title'), 'a rejected set recorded an event');
+});
+
+test('addParticipants joins without removing anyone, and refuses an unknown name with no partial add', async () => {
+  // S-3061: the additive form keeps the members already there. The replace form would drop them.
+  const x = await itsa.create({ title: 'Additive', by: 'human', owner: 'alice', participants: ['bob'] });
+  await itsa.set(x.id, { addParticipants: ['human'] }, 'human');
+  assert.deepEqual(itsa.participants(x.id), ['a1', 'a2', 'human'], 'an additive set dropped a member');
+  assert.ok(itsa.events(x.id).some((e) => e.type === 'participants'), 'the join recorded no participants event');
+
+  // Two joins at once: both survive, neither reads a stale list.
+  const y = await itsa.create({ title: 'Racing joins', by: 'human', owner: 'alice' });
+  await Promise.all([itsa.set(y.id, { addParticipants: ['bob'] }, 'human'), itsa.set(y.id, { addParticipants: ['human'] }, 'human')]);
+  assert.deepEqual(itsa.participants(y.id), ['a1', 'a2', 'human'], 'a concurrent join was lost');
+
+  // An unknown name is refused before any write: the good name in the same list isn't added either.
+  await assert.rejects(() => itsa.set(x.id, { addParticipants: ['bob', 'ghost'], title: 'Changed' }, 'human'), /no agent ghost/);
+  assert.deepEqual(itsa.participants(x.id), ['a1', 'a2', 'human']);
+  assert.equal(itsa.must(x.id).title, 'Additive', 'a rejected additive set changed the title');
 });
 
 test('concurrent sets do not lose a change or record a stale from', async () => {

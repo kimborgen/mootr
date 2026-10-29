@@ -1,0 +1,2 @@
+// flock is only in this comment
+const x = 1;

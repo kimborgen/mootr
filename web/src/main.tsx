@@ -84,6 +84,19 @@ function openHash(h: URLSearchParams) {
   if (diff) openDiff(diff.repo, diff.pr)
   const key = h.get('itsa')
   if (key) openItsaKey(key.toUpperCase())
+  const cfg = h.get('cfg')
+  if (cfg) openSettingsCfg(cfg)
+}
+// `#cfg=SECTION/TAB` opens Settings at a section and its tab (`fields/table`). The section and the tab are kept
+// in localStorage like a Settings pick, so an open Settings and one opened after it both show them.
+function openSettingsCfg(cfg: string) {
+  const [section, tab] = cfg.split('/')
+  try {
+    localStorage.setItem('stam/settings-section', section)
+    if (tab) localStorage.setItem('stam/fields-tab', tab)
+  } catch {}
+  openWorld('config')
+  dispatchEvent(new CustomEvent('stam:open-setting', { detail: { section, tab } }))
 }
 // The ITSAs load after the boot, so a key not known yet opens once they arrive.
 function openItsaKey(key: string) {

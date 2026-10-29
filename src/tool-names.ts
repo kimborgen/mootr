@@ -13,15 +13,12 @@
 // cost under openrouter/tool-name.
 import * as db from './db.ts';
 import { settings, onSettingsChange } from './settings.ts';
-import { apiKey } from './credits.ts';
 import { recordSpend } from './decide.ts';
-import { systemHeld } from './budgets.ts';
-import { checkCredential, send } from './llm/http.ts';
+import { askBlocked, spendTo } from './tiny-spend.ts';
+import { complete, parseModelRef } from './llm/index.ts';
 import { toolNameConfig, TOOL_NAME_INSTRUCTIONS, TOOL_NAME_MAX_WORDS } from './tiny-models.ts';
 import { splitTool, seededLabel } from './tool-name-labels.ts';
-import { envVar } from './env.ts';
 
-const base = () => envVar('OPENROUTER_URL') ?? 'https://openrouter.ai/api/v1';
 const PURPOSE = 'tool-name';
 const TIMEOUT_MS = 15_000;
 const CONCURRENCY = 3;
@@ -55,6 +52,9 @@ function model(): string {
   const c = toolNameConfig(settings());
   return c.enabled ? c.model : '';
 }
+// Whether the model's provider can be asked now: it has a key and its system budget isn't spent.
+const canAsk = (m: string): boolean => askBlocked(m) === null;
+
 function refresh(): void {
   if (model() !== '') return;
   for (const j of queue.splice(0)) drop(j);
@@ -70,7 +70,7 @@ function drop(j: Job): void {
 // unnamed then is `pending`; one that failed is in neither, so the view shows its prettified name.
 export async function toolNames(harness: string, names: string[], waitMs = 0): Promise<ToolNames> {
   const m = model();
-  const enabled = m !== '' && !!apiKey() && !systemHeld();
+  const enabled = m !== '' && canAsk(m);
   const labels: Record<string, string> = {};
   const asked: Job[] = [];
   const seenTool = new Set<string>();
@@ -144,37 +144,26 @@ function pump(): void {
 }
 
 async function name(j: Job, signal: AbortSignal): Promise<void> {
-  const key = apiKey();
   // A spent system budget or no key: nothing is asked, and not remembered as failed.
-  if (systemHeld() || !key) return;
-  let data: any;
+  if (!canAsk(j.model)) return;
+  let data;
   try {
-    // checkCredential refuses a key that isn't a plain header value, with text that names no key (S-2117).
-    const res = await send(`${base()}/chat/completions`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${checkCredential(key, 'API key')}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: j.model,
-        messages: [
-          { role: 'system', content: TOOL_NAME_INSTRUCTIONS },
-          { role: 'user', content: `Tool: ${j.tool}` },
-        ],
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'tool_name',
-            strict: true,
-            schema: { type: 'object', properties: { label: { type: 'string', description: 'the tool in plain English, 1-3 words' } }, required: ['label'], additionalProperties: false },
-          },
-        },
-        max_tokens: 30,
-        temperature: 0,
-        usage: { include: true },
-      }),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]),
+    data = await complete({
+      model: j.model,
+      messages: [
+        { role: 'system', content: TOOL_NAME_INSTRUCTIONS },
+        { role: 'user', content: `Tool: ${j.tool}` },
+      ],
+      jsonSchema: {
+        name: 'tool_name',
+        strict: true,
+        schema: { type: 'object', properties: { label: { type: 'string', description: 'the tool in plain English, 1-3 words' } }, required: ['label'], additionalProperties: false },
+      },
+      maxTokens: 30,
+      temperature: 0,
+      signal,
+      timeoutMs: TIMEOUT_MS,
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    data = await res.json();
   } catch (e) {
     const canceled = signal.aborted;
     // A canceled call was turned off, not failed; it is asked again once a model is back.
@@ -182,10 +171,11 @@ async function name(j: Job, signal: AbortSignal): Promise<void> {
     db.addEvent('stam', canceled ? 'tool-name:canceled' : 'tool-name:error', { harness: j.harness, tool: j.tool, error: e instanceof Error ? e.message : String(e) });
     return;
   }
-  const usage = data?.usage ?? {};
-  const used = String(data?.model ?? j.model);
-  recordSpend(PURPOSE, used, Number(usage.cost) || 0, Number(usage.prompt_tokens) || 0, Number(usage.completion_tokens) || 0);
-  const label = parseToolLabel(data?.choices?.[0]?.message?.content);
+  const to = spendTo(parseModelRef(j.model).provider);
+  // A non-default provider's model is kept with its prefix, so the record names who served it.
+  const used = !to ? data.model : `${to.provider}:${data.model}`;
+  recordSpend(PURPOSE, used, data.costUsd ?? 0, data.usage.inputTokens, data.usage.outputTokens, to);
+  const label = parseToolLabel(data.text);
   if (!label) {
     failed.add(j.key);
     db.addEvent('stam', 'tool-name:refused', { harness: j.harness, tool: j.tool });

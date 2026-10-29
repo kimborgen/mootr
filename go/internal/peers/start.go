@@ -160,7 +160,7 @@ func (c *Client) deployPeer(p config.Peer, release string) error {
 		return errors.New(msg)
 	}
 	slog.Info(fmt.Sprintf("peer:deploy %s: running %s for %s", p.Name, p.Deploy, release))
-	code, tail := runCommand(p.Deploy, append(os.Environ(), "STAM_RELEASE="+release, "STAM_PEER="+p.Name), deadline)
+	code, tail := runCommand(p.Deploy, append(os.Environ(), "STAM_RELEASE="+release, "STAM_PEER="+p.Name, "MOOTR_RELEASE="+release, "MOOTR_PEER="+p.Name), deadline)
 	if code == lateCode {
 		return fail("its deploy command ran past the deadline", tail)
 	}

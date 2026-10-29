@@ -27,6 +27,8 @@ export interface ConvMail {
   superseded_by?: string | null
   kind?: string | null
   health?: string | null
+  // Where the body holds the ITSA text it showed the human (S-2998): drawn above the rest.
+  shown?: { at: number; len: number }
 }
 
 const LONG_MAIL = 320
@@ -90,7 +92,7 @@ export function ConvMailCard({ m, self, full, chip, noThread, before, after, res
       {before}
       {m.subject ? <div className="ov-mail-subj">{m.subject}</div> : null}
       {long && !open ? <p className="ov-mail-snip">{m.body.replace(/\s+/g, ' ')}</p>
-        : m.body ? <div className="ov-mail-body"><Rendered text={m.body} className="ov-text" base={agentBase(m.from_id)} resolve={resolve} /></div> : null}
+        : m.body ? <div className="ov-mail-body"><Rendered text={m.body} shown={m.shown} className="ov-text" base={agentBase(m.from_id)} resolve={resolve} /></div> : null}
       {after}
       <div className="ov-mail-foot">
         {long ? <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}><Icon name={open ? 'chevron-down' : 'chevron-right'} size="xs" />{open ? 'Show less' : 'Show all'}</button> : null}

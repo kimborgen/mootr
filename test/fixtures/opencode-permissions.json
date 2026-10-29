@@ -1,0 +1,50 @@
+{
+  "_note": "One real capture of OpenCode 2.0.26 (openrouter/~deepseek/deepseek-v4-flash-latest), S-4280: a session whose rules ask for everything ran the shell command `echo capture-hello`; GET /api/session/SID/permission was read while the permission was pending, then after an interrupt, and for a session the server doesn't have. A listing item has no `metadata` (the permission.asked event does); `save` and `source` are the listing's own.",
+  "pending": {
+    "status": 200,
+    "body": {
+      "data": [
+        {
+          "id": "per_17f85483d001D1YY6Re5J2fj69",
+          "sessionID": "ses_e807abf53ffeeTUX184TmVPKle",
+          "action": "shell",
+          "resources": [
+            "echo capture-hello"
+          ],
+          "save": [
+            "echo *"
+          ],
+          "source": {
+            "type": "tool",
+            "messageID": "msg_17f854388001X3hpYO41B8EPqc",
+            "id": "call_7d364415f81640729b6a6a00"
+          }
+        }
+      ]
+    }
+  },
+  "afterInterrupt": {
+    "status": 200,
+    "body": {
+      "data": []
+    }
+  },
+  "missingSession": {
+    "status": 404,
+    "body": {
+      "_tag": "SessionNotFoundError",
+      "sessionID": "ses_doesnotexist",
+      "message": "Session not found: ses_doesnotexist"
+    }
+  },
+  "active": {
+    "status": 200,
+    "body": {
+      "data": {
+        "ses_e807abf53ffeeTUX184TmVPKle": {
+          "type": "running"
+        }
+      }
+    }
+  }
+}

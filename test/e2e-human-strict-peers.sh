@@ -57,6 +57,17 @@ curl -s -H "authorization: Bearer $TWIN_TOKEN" "$TWIN_URL/api/agents/$BOB/inbox"
 FWD="{\"from\":\"human\",\"forwarded\":{\"from_name\":\"octocat\"},\"to\":\"$BOB\",\"subject\":\"fwd\",\"body\":\"b\"}"
 [ "$(code -X POST -H "authorization: Bearer $TWIN_TOKEN" -H 'x-stam-local: 1' -H "$J" -d "$FWD" "$TWIN_URL/api/mail")" = 403 ] || fail "twin took forwarded human mail from the shared token"
 [ "$(code -X POST -H "authorization: Bearer $TWIN_PEER" -H 'x-stam-local: 1' -H "$J" -d "$FWD" "$TWIN_URL/api/mail")" = 200 ] || fail "twin refused forwarded human mail from the peer token: $(cat "$TEST_TMP/body")"
+# Forwarded system mail (S-1239): a peer's own stam mail passes with the peer token; no shared-token caller forges it or an agent.
+SYS="{\"from\":\"system:cost\",\"system\":\"cost\",\"forwarded\":{\"from_name\":\"cost\"},\"to\":\"$BOB\",\"subject\":\"sys\",\"body\":\"b\"}"
+[ "$(code -X POST -H "authorization: Bearer $TWIN_TOKEN" -H "$J" -d "$SYS" "$TWIN_URL/api/mail")" = 403 ] || fail "twin took forwarded system mail from the shared token"
+[ "$(code -X POST -H "authorization: Bearer $TWIN_PEER" -H 'x-stam-local: 1' -H "$J" -d "$SYS" "$TWIN_URL/api/mail")" = 200 ] || fail "twin refused forwarded system mail from the peer token: $(cat "$TEST_TMP/body")"
+curl -s -H "authorization: Bearer $TWIN_TOKEN" "$TWIN_URL/api/agents/$BOB/inbox" >"$TEST_TMP/inbox"; grep -q '"from_id":"system:cost"' "$TEST_TMP/inbox" || fail "bob didn't get the system mail from system:cost: $(head -c 400 "$TEST_TMP/inbox")"
+BADSYS="{\"from\":\"system:Bad Name\",\"system\":\"cost\",\"forwarded\":{\"from_name\":\"x\"},\"to\":\"$BOB\",\"subject\":\"bad\",\"body\":\"b\"}"
+[ "$(code -X POST -H "authorization: Bearer $TWIN_PEER" -H 'x-stam-local: 1' -H "$J" -d "$BADSYS" "$TWIN_URL/api/mail")" = 400 ] || fail "twin took a forwarded system sender with a bad name"
+AGT="{\"from\":\"$BOB\",\"forwarded\":{\"from_name\":\"bob\"},\"to\":\"$BOB\",\"subject\":\"forged\",\"body\":\"b\"}"
+[ "$(code -X POST -H "authorization: Bearer $TWIN_TOKEN" -H "$J" -d "$AGT" "$TWIN_URL/api/mail")" = 403 ] || fail "twin took forwarded agent mail from the shared token"
+UNK="{\"from\":\"system:cost\",\"forwarded\":{\"from_name\":\"cost\"},\"to\":\"$BOB\",\"subject\":\"nosys\",\"body\":\"b\"}"
+[ "$(code -X POST -H "authorization: Bearer $TWIN_TOKEN" -H "$J" -d "$UNK" "$TWIN_URL/api/mail")" = 403 ] || fail "twin took forwarded system mail with no system field from the shared token"
 
 echo "-- a terminal on twin relays through main with the peer token"
 SH=$(curl -s -X POST -H "authorization: Bearer $TWIN_TOKEN" -H "$KEY" -H "$J" -d '{}' "$TWIN_URL/api/shells" | jget "d['id']")

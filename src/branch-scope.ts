@@ -25,12 +25,23 @@ function worktreeBranch(a: db.Agent): string | null {
 // archived and isn't in the agent's tree (itself and its descendants) has a worktree on it, even when
 // another one in the tree does too; else 'tree' if one in the tree has; else 'none'. A stopped agent
 // (shut_down, failed) still owns its branch: only archiving gives it up.
+//
+// A predecessor whose work cost_switch moved to a member of the tree (agents.forwarded_to, recorded by the
+// switch, in the database) is in the tree too: its successor holds the same worktree and branch (S-923).
 export function localScope(agent: string, branch: string): Scope {
   if (!agent || !branch) return 'none';
   const id = db.getAgent(agent)?.id ?? agent;
   const tree = new Set([id, ...descendants(id)]);
+  const handedTo = (a: db.Agent): boolean => {
+    const seen = new Set<string>();
+    for (let cur: db.Agent | undefined = a; cur?.forwarded_to && !seen.has(cur.id); cur = db.getAgent(cur.forwarded_to)) {
+      seen.add(cur.id);
+      if (tree.has(cur.forwarded_to)) return true;
+    }
+    return false;
+  };
   const owners = db.listAgents().filter((a) => a.lifecycle !== 'archived' && worktreeBranch(a) === branch);
-  if (owners.some((a) => !tree.has(a.id))) return 'foreign';
+  if (owners.some((a) => !tree.has(a.id) && !handedTo(a))) return 'foreign';
   return owners.length ? 'tree' : 'none';
 }
 

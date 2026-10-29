@@ -1,8 +1,18 @@
 get:
   operationId: listAgents
   tags: [agents]
-  summary: Every agent on this machine and its peers, with the extras the web tree shows.
+  summary: The agents on this machine and its peers, with the extras the web tree shows; live agents unless state or ids asks for others (S-3816).
   parameters:
+    - name: state
+      in: query
+      description: A comma list of lifecycle groups to list (live is active or paused, stopped is shut down, archived, all). Without it (or empty), and without ids, the list is live agents only; an unknown group is a 400.
+      schema:
+        type: string
+    - name: ids
+      in: query
+      description: Agent ids or names, comma-separated, added in any state. Without state, the list is only these.
+      schema:
+        type: string
     - name: q
       in: query
       description: Keeps agents matching the text.
@@ -20,7 +30,7 @@ get:
         type: string
   responses:
     '200':
-      description: A bare array, not an envelope.
+      description: A bare array, not an envelope. Each row sends `first_prompt` as null; the agent's detail (GET /api/agents/{id}) carries it (S-3808).
       content:
         application/json:
           schema:

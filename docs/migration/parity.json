@@ -468,8 +468,8 @@
       "status": "fail"
     },
     "event-waits": {
-      "module": "unassigned",
-      "status": "fail"
+      "module": "events",
+      "status": "pass"
     },
     "events": {
       "module": "unassigned",
@@ -916,7 +916,7 @@
       "status": "fail"
     },
     "mcp-auth": {
-      "module": "unassigned",
+      "module": "mcp-auth",
       "status": "fail"
     },
     "mcp-config": {
@@ -1024,6 +1024,10 @@
       "status": "fail"
     },
     "orphan-procs": {
+      "module": "unassigned",
+      "status": "fail"
+    },
+    "peer-agent-refresh": {
       "module": "unassigned",
       "status": "fail"
     },
@@ -1635,6 +1639,10 @@
       "module": "unassigned",
       "status": "fail"
     },
+    "tmux-socket": {
+      "module": "unassigned",
+      "status": "fail"
+    },
     "token-scope": {
       "module": "unassigned",
       "status": "fail"
@@ -1764,8 +1772,8 @@
       "status": "fail"
     },
     "watch": {
-      "module": "unassigned",
-      "status": "fail"
+      "module": "events",
+      "status": "pass"
     },
     "watch-pr": {
       "module": "unassigned",
@@ -1776,7 +1784,7 @@
       "status": "fail"
     },
     "watch-unit": {
-      "module": "unassigned",
+      "module": "events",
       "status": "fail"
     },
     "window-summary-calls": {

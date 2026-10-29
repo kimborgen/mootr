@@ -8,7 +8,7 @@ import (
 )
 
 // Capabilities is src/registry.ts capabilitiesFor as the agents row stores it (JSON): the model's inputs and the
-// harness's tools from the registry (registry/defaults.json, then STAM_HOME/registry.json over it by name), and whether
+// harness's tools from the registry (registry/defaults.json, then the user registry (the home's cached copy on a peer) over it by name), and whether
 // the registry knows the model. A model it doesn't know gets unknown (null) image and video inputs.
 func (l *Lifecycle) Capabilities(harness, model string) (string, error) {
 	defaults, err := readJSON(filepath.Join(l.claude.Templates.Root, "registry", "defaults.json"))
@@ -16,7 +16,7 @@ func (l *Lifecycle) Capabilities(harness, model string) (string, error) {
 		return "", err
 	}
 	// A registry.json that is missing or not JSON counts as empty, as in TS.
-	user, _ := readJSON(filepath.Join(l.claude.Templates.Home, "registry.json"))
+	user := jsjson.Value(l.claude.Templates.UserRegistry())
 	entry := func(section, key string) (jsjson.Value, bool) {
 		var found jsjson.Value
 		ok := false

@@ -37,6 +37,17 @@ const ITSAS: Itsa[] = [
   itsa('i-3', 'F-3', 'fl-m1', 'in_review', 'Fixture issue three'),
 ]
 // The fleet, as the store holds it: the machine this page runs on is the first fixture box.
+// A waiting manager whose child isn't waiting: the Waiting scope lists the manager alone, and its cost keeps the tree's spend (S-3281).
+const WAITING_TREE: Agent[] = [
+  agent({ id: 'wt-m', name: 'fixture-waiting-manager', role: 'manager', cost_usd: 3, cost: cost(3), waits: [{ kind: 'human' }] as never, created_at: T0 }),
+  agent({ id: 'wt-k', name: 'fixture-idle-child', role: 'developer', parents: ['wt-m'], cost_usd: 1, cost: cost(1), created_at: T0 }),
+]
+// A waiting manager blocked on an open ask: its Activity cell links to the ask (S-3977).
+const ASKED: Agent[] = [
+  agent({ id: 'ak-m', name: 'fixture-blocked-manager', role: 'manager', cost_usd: 2, cost: cost(2), waits: [{ kind: 'human' }] as never, open_ask: 'request:fx-ask', created_at: T0 }),
+  agent({ id: 'ak-k', name: 'fixture-idle-child', role: 'developer', parents: ['ak-m'], cost_usd: 1, cost: cost(1), created_at: T0 }),
+]
+const ASK = { key: 'request:fx-ask', kind: 'request', state: 'open', outcome: null, what: 'Permission request', agent_id: 'ak-m', agent_name: 'fixture-blocked-manager', machine: 'fixture-box-one', thread_id: 'fx-ask-thread', itsa_id: null, since: T0, settled_at: null } as const
 const HERE = 'fixture-box-one'
 const facts = (agents: Agent[] = FLEET) => factsOf(agents, ITSAS, HERE)
 
@@ -45,12 +56,13 @@ function cost(own: number) {
 }
 
 // The table, with its lines built the page's way for the grouping and sort a state names.
-function table(o: { group?: Group; sort?: Sort | null; cols?: ColumnId[]; cursor?: string | null; query?: string; agents?: Agent[]; scope?: Scope } = {}) {
+function table(o: { group?: Group; sort?: Sort | null; cols?: ColumnId[]; cursor?: string | null; query?: string; agents?: Agent[]; scope?: Scope; checked?: string[] } = {}) {
   const agents = o.agents ?? FLEET
   const f = facts(agents)
   const lines = buildLines(agents, f, { group: o.group ?? 'tree', query: o.query ?? '', sort: o.sort ?? null, collapsed: {}, scope: o.scope })
   return <AgentsTable lines={lines} facts={f} group={o.group ?? 'tree'} cols={o.cols ?? ['role', 'model', 'machine', 'itsa', 'activity', 'wait', 'context', 'cost', 'unread', 'age']}
-    sort={o.sort ?? null} cursor={o.cursor ?? null} enforce={200000} onSort={() => {}} onPick={() => {}} />
+    sort={o.sort ?? null} cursor={o.cursor ?? null} enforce={200000} onSort={() => {}} onPick={() => {}}
+    checked={new Set(o.checked ?? [])} checkAll={o.checked?.length ? 'some' : 'none'} onCheck={() => {}} onCheckAll={() => {}} />
 }
 
 export const stories: Story[] = [{
@@ -64,17 +76,22 @@ export const stories: Story[] = [{
     'The table scrolls up and down in its own box, never the page or sideways: its columns shrink, then drop by priority as it narrows (age first, then unread, machine, role and model, activity and ITSA). A long text cuts with an ellipsis, and its full value is the tooltip.',
     'A header that is sorted shows its direction and `aria-sort`. A click cycles ascending, descending and no sort.',
     'The tree keeps the sidebar\'s folds: a chevron folds an agent\'s children. An agent with two parents shows under each, its second place muted and marked.',
+    'A fold counts the children in the scope the table lists. A cost shows its tree ("/" and the tree spend) when the agent has children in any scope, so a parent in Waiting keeps its tree spend when its children are not waiting.',
     'A group line (Machine, ITSA) sits above its agents on `--table-header-bg`, with the count. This machine comes first among machines; the agents with no ITSA come last.',
     'A click picks a row (its cursor); a double click opens the agent, as the sidebar row does (' + ds('Density') + ').',
+    'A checkbox checks its row and does not pick it. A checked row takes `--table-row-hover`, and the header box is mixed when only some rows in view are checked.',
   ],
   states: [
     { name: 'Tree, by default', data: { agents: FLEET, itsas: ITSAS }, setup: quiet, render: () => table() },
     { name: 'Grouped by machine', data: { agents: FLEET, itsas: ITSAS }, setup: quiet, render: () => table({ group: 'machine' }) },
     { name: 'Grouped by ITSA', data: { agents: FLEET, itsas: ITSAS }, setup: quiet, render: () => table({ group: 'itsa' }) },
     { name: 'Flat, sorted by cost', data: { agents: FLEET, itsas: ITSAS }, setup: quiet, render: () => table({ group: 'flat', sort: { col: 'cost', dir: 'desc' }, cursor: 'fl-a3' }) },
+    { name: 'Three checked, the picked row unchecked', data: { agents: FLEET, itsas: ITSAS }, setup: quiet, render: () => table({ cursor: 'fl-m0', checked: ['fl-a0', 'fl-a1', 'fl-a2'] }) },
     { name: 'Narrow, 520 px', data: { agents: FLEET, itsas: ITSAS }, setup: quiet, render: () => <div style={{ width: 520 }}>{table({ cursor: 'fl-m0' })}</div> },
     { name: 'Stopped', data: { agents: GONE, itsas: ITSAS }, setup: quiet, render: () => table({ scope: 'stopped', agents: GONE }) },
+    { name: 'Waiting, a parent whose child is not waiting', data: { agents: WAITING_TREE, itsas: ITSAS }, setup: quiet, render: () => table({ scope: 'waiting', agents: WAITING_TREE }) },
     { name: 'Archived, by age', data: { agents: GONE, itsas: ITSAS }, setup: quiet, render: () => table({ scope: 'archived', agents: GONE, group: 'flat', sort: { col: 'age', dir: 'desc' } }) },
-    { name: 'Empty', data: { agents: [], itsas: [] }, setup: quiet, render: () => <AgentsTable lines={[]} facts={facts([])} group="tree" cols={['role', 'cost']} sort={null} cursor={null} enforce={200000} onSort={() => {}} onPick={() => {}} empty={<div className="pad muted">No agents running. Press + to add one.</div>} /> },
+    { name: 'Blocked on an open ask', data: { agents: ASKED, itsas: ITSAS, asks: [ASK] }, setup: quiet, render: () => table({ agents: ASKED, scope: 'waiting' }) },
+    { name: 'Empty', data: { agents: [], itsas: [] }, setup: quiet, render: () => <AgentsTable lines={[]} facts={facts([])} group="tree" cols={['role', 'cost']} sort={null} cursor={null} enforce={200000} onSort={() => {}} onPick={() => {}} checked={new Set()} checkAll="none" onCheck={() => {}} onCheckAll={() => {}} empty={<div className="pad muted">No agents running. Press + to add one.</div>} /> },
   ],
 }]

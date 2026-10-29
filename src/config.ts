@@ -1,17 +1,23 @@
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, realpathSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, realpathSync, renameSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { envVar } from './env.ts';
+import { defaultHome, defaultHomes } from './default-home.ts';
 
 export const ROOT = join(import.meta.dirname, '..');
 // The live home, which a test daemon never uses: tests set STAM_HOME to a throwaway folder.
-export const DEFAULT_STAM_HOME = join(homedir(), '.local', 'share', 'stam');
-// The renamed home (S-2889) is used only when it exists and the stam home doesn't: nothing is created, moved or linked.
-const MOOTR_DEFAULT_HOME = join(homedir(), '.local', 'share', 'mootr');
-const defaultHome = !existsSync(DEFAULT_STAM_HOME) && existsSync(MOOTR_DEFAULT_HOME) ? MOOTR_DEFAULT_HOME : DEFAULT_STAM_HOME;
-export const STAM_HOME = envVar('HOME') ?? defaultHome;
+// The default home (S-3347, S-4335): stam when it is a real folder, else mootr (src/default-home.ts).
+// After the move stam is a symlink to mootr. A home that can't be inspected throws, but only when no MOOTR_HOME/STAM_HOME
+// is set: an explicit home never inspects the default.
+const [STAM_DEFAULT_HOME, MOOTR_DEFAULT_HOME] = defaultHomes();
+const explicitHome = envVar('HOME');
+export const DEFAULT_STAM_HOME = explicitHome === undefined ? defaultHome() : STAM_DEFAULT_HOME;
+export const STAM_HOME = explicitHome ?? DEFAULT_STAM_HOME;
+// Both spellings of the default home, whether or not either exists: after the move stam is a symlink to mootr, and a
+// path-based guard (secret files, deny rules, test-home checks) must match a read through either one (S-3347).
+export const DEFAULT_HOMES = [STAM_DEFAULT_HOME, MOOTR_DEFAULT_HOME];
 // Whether this is the live home (S-422): never a test home, so test-only switches, such as
 // STAM_TEST_HUMAN_KEY, do nothing here (src/test-env.ts gates them on the test-home marker).
 const isHome = (home: string) => {
@@ -21,7 +27,7 @@ const isHome = (home: string) => {
     return resolve(STAM_HOME) === resolve(home);
   }
 };
-export const LIVE_HOME = isHome(DEFAULT_STAM_HOME) || isHome(MOOTR_DEFAULT_HOME);
+export const LIVE_HOME = isHome(STAM_DEFAULT_HOME) || isHome(MOOTR_DEFAULT_HOME);
 // `stam deploy` builds releases into RELEASES/SHA and points RELEASES/current at the live one.
 export const RELEASES = join(STAM_HOME, 'releases');
 const realReleases = (() => {
@@ -84,6 +90,41 @@ export function ensurePeerToken(): string {
     chmodSync(file, 0o600);
   } catch {}
   return readFileSync(file, 'utf8').trim();
+}
+
+// The lease token (S-3176): the bearer a peer sends to the home's peer-only MCP lease route. It is apart
+// from the peer token, so `stam mcp lease-rotate` revokes leases without breaking the peer link. The
+// daemon reads the file per request, so a rotation needs no restart. Copy it to the peer's
+// settings.peers[].leaseToken, as the peer token is copied.
+const leaseTokenFile = () => join(STAM_HOME, 'mcp-lease-token');
+const newLeaseToken = () => randomBytes(24).toString('base64url');
+
+export function ensureLeaseToken(): void {
+  mkdirSync(STAM_HOME, { recursive: true });
+  const file = leaseTokenFile();
+  if (!existsSync(file)) writeFileSync(file, newLeaseToken(), { mode: 0o600 });
+  else try {
+    chmodSync(file, 0o600);
+  } catch {}
+}
+
+// The current lease token, or undefined when there is none, so every request with a bearer is refused.
+export function readLeaseToken(): string | undefined {
+  try {
+    return readFileSync(leaseTokenFile(), 'utf8').trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Writes a new lease token, through a temp file renamed over the old one, mode 0600. It returns nothing:
+// the token never reaches a tty, env or tmux session (S-743), only the file.
+export function rotateLeaseToken(): void {
+  mkdirSync(STAM_HOME, { recursive: true });
+  const file = leaseTokenFile();
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, newLeaseToken(), { mode: 0o600 });
+  renameSync(tmp, file);
 }
 
 export function readToken(): string | undefined {

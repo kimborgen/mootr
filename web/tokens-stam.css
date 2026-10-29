@@ -5,6 +5,8 @@
  * hues. No new neutrals. Like tokens.css, each colour is defined in all three theme states.
  */
 :root {
+  /* The issue card editor's widest column (S-3297): a settings pane's reading width, wide enough for the slot rows. */
+  --size-ice-max: calc(var(--space-12) * 12);
   /* The thin bar under the main tab bar (S-1659), and the sidebar pane tab strips (S-1421):
      compact, the default, is half the main tab bar. One token, so the two stay the same. */
   --size-tab-bar-thin: calc(var(--size-tab-bar) / 2);
@@ -25,6 +27,10 @@
   --size-work-fold: var(--space-5);
   /* The Agents page's detail pane beside its table (S-3048): the width the pane keeps. */
   --size-agents-pane: 420px;
+  /* The Agents table's checkbox (S-3117): the box, its column, and the width of the bulk confirm. */
+  --size-agents-check: var(--space-4);
+  --size-agents-check-col: calc(var(--space-4) + var(--space-2));
+  --size-agents-confirm: 320px;
   /* Agent state, on the status vocabulary. Working borrows indigo, as in-progress does. */
   --st-working: var(--accent);
   --st-idle: var(--status-success-fg);
@@ -161,6 +167,10 @@
    so a second click on the emptied box doesn't Stop the turn (S-1774). A threshold, not motion, so
    reduced motion must not zero it. */
 :root { --duration-double-click: 500ms; }
+
+/* How long a key pick waits before the Agents pane shows its agent (S-3088), so holding an arrow key
+   doesn't fetch each agent it passes. A threshold, not motion, so reduced motion must not zero it. */
+:root { --duration-pick-wait: 150ms; }
 
 /* How long a tool call waits for its summary before it shows raw (S-1481): read by
    web/src/mail/tool-summaries.ts. A threshold, not motion, so reduced motion must not zero it. */

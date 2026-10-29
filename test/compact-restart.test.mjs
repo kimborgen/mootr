@@ -9,6 +9,7 @@
 // relaunched. Runs against a throwaway STAM_HOME and tmux
 // socket with a fake harness; no daemon, no network, no models: `node --test test/compact-restart.test.mjs`.
 import { test, before, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
@@ -21,7 +22,7 @@ const socket = `compact-restart-test-${process.pid}`;
 process.env.STAM_HOME = home;
 process.env.STAM_TMUX_SOCKET = socket;
 // The private tmux server goes with the process on every exit, even when after() never runs (a signal, a crash).
-process.on('exit', () => spawnSync('tmux', ['-L', socket, 'kill-server']));
+process.on('exit', () => killTmuxServer(socket));
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => process.exit(130));
 for (const k of ['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT', 'STAM_COMPACTOR']) delete process.env[k];
 writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [] }));
@@ -73,7 +74,7 @@ before(async () => {
 });
 after(() => {
   for (const c of children) c.kill('SIGKILL');
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 

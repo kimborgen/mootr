@@ -106,7 +106,7 @@ export async function retroParent(api: Api, by: string): Promise<any> {
 
 // The reporter as the body names it: `NAME (model, type)`, the parts it has.
 async function reporterOf(api: Api, by: string): Promise<{ name: string; label: string }> {
-  const agent = (await api('GET', `/api/agents?as=${encodeURIComponent(by)}`)).find((a: any) => a.id === by);
+  const agent = (await api('GET', `/api/agents?${new URLSearchParams({ as: by, ids: by })}`)).find((a: any) => a.id === by);
   const name = agent?.name ?? by;
   const extra = [agent?.model, agent?.type].filter(Boolean).join(', ');
   return { name, label: extra ? `${name} (${extra})` : name };

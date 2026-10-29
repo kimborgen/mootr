@@ -25,13 +25,32 @@
 # Harness logins stay the user's own (~/.claude, ~/.codex); only stam's state is private.
 # STAM_TEST_ROOT overrides the repo root, for a script sourcing this from elsewhere.
 # STAM_DAEMON=go runs the Go daemon (S-2194) instead of the TypeScript one: daemon_up starts go/bin/stamd
-# (built by go/build.sh when missing) and $STAM is go/bin/stam. Everything else here is unchanged. Go builds
+# (rebuilt by go/build.sh as the test starts, S-4076) and $STAM is go/bin/stam. Everything else here is unchanged. Go builds
 # run on storage only, so scripts/go-parity.mjs and the go-e2e gate set it there.
 
 ROOT="${STAM_TEST_ROOT:-$(dirname "$(readlink -f "$0")")/..}"
 STAM="$ROOT/bin/stam"
-[ "$STAM_DAEMON" = go ] && STAM="$ROOT/go/bin/stam"
+# go_build: runs go/build.sh as the test starts, so it tests the current go/ sources, not a stale binary (S-4076).
+# Go's build cache makes a no-change build take about a second. A failed build fails the run; it never falls back to
+# the old binary. A machine without Go keeps using the existing binaries, and says so.
+go_build() {
+  if command -v go >/dev/null 2>&1 || [ -x "$HOME/.local/go/bin/go" ]; then
+    sh "$ROOT/go/build.sh" >&2 || { echo "FAIL: go/build.sh failed"; exit 1; }
+  elif [ -x "$ROOT/go/bin/stamd" ] && [ -x "$ROOT/go/bin/stam" ]; then
+    echo "note: no Go toolchain here; testing the existing go/bin/stamd, which may not match the go/ sources" >&2
+  else
+    echo "FAIL: no Go toolchain to build go/bin/stamd (go on PATH or ~/.local/go/bin/go)"
+    exit 1
+  fi
+}
+
+if [ "$STAM_DAEMON" = go ]; then
+  STAM="$ROOT/go/bin/stam"
+  go_build
+fi
 LIVE_HOME="$HOME/.local/share/stam"
+# The renamed home (S-3347): after the move stam is a symlink to it, so a test refuses both.
+LIVE_HOME_MOOTR="$HOME/.local/share/mootr"
 
 # Who runs the test, read before the environment is cleaned below: a stam agent's id, or
 # "user". It goes into the folder and tmux socket names and an owner file, so agents
@@ -45,8 +64,21 @@ unset STAM_AGENT_ID STAM_AGENT_NAME STAM_URL STAM_TOKEN STAM_USER_STATUSLINE STA
   STAM_TMUX_SOCKET STAM_MACHINE STAM_BIND STAM_OPENCODE_PORT STAM_AGENTS_SKILLS STAM_CLAUDE_BIN STAM_CODEX_BIN STAM_FAKE_CLAUDE_SCRIPT TMUX TMUX_PANE CLAUDECODE CLAUDE_PID CLAUDE_EFFORT \
   OPENROUTER_API_KEY
 # The MOOTR_ names a stam agent's environment carries (S-2889) would win over the STAM_ overrides above and below, so no
-# test inherits one: every test runs its CLI and daemons on STAM_ names only.
+# test inherits one: the loop drops them, and every override below sets both names (S-3141), so a reader that prefers
+# MOOTR_ sees the same value as one that reads STAM_.
 for v in $(env | sed -n 's/^\(MOOTR_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
+
+# env_pair NAME VALUE: the words `STAM_NAME=VALUE MOOTR_NAME=VALUE`, for an `export` line or an `env` command, so a test
+# override never leaves one name to be shadowed by the other. VALUE is passed on as written, quotes included.
+env_pair() { printf 'STAM_%s=%s MOOTR_%s=%s' "$1" "$2" "$1" "$2"; }
+
+# twin_env NAME...: exports MOOTR_NAME from the STAM_NAME already set in this shell (for each NAME that is set), for a
+# script that assigns a STAM_ name itself after sourcing this file.
+twin_env() {
+  for _n in "$@"; do
+    eval "[ -z \"\${STAM_$_n+x}\" ] || export MOOTR_$_n=\"\$STAM_$_n\""
+  done
+}
 # Search by meaning uses the scripted stub embedder in every test daemon (S-141): no model.
 export STAM_EMBEDDER=stub
 # Enables the test-only cost routes of POST /api/test/cost (src/daemon.ts); only this file sets it.
@@ -67,6 +99,20 @@ export STAM_ASSISTANT_AUTOSTART="${STAM_ASSISTANT_AUTOSTART:-0}"
 # Codex agents run the scripted fake (test/fake-codex) the same way (S-184), so no FREE test reaches
 # the real codex, even one that starts a daemon by hand.
 [ -n "$STAM_TEST_SMOKE" ] || export STAM_CODEX_BIN="$ROOT/test/fake-codex/codex"
+# Every daemon starts stam's own OpenCode server at boot, so the server and its agents run the scripted fake
+# (test/fake-opencode) too (S-4237, S-107), unless this is a smoke test or the test names a binary of its own (/bin/false,
+# say). Only the STAM_ name: the MOOTR_ ones are unset above, and a test that sets STAM_OPENCODE_BIN later still wins.
+[ -n "$STAM_TEST_SMOKE" ] || export STAM_OPENCODE_BIN="${STAM_OPENCODE_BIN:-$ROOT/test/fake-opencode/opencode}"
+# A caller's value is judged now, before anything starts, and again by daemon_up and go_daemon_up, so a test that sets it
+# later can't slip the real binary past (test/opencode-guard.sh).
+. "$ROOT/test/opencode-guard.sh"
+opencode_bin_guard || exit 1
+# Every "$STAM" call is judged too, against the value it runs with (test/stam-guarded), so a test that changes or unsets
+# STAM_OPENCODE_BIN and then runs `"$STAM" daemon start` itself is refused or gets the fake.
+if [ -z "$STAM_TEST_SMOKE" ]; then
+  export STAM_GUARDED_CLI="$STAM"
+  STAM="$ROOT/test/stam-guarded"
+fi
 for v in $(env | sed -n 's/^\(CLAUDE_CODE_[A-Z0-9_]*\)=.*/\1/p'); do
   case "$v" in CLAUDE_CODE_OAUTH_TOKEN | CLAUDE_CODE_USE_*) ;; *) unset "$v" ;; esac
 done
@@ -113,7 +159,7 @@ daemon_home() {
   _o=$(free_port)
   while [ "$_o" = "$_p" ]; do _o=$(free_port); done
   cat >"$_h/test.env" <<EOF
-export STAM_HOME='$_h' STAM_PORT=$_p STAM_URL=http://127.0.0.1:$_p STAM_TMUX_SOCKET=stam-test-$STAM_TEST_OWNER-${TEST_TMP##*.}-$1 STAM_MACHINE=$1 STAM_BIND=127.0.0.1 STAM_OPENCODE_PORT=$_o STAM_AGENTS_SKILLS='$_h/agents-skills'
+export $(env_pair HOME "'$_h'") $(env_pair PORT "$_p") $(env_pair URL "http://127.0.0.1:$_p") $(env_pair TMUX_SOCKET "stam-test-$STAM_TEST_OWNER-${TEST_TMP##*.}-$1") $(env_pair MACHINE "$1") $(env_pair BIND 127.0.0.1) $(env_pair OPENCODE_PORT "$_o") $(env_pair AGENTS_SKILLS "'$_h/agents-skills'")
 EOF
   printf '{ "peers": [] }\n' >"$_h/settings.json"
   # The token exists before the daemon starts, so peers can be wired up front.
@@ -147,7 +193,8 @@ stub_key() {
 
 use() {
   . "$TEST_TMP/$1/test.env"
-  case "$STAM_HOME" in "$LIVE_HOME" | "$LIVE_HOME"/) echo "FAIL: refusing to use the live home" >&2; exit 1 ;; esac
+  twin_env HOME PORT URL TMUX_SOCKET MACHINE BIND OPENCODE_PORT AGENTS_SKILLS TOKEN
+  case "$STAM_HOME" in "$LIVE_HOME" | "$LIVE_HOME"/ | "$LIVE_HOME_MOOTR" | "$LIVE_HOME_MOOTR"/) echo "FAIL: refusing to use the live home" >&2; exit 1 ;; esac
 }
 
 on() {
@@ -159,12 +206,16 @@ on() {
 # go_daemon_up NAME: starts go/bin/stamd in NAME's environment and waits until /api/health names it. The pid
 # file is what cleanup and daemon_stop use, as for the TypeScript daemon.
 go_daemon_up() {
-  { [ -x "$ROOT/go/bin/stamd" ] && [ -x "$ROOT/go/bin/stam" ]; } || sh "$ROOT/go/build.sh" >&2 || { echo "FAIL: go/build.sh failed"; exit 1; }
+  # Its own check too, for a caller that starts the Go daemon without daemon_up: the Go daemon starts OpenCode at boot.
+  opencode_bin_guard || { echo "FAIL: go daemon $1 not started"; exit 1; }
   (
     use "$1"
+    # Go's BinPath takes MOOTR_OPENCODE_BIN before the STAM_ name the guard judged: it goes.
+    unset MOOTR_OPENCODE_BIN
     # The Go daemon opens an existing stam.db and doesn't create the schema: make it with the TS schema first (S-2297).
     node --no-warnings "$ROOT/test/go-seed-db.mjs" || { echo "FAIL: go-seed-db.mjs didn't create the db"; exit 1; }
-    setsid "$ROOT/go/bin/stamd" </dev/null >"$STAM_HOME/daemon.log" 2>&1 &
+    # Appended to, as `stam daemon start` opens it (src/cli.ts): a restart keeps the earlier lines.
+    setsid "$ROOT/go/bin/stamd" </dev/null >>"$STAM_HOME/daemon.log" 2>&1 &
     echo $! >"$STAM_HOME/daemon.pid"
   )
   for _i in $(seq 1 50); do
@@ -187,6 +238,8 @@ daemon_up() {
     echo "FAIL: daemon $1 would run the real codex ($STAM_CODEX_BIN); only --smoke tests may"
     exit 1
   fi
+  # And for OpenCode (S-4237): the real binary only in a smoke test, however it is spelled.
+  opencode_bin_guard || { echo "FAIL: daemon $1 not started"; exit 1; }
   python3 "$ROOT/test/wire-peer-tokens.py" "$TEST_TMP" "$1" || true
   if [ "$STAM_DAEMON" = go ]; then go_daemon_up "$1"; return; fi
   on "$1" "$STAM" daemon start >/dev/null || { echo "FAIL: daemon $1 didn't start; see $TEST_TMP/$1/daemon.log"; exit 1; }
@@ -207,6 +260,11 @@ wait_until() {
   echo "FAIL: timed out waiting for: $*"
   exit 1
 }
+
+# poll SECONDS CMD...: like wait_until, but returns 1 after SECONDS instead of failing, so the test prints its own FAIL
+# line. Bounded by time, not by a count of tries: the Go CLI answers in a few ms where the TS one took about 180 ms, so
+# a count ran out before a 5 s reconcile tick on Go (S-4079, S-4083). Size SECONDS to the slowest state it waits for.
+poll() { _end=$(($(date +%s) + $1)); shift; while :; do "$@" && return 0; [ "$(date +%s)" -lt "$_end" ] || return 1; sleep 0.2; done; }
 
 # transcript_said FILE PATTERN: the assistant's text in the JSONL transcript FILE holds PATTERN (grep syntax). Only
 # assistant text blocks count, so a prompt or a tool result that holds PATTERN doesn't match.
@@ -327,7 +385,10 @@ stam_test_cleanup() {
         sleep 0.2
       done
       [ -n "$dpid" ] && kill -s KILL "$dpid" 2>/dev/null
-      rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$STAM_TMUX_SOCKET"
+      # The file goes only once the server is down: kill-server worked, or tmux says no server runs.
+      if tmux -L "$STAM_TMUX_SOCKET" kill-server 2>/dev/null || timeout 5 tmux -L "$STAM_TMUX_SOCKET" ls 2>&1 | grep -q "no server running"; then
+        rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$STAM_TMUX_SOCKET"
+      fi
     )
   done
   [ -n "$KEEP" ] && { echo "kept $TEST_TMP (daemons still running)"; return; }

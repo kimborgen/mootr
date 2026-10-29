@@ -153,7 +153,9 @@ func (s *Set) BlocksText(name string) (string, error) {
 type TypeBlocks struct {
 	Off     []string
 	Replace map[string]string
-	Order   []string
+	// ReplaceOrder is Replace's keys in the registry's order (Object.entries').
+	ReplaceOrder []string
+	Order        []string
 }
 
 // NormalizeTypeBlocks cleans a type's `blocks` as the registry holds it (an agent can hand-edit it) to the valid shape,
@@ -200,6 +202,7 @@ func NormalizeTypeBlocks(raw jsjson.Value) (TypeBlocks, []string) {
 						tb.Replace = map[string]string{}
 					}
 					tb.Replace[k] = p
+					tb.ReplaceOrder = append(tb.ReplaceOrder, k)
 				}
 			}
 			if len(tb.Replace) != o.Len() {
@@ -233,9 +236,9 @@ func (tb TypeBlocks) composes() bool {
 	return len(tb.Off) > 0 || len(tb.Replace) > 0 || len(tb.Order) > 0
 }
 
-// usableReplacement is the replacement block at path, which must be a block file inside blocks/ once symlinks are
+// UsableReplacement is the replacement block at path, which must be a block file inside blocks/ once symlinks are
 // resolved (the registry is editable by agents, so a path is never trusted); false when it can't be used.
-func (s *Set) usableReplacement(path string) (Block, bool) {
+func (s *Set) UsableReplacement(path string) (Block, bool) {
 	base, err := filepath.EvalSymlinks(filepath.Join(s.Root, "blocks"))
 	if err != nil {
 		return Block{}, false
@@ -287,7 +290,7 @@ func (s *Set) ComposedBlocks(name string, raw jsjson.Value) ([]Block, error) {
 			continue
 		}
 		if p := tb.Replace[b.ID]; p != "" {
-			if r, ok := s.usableReplacement(p); ok {
+			if r, ok := s.UsableReplacement(p); ok {
 				b.Body = r.Body
 			}
 		}

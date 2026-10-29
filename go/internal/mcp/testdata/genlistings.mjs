@@ -1,23 +1,41 @@
-// Writes go/internal/mcp/listings_mail.go or listings_itsa.go: the tools/list entries of the mail or ITSA tools, as src/mcp.ts's JSON.stringify writes
+// Writes go/internal/mcp/listings_mail.go, listings_itsa.go, listings_config.go, listings_cost.go, listings_agents.go, listings_retro.go, listings_reqring.go or listings_layout.go: the tools/list entries of the mail, ITSA, config, cost, agent or layout tools, as src/mcp.ts's JSON.stringify writes
 // them (S-2824). Run it when src/mcp.ts changes one of them; mcp_test.go and mail_test.go compare the bytes.
 //
 //   node go/internal/mcp/testdata/genlistings.mjs > go/internal/mcp/listings_mail.go && gofmt -w go/internal/mcp/listings_mail.go
 import { spawn } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const root = resolve(new URL('../../../../', import.meta.url).pathname);
-// `node genlistings.mjs` writes listings_mail.go, `node genlistings.mjs itsa` listings_itsa.go.
+// `node genlistings.mjs` writes listings_mail.go, `node genlistings.mjs itsa` listings_itsa.go, `node genlistings.mjs config`
+// listings_config.go, `node genlistings.mjs cost` listings_cost.go, `node genlistings.mjs agents` listings_agents.go,
+// `node genlistings.mjs retro` listings_retro.go, `node genlistings.mjs reqring` listings_reqring.go, `node genlistings.mjs layout`
+// listings_layout.go, `node genlistings.mjs events` listings_events.go.
 const group = process.argv[2] ?? 'mail';
 const groups = {
-  mail: { names: ['read_mail', 'list_inbox', 'read_thread', 'send_mail'], what: 'mail', varName: 'mailListings' },
+  mail: { names: ['read_mail', 'list_inbox', 'read_thread', 'send_mail', 'mail_attach', 'withdraw_ask', 'defer_thread', 'search_mail', 'search'], what: 'mail', varName: 'mailListings' },
   itsa: { names: ['itsa_create', 'itsa_get', 'itsa_list', 'itsa_set', 'itsa_fields', 'itsa_link', 'itsa_post'], what: 'ITSA', varName: 'itsaListings' },
+  config: { names: ['settings_ask'], what: 'config', varName: 'configListings' },
+  cost: { names: ['usage_info', 'cost_allocate', 'cost_ack', 'cost_switch', 'cost_pause'], what: 'cost', varName: 'costListings' },
+  agents: { names: ['workspace_share', 'find_agents', 'registry_info', 'spawn_agent', 'agent_control', 'compact_self', 'reconnect_mcp'], what: 'agent', varName: 'agentListings' },
+  retro: { names: ['feedback', 'retro'], what: 'retro and feedback', varName: 'retroListings' },
+  reqring: {
+    names: ['request_permission', 'suggest_input', 'answer_permission', 'ring_create', 'ring_submit', 'ring_decide', 'wait_for', 'wait_done', 'wake_me', 'req_create', 'req_get', 'req_set', 'req_check', 'req_waive'],
+    what: 'permission, ring, wait and requirement',
+    varName: 'reqringListings',
+  },
+  layout: { names: ['layout_get', 'layout_arrange'], what: 'layout', varName: 'layoutListings' },
+  events: { names: ['subscribe', 'unsubscribe', 'list_subscriptions'], what: 'event subscription', varName: 'eventsListings' },
 };
 const { names, what, varName } = groups[group];
 const home = mkdtempSync(join(tmpdir(), 'stam-genlistings-'));
+// The requirement tools are listed only while the daemon says requirements are on: a stub says so.
+const daemon = createServer((req, res) => res.end(req.url === '/api/req-enabled' ? '{"enabled":true}' : '{}'));
+await new Promise((ok) => daemon.listen(0, '127.0.0.1', ok));
 const child = spawn('node', ['--no-warnings', join(root, 'src', 'cli.ts'), 'mcp'], {
-  env: { PATH: process.env.PATH, HOME: process.env.HOME, STAM_HOME: home, STAM_URL: 'http://127.0.0.1:1', STAM_TOKEN: 'x', STAM_ROOT: root, STAM_AGENT_ID: 'a1' },
+  env: { PATH: process.env.PATH, HOME: process.env.HOME, STAM_HOME: home, STAM_URL: `http://127.0.0.1:${daemon.address().port}`, STAM_TOKEN: 'x', STAM_ROOT: root, STAM_AGENT_ID: 'a1' },
   stdio: ['pipe', 'pipe', 'inherit'],
 });
 let buf = '';

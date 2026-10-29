@@ -1,0 +1,2 @@
+import { run } from 'node:child_process';
+run('sh', ['lib.sh']);

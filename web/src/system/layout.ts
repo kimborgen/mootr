@@ -5,6 +5,7 @@
 // walks the tree; the placement is our own, since that leaf column isn't one of d3's layouts.
 import { stratify, type HierarchyNode } from 'd3-hierarchy'
 import type { Bez } from './flights'
+import type { CardLayout } from '../card-layout'
 
 // One card: its id and its parent's (null for the root). Children keep the order given. `cost`,
 // its spend in dollars, sizes its orb in Stars mode (stars.ts).
@@ -319,3 +320,27 @@ export function descendants(nodes: TreeIn[], id: string): string[] {
   walk(id)
   return out
 }
+
+// The agent card's height (S-1438 PR 4, PR 8). Its rows are the ISSUE row (`issueRows` nested rows tall), then BADGES and FOOT,
+// one row each when the layout places an item there (`badgeRows`, `footRows`: 0 or 1). `base` is today's card, 96 px (--sv-card-h),
+// whose rows are HEAD's, one ISSUE row, BADGES and FOOT, so the default layout gives `base`, and each row the layout leaves out
+// takes it off. Pure, and worked out once per layout, never per card.
+export function agentCardHeight(base: number, row: number, issueRows: number, badgeRows = 1, footRows = 1): number {
+  return base - 3 * row + row * (issueRows + badgeRows + footRows)
+}
+
+// The nested rows an agent card's ISSUE slot holds: the status, key and title row, then one each for the
+// issue layout's BADGES and FOOT when it puts items there. 0 when the agent layout leaves ISSUE out.
+// A nested row counts only when it draws something: its owner is the agent card's own, and a BADGES item the agent
+// card's BADGES already draws is left out of the nested card, so neither makes a row (S-3179 review).
+export function nestedRows(issue: CardLayout, agent: CardLayout): number {
+  if (!(agent.slots.ISSUE ?? []).includes('issue')) return 0
+  const onAgent = agent.slots.BADGES ?? []
+  const badges = (issue.slots.BADGES ?? []).filter((id) => id !== 'owner' && !onAgent.includes(id))
+  const foot = (issue.slots.FOOT ?? []).filter((id) => id !== 'owner')
+  return 1 + (badges.length ? 1 : 0) + (foot.length ? 1 : 0)
+}
+
+// The rows an agent layout's BADGES and FOOT take on the card: 1 when the layout places an item there, else 0.
+export const agentBadgeRows = (agent: CardLayout): number => ((agent.slots.BADGES ?? []).length ? 1 : 0)
+export const agentFootRows = (agent: CardLayout): number => ((agent.slots.FOOT ?? []).length ? 1 : 0)

@@ -35,8 +35,11 @@ type live struct {
 	db   *db.DB
 	tmux *tmux.Client
 	life *Lifecycle
-	opts Options
-	work string
+	// restarted holds the lifecycles restart made after life (costswitch_run_test.go); restartedMu guards it.
+	restarted   []*Lifecycle
+	restartedMu sync.Mutex
+	opts        Options
+	work        string
 	// base is the test's folder: the fake's compaction log (compacts) and its hold and fail flags live there.
 	base, home string
 	logs       *bytes.Buffer
@@ -45,24 +48,53 @@ type live struct {
 	// netGate, while set, holds every network probe until it is closed (holdNetwork).
 	netMu   sync.Mutex
 	netGate chan struct{}
+	// costs records cost notices' mail, once newCostLive set it.
+	costs *costBox
 }
 
 // fakeClaude is a Claude Code that draws its ready screen and an empty input box and waits; run headless (-p), as a
-// compaction runs it, it logs STAM_COMPACTOR, STAM_AGENT_ID and its stdin to BASE/compacts, waits while BASE/hold
-// exists, and fails when BASE/fail does.
+// compaction runs it, it logs STAM_COMPACTOR, STAM_AGENT_ID and its stdin to BASE/compacts, its MOOTR_AGENT_ID, STAM_AGENT_NAME
+// and STAM_TOKEN to BASE/compact-env, waits while BASE/hold exists, and fails when BASE/fail does. Interactive, it waits to
+// draw while BASE/hold-box exists. It takes a typed prompt as Claude Code does: a bracketed paste shows in the box, a
+// backspace deletes one character, and Enter submits it (one JSON string per line in BASE/typed) and empties the box.
+// It sends no UserPromptSubmit hook: no daemon listens here, so a test moves the agent off starting itself and marks its
+// first prompt taken (firstPromptHook, playPromptHooks in costswitch_run_test.go). Interactive, it
+// exits at once when BASE/exit-ID exists for its agent.
 const fakeClaude = `#!/bin/sh
 dir=BASE
 for a in "$@"; do [ "$a" = -p ] && headless=1; done
 if [ -n "$headless" ]; then
   input=$(cat)
   printf '%s|%s|%s\n' "$STAM_COMPACTOR" "$STAM_AGENT_ID" "$input" >>"$dir/compacts"
+  printf '%s|%s|%s\n' "${MOOTR_AGENT_ID-unset}" "${STAM_AGENT_NAME-unset}" "${STAM_TOKEN-unset}" >"$dir/compact-env"
   while [ -e "$dir/hold" ]; do sleep 0.05; done
   if [ -e "$dir/fail" ]; then echo "fake compaction failed" >&2; exit 1; fi
   echo '{"type":"result"}'
   exit 0
 fi
-printf '? for shortcuts\n\342\235\257 \n'
-exec sleep 600
+[ -e "$dir/exit-$STAM_AGENT_ID" ] && exit 3
+while [ -e "$dir/hold-box" ]; do sleep 0.05; done
+exec node -e '
+var fs = require("fs"), dir = process.argv[1], buf = "", pasting = false;
+function draw() { process.stdout.write("\x1b[H\x1b[2J? for shortcuts\r\n❯ " + buf.replace(/\n/g, " ")); }
+process.stdout.write("\x1b[?2004h");
+process.stdin.setRawMode(true);
+process.stdin.on("data", function (d) {
+  d.toString().split(/(\x1b\[20[01]~)/).forEach(function (part) {
+    if (part === "\x1b[200~") { pasting = true; return; }
+    if (part === "\x1b[201~") { pasting = false; return; }
+    for (var c of part) {
+      if (pasting) buf += c === "\r" ? "\n" : c;
+      else if (c === "\r") { if (buf.trim() !== "") fs.appendFileSync(dir + "/typed", JSON.stringify(buf) + "\n"); buf = ""; }
+      else if (c === "\x7f") buf = buf.slice(0, -1);
+      else if (c >= " ") buf += c;
+    }
+  });
+  draw();
+});
+draw();
+setTimeout(function () {}, 600000);
+' "$dir"
 `
 
 func newLive(t *testing.T) *live {
@@ -387,4 +419,84 @@ func TestReconcileSkipsAFailedSnapshot(t *testing.T) {
 	if got := l.agent("alfe4"); got.Lifecycle != "active" {
 		t.Errorf("a nil snapshot shut the agent down: %s %q", got.Lifecycle, detailOf(got))
 	}
+}
+
+// TestLiveSessionGoBin checks a spawn's pane gets the Go bin dir first on its shell's PATH (S-3666; launchAt passes the argv
+// through adapters.GoBinArgv), keeping every dir the shell's startup adds and every dir the inherited PATH has. The pane's shell
+// is a fake that adds a marker dir, as a user's .zshenv does, and the test's PATH has no Go dir, so a launch that replaced the
+// PATH, or didn't wrap the argv, fails it.
+func TestLiveSessionGoBin(t *testing.T) {
+	user := t.TempDir()
+	bin := filepath.Join(user, ".local", "go", "bin")
+	opencodeBin := filepath.Join(user, ".opencode", "bin")
+	marker := t.TempDir()
+	for _, d := range []string{bin, opencodeBin} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l := newLive(t) // its fixture needs node on the test's PATH, so the PATH is set after it
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("no node")
+	}
+	// The fake harness runs under node, so node's dir stays on the PATH the test gives.
+	inherited := strings.Join([]string{opencodeBin, "/usr/local/sbin", "/usr/sbin", "/sbin", "/usr/bin", "/bin", filepath.Dir(node)}, ":")
+	shell := filepath.Join(user, "startup-shell")
+	if err := os.WriteFile(shell, []byte("#!/bin/sh\nPATH=\""+marker+":$PATH\"\nexport PATH\nexec /bin/sh \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", user)
+	t.Setenv("PATH", inherited)
+	t.Setenv("SHELL", shell)
+	l.spawn("gobin1")
+	if path, want := harnessPath(t, l, "gobin1", "node"), bin+":"+marker+":"+inherited; path != want {
+		t.Fatalf("harness PATH %q, want %q", path, want)
+	}
+}
+
+// harnessPath is the PATH the pane's harness started with (S-3666): the deepest process under the pane's shell, once its
+// executable is exe. The shell and the argv wrapper run before it, and the shell's own environ is not the harness's.
+func harnessPath(t *testing.T, l *live, session, exe string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		leaf := strings.TrimSpace(l.tmux.Run(l.ctx, nil, "display-message", "-p", "-t", "="+session+":", "#{pane_pid}").Stdout)
+		for kids := childrenOf(leaf); len(kids) > 0; kids = childrenOf(leaf) {
+			leaf = kids[0]
+		}
+		if link, err := os.Readlink("/proc/" + leaf + "/exe"); err == nil && filepath.Base(link) == exe {
+			environ, err := os.ReadFile("/proc/" + leaf + "/environ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, kv := range strings.Split(string(environ), "\x00") {
+				if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+					return v
+				}
+			}
+			return ""
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %s process under the %s pane", exe, session)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// childrenOf is the pids whose parent is pid, from /proc.
+func childrenOf(pid string) []string {
+	entries, _ := os.ReadDir("/proc")
+	var kids []string
+	for _, e := range entries {
+		stat, err := os.ReadFile(filepath.Join("/proc", e.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		fields := strings.Fields(string(stat[strings.LastIndex(string(stat), ")")+1:]))
+		if len(fields) > 1 && fields[1] == pid {
+			kids = append(kids, e.Name())
+		}
+	}
+	return kids
 }

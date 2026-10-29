@@ -1,23 +1,41 @@
-// One card on the system view (S-458): an agent as an instrument tile. Row 1 is its mark, name,
-// model, and cost (its own; its tree's on hover); row 2 the ITSA it owns; row 3 that ITSA's Work
-// columns as badges; row 4 what it is doing. A hairline context bar runs along its foot, unread
-// mail stacks against its top-right corner, and a manager has a fold control. Memoised by a
-// signature of what it shows, so a poll that changes one agent redraws one card.
+// One card on the system view (S-458): an agent as an instrument tile, drawn from the agent card
+// layout (S-1438). Row 1 is its mark, name, model, and cost (its own; its tree's on hover); row 2 the
+// ITSA it owns, as the shared IssueCard nested (S-1438 PR 4); row 3 the badges the agent layout
+// places there; row 4 what it is doing. A hairline context bar runs along its foot, unread mail
+// stacks against its top-right corner, and a manager has a fold control. Memoised by a signature of
+// what it shows, so a poll that changes one agent redraws one card.
 // Its motion (S-463): Motion places it by one transform string, so a layout change glides it to
 // its new place (FLIP), a spawn grows out of its parent and an archive shrinks back into it; a
 // status change stamps the ITSA's mark and washes its row; its cost rolls, with a "+$" rising.
-import { memo, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { animate, motion, useIsPresent } from 'motion/react'
 import { costShort, costTitle, model, stateLabel } from '../format'
 import { Glyph, PlainGlyph } from '../Glyph'
 import { Icon } from '../Icon'
 import { isClosed, StatusGlyph, statusLabel } from '../itsa/itsa'
+import { IssueCard, type IssueCardActions, type IssueCardState } from '../itsa/IssueCard'
+import { defaultCardLayout, type CardLayout } from '../card-layout'
+import type { Field } from '../itsa/fields'
 import { FieldValue } from '../work/field-columns'
+import type { CardItem } from '../work/card-items'
+import type { CellContext } from '../work/columns'
+import type { WorkExtras } from '../work/data'
+import { activityOf as itsaActivityOf, costOf, linkKind } from '../work/links'
 import { waitLabel, waitsOf } from '../waits'
 import type { Agent, Itsa } from '../types'
 import type { Badge } from './model'
 import { Rise, Roll, useTiming } from './Roll'
 import { type Bezier, cardTransform, spring, SPRINGS, tween } from './springs'
+
+// What the cards draw their layouts with, given by the view: the agent and issue card layouts, and the
+// items, fields and context the nested issue card draws from. Without a view a card takes the defaults.
+// The context holds only what changes when a layout or a field does, so a poll that brings new data leaves its value
+// as it was and re-renders no card. The per-card data (cx) rides on each card's model, with its cxSig in the card's sig.
+export interface CardLayouts { agent: CardLayout; issue: CardLayout; items: Map<string, CardItem>; fields: Field[] }
+const DEFAULT_LAYOUTS: CardLayouts = { agent: defaultCardLayout('agent'), issue: defaultCardLayout('issue'), items: new Map(), fields: [] }
+export const CardLayoutsContext = createContext<CardLayouts>(DEFAULT_LAYOUTS)
+// The nested issue card takes no gestures of its own: the agent card's click opens the ITSA.
+const NO_ACTIONS: IssueCardActions = { onOpen: () => {}, onPointerDown: () => {}, onKeyDown: () => {}, onMenu: () => {} }
 
 // The card's own facts, built per render by the view; `sig` is them as a string for memo.
 export interface CardModel {
@@ -32,6 +50,10 @@ export interface CardModel {
   it: Itsa | null
   owns: number
   badges: Badge[]
+  // The cell context the nested issue card's items draw from, and its signature: the ITSA's own cost, activity and
+  // (for a GitHub link) watch state. A card re-renders only when this changes, not on every poll.
+  cx: CellContext
+  cxSig: string
   unread: number
   ctx: number
   ctxLevel: number
@@ -64,7 +86,13 @@ export function activityOf(a: Agent): string {
 }
 
 // Everything a card draws, so the memo (SystemCard) redraws it exactly when one changes.
-export const cardSig = (m: CardModel) => JSON.stringify([m.short, m.agent, m.activity, m.it, m.owns, m.badges.map((b) => (b.kind === 'word' ? [b.id, b.word, b.tone, b.title] : [b.id, b.f, b.v])), m.unread, m.ctx, m.ctxLevel, m.kids, m.folded, m.hit, m.rollup])
+export const cardSig = (m: CardModel) => JSON.stringify([m.short, m.agent, m.activity, m.it, m.owns, m.badges.map((b) => (b.kind === 'word' ? [b.id, b.word, b.tone, b.title] : [b.id, b.f, b.v])), m.cxSig, m.unread, m.ctx, m.ctxLevel, m.kids, m.folded, m.hit, m.rollup])
+
+// The signature of the data a nested issue card's items can draw from (the ITSA's cost, activity and, for a GitHub
+// link, watch state): so a poll that changes another ITSA's data leaves this card's sig, and its render, as they were.
+export const issueCxSig = (it: Itsa | null, extras: WorkExtras): string => (it
+  ? JSON.stringify([costOf(extras.costs, it.key), itsaActivityOf(extras.activity, it.key), it.links?.some((l) => linkKind(l) === 'github') ? extras.watch : null])
+  : '')
 
 // The agent's own cost in its cost mode: in dollars the live stream's cost_usd, which an
 // agent.changed event carries between polls, else the poll's.
@@ -108,6 +136,7 @@ interface Props { m: CardModel; sig: string; place: CardPlace; selected: boolean
 function Card({ m, place, selected, enter, jump, far }: Props) {
   const a = m.agent
   const human = !a
+  const L = useContext(CardLayoutsContext)
   const { slow, ease } = useTiming()
   // Exiting, under AnimatePresence: it stays drawn while it shrinks away, but is no longer a card.
   const leaving = !useIsPresent()
@@ -154,32 +183,31 @@ function Card({ m, place, selected, enter, jump, far }: Props) {
         {far ? null : a ? <Glyph agent={a} /> : <PlainGlyph name="user" />}
         <button type="button" className="sv-nm" data-open tabIndex={leaving ? -1 : 0} aria-pressed={selected} aria-label={`${name}: details`} title={name}>
           <span className="full">{name}</span><span className="short" aria-hidden="true">{m.short}</span></button>
-        {a && !far ? <span className="sv-mdl" title={a.model ?? 'default model'}>{model(a).label.split(' ')[0]}</span> : null}
-        {a?.cost && !far ? <span className={'sv-cost' + (m.kids ? ' has-tree' : '')} title={costTitle(a.cost, m.kids > 0)}>
-          {own == null ? <span className="own">{costShort(null, mode)}</span> : <Roll className="own" value={own} fmt={fmtCost} />}
-          {m.kids ? <span className="tree">tree {costShort(a.cost.tree[mode], mode)}</span> : null}
-          {dollars ? <Rise value={own} fmt={fmtCost} /> : null}
-        </span> : null}
+        {a && !far ? (L.agent.slots.HEAD ?? []).map((id) => id === 'model'
+          ? <span key={id} className="sv-mdl" title={a.model ?? 'default model'}>{model(a).label.split(' ')[0]}</span>
+          : id === 'cost' ? a.cost ? <span key={id} className={'sv-cost' + (m.kids ? ' has-tree' : '')} title={costTitle(a.cost, m.kids > 0)}>
+            {own == null ? <span className="own">{costShort(null, mode)}</span> : <Roll className="own" value={own} fmt={fmtCost} />}
+            {m.kids ? <span className="tree">tree {costShort(a.cost.tree[mode], mode)}</span> : null}
+            {dollars ? <Rise value={own} fmt={fmtCost} /> : null}
+          </span> : null
+          : registryNode(L, id, 'inline', m)) : null}
       </div>
-      {far ? null : <div className="sv-r2">
+      {far || !shows(L.agent, 'ISSUE', 'issue') ? null : <div className="sv-r2">
         {/* The wash after a stamp: the accent's subtle fill, fading out by opacity alone. */}
         {st.n ? <span key={'w' + st.n} className={'sv-wash' + (m.it && isClosed(m.it) ? ' done' : '')} aria-hidden="true" /> : null}
-        {m.it ? <>
-          <motion.span key={st.n} className="sv-stamp" initial={st.n ? { transform: STAMP_FROM } : false} animate={{ transform: STAMP_TO }} transition={spring(SPRINGS.stamp, slow)}>
-            <StatusGlyph status={m.it.status} title={statusLabel(m.it.status)} /></motion.span>
-          <span className="sv-key">{m.it.key}</span><span className="sv-tt">{m.it.title}</span>
-          {m.rollup ? <span ref={rollEl} className="sv-rollup" title={`${m.rollup.done} of ${m.rollup.total} child ITSAs done`}>
-            <Roll value={m.rollup.done} fmt={whole} />/{m.rollup.total}</span> : null}
-          {m.owns > 1 ? <span className="sv-more" title={`Owns ${m.owns} open ITSAs`}>+{m.owns - 1}</span> : null}
-        </> : <span className="sv-tt muted">{human ? 'Asks and results arrive here' : 'No ITSA'}</span>}
+        {m.it ? <IssueCard itsa={m.it} layout={L.issue} size="nested" state={issueState(L, m.cx)} actions={NO_ACTIONS} nested={{ skip: L.agent.slots.BADGES ?? [],
+          lead: <motion.span key={st.n} className="sv-stamp" initial={st.n ? { transform: STAMP_FROM } : false} animate={{ transform: STAMP_TO }} transition={spring(SPRINGS.stamp, slow)}>
+            <StatusGlyph status={m.it.status} title={statusLabel(m.it.status)} /></motion.span>,
+          trail: <>
+            {m.rollup ? <span ref={rollEl} className="sv-rollup" title={`${m.rollup.done} of ${m.rollup.total} child ITSAs done`}>
+              <Roll value={m.rollup.done} fmt={whole} />/{m.rollup.total}</span> : null}
+            {m.owns > 1 ? <span className="sv-more" title={`Owns ${m.owns} open ITSAs`}>+{m.owns - 1}</span> : null}
+          </>,
+        }} /> : <span className="sv-tt muted">{human ? 'Asks and results arrive here' : 'No ITSA'}</span>}
       </div>}
-      {far ? null : <div className="sv-r3">
-        {m.badges.map((b) => b.kind === 'word'
-          ? <span key={b.id} className={('badge ' + b.tone).trim()} title={b.title}>{b.word}</span>
-          : <span key={b.id} className="sv-field" title={b.f.label}><FieldValue f={b.f} v={b.v} /></span>)}
-      </div>}
-      {far ? null : <div className="sv-r4">{a ? m.activity : m.unread ? `${m.unread} unread` : 'Nothing unread'}</div>}
-      {a && !far ? <div className={'sv-ctx' + (m.ctxLevel >= 2 ? ' l2' : m.ctxLevel >= 1 ? ' l1' : '')} title={`Context ${Math.round(m.ctx * 100)}% of the compaction limit`}>
+      {far ? null : <div className="sv-r3">{badgeNodes(L, m)}</div>}
+      {far ? null : <div className="sv-r4">{a ? footNodes(L, m) : <span>{m.unread ? `${m.unread} unread` : 'Nothing unread'}</span>}</div>}
+      {a && !far && L.agent.hairline !== false ? <div className={'sv-ctx' + (m.ctxLevel >= 2 ? ' l2' : m.ctxLevel >= 1 ? ' l1' : '')} title={`Context ${Math.round(m.ctx * 100)}% of the compaction limit`}>
         <i style={{ transform: `scaleX(${m.ctx})` }} /></div> : null}
       {/* The far zoom's chip: drawn at screen size over the card's place, so it reads at any zoom.
           Drawn near too (hidden), so a mode switch measures it as soon as it shows. */}
@@ -200,6 +228,41 @@ function Card({ m, place, selected, enter, jump, far }: Props) {
   )
 }
 
+// Whether a layout's slot holds an item.
+const shows = (lay: CardLayout, slot: string, id: string) => (lay.slots[slot] ?? []).includes(id)
+
+// The badges an issue-side item draws from the view's computed badges (cardBadges), so one that has no value draws nothing.
+const issueSide = (id: string) => id === 'health' || id === 'review' || id === 'tests' || id.startsWith('field:')
+
+// A registry item the layout places, drawn for this card: its inline form on a row, or its chip form in BADGES. Nothing when
+// its form is empty, so an item with no value takes no room (S-2777).
+const registryNode = (L: CardLayouts, id: string, form: 'inline' | 'chip', m: CardModel): ReactNode => {
+  const item = L.items.get(id)
+  const node = form === 'inline' ? item?.inline({ it: m.it, agent: m.agent, cx: m.cx }) : item?.chip?.({ it: m.it, agent: m.agent, cx: m.cx })
+  return node ? <span key={id} className="sv-item">{node}</span> : null
+}
+
+// An agent card's BADGES in the layout's order: an issue-side item draws its computed badge, and an agent-side item its chip.
+// A human card draws the badges the view gives it.
+function badgeNodes(L: CardLayouts, m: CardModel): ReactNode[] {
+  const draw = (b: Badge) => b.kind === 'word'
+    ? <span key={b.id} className={('badge ' + b.tone).trim()} title={b.title}>{b.word}</span>
+    : <span key={b.id} className="sv-field" title={b.f.label}><FieldValue f={b.f} v={b.v} /></span>
+  if (!m.agent) return m.badges.map(draw)
+  return (L.agent.slots.BADGES ?? []).flatMap((id): ReactNode[] => {
+    const b = m.badges.find((x) => x.id === id)
+    if (b) return [draw(b)]
+    return issueSide(id) ? [] : [registryNode(L, id, 'chip', m)]
+  })
+}
+
+// An agent card's FOOT, in the layout's order: each item's inline form, or the human's unread count.
+const footNodes = (L: CardLayouts, m: CardModel): ReactNode[] => (L.agent.slots.FOOT ?? []).map((id) => registryNode(L, id, 'inline', m))
+
+// The issue card's state on an agent card: no column (so its status shows wherever the layout puts it), the
+// view's items, fields and context. Only the nested card reads it, and it draws the agent's own ITSA.
+const issueState = (L: CardLayouts, cx: CellContext): IssueCardState => ({ column: '', mode: 'status', parentKey: null, dragging: false, items: L.items, fields: L.fields, cx })
+
 // The card as a still copy (S-705): what Card draws, as plain markup. It takes its place at once, rolls and
 // stamps nothing, and carries no state, so a card zoomed far out in Cards costs a paint.
 function FlatCard({ m, place, selected }: Props) {
@@ -208,6 +271,7 @@ function FlatCard({ m, place, selected }: Props) {
   const name = a?.name ?? 'You'
   const mode = a?.cost?.mode ?? 'api'
   const own = a ? ownCost(a) : null
+  const L = useContext(CardLayoutsContext)
   return (
     <div className={'sv-card flat' + (human ? ' human' : '') + (m.hit ? ' hit ' + m.hit : '') + (selected ? ' sel' : '')} data-card={m.id} data-tid={m.id} role="group"
       aria-label={human ? 'You: asks and results arrive here' : `${name}, ${stateLabel(a)}${m.it ? `, ${m.it.key} ${m.it.title}` : ''}`}
@@ -216,17 +280,17 @@ function FlatCard({ m, place, selected }: Props) {
         {a ? <Glyph agent={a} /> : <PlainGlyph name="user" />}
         <button type="button" className="sv-nm" data-open aria-pressed={selected} aria-label={`${name}: details`} title={name}>
           <span className="full">{name}</span><span className="short" aria-hidden="true">{m.short}</span></button>
-        {a ? <span className="sv-mdl">{model(a).label.split(' ')[0]}</span> : null}
-        {a?.cost ? <span className="sv-cost"><span className="own">{costShort(own, mode)}</span></span> : null}
+        {a ? (L.agent.slots.HEAD ?? []).map((id) => id === 'model'
+          ? <span key={id} className="sv-mdl">{model(a).label.split(' ')[0]}</span>
+          : id === 'cost' ? a.cost ? <span key={id} className="sv-cost"><span className="own">{costShort(own, mode)}</span></span> : null
+          : registryNode(L, id, 'inline', m)) : null}
       </div>
-      <div className="sv-r2">
-        {m.it ? <><StatusGlyph status={m.it.status} /><span className="sv-key">{m.it.key}</span><span className="sv-tt">{m.it.title}</span></>
+      {shows(L.agent, 'ISSUE', 'issue') ? <div className="sv-r2">
+        {m.it ? <IssueCard itsa={m.it} layout={L.issue} size="nested" state={issueState(L, m.cx)} actions={NO_ACTIONS} nested={{ skip: L.agent.slots.BADGES ?? [] }} />
           : <span className="sv-tt muted">{human ? 'Asks and results arrive here' : 'No ITSA'}</span>}
-      </div>
-      <div className="sv-r3">
-        {m.badges.map((b) => b.kind === 'word' ? <span key={b.id} className={('badge ' + b.tone).trim()}>{b.word}</span> : <span key={b.id} className="sv-field"><FieldValue f={b.f} v={b.v} /></span>)}
-      </div>
-      <div className="sv-r4">{a ? m.activity : m.unread ? `${m.unread} unread` : 'Nothing unread'}</div>
+      </div> : null}
+      <div className="sv-r3">{badgeNodes(L, m)}</div>
+      <div className="sv-r4">{a ? footNodes(L, m) : <span>{m.unread ? `${m.unread} unread` : 'Nothing unread'}</span>}</div>
       <Stack id={m.id} n={m.unread} name={name} />
       {m.kids || m.folded ? <button type="button" className={'sv-fold' + (m.folded ? ' shut' : '')} data-fold={m.id} aria-expanded={!m.folded}
         aria-label={`${m.folded ? 'Show' : 'Fold'} ${name}'s agents`}>

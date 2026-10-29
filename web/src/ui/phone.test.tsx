@@ -33,3 +33,29 @@ describe('the touch long-press shim', () => {
     })
   }
 })
+
+describe('the typing state', () => {
+  it('ends when the focused field leaves the page without a focusout (Safari)', async () => {
+    document.body.innerHTML = '<textarea id="t"></textarea>'
+    const t = document.getElementById('t')!
+    t.focus()
+    expect(document.documentElement.hasAttribute('data-typing')).toBe(true)
+    t.addEventListener('focusout', (e) => e.stopImmediatePropagation())
+    t.remove()
+    await new Promise((r) => setTimeout(r, 0))
+    await vi.waitFor(() => expect(document.documentElement.hasAttribute('data-typing')).toBe(false))
+  })
+
+  it('ends when the focused field is disabled and keeps the focus (Safari)', async () => {
+    document.body.innerHTML = '<textarea id="t"></textarea>'
+    const t = document.getElementById('t') as HTMLTextAreaElement
+    t.focus()
+    expect(document.documentElement.hasAttribute('data-typing')).toBe(true)
+    // Safari fires no focusout here and keeps the focus on the disabled field until its next style update.
+    t.addEventListener('focusout', (e) => e.stopImmediatePropagation())
+    t.disabled = true
+    expect(document.activeElement).toBe(t)
+    await new Promise((r) => setTimeout(r, 0))
+    await vi.waitFor(() => expect(document.documentElement.hasAttribute('data-typing')).toBe(false))
+  })
+})

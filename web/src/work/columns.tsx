@@ -124,14 +124,16 @@ function prWord(l: ItsaLink, watch: Record<string, WatchState>): ReactNode {
 // `cell` is the column id a card's long-press filters by (S-1518).
 // A PR of a repo the diff API serves opens its diff view on a plain click or tap (S-1533); the GitHub page stays one
 // modifier-click away (Ctrl, Cmd or Shift, or the middle button) and in the cell menu (right-click, or a long-press on the phone).
-export function LinkChip({ l, className, cell }: { l: ItsaLink; className: string; cell?: string }) {
+// `iconOnly` draws the kind's icon alone (a phone card's links, named by the long-press menu and the label for a screen reader).
+export function LinkChip({ l, className, cell, iconOnly }: { l: ItsaLink; className: string; cell?: string; iconOnly?: boolean }) {
   const kind = linkKind(l)
   const repos = useDiffRepos()
   const diff = kind === 'github' ? prUrlTarget(repos, l.url) : null
-  const body = <><Icon name={LINK_ICON[kind]} size="xs" /><span className="w-link-label">{linkLabel(l)}</span></>
+  const body = <><Icon name={LINK_ICON[kind]} size="xs" />{iconOnly ? null : <span className="w-link-label">{linkLabel(l)}</span>}</>
+  const name = iconOnly ? linkLabel(l) : undefined
   return kind === 'branch'
-    ? <span className={className} title={linkTitle(l)} data-cell={cell}>{body}</span>
-    : <a className={className} href={l.url} target="_blank" rel="noreferrer noopener" title={diff ? `${linkTitle(l)}\nOpens the diff; Ctrl-click for GitHub` : linkTitle(l)} data-link={l.n} data-cell={cell}
+    ? <span className={className} title={linkTitle(l)} aria-label={name} data-cell={cell}>{body}</span>
+    : <a className={className} aria-label={name} href={l.url} target="_blank" rel="noreferrer noopener" title={diff ? `${linkTitle(l)}\nOpens the diff; Ctrl-click for GitHub` : linkTitle(l)} data-link={l.n} data-cell={cell}
         data-diff={diff ? `${diff.repo}#${diff.pr}` : undefined}
         onClick={(e) => {
           e.stopPropagation()
@@ -176,9 +178,12 @@ const toneClass = (tone: FieldTone | undefined): string => (tone ? TONE_CLASS[to
 // A link kind's card form: on an issue card, its links as icons (the board's META line), and as a badge in BADGES.
 const linkCard = (kind: LinkKind): CardSpec => ({
   where: ['issue'],
-  inline: ({ it }) => {
+  inline: ({ it, touch }) => {
     const all = it ? (it.links ?? []).filter((l) => linkKind(l) === kind) : []
     if (!all.length) return null
+    // On the phone's card a link is the table's chip with the icon only: a branch is only named, a PR tap opens the diff, and a
+    // long-press opens the cell menu, which names the link (S-1533, S-3560).
+    if (touch) return <span className="bc-links">{all.map((l) => <LinkChip key={l.n} l={l} className="bc-link" cell={kind} iconOnly />)}</span>
     return <span className="bc-links">{all.map((l) => (
       <a key={l.n} href={l.url} target="_blank" rel="noreferrer noopener" title={linkTitle(l)} onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}><Icon name={LINK_ICON[kind]} size="xs" /></a>))}</span>
   },
@@ -276,7 +281,7 @@ export const WORK_COLUMNS: WorkColumn[] = ([
   {
     id: 'health', label: 'Health', width: 'calc(var(--space-12) + var(--space-6))', hideBelow: 1116,
     card: {
-      where: ['issue'],
+      where: ['issue', 'agent'],
       // A dot on the card's TOP line, with the label as its name; the chip keeps the words.
       inline: ({ it }) => { const h = it?.health ? HEALTH[it.health] : null; return h ? <span className="hdot" style={{ color: h.tone }} title={`${h.label}, from the owner's latest update`} role="img" aria-label={h.label}><i /></span> : null },
       chip: ({ it }) => { const h = it?.health ? HEALTH[it.health] : null; return h ? badge(h.label, undefined, toneClass(HEALTH_TONE[it?.health ?? ''])) : null },
@@ -289,7 +294,7 @@ export const WORK_COLUMNS: WorkColumn[] = ([
   {
     id: 'review', label: 'Review', width: 'calc(var(--space-12) + var(--space-3))', hideBelow: 1260,
     card: {
-      where: ['issue'],
+      where: ['issue', 'agent'],
       inline: ({ it }) => { const r = it ? reviewOf(branchOf(rowOf(it))?.meta) : null; return r ? <span className="w-review" style={r.tone ? { color: r.tone } : undefined}>{r.word}</span> : null },
       chip: ({ it }) => {
         const meta = it ? branchOf(rowOf(it))?.meta : null
@@ -305,7 +310,7 @@ export const WORK_COLUMNS: WorkColumn[] = ([
   {
     id: 'tests', label: 'Tests', width: 'calc(var(--space-12) + var(--space-3))', hideBelow: 1190,
     card: {
-      where: ['issue'],
+      where: ['issue', 'agent'],
       inline: ({ it }) => { const t = it ? testsOf(branchOf(rowOf(it))?.meta) : null; return t ? <span className="w-tests" style={t.tone ? { color: t.tone } : undefined}>{t.word}</span> : null },
       chip: ({ it }) => { const t = it ? testsOf(branchOf(rowOf(it))?.meta) : null; return t ? badge(t.word, undefined, toneClass(t.severe ? 'bad' : 'ok')) : null },
     },

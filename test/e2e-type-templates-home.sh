@@ -3,7 +3,7 @@
 # type (STAM_HOME/templates/type-NAME.md) lives on the settings home with the type. Two isolated
 # daemons: "home", and "peer", whose settings.json names home as its `home`, with a long poll so only
 # boot and the push move it. Checks:
-#   - a type template saved on the home reaches the peer's /api/templates and its agents' briefs, and
+#   - a type template saved on the home reaches the peer's /api/templates, and
 #     the peer ignores its own file for it
 #   - the peer refuses to edit or reset a type template (409 naming the home) and writes nothing
 #   - a template that isn't a type's stays per machine
@@ -83,7 +83,10 @@ daemon_up home
 [ -e "$TEST_TMP/home/templates/type-tester.md" ] && fail "the home kept the template file"
 _gone() { [ "$(hapi peer GET /api/templates | jget "any(t['name']=='type-tester' for t in d)")" = False ]; }
 _nofile() { [ ! -e "$TEST_TMP/peer/templates/type-tester.md" ]; }
+# The cache is what a restarted peer reads, and listTemplates filters by the registry, so _gone alone can't see it.
+_cache_gone() { python3 -c "import json,sys; sys.exit('type-tester' in json.load(open(sys.argv[1])).get('templates', {}))" "$TEST_TMP/peer/settings.shared.json"; }
 wait_until _gone
+wait_until _cache_gone
 # The peer's own file for the type goes too, once the home has confirmed the type gone (S-3079).
 wait_until _nofile
 

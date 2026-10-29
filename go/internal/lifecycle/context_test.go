@@ -57,6 +57,10 @@ func (l *live) lastNotice(id string) string {
 // and going down a level records nothing. The first report after a compaction is measured, and a threshold then counts
 // only past the growth floor.
 func TestContextThresholds(t *testing.T) {
+	// The daemon's own identity must not reach the compactor (S-3329): the fake logs what it was given.
+	t.Setenv("MOOTR_AGENT_ID", "parent")
+	t.Setenv("STAM_AGENT_NAME", "parent")
+	t.Setenv("STAM_TOKEN", "parent-tok")
 	l := newLive(t)
 	l.setSettings(`{"context":{"warnTokens":100000,"instructTokens":200000,"enforceTokens":300000},"idleCompaction":{"growthTokens":50000},"retro":{"reminders":{"enabled":false}}}`)
 	l.spawn("alpt1")
@@ -96,6 +100,9 @@ func TestContextThresholds(t *testing.T) {
 	}
 	if got := l.compacts(); len(got) != 1 || !strings.HasSuffix(got[0], "|/compact") {
 		t.Errorf("compactor runs: %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(l.base, "compact-env")); string(got) != "|unset|unset\n" {
+		t.Errorf("the compactor was given an identity: %q", got)
 	}
 
 	// The first report after it is the post-compaction size: 120k puts the growth floor at 170k.

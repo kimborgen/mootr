@@ -77,9 +77,10 @@ func TestWaitsRefusals(t *testing.T) {
 		status     int
 		error      string
 	}{
-		{"declared", `{"on":"event","by":"achild"}`, 501, "external event is not ported"},
-		{"declared", `{"on":"agent","target":"apeer","by":"achild"}`, 501, "another machine is not ported"},
-		{"declared", `{"on":"agent","target":"remote-one","by":"achild"}`, 501, "another machine is not ported"},
+		{"declared", `{"on":"event","by":"achild"}`, 400, "wait_for on 'event' needs a filter"},
+		// Met before on a peer, with no peer to ask now: no agent, as TS's peerTarget answers.
+		{"declared", `{"on":"agent","target":"apeer","by":"achild"}`, 400, "no agent apeer"},
+		{"declared", `{"on":"agent","target":"remote-one","by":"achild"}`, 400, "no agent remote-one"},
 		{"declared", `{"on":"agent","target":"aboss","rest":true,"by":"achild"}`, 501, "rest is not ported"},
 		{"wake", `{"note":"n","in_minutes":5,"rest":true,"by":"achild"}`, 501, "rest is not ported"},
 		{"declared", `{"on":"mail","by":"achild"}`, 400, "on must be 'agent', 'human', or 'event'"},

@@ -4,6 +4,7 @@
 // active, and an error is raised when it still runs. A stub server stands in for OpenCode on
 // its own port; no daemon, no model: `node --test test/opencode-stop.test.mjs`.
 import { test, before, after, beforeEach } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -62,7 +63,7 @@ before(async () => {
 });
 after(() => {
   stub.close();
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 beforeEach(() => {

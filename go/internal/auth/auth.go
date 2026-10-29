@@ -67,6 +67,9 @@ type Auth struct {
 	serverTokenFile string
 	testHumanKey    [sha256.Size]byte
 	hasTestKey      bool
+	// LocalHuman is whether a request carries a live local human session on a direct loopback connection (S-613),
+	// set by the server; nil is never.
+	LocalHuman func(*http.Request) bool
 }
 
 // New returns the Auth of a config, with lookup for agents' tokens.
@@ -116,19 +119,31 @@ func (a *Auth) CallerOf(r *http.Request) (Caller, error) {
 	return Caller{Kind: None}, nil
 }
 
-// TrustedHuman is src/daemon.ts trustedHuman. Ported: the test key, in a test home only (S-634). Not yet ported, so
-// never true here: the tailscale serve login (owner, root-owned loopback socket, client IP) and the local human
-// session (S-613).
+// IsShared is whether token is the shared token, for an attachment URL that carries it (src/daemon.ts mediaToken).
+func (a *Auth) IsShared(token string) bool {
+	sum := sha256.Sum256([]byte(token))
+	return token != "" && subtle.ConstantTimeCompare(sum[:], a.shared[:]) == 1
+}
+
+// IsPeer is whether token is the peer token, for a terminal socket that carries it (src/daemon.ts tokenAuth).
+func (a *Auth) IsPeer(token string) bool {
+	sum := sha256.Sum256([]byte(token))
+	return token != "" && subtle.ConstantTimeCompare(sum[:], a.peer[:]) == 1
+}
+
+// TrustedHuman is src/daemon.ts trustedHuman. Ported: the test key, in a test home only (S-634), then a local human
+// session (LocalHuman, S-613). Not yet ported, so never true here: the tailscale serve login (owner, root-owned loopback
+// socket, client IP).
 func (a *Auth) TrustedHuman(r *http.Request) bool {
-	if !a.hasTestKey {
-		return false
+	if a.hasTestKey {
+		if got := r.Header.Get("X-Stam-Test-Human"); got != "" {
+			sum := sha256.Sum256([]byte(got))
+			if subtle.ConstantTimeCompare(sum[:], a.testHumanKey[:]) == 1 {
+				return true
+			}
+		}
 	}
-	got := r.Header.Get("X-Stam-Test-Human")
-	if got == "" {
-		return false
-	}
-	sum := sha256.Sum256([]byte(got))
-	return subtle.ConstantTimeCompare(sum[:], a.testHumanKey[:]) == 1
+	return a.LocalHuman != nil && a.LocalHuman(r)
 }
 
 func (a *Auth) serverTokenHash() string {
@@ -147,6 +162,9 @@ type Resolved struct {
 	Verified Kind
 	// Local is a peer's daemon-to-daemon call (x-stam-local: 1): it unlocks the peer-only routes.
 	Local bool
+	// Owned is src/daemon.ts owned: the request proves the human (TrustedHuman), whatever token it also carries, but
+	// never with an agent's or the OpenCode server's token, nor with x-stam-local. Set by the server's callerOf.
+	Owned bool
 }
 
 // ErrPeerHeaders refuses the shared token sending a peer's headers (S-545, S-1064): any holder could forge them.

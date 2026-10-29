@@ -73,7 +73,9 @@ ASK=$(get /api/itsas/attention | python3 -c 'import json,sys; r=[x for x in json
 get /api/itsas/attention | grep -q "R-1" || fail "the ask doesn't name R-1"
 
 # The human approves it there: the requirement is in force and the ask closes.
-post "/api/itsas/$ASK/act" '{"action":"approve","text":""}' >/dev/null
+# Approve carries the revision of the text it was shown (S-2998).
+REV=$(get "/api/itsas/$ASK" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rev"])')
+post "/api/itsas/$ASK/act" "{\"action\":\"approve\",\"text\":\"\",\"if_rev\":\"$REV\"}" >/dev/null
 i=0
 while [ "$(get /api/requirements/R-1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')" != in_force ]; do
   i=$((i + 1)); [ "$i" -gt 100 ] && fail "R-1 didn't go in force after the approval"; sleep 0.2

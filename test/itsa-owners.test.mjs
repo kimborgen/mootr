@@ -384,7 +384,7 @@ test('retryPendingUnowns: a 403 ends the retry; a 400 or 503 keeps the row and b
     });
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  writeFileSync(join(home, 'settings.json'), JSON.stringify({ itsa: { home: 'far' }, peers: [{ name: 'far', url: `http://127.0.0.1:${server.address().port}`, token: 't' }] }));
+  writeFileSync(join(home, 'settings.json'), JSON.stringify({ itsa: { home: 'far' }, peers: [{ name: 'far', url: `http://127.0.0.1:${server.address().port}`, token: 'test-peer-token' }] }));
   const pending = () => db.open().prepare('SELECT agent_id FROM itsa_pending_unown ORDER BY agent_id').all().map((r) => r.agent_id);
   for (const id of ['u403', 'u400', 'u503']) {
     agent(id, id);
@@ -429,7 +429,7 @@ test('guardPeerReport: 403 when no peer holds the agent, 503 when the action fai
   const { createServer } = await import('node:http');
   const server = createServer((_req, res) => (res.writeHead(200, { 'content-type': 'application/json' }), res.end(JSON.stringify({ id: 'far1', name: 'far1', machine: 'far', lifecycle: 'archived' }))));
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [{ name: 'far', url: `http://127.0.0.1:${server.address().port}`, token: 't' }] }));
+  writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [{ name: 'far', url: `http://127.0.0.1:${server.address().port}`, token: 'test-peer-token' }] }));
   try {
     assert.equal(await owners.guardPeerReport(true, 'far1', ['archived'], 'it', () => 'ok'), 'ok');
     assert.equal(await code(() => owners.guardPeerReport(true, 'far1', ['archived'], 'it', () => { throw new Error('database is locked'); })), 503);
@@ -546,6 +546,23 @@ test('a reviewer keeps the ITSA it still owns', async () => {
   assert.ok(itsa.participants(x.id).includes('rv2'));
 });
 
+// S-3161: an approve releases the reviewer only from the ITSAs whose branch link names this repo, so the same branch name
+// linked in another repo is left alone.
+test('an approve releases the reviewer only from the branch link in its own repo (S-3161)', async () => {
+  agent('rv7', 'reviewer-seven');
+  db.updateAgent('rv7', { type: 'reviewer' });
+  const { settings, setSetting } = await import('../src/settings.ts');
+  setSetting('itsa', { ...settings().itsa, repos: { ...settings().itsa.repos, stam2: home, other: home } });
+  const mine = await itsa.create({ title: 'Same repo', by: 'human', owner: 'lead', participants: ['rv7'] });
+  const theirs = await itsa.create({ title: 'Other repo', by: 'human', owner: 'lead', participants: ['rv7'] });
+  await itsa.addLink(mine.key, { system: 'branch', external_id: 'stam/shared', repo: 'stam2', url: '' }, 'human');
+  await itsa.addLink(theirs.key, { system: 'branch', external_id: 'stam/shared', repo: 'other', url: '' }, 'human');
+  const removed = await owners.releaseReviewer('rv7', 'rv7', { branch: 'stam/shared', repo: 'stam2' });
+  assert.equal(removed, 1);
+  assert.ok(!itsa.participants(mine.id).includes('rv7'));
+  assert.ok(itsa.participants(theirs.id).includes('rv7'), 'the same branch in another repo is untouched');
+});
+
 test('archiving a reviewer removes its participation; a non-reviewer participant is kept', async () => {
   agent('rv3', 'reviewer-three');
   db.updateAgent('rv3', { type: 'reviewer' });
@@ -592,6 +609,65 @@ test('a leave keeps the row for the spend, and a join makes the reviewer a membe
   assert.ok((await itsa.list()).find((y) => y.id === x.id).participants.includes('rv6'));
 });
 
+// S-3508: a reviewer that watches a PR joins the ITSAs the PR is linked to (the owner unchanged), so it can reply in their
+// threads until its verdict. Only a reviewer type joins, and only for a PR a link names. The gate is mail-visibility's.
+const prUrl = (n) => `https://github.com/example/stam/pull/${n}`;
+const prKey = (n) => `github:example/stam#${n}`;
+
+test('(a) a reviewer spawned without itsa that watches a linked PR may post to its ITSA, and the owner stays (S-3508)', async () => {
+  const vis = await import('../src/mail-visibility.ts');
+  agent('pr1', 'pr-rev-one');
+  db.updateAgent('pr1', { type: 'reviewer' });
+  const x = await itsa.create({ title: 'Linked PR', by: 'human', owner: 'lead', status: 'in_progress' });
+  await itsa.addLink(x.key, { system: 'github', url: prUrl(1101), external_id: '1101' }, 'human');
+  assert.equal(vis.mayPostItsa('pr1', x.id), false);
+  assert.deepEqual(await owners.joinPrReviewer('pr1', prKey(1101), 'l1'), [x.key]);
+  assert.ok(vis.mayPostItsa('pr1', x.id));
+  assert.equal(itsa.find(x.id).owner, 'l1');
+});
+
+test('(b) a second reviewer of the PR may post after the first is archived, which marks the first left (S-3508)', async () => {
+  const vis = await import('../src/mail-visibility.ts');
+  agent('pr2', 'pr-rev-two');
+  db.updateAgent('pr2', { type: 'reviewer' });
+  agent('pr3', 'pr-rev-three');
+  db.updateAgent('pr3', { type: 'reviewer' });
+  const x = await itsa.create({ title: 'Re-reviewed PR', by: 'human', owner: 'lead', status: 'in_progress' });
+  await itsa.addLink(x.key, { system: 'github', url: prUrl(1102), external_id: '1102' }, 'human');
+  await owners.joinPrReviewer('pr2', prKey(1102), 'l1');
+  await owners.unownAgent({ ...db.getAgent('pr2'), type: 'reviewer' }, 'archived');
+  assert.equal(vis.mayPostItsa('pr2', x.id), false);
+  assert.deepEqual(await owners.joinPrReviewer('pr3', prKey(1102), 'l1'), [x.key]);
+  assert.ok(vis.mayPostItsa('pr3', x.id));
+  assert.equal(itsa.find(x.id).owner, 'l1');
+});
+
+test('(c) an agent that is not a reviewer, or a reviewer of a PR no link names, joins nothing and may not post (S-3508)', async () => {
+  const vis = await import('../src/mail-visibility.ts');
+  agent('dv4', 'dev-four');
+  db.updateAgent('dv4', { type: 'developer' });
+  agent('pr4', 'pr-rev-four');
+  db.updateAgent('pr4', { type: 'reviewer' });
+  const x = await itsa.create({ title: 'Guarded PR', by: 'human', owner: 'lead', status: 'in_progress' });
+  await itsa.addLink(x.key, { system: 'github', url: prUrl(1104), external_id: '1104' }, 'human');
+  assert.deepEqual(await owners.joinPrReviewer('dv4', prKey(1104), 'l1'), []);
+  assert.deepEqual(await owners.joinPrReviewer('pr4', prKey(9999), 'l1'), []);
+  assert.ok(!itsa.participants(x.id).includes('dv4') && !itsa.participants(x.id).includes('pr4'));
+  assert.equal(vis.mayPostItsa('dv4', x.id), false);
+  assert.equal(vis.mayPostItsa('pr4', x.id), false);
+});
+
+test('(d) an archived reviewer is marked left in its ITSA row, not removed (S-3508)', async () => {
+  agent('pr5', 'pr-rev-five');
+  db.updateAgent('pr5', { type: 'reviewer' });
+  const x = await itsa.create({ title: 'Archived reviewer row', by: 'human', owner: 'lead', status: 'in_progress' });
+  await itsa.addLink(x.key, { system: 'github', url: prUrl(1105), external_id: '1105' }, 'human');
+  await owners.joinPrReviewer('pr5', prKey(1105), 'l1');
+  await owners.unownAgent({ ...db.getAgent('pr5'), type: 'reviewer' }, 'archived');
+  const row = db.open().prepare('SELECT left_at FROM itsa_participants WHERE itsa_id = ? AND agent_id = ?').get(x.id, 'pr5');
+  assert.ok(row && row.left_at, JSON.stringify(row));
+});
+
 test('an unown queued with its type sends that type after the agent is gone (S-3015)', async () => {
   const { createServer } = await import('node:http');
   const seen = [];
@@ -605,7 +681,7 @@ test('an unown queued with its type sends that type after the agent is gone (S-3
     });
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  writeFileSync(join(home, 'settings.json'), JSON.stringify({ itsa: { home: 'far' }, peers: [{ name: 'far', url: `http://127.0.0.1:${server.address().port}`, token: 't' }] }));
+  writeFileSync(join(home, 'settings.json'), JSON.stringify({ itsa: { home: 'far' }, peers: [{ name: 'far', url: `http://127.0.0.1:${server.address().port}`, token: 'test-peer-token' }] }));
   try {
     owners.queueUnown({ id: 'fg1', name: 'forgotten-one', type: 'reviewer' }, 'forgotten');
     await owners.unownAgent({ id: 'fg1', name: 'forgotten-one' }, 'forgotten');

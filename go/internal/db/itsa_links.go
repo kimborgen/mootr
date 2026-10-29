@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strconv"
 
 	"zombiezen.com/go/sqlite"
@@ -18,31 +17,6 @@ import (
 type NotPorted struct{ Msg string }
 
 func (e *NotPorted) Error() string { return e.Msg }
-
-var (
-	reGitHubURL = regexp.MustCompile(`^https?://github\.com/([^/\s\p{Z}\x{feff}]+)/([^/\s\p{Z}\x{feff}]+)/(?:pull|issues)/(\d+)(?:[/?#][^\n\r\x{2028}\x{2029}]*)?$`)
-	reLinearURL = regexp.MustCompile(`^https?://linear\.app/[^/\s\p{Z}\x{feff}]+/issue/([A-Za-z][A-Za-z0-9]*-\d+)(?:[/?#][^\n\r\x{2028}\x{2029}]*)?$`)
-)
-
-// WatchedURL is whether src/watch.ts subjectsForUrl names a subject for a link's URL: a GitHub pull request or issue, or a
-// Linear issue. An ITSA with such a link has a watch on it (watch.syncItsa), which this daemon does not keep.
-func WatchedURL(url string) bool {
-	u := jsTrim(url)
-	return reGitHubURL.MatchString(u) || reLinearURL.MatchString(u)
-}
-
-const watchNotPorted = "a link to a GitHub or Linear pull request or issue starts the ITSA's watch on it (watch.syncItsa), which is not ported to the Go daemon yet"
-
-// HasWatchedLink is whether any link of the ITSA names a subject: closing or reopening it would change its watches.
-func (t ItsaTx) HasWatchedLink(id string) (bool, error) {
-	urls, err := column(t.conn, "SELECT url FROM itsa_links WHERE itsa_id = ?", id)
-	for _, u := range urls {
-		if WatchedURL(u) {
-			return true, nil
-		}
-	}
-	return false, err
-}
 
 // inItsa finds the ITSA a ref names and runs fn on it inside one write transaction. An error from fn, or a missing ITSA,
 // is the caller's to read as it is, not a database failure to wrap.
@@ -107,9 +81,6 @@ func nextLinkN(conn *sqlite.Conn, itsaID string) (int64, error) {
 
 // insertLink is itsa.ts addLinkRow: the next link of an ITSA, as the API shows it.
 func insertLink(conn *sqlite.Conn, itsaID string, l NewLink) (jsfmt.Value, error) {
-	if WatchedURL(l.URL) {
-		return jsfmt.Value{}, &NotPorted{watchNotPorted}
-	}
 	n, err := nextLinkN(conn, itsaID)
 	if err != nil {
 		return jsfmt.Value{}, err
@@ -161,13 +132,6 @@ func (d *DB) AddItsaLink(ctx context.Context, ref, actor string, l NewLink) (lin
 // RemoveItsaLink is itsa.removeLink: the ITSA after the link n is gone.
 func (d *DB) RemoveItsaLink(ctx context.Context, ref string, n int64, actor string) (jsfmt.Value, error) {
 	return d.inItsa(ctx, ref, func(conn *sqlite.Conn, x jsfmt.Value) (jsfmt.Value, error) {
-		urls, err := column(conn, "SELECT url FROM itsa_links WHERE itsa_id = ? AND n = ?", x.Text("id"), n)
-		if err != nil {
-			return jsfmt.Value{}, err
-		}
-		if len(urls) > 0 && WatchedURL(urls[0]) {
-			return jsfmt.Value{}, &NotPorted{watchNotPorted}
-		}
 		if err := runSQL(conn, "DELETE FROM itsa_links WHERE itsa_id = ? AND n = ?", x.Text("id"), n); err != nil {
 			return jsfmt.Value{}, err
 		}

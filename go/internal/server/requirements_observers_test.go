@@ -132,7 +132,7 @@ func TestRequirementsStamMailNotChecked(t *testing.T) {
 	startDecideStub(t)
 	f := newFixture(t, nil)
 	f.inform(reqSettings)
-	if !f.srv.sendFromStam(context.Background(), []string{"aboss"}, "[stam] note", "REQ:R-1=violates") {
+	if !f.srv.sendFromSystem(context.Background(), "requirements", []string{"aboss"}, "[stam] note", "REQ:R-1=violates") {
 		t.Fatal("no stam mail sent")
 	}
 	f.mailAs(agentTok, `{"to":["aboss"],"subject":"status","body":"marker"}`)
@@ -244,7 +244,7 @@ func TestRequirementsForwardedSubjects(t *testing.T) {
 	}))
 	defer home.Close()
 	f := newFixture(t, nil)
-	writeFile(t, filepath.Join(f.home, "settings.json"), `{"requirements":{"enabled":true},"home":"farhome","peers":[{"name":"farhome","url":"`+home.URL+`","token":"t"}]}`)
+	writeFile(t, filepath.Join(f.home, "settings.json"), `{"requirements":{"enabled":true},"home":"farhome","peers":[{"name":"farhome","url":"`+home.URL+`","token":"test-peer-token"}]}`)
 	id := f.mailAs(agentTok, `{"to":["aboss"],"subject":"status","body":"hello"}`)
 	until(t, "the forward", func() bool { mu.Lock(); defer mu.Unlock(); return len(bodies) == 1 })
 	want := `{"subject":{"kind":"mail","ref":"mail:` + id + `","content":{"subject":"status","body":"hello","thread":"` + f.count1("SELECT thread_id FROM mail WHERE id = '"+id+"'") + `"},"actor":{"name":"child","role":"developer","parent":"boss"},"actorId":"achild"}}`
@@ -327,4 +327,19 @@ func (f *fixture) count1(query string) string {
 		f.t.Fatalf("no row for %s", query)
 	}
 	return v.Items[0].Text(v.Items[0].Keys[0])
+}
+
+// TestSendFromSystem: stam's own mail from a system sender is stored from system:NAME, named NAME, to its recipients;
+// a bad name sends nothing.
+func TestSendFromSystem(t *testing.T) {
+	f := newFixture(t, nil)
+	if !f.srv.sendFromSystem(context.Background(), "cost", []string{"human"}, "[stam] Daily spend passed $2", "b") {
+		t.Fatal("not sent")
+	}
+	if got := f.count1("SELECT from_id || '|' || from_name || '|' || r.agent_id FROM mail JOIN mail_recipients r ON r.mail_id = mail.id WHERE subject = '[stam] Daily spend passed $2'"); got != "system:cost|cost|human" {
+		t.Errorf("stored %s", got)
+	}
+	if f.srv.sendFromSystem(context.Background(), "Bad Name", []string{"human"}, "s", "b") {
+		t.Error("a bad system name was sent")
+	}
 }

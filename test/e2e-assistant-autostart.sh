@@ -8,7 +8,7 @@ fake_claude ""
 # test/lib.sh turns autostart off for every test daemon; this test turns it on.
 export STAM_ASSISTANT_AUTOSTART=1
 fail() { echo "FAIL: $1"; exit 1; }
-count() { curl -s -H "authorization: Bearer $(cat "$STAM_HOME/token")" "$STAM_URL/api/agents" | python3 -c 'import json,sys; print(sum(1 for a in json.load(sys.stdin) if a.get("kind")=="assistant"))'; }
+count() { curl -s -H "authorization: Bearer $(cat "$STAM_HOME/token")" "$STAM_URL/api/agents?state=all" | python3 -c 'import json,sys; print(sum(1 for a in json.load(sys.stdin) if a.get("kind")=="assistant"))'; }
 
 # A fresh home: one assistant after start.
 isolate

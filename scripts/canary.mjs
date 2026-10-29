@@ -18,6 +18,8 @@
 // requests fail. A run with no load (no agents, or a baseline that took none) can't judge, so it is an error. A release
 // that started and fails is run once more on the same build and db copy, beside a rerun of the baseline, and fails only
 // when the rerun fails too (STAM_CANARY_RERUN=0 turns that off): one noisy run under machine load doesn't hold a deploy.
+// The rerun swaps the pair's order (S-4047): the new release's db copy is made and its daemon started first, and it is
+// probed first in the first round, so an edge from going first can't fail the same release twice.
 // Isolation of the canary's daemons: each gets its own HOME and STAM_HOME, a stub folder first on PATH whose tmux,
 // harnesses, gh, ssh, systemctl, sudo, tailscale and pkill only record the call and fail, the same stubs as its harness
 // binaries, no peers, no model or GitHub endpoints, and no push devices or peer outbox in its db copy. The build step is
@@ -30,7 +32,9 @@ import { createServer } from 'node:net';
 import { getPriority, homedir, hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { checkRoots, real } from './check-homes.mjs';
-import { envVar } from '../src/env.ts';
+import { envVar, withTwins } from '../src/env.ts';
+import { defaultHome } from '../src/default-home.ts';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import { isMain } from './main-guard.mjs';
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -44,7 +48,7 @@ const STRIPPED = ['push_devices', 'peer_outbox'];
 
 // Everything the canary reads from the environment. Durations are milliseconds unless the name says seconds.
 export function canaryConfig(env = process.env) {
-  const home = envVar('HOME', env) || join(homedir(), '.local/share/stam');
+  const home = envVar('HOME', env) || defaultHome();
   return {
     home,
     db: join(home, 'stam.db'),
@@ -132,7 +136,7 @@ function checkLeftovers(pgid) {
 function killTree(pid) {
   const left = checkLeftovers(pid);
   killGroup(pid, 'SIGKILL');
-  for (const socket of left.sockets) spawnSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore', timeout: 5000 });
+  for (const socket of left.sockets) killTmuxServer(socket);
   for (const home of left.homes) rmSync(home, { recursive: true, force: true });
 }
 
@@ -319,21 +323,23 @@ async function startRelease(c, release, name, run, dbFile, signal) {
     PATH: `${stubs}:${process.env.PATH ?? '/usr/bin:/bin'}`,
     HOME: home,
     LANG: process.env.LANG ?? 'C.UTF-8',
-    STAM_HOME: home,
-    STAM_PORT: String(port),
-    STAM_TMUX_SOCKET: `stam-canary-${basename(run)}-${name}`,
-    STAM_BIND: '127.0.0.1',
-    STAM_MACHINE: c.machine,
-    STAM_RELEASE_ID: basename(release),
-    STAM_OPENCODE_PORT: String(await freePort()),
-    STAM_CLAUDE_BIN: join(stubs, 'claude'),
-    STAM_CODEX_BIN: join(stubs, 'codex'),
-    STAM_OPENCODE_BIN: join(stubs, 'opencode'),
-    STAM_EMBEDDER: 'stub',
-    STAM_OPENROUTER_URL: DEAD_URL,
-    STAM_GITHUB_API: DEAD_URL,
-    STAM_ELEVENLABS_URL: DEAD_URL,
-    STAM_MCP_REGISTRY_URL: DEAD_URL,
+    ...withTwins({
+      STAM_HOME: home,
+      STAM_PORT: String(port),
+      STAM_TMUX_SOCKET: `stam-canary-${basename(run)}-${name}`,
+      STAM_BIND: '127.0.0.1',
+      STAM_MACHINE: c.machine,
+      STAM_RELEASE_ID: basename(release),
+      STAM_OPENCODE_PORT: String(await freePort()),
+      STAM_CLAUDE_BIN: join(stubs, 'claude'),
+      STAM_CODEX_BIN: join(stubs, 'codex'),
+      STAM_OPENCODE_BIN: join(stubs, 'opencode'),
+      STAM_EMBEDDER: 'stub',
+      STAM_OPENROUTER_URL: DEAD_URL,
+      STAM_GITHUB_API: DEAD_URL,
+      STAM_ELEVENLABS_URL: DEAD_URL,
+      STAM_MCP_REGISTRY_URL: DEAD_URL,
+    }),
   };
   const logFile = join(home, 'daemon.log');
   const fd = openSync(logFile, 'a');
@@ -467,6 +473,13 @@ function unfitBaseline(r, what) {
   if (r.load.ok === 0) return [`${what} ${r.release} took no load (${r.load.failed} requests failed), so nothing can be compared`];
 }
 
+// A probe count from the stats: samples and the failed and slow counts, all whole numbers, the samples at least one.
+const readableStats = (s) => Number.isInteger(s?.n) && s.n > 0 && Number.isInteger(s.failed) && Number.isInteger(s.slow);
+
+// How many of a release's `nextN` probes may show a symptom the baseline showed `baseCount` of in `baseN` (S-4047): its
+// share of them, plus the margin a slow probe gets, the larger of slowMargin and slowFraction of the samples (S-1862).
+const relativeAllowance = (c, baseCount, baseN, nextN) => Math.ceil((baseCount / baseN) * nextN) + Math.max(c.slowMargin, Math.ceil(c.slowFraction * nextN));
+
 // Why the new release regresses against the baseline, one reason each; empty when it doesn't.
 export function judge(c, base, next) {
   const why = [];
@@ -475,8 +488,20 @@ export function judge(c, base, next) {
   for (const probe of ['health', 'db']) {
     const n = next[probe];
     const b = base[probe];
-    if (n.failed > 0) why.push(`${n.failed} of ${n.n} ${probe} probes failed`);
-    const allowed = Math.min(b.slow, Math.floor(b.n / 2)) + Math.max(c.slowMargin, Math.ceil(c.slowFraction * n.n));
+    // Stats that can't be read fail closed: a probe count of 0 is a release that answered nothing.
+    if (!readableStats(n) || !readableStats(b)) {
+      why.push(`the ${probe} probes can't be read, so nothing can be compared`);
+      continue;
+    }
+    // A release whose every probe failed is dead, however the baseline did (a saturated machine fails some on both).
+    if (n.failed === n.n) why.push(`all ${n.n} ${probe} probes failed`);
+    // The baseline's share of a symptom is the norm: a machine saturated for both releases fails and runs slow on both.
+    // With a clean baseline any failure still fails. Otherwise the share, plus the same margin as a slow probe.
+    else if (n.failed > 0) {
+      const allowedFailed = b.failed > 0 ? relativeAllowance(c, b.failed, b.n, n.n) : 0;
+      if (n.failed > allowedFailed) why.push(`${n.failed} of ${n.n} ${probe} probes failed${b.failed ? ` (baseline ${b.failed} of ${b.n})` : ''}`);
+    }
+    const allowed = relativeAllowance(c, b.slow, b.n, n.n);
     if (n.slow > allowed) why.push(`${n.slow} of ${n.n} ${probe} probes over ${c.slowS} s (baseline ${b.slow})`);
   }
   const stallLimit = c.stallFactor * base.stalls.totalMs + c.stallMarginMs;
@@ -564,14 +589,17 @@ async function canaryRun(c, sha, log, signal, box) {
     }
     let reasons = judge(c, base, fresh);
     // A release that ran and failed runs again on the same build and copy (S-1862), and so does the baseline, side by
-    // side again (S-2076): it fails only when the rerun does too. The rerun is judged against the baseline sampled beside
+    // side again (S-2076): it fails only when the rerun does too. The rerun puts the new release first (S-4047): the first
+    // run copies, starts and first probes the baseline first, and bc397f6031, a spec-only release, failed twice in that
+    // order on health probes alone (8 and 12 of 28 slow against 1 of 29), so whatever going second costs lands on each
+    // side once. The rerun is judged against the baseline sampled beside
     // it, not the first one, so load that rose since the first run doesn't read as a regression (S-2151). A rerun
     // baseline that can't be compared with is an error, never a pass. One that never started or exited fails at once.
     let first;
     if (reasons.length && c.rerun && fresh.started && !fresh.exited) {
       first = reasons;
       log(`canary: the new release failed (${reasons.join('; ')}); running it and the baseline once more`);
-      const [base2, rerun] = await runReleases(c, [[baseline, 'baseline-rerun'], [next, 'rerun']], run, dbFile, agents, signal);
+      const [rerun, base2] = await runReleases(c, [[next, 'rerun'], [baseline, 'baseline-rerun']], run, dbFile, agents, signal);
       if (signal?.aborted) return canceled();
       log(`canary: ${describeRun(base2)}`);
       log(`canary: ${describeRun(rerun)}`);

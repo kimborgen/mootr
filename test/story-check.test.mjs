@@ -30,6 +30,13 @@ test('a new component with no story fails, naming the file, the component and th
   assert.match(errors[0], /Pane\.stories\.tsx/);
 });
 
+test('the refusal names the fix: the refused path#Symbol in a story\'s code array (S-3447)', () => {
+  const files = { ...base().files, 'web/src/App.tsx': 'export function MobileNav() { return null }\n' };
+  const errors = run({ files, changed: ['web/src/App.tsx'] });
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0], "web/src/App.tsx: the component MobileNav has no story: add 'web/src/App.tsx#MobileNav' to a story's code array in web/src/App.stories.tsx (docs/stories.md).");
+});
+
 test("a path#Symbol in a story's prose does not count as a code link (S-685)", () => {
   // The `when` names the file; only a code list links a component to a story.
   const prose = "export const stories = [{ name: 'Other', what: 'Shows the tree.', when: 'Beside `web/src/Pane.tsx#Pane`.', code: ['web/src/Tree.tsx#Tree'], rules: [] }]\n";

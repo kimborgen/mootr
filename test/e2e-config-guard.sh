@@ -17,7 +17,13 @@ cat >"$TEST_TMP/guard.json" <<'EOF3'
 { "turns": [ { "match": "hello", "steps": [ { "reply": "DONE" } ] } ] }
 EOF3
 fake_claude "$TEST_TMP/guard.json"
-isolate main
+# The daemon writes two keys of this file on its own timers: resourceWarn.lastWarned (the sampler, on a loaded
+# machine) and retro.lastDigest (the digest's first tick, a minute after a fresh start, since it has none).
+# A write in the middle of the checks below reads as a change by the approval (S-3747), so both are off here.
+daemon_home main
+printf '{ "resourceWarn": { "enabled": false }, "retro": { "digest": { "enabled": false } } }\n' >"$TEST_TMP/main/settings.json"
+use main
+daemon_up main
 fail() { echo "FAIL: $1"; exit 1; }
 jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 TOKEN=$(cat "$STAM_HOME/token")

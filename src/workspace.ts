@@ -8,7 +8,7 @@ import { storageRemoteFallback } from './settings.ts';
 import { derivedRepoPath } from './default-repo.ts';
 import { depsCachePath, depsKey, ensureCacheReadOnly, fillDeps, linkDepsOutcome, linkDepsOutcomeAsync, type LinkOutcome, retireDamagedCache, touchDepsUsed, warmDeps } from './deploy.ts';
 import type { AgentType } from './agent-types.ts';
-import { envVar } from './env.ts';
+import { envVar, withTwins } from './env.ts';
 
 // What linking a worktree's dependencies did (S-1044), for the spawn to log as an agent event.
 // `warm` starts nothing: it hands the background fill's promise to a caller that wants to await
@@ -36,7 +36,7 @@ export interface Workspace {
   spec: WorkspaceSpec;
   cwd: string;
   // Set for worktrees the agent owns.
-  worktree?: { repo: string; path: string; branch: string; base?: string; continues?: boolean };
+  worktree?: { repo: string; path: string; branch: string; base?: string; continues?: boolean; suffixed?: boolean };
   // The worktree's dependency linking (S-1044): one entry per package folder.
   deps?: DepsEvent[];
   // Where the branch was cut from and how the fetch went (S-1666), so a stale fallback is visible.
@@ -195,18 +195,23 @@ function resolveBase(repo: string, ref: string, fetched?: BaseFetch): string {
   }
 }
 
-// Why the default branch `stam/NAME` can't be used (S-1419), or null when it can: the checkout already has it, as a local
-// branch or as a remote-tracking ref of origin or storage. A new agent named like an old one would otherwise open its PR
+// The remote names of a checkout, from its config alone (no network); [] when git can't tell.
+function localRemotes(repo: string): string[] {
+  try { return execFileSync('git', ['-C', repo, 'remote'], { encoding: 'utf8', stdio: 'pipe', timeout: 5000 }).split('\n').filter(Boolean); } catch { return []; }
+}
+
+// Why the branch `stam/NAME` is taken (S-1419), or null when it is free: the checkout already has it, as a local
+// branch or as a remote-tracking ref of origin or the storage remote. A new agent named like an old one would otherwise open its PR
 // on the old branch's name. Local refs only, no network: this runs on the daemon's event loop, and a stopped storage
-// would stall it. The check is best-effort (a tracking ref can be stale); the real guard is pr-sync's ancestry check.
-export function reusedBranchRefusal(repo: string, branch: string, remotes: string[] = ['origin', 'storage']): string | null {
+// remote would stall it. The check is best-effort (a tracking ref can be stale); the real guard is pr-sync's ancestry check.
+export function reusedBranchRefusal(repo: string, branch: string, remotes: string[] = ['origin']): string | null {
   const refs = ['refs/heads', ...remotes.map((r) => `refs/remotes/${r}`)].map((p) => `${p}/${branch}`);
   const out = execFileSync('git', ['-C', repo, 'for-each-ref', '--format=%(refname)', ...refs], { encoding: 'utf8', stdio: 'pipe', timeout: 5000 }).trim();
   if (!out) return null;
-  return `${branch} already exists here (${out.split('\n')[0]}): an earlier agent used that name. Pick another agent name, or pass an explicit branch.`;
+  return `${branch} already exists here (${out.split('\n')[0]}): an earlier agent used that name.`;
 }
 
-// The PR branch a spawn continues (S-3113): `base: origin/stam/X` (or storage/stam/X) puts the worktree on stam/X itself,
+// The PR branch a spawn continues (S-3113): `base: origin/stam/X` (or STORAGE/stam/X, the storage remote) puts the worktree on stam/X itself,
 // so the agent's commits go to the PR's branch and pr_open needs no hand-made fast-forward. null for any other base.
 export function continuedBranch(base: string | undefined, remotes: string[]): string | null {
   if (!base) return null;
@@ -252,27 +257,72 @@ function continuedBranchRefusal(repo: string, branch: string, start: string): { 
 // createWorkspace after an async, bounded fetch of its base (S-1666): what the daemon runs, so a slow or
 // stopped remote never blocks its event loop. A worktree with no base is cut from the fresh origin/main.
 export async function createWorkspaceFetched(spec: WorkspaceSpec, agentName: string): Promise<Workspace> {
-  const fetched = spec.kind === 'worktree' ? await prefetchBase(spec.repo, spec.base) : undefined;
-  return createWorkspace(spec, agentName, fetched);
+  // "new" asks for the default stam/NAME too (S-964), so its name is checked on origin like an unset branch; run beside the base fetch.
+  const defaulted = spec.kind === 'worktree' && (!spec.branch || spec.branch === 'new');
+  const [fetched, onRemote] = await Promise.all([
+    spec.kind === 'worktree' ? prefetchBase(spec.repo, spec.base) : undefined,
+    defaulted ? remoteBranchNames(spec.repo, `stam/${agentName}`) : [],
+  ]);
+  return createWorkspace(spec, agentName, fetched, onRemote);
 }
 
-export function createWorkspace(spec: WorkspaceSpec, agentName: string, fetched?: BaseFetch): Workspace {
+// The branches `stam/NAME` and `stam/NAME-*` on origin, by a bounded `ls-remote` off the event loop (S-3486): on the home, origin is
+// GitHub, whose old branches a checkout's tracking refs may not hold. Best effort: a failure, timeout or stopped remote gives [] and
+// the spawn goes on with its local refs (the pr_open head check is the guard). The output is branch names only, never the URL.
+function remoteBranchNames(repo: string, branch: string): Promise<string[]> {
+  return new Promise((done) => {
+    const ms = fetchTimeoutMs();
+    const child = spawn('git', ['-C', repo, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`, `refs/heads/${branch}-*`], {
+      detached: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+    let out = '';
+    let settled = false;
+    const finish = (r: string[]) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      done(r);
+    };
+    const timer = setTimeout(() => {
+      try {
+        process.kill(-child.pid!, 'SIGKILL');
+      } catch {}
+      finish([]);
+    }, ms);
+    child.stdout!.on('data', (d) => (out += d));
+    child.on('error', () => finish([]));
+    child.on('close', (code) => finish(code === 0 ? out.split('\n').map((l) => l.split('\t')[1]?.replace(/^refs\/heads\//, '')).filter((b): b is string => Boolean(b)) : []));
+  });
+}
+
+// The first free name for a default branch (S-3486): `stam/NAME`, else `stam/NAME-2`, `-3`, ... Taken is a local branch, a
+// remote-tracking ref of origin or storage, or a name in `onRemote` (origin's own list). Throws after 50 tries.
+function freeBranch(repo: string, branch: string, remotes: string[], onRemote: string[]): string {
+  for (let n = 1; n <= 50; n++) {
+    const candidate = n === 1 ? branch : `${branch}-${n}`;
+    if (!onRemote.includes(candidate) && !reusedBranchRefusal(repo, candidate, remotes)) return candidate;
+  }
+  throw new Error(`${branch} and its -2 to -50 suffixes are all taken: pass an explicit branch`);
+}
+
+export function createWorkspace(spec: WorkspaceSpec, agentName: string, fetched?: BaseFetch, onRemote: string[] = []): Workspace {
   switch (spec.kind) {
     case 'dir':
       return { spec, cwd: resolve(spec.path) };
     case 'worktree': {
       const repo = execFileSync('git', ['-C', spec.repo, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
       const path = join(STAM_HOME, 'worktrees', `${basename(repo)}-${agentName}`);
-      const remotes = ['origin', storageRemoteFallback(['storage'])].filter(Boolean);
+      const remotes = ['origin', storageRemoteFallback(localRemotes(repo))].filter(Boolean);
       // `branch: "new"` asks for the agent's own stam/NAME branch even on a PR branch's base: a new stacked PR (S-964).
       const asked = spec.branch === 'new' ? undefined : spec.branch;
       // A base of origin/stam/X continues that PR's branch (S-3113), unless a branch was asked for.
       const continues = !spec.branch ? continuedBranch(spec.base, remotes) : null;
-      const branch = continues ?? asked ?? `stam/${agentName}`;
-      if (!asked && !continues) {
-        const why = reusedBranchRefusal(repo, branch, remotes);
-        if (why) throw new Error(why);
-      }
+      const wanted = `stam/${agentName}`;
+      // A default name an earlier agent used gets a free suffix instead of its old branch (S-1419, S-3486); an explicit branch or a continued PR branch is taken as given.
+      const branch = continues ?? asked ?? freeBranch(repo, wanted, remotes, onRemote);
+      const suffixed = !asked && !continues && branch !== wanted;
       // A base that doesn't resolve fails here, before any worktree exists.
       let start: string | undefined;
       let baseUsed: BaseUsed | undefined;
@@ -329,11 +379,11 @@ export function createWorkspace(spec: WorkspaceSpec, agentName: string, fetched?
         execFileSync('git', ['-C', repo, 'worktree', 'add', '-b', branch, path, ...(start ? [start] : [])], { encoding: 'utf8', stdio: 'pipe' });
       }
       const deps = DEPS_FOLDERS.map((rel) => linkDeps(path, rel)).filter((d): d is DepsEvent => Boolean(d));
-      return { spec, cwd: path, worktree: { repo, path, branch, ...(spec.base ? { base: spec.base } : {}), ...(continues ? { continues: true } : {}) }, deps, ...(baseUsed ? { baseUsed } : {}) };
+      return { spec, cwd: path, worktree: { repo, path, branch, ...(spec.base ? { base: spec.base } : {}), ...(continues ? { continues: true } : {}), ...(suffixed ? { suffixed: true } : {}) }, deps, ...(baseUsed ? { baseUsed } : {}) };
     }
     case 'script': {
       // The script prints the directory to use on its last line of output.
-      const out = execFileSync('sh', ['-c', spec.command], { cwd: spec.cwd, encoding: 'utf8', env: { ...process.env, ...{ STAM_AGENT_NAME: agentName } } });
+      const out = execFileSync('sh', ['-c', spec.command], { cwd: spec.cwd, encoding: 'utf8', env: { ...process.env, ...withTwins({ STAM_AGENT_NAME: agentName }) } });
       const dir = out.trim().split('\n').pop() ?? '';
       if (!dir || !existsSync(dir)) throw new Error(`workspace script printed no existing directory: ${dir}`);
       return { spec, cwd: resolve(spec.cwd, dir) };

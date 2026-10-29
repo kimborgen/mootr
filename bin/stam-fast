@@ -24,9 +24,15 @@ fi
 
 url=${MOOTR_URL:-${STAM_URL:-http://127.0.0.1:${MOOTR_PORT:-${STAM_PORT:-7878}}}}
 # env MOOTR_TOKEN (or STAM_TOKEN) wins, then the daemon's token file, as src/config.ts readToken does.
-# The home is the MOOTR_HOME or STAM_HOME override, else the stam folder, or the mootr folder when only that exists (config.ts).
+# The home is the MOOTR_HOME or STAM_HOME override, else the default_home rule: a real stam folder, else mootr.
+# A home that can't be inspected falls to the node CLI, which reports it.
 home=${MOOTR_HOME:-${STAM_HOME:-}}
-[ -n "$home" ] || { home="$HOME/.local/share/stam"; [ -e "$home" ] || [ ! -e "$HOME/.local/share/mootr" ] || home="$HOME/.local/share/mootr"; }
+if [ -z "$home" ]; then
+  # dash exits on a `.` of a missing file even behind `||`, so the file is tested first.
+  [ -r "$here/../scripts/default-home.sh" ] || node_cli "$@"
+  . "$here/../scripts/default-home.sh"
+  home=$(default_home 2>/dev/null) || node_cli "$@"
+fi
 token=${MOOTR_TOKEN:-${STAM_TOKEN:-$(cat "$home/token" 2>/dev/null)}}
 id=${MOOTR_AGENT_ID:-${STAM_AGENT_ID:-}}
 usl=${MOOTR_USER_STATUSLINE:-${STAM_USER_STATUSLINE:-}}
@@ -35,7 +41,8 @@ usl=${MOOTR_USER_STATUSLINE:-${STAM_USER_STATUSLINE:-}}
 # hard, where no trap runs; S-668): the daemon's route reads a JSON body, and a tool-call
 # hook's can exceed the 128 KB limit on one argument.
 in=$(mktemp "${TMPDIR:-/tmp}/stam-hook.XXXXXX") || node_cli "$@"
-trap 'rm -f "$in"' EXIT
+printed=
+trap 'rm -f "$in" "$printed"' EXIT
 trap 'exit 0' INT TERM HUP
 cat >"$in"
 
@@ -55,17 +62,32 @@ hook)
     sleep 0.5
   done
   [ -n "$resp" ] || exit 0
-  # Exactly the node path's `process.stdout.write(r.stdout)`, trailing newline included:
-  # jq's --join-output adds none, and the output goes straight out so a command
-  # substitution can't strip one.
+  # Exactly the node path's `process.stdout.write(r.stdout)`, trailing newline included: the text goes through a file,
+  # so the exit status of each step can be checked. jq's --join-output adds none, and `cat` writes the bytes out as they
+  # are, where a command substitution would strip a newline.
+  printf '%s' "$resp" >"$in" || exit 0
+  # The printed text holds the notices, so it lives in a private file (mktemp: mode 0600, and a stam-hook.* name the
+  # janitor sweeps), removed on exit.
+  printed=$(mktemp "${TMPDIR:-/tmp}/stam-hook.XXXXXX") || exit 0
   if command -v jq >/dev/null 2>&1; then
-    printf '%s' "$resp" | jq --join-output '.stdout // empty' 2>/dev/null
+    jq --join-output '.stdout // empty' "$in" >"$printed" 2>/dev/null || exit 0
+    acks=$(jq -r '.ack[]?' "$in" 2>/dev/null)
   else
-    printf '%s' "$resp" | python3 -c 'import json, sys
-d = json.load(sys.stdin)
+    python3 -c 'import json, sys
+d = json.load(open(sys.argv[1]))
 out = d.get("stdout") if isinstance(d, dict) else None
-sys.stdout.write(out or "")' 2>/dev/null
+sys.stdout.write(out or "")' "$in" >"$printed" 2>/dev/null || exit 0
+    acks=$(python3 -c 'import json, sys
+d = json.load(open(sys.argv[1]))
+[print(r) for r in (d.get("ack") or []) if isinstance(d, dict)]' "$in" 2>/dev/null)
   fi
+  # Only a response that was printed in full reached the agent, so only then may the daemon delete the answer rows
+  # the response carried (S-3923). A closed or full stdout fails the write and sends no ack. A failed acknowledgement
+  # keeps the rows, and a restart replays them.
+  cat "$printed" || exit 0
+  for row in $acks; do
+    curl -sS -m 3 -X POST -H "authorization: Bearer $token" "$url/api/notices/$id/ack/$row" >/dev/null 2>&1
+  done
   exit 0
   ;;
 statusline)

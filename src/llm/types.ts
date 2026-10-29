@@ -36,6 +36,8 @@ export interface CompleteResult {
   usage: { inputTokens: number; outputTokens: number };
   // Billed cost in USD, when the provider reports one.
   costUsd?: number;
+  // Set when stam priced the call itself (src/llm/pricing.ts): from the registry's prices, or the dearer fallback for a model with none.
+  priced?: 'catalog' | 'fallback' | 'free';
 }
 
 export interface ModelInfo {
@@ -84,6 +86,8 @@ export interface LlmAdapter {
   apiKey(): string | undefined;
   // A provider that takes no key (a local Ollama): `hasKey` is true without one.
   keyless?: boolean;
+  // A server that bills nothing (a local Ollama or vLLM, S-3245): a model with no catalogue price books $0, not the fallback.
+  unmetered?: boolean;
   complete(req: Omit<CompleteRequest, 'model'> & { model: string }): Promise<CompleteResult>;
   listModels?(): Promise<ModelInfo[]>;
   // The account's credit. Null when the call fails or answers non-2xx.

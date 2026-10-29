@@ -177,11 +177,12 @@ function closeDialog(answer) {
 let bash = false;
 // A completion menu under the box while its text is `/word` or ends in `@word`: Enter takes its
 // item instead of the text, and one Esc closes it until the text changes. Text with `@@` opens
-// one that Esc doesn't close.
+// one that Esc doesn't close. A file `no-menu` in the agent's folder turns menus off (a test
+// clears one that holds an approval; the next key redraws the box without it).
 let menu = null;
 let menuDismissed = false;
 function syncMenu() {
-  const want = !busy && !pasting && !menuDismissed && (/^\/\S*$/.test(input) || /(^|\s)@\S*$/.test(input)) ? (input.startsWith('/') ? '/menu-pick' : '@menu-pick') : null;
+  const want = !busy && !pasting && !menuDismissed && !existsSync(join(process.cwd(), 'no-menu')) && (/^\/\S*$/.test(input) || /(^|\s)@\S*$/.test(input)) ? (input.startsWith('/') ? '/menu-pick' : '@menu-pick') : null;
   // Under the footer after a blank line (Claude Code draws it over the box; stam checks both).
   if (want && !menu) write(`\r\n\r\n\r\n\r\n  ▸ ${want}\x1b[4A${boxLine()}`);
   else if (!want && menu) write(`\r\n\r\n\r\n\x1b[J\x1b[3A${boxLine()}`);
@@ -269,9 +270,10 @@ function onKeys(data) {
         continue;
       }
       if (c === '\x03' || c === '\x04') return exit('prompt_input_exit');
-      // While the file a script's `holdEnter` names exists, Enter does nothing (each one is logged
-      // to that path plus `.dropped`), as a Claude Code too busy to take it (S-2123).
-      if (c === '\r' && script.holdEnter && existsSync(script.holdEnter)) {
+      // While the file a script's `holdEnter` names exists, Enter does nothing in a launch that isn't
+      // a resume (each one is logged to that path plus `.dropped`), as a Claude Code too busy to take
+      // it (S-2123). A resume is the relaunch a restart makes, so the hold doesn't go with the old launch (S-3454).
+      if (c === '\r' && script.holdEnter && !resumed && existsSync(script.holdEnter)) {
         appendFileSync(`${script.holdEnter}.dropped`, `${sessionId}\n`);
         continue;
       }
@@ -610,7 +612,8 @@ async function step(raw, turn) {
     // answer comes from keys typed into the pane (1, 2, ..., Enter for the first, Esc).
     const name = s.ask ? 'AskUserQuestion' : s.permission;
     const options = s.options ?? ['Yes', 'No'];
-    const toolInput = s.ask ? { questions: [{ question: s.ask, options: options.map((label) => ({ label })) }] } : (s.input ?? {});
+    // `multiSelect` (S-3978): a question whose options are toggled, not picked, as Claude Code's multi-select question.
+    const toolInput = s.ask ? { questions: [{ question: s.ask, multiSelect: s.multiSelect === true, options: options.map((label) => ({ label })) }] } : (s.input ?? {});
     await toolUse(name, toolInput, async () => {
       await hook('PermissionRequest', { tool_name: name, tool_input: toolInput });
       // Like Claude Code's, a permission dialog shows the call it asks about.
@@ -657,12 +660,16 @@ async function step(raw, turn) {
   }
 }
 
+let hookWraps = 0;
 async function runTurn(prompt, source) {
   vars.prompt = prompt;
   // While the file a script's `holdPromptHook` names exists, UserPromptSubmit waits, as on a
   // stalled daemon (S-2123).
   while (script.holdPromptHook && existsSync(script.holdPromptHook)) await new Promise((r) => setTimeout(r, 100));
-  await hook('UserPromptSubmit', { prompt });
+  // A prompt Claude Code folds (over 800 characters, or more than two lines) reaches its UserPromptSubmit
+  // hook wrapped in `<pasted_content>` tags, not as typed (S-3454); a channel push never is.
+  const folded = source !== 'channel' && (prompt.length > 800 || prompt.split('\n').length > 2);
+  await hook('UserPromptSubmit', { prompt: folded ? `<pasted_content id="${++hookWraps}">${prompt}</pasted_content id="${hookWraps}">` : prompt });
   // A bash-mode command is recorded as Claude Code records one.
   record({ type: 'user', message: { role: 'user', content: prompt.startsWith('!') ? `<bash-input>${prompt.slice(1)}</bash-input>` : prompt } });
   const t = await pick(prompt, source);
@@ -730,7 +737,14 @@ process.on('SIGHUP', () => exit('other'));
 process.on('SIGTERM', () => exit('other'));
 log(`fake-claude ${resumed ? 'resumed' : 'started'} session ${sessionId} (script: ${process.env.STAM_FAKE_CLAUDE_SCRIPT ?? 'none'})`);
 busy = true;
-await hook('SessionStart', { source: resumed ? 'resume' : 'startup', model });
+// S-3250: `fake-start-hold` in the stam home holds a resumed launch before its SessionStart and its
+// prompt, so a test can restart the daemon under it; `fake-drop-session-start` (removed once used)
+// loses that SessionStart, as a hook sent while the daemon restarted was lost.
+const flag = (name) => join(process.env.STAM_HOME ?? process.cwd(), name);
+while (resumed && existsSync(flag('fake-start-hold'))) await new Promise((r) => setTimeout(r, 100));
+const dropStart = resumed && existsSync(flag('fake-drop-session-start'));
+if (dropStart) rmSync(flag('fake-drop-session-start'), { force: true });
+if (!dropStart) await hook('SessionStart', { source: resumed ? 'resume' : 'startup', model });
 await statusline();
 if (queue.length) drain();
 else {

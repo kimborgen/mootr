@@ -50,7 +50,7 @@ test('only the shared writes are peer UI routes', () => {
 
 test("the home applies a peer's patch to shared keys only and keeps its own local keys", () => {
   const file = join(home, 'settings.json');
-  writeFileSync(file, JSON.stringify({ home: MACHINE, peers: [{ name: 'peerbox', url: 'http://peerbox:7878', token: 't' }], itsa: { home: MACHINE, repos: { a: '/a' }, wip: 3 }, humanMail: { when: 'necessary' } }));
+  writeFileSync(file, JSON.stringify({ home: MACHINE, peers: [{ name: 'peerbox', url: 'http://peerbox:7878', token: 'test-peer-token' }], itsa: { home: MACHINE, repos: { a: '/a' }, wip: 3 }, humanMail: { when: 'necessary' } }));
   s.settingsChanged();
   const r = s.patchSharedSettings({
     peers: [],

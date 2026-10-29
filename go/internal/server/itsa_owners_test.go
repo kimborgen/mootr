@@ -140,7 +140,7 @@ func TestItsaOwnerNotices(t *testing.T) {
 func TestItsaOwnerPeer(t *testing.T) {
 	far := newFarPeer(t, map[string]string{"afar1": `{"id":"afar1","name":"far","machine":"elsewhere","lifecycle":"active"}`})
 	f := newFixture(t, nil)
-	writeFile(t, filepath.Join(f.home, "settings.json"), `{"peers":[{"name":"elsewhere","url":"`+far.URL+`","token":"t"}]}`)
+	writeFile(t, filepath.Join(f.home, "settings.json"), `{"peers":[{"name":"elsewhere","url":"`+far.URL+`","token":"test-peer-token"}]}`)
 	parent := f.createItsa(`{"title":"parent"}`)
 	f.sql("UPDATE itsas SET owner = 'afar1' WHERE key = ?", parent)
 	kid := f.createItsa(`{"title":"kid","parent":"` + parent + `"}`)
@@ -176,16 +176,18 @@ func TestOwnerStopped(t *testing.T) {
 	}
 	pk := parent
 	k1, k2 := f.count1("SELECT key FROM itsas WHERE title = 'one'"), f.count1("SELECT key FROM itsas WHERE title = 'two'")
+	// The create of "shut" (closed, under boss's parent) tells boss on its own goroutine: wait for it, so the stop
+	// notice is the second.
+	until(t, "the close notice", func() bool { return len(n.all()) == 1 })
 	f.srv.ownerStopped(context.Background(), "achild", "child", "errored")
 	want := "aboss: [stam] child errored. These are children of your " + pk + ": " + k1 + ` "one" (backlog), ` + k2 + ` "two" (backlog).`
-	// The create of "shut" (closed, under boss's parent) told boss already.
 	until(t, "the stop notice", func() bool { return len(n.all()) == 2 })
 	if got := n.all()[1]; got != want {
 		t.Errorf("stop:\n got %s\nwant %s", got, want)
 	}
 	// Off the home: the home hears.
 	far := newFarPeer(t, nil)
-	writeFile(t, filepath.Join(f.home, "settings.json"), `{"itsa":{"home":"farhome"},"peers":[{"name":"farhome","url":"`+far.URL+`","token":"t"}]}`)
+	writeFile(t, filepath.Join(f.home, "settings.json"), `{"itsa":{"home":"farhome"},"peers":[{"name":"farhome","url":"`+far.URL+`","token":"test-peer-token"}]}`)
 	f.srv.ownerStopped(context.Background(), "achild", "child", "was shut down")
 	if got := far.received(); len(got) != 1 || got[0] != `/api/itsas/owner-stopped {"id":"achild","name":"child","what":"was shut down"}` {
 		t.Errorf("the home heard %q", got)
@@ -203,7 +205,7 @@ func TestTellWhere(t *testing.T) {
 	f := newFixture(t, nil)
 	n := &notices{}
 	f.srv.noticeHook = n.add
-	writeFile(t, filepath.Join(f.home, "settings.json"), `{"peers":[{"name":"elsewhere","url":"`+far.URL+`","token":"t"}]}`)
+	writeFile(t, filepath.Join(f.home, "settings.json"), `{"peers":[{"name":"elsewhere","url":"`+far.URL+`","token":"test-peer-token"}]}`)
 	ctx := context.Background()
 	check := func(id, want, outcome string) {
 		t.Helper()

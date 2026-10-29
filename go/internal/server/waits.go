@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -11,8 +12,10 @@ import (
 	"stam/internal/api"
 	"stam/internal/auth"
 	"stam/internal/db"
+	"stam/internal/events"
 	"stam/internal/jsjson"
 	"stam/internal/lifecycle"
+	"stam/internal/peers"
 	"stam/internal/steps"
 )
 
@@ -20,8 +23,7 @@ import (
 // (any wait, from the sources of waits), /waits/clear, and the agent's own wait_for (/waits/declared), wake_me
 // (/waits/wake) and wait_done (/waits/done). Who may write is mayManageWaits.
 //
-// Not ported, each a 501 before any write: a wait on an external event (`on: 'event'`), a wait_for target on another
-// machine, and `rest`.
+// Not ported, a 501 before any write: `rest`.
 
 func (s *Server) waitsRoutes() {
 	s.handle("GET /api/agents/{id}/waits", agentPath(s.getWaits))
@@ -291,7 +293,18 @@ func (s *Server) declareWait(r *http.Request, c auth.Resolved) (any, error) {
 		return nil, err
 	}
 	if on == "event" {
-		return nil, Errorf(http.StatusNotImplemented, "a wait for an external event is not ported to the Go daemon yet")
+		// An event wait clears on the first external event its filter fits (src/watch.ts ingest), and is kept by its
+		// rows: a restart keeps it, and a cleared one stays cleared.
+		if err := restRefusal(body); err != nil {
+			return nil, err
+		}
+		ed := events.Declare{Filter: events.Sanitize(bodyField(body, "filter")), Note: d.Note, Timeout: d.Timeout, Expect: d.Expect}
+		w, err := s.events.DeclareWait(ctx, a.ID, ed)
+		var bad *events.ErrInvalid
+		if errors.As(err, &bad) {
+			return nil, Errorf(http.StatusBadRequest, "%s", bad.Msg)
+		}
+		return w, err
 	}
 	if on == "agent" {
 		ref := ""
@@ -301,25 +314,26 @@ func (s *Server) declareWait(r *http.Request, c auth.Resolved) (any, error) {
 		if ref == "" {
 			return nil, Errorf(http.StatusBadRequest, "wait_for on 'agent' needs target (an agent id or name)")
 		}
+		// The target may run on another machine; ids are unique across machines.
 		t, err := s.db.GetAgent(ctx, ref)
+		remote := false
 		if errors.Is(err, db.ErrNotFound) {
-			// The target may run on another machine: one this daemon has met is refused as not ported, any other is
-			// no agent, as send answers for a recipient it can't find here.
-			if peer, err := s.db.HasPeerAgent(ctx, ref); err != nil {
+			var ok bool
+			if t, ok, err = s.peerTarget(ctx, ref); err != nil {
 				return nil, err
-			} else if peer {
-				return nil, Errorf(http.StatusNotImplemented, "a wait_for target on another machine is not ported to the Go daemon yet")
 			}
-			return nil, Errorf(http.StatusBadRequest, "no agent %s", ref)
-		}
-		if err != nil {
+			if !ok {
+				return nil, Errorf(http.StatusBadRequest, "no agent %s", ref)
+			}
+			remote = true
+		} else if err != nil {
 			return nil, err
 		}
 		// An archived agent never sends the reply, so the wait would never clear.
 		if t.Lifecycle == "archived" {
 			return nil, Errorf(http.StatusBadRequest, "no agent %s (archived)", ref)
 		}
-		d.Target = t
+		d.Target, d.Remote = t, remote
 	}
 	if th := bodyField(body, "thread"); th != nil && th != "" {
 		d.Thread = claude.JSString(th)
@@ -329,6 +343,47 @@ func (s *Server) declareWait(r *http.Request, c auth.Resolved) (any, error) {
 	}
 	w, err := s.life.DeclareWait(ctx, a, d)
 	return w, waitError(err)
+}
+
+// peerTarget is src/waits.ts peerTarget: an agent on a peer, found there now, or one this daemon has met before on a peer
+// it still has that did not answer this lookup (send_mail queues to such an agent the same way, S-235). A peer that
+// answered it has no such agent outweighs the memory of one there, and two remembered agents the name could mean are
+// ambiguous, as a lookup on the peers would be (TS takes the first remembered row either way). Its mail reaches this
+// daemon through the peer link, so the wait clears on it. The caller refuses an archived one.
+func (s *Server) peerTarget(ctx context.Context, ref string) (db.Agent, bool, error) {
+	hit, found, silent, err := s.peers.LocateSilent(ctx, s.db, ref)
+	var amb *peers.AmbiguousError
+	if errors.As(err, &amb) {
+		return db.Agent{}, false, Errorf(http.StatusConflict, "%s", amb.Msg)
+	}
+	if err != nil {
+		return db.Agent{}, false, err
+	}
+	if found == peers.Found {
+		return db.Agent{ID: hit.Agent.ID, Name: hit.Agent.Name, Lifecycle: api.AgentLifecycle(hit.Agent.Lifecycle)}, true, nil
+	}
+	if found != peers.Unreachable {
+		return db.Agent{}, false, nil
+	}
+	known, err := s.db.PeerAgentsMatching(ctx, ref)
+	if err != nil {
+		return db.Agent{}, false, err
+	}
+	var hits []peers.Hit
+	// silent names only peers in the settings, so an agent remembered on a machine no longer there is no match.
+	for _, k := range known {
+		if slices.Contains(silent, k.Machine) {
+			hits = append(hits, peers.Hit{Agent: peers.Agent{ID: k.ID, Name: k.Name, Machine: k.Machine, Lifecycle: k.Lifecycle}})
+		}
+	}
+	pick, err := peers.Pick(ref, hits)
+	if errors.As(err, &amb) {
+		return db.Agent{}, false, Errorf(http.StatusConflict, "%s", amb.Msg)
+	}
+	if err != nil || pick == nil {
+		return db.Agent{}, false, err
+	}
+	return db.Agent{ID: pick.Agent.ID, Name: pick.Agent.Name, Lifecycle: api.AgentLifecycle(pick.Agent.Lifecycle)}, true, nil
 }
 
 var wakeModes = []string{"in_minutes", "at", "cron", "every_minutes"}

@@ -10,9 +10,14 @@
 // PR's ITSA (its body's ITSA: line) or whose tree's worktree is on the PR's branch (branch-scope.ts).
 // `pr_merge` with cancel (cancelHere, S-2709) takes the PR out of the merge queue on the same terms: scripts/merge-cancel.mjs runs
 // under the gate lock, stops the run's shell and the PR's merge worker by recorded pid and start time, and drops its tickets.
-// A held lock means a train is running, and the cancel is refused ("retry after it"): a PR in a train is never half-dropped.
+// A held lock means a train is running: it can't be stopped (other PRs share it), so a PR that is in it gets a cancel claim on
+// its ticket and the train drops the PR before its merge (S-3679); one exclusive claim file decides merge or cancel, never both.
 // `pr_close` (closeHere) closes a PR on the same terms, such as one a later PR superseded: `gh pr close N --comment`.
+// A PR sent back unmerged (refused, or not merged) whose caller is gone (archived, shut down, or refused mail) goes to whoever
+// src/failure-route.ts finds (S-3802): its ITSA's owner, woken if gone, else up its tree, else cos with a fallback ITSA; its ITSA is
+// reopened. Those steps run through the stam CLI as the `pr-merge` system sender.
 import { execFile, spawn } from 'node:child_process';
+import { lockHome } from './default-home.ts';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
@@ -30,6 +35,7 @@ import { settings } from './settings.ts';
 import { envVar } from './env.ts';
 import { testOnlyEnv } from './test-env.ts';
 import { deployCheckout } from './workspace.ts';
+import { COS, fallback, itsaOf, pickUp, reopen, type ItsaView, type PickUp } from './failure-route.ts';
 
 const run = promisify(execFile);
 
@@ -58,6 +64,10 @@ export interface MergeRun {
   reported?: boolean;
   // Who cancelled it (S-2709). Set before the run is stopped and kept while it is, so a daemon restart in between finishes the cancel.
   cancelBy?: string;
+  // The gh and repo the run was started with, so a late reroute reads the PR's live state where it merges (S-3802). A record
+  // without them (an older daemon's) reads settings.itsa.prOpen.
+  gh?: string;
+  github?: string;
 }
 
 export interface MergeStatus {
@@ -86,6 +96,7 @@ export interface TrainStatus {
 
 // The script exits 0 when it merged and 3 on a verdict on the PR (merge-pr.mjs REFUSED); anything else is "not merged".
 const REFUSED = 3;
+const CANCELLED = 79; // merge-pr.mjs: the train dropped the PR on a cancel's claim, nothing merged (S-3679)
 const TAIL = 15;
 const SHA = /^[0-9a-f]{7,40}$/;
 // The time gate.mjs stampText puts at a worker log line's start (S-3067). The run's own log has none (the caller relays the worker's
@@ -235,7 +246,7 @@ export async function mergeRefusal(via: Via | undefined, pr: number, view: { bod
 }
 
 // Starts the merge script for the PR, detached, and records the run.
-async function start(pr: number, by: string, key: string | null, branch: string): Promise<MergeRun> {
+async function start(pr: number, by: string, key: string | null, branch: string, cfg: PrOpenConfig): Promise<MergeRun> {
   mkdirSync(runsDir(), { recursive: true });
   pruneLogs();
   const g = await gate(pr);
@@ -252,7 +263,7 @@ async function start(pr: number, by: string, key: string | null, branch: string)
   child.on('error', (e) => console.error(`pr_merge: PR #${pr}: ${e.message}`));
   child.unref();
   const id = child.pid ? g.processIdentity(child.pid) : { start: '', boot: '' };
-  const r: MergeRun = { pr, by, itsa: key, branch, state: 'running', started: new Date(stamp).toISOString(), pid: child.pid ?? 0, start: id.start, boot: id.boot, log, status };
+  const r: MergeRun = { pr, by, itsa: key, branch, state: 'running', started: new Date(stamp).toISOString(), pid: child.pid ?? 0, start: id.start, boot: id.boot, log, status, gh: cfg.gh, github: cfg.github };
   save(r);
   openRuns().add(pr);
   return r;
@@ -278,7 +289,7 @@ export async function mergeHere(input: { pr: unknown; by?: string | null }, via?
     if (!existsSync(script)) throw new Error(`pr_merge can't merge PR #${pr}: ${script} is missing. The merge script is the deploy checkout's scripts/merge-pr.mjs; set STAM_DEPLOY_REPO to a checkout that has it (otherwise stam uses the checkout it runs from). Nothing was started.`);
     const by = input.by || via?.agent || HUMAN;
     console.log(`pr_merge: PR #${pr} for ${by}`);
-    return { ...(await start(pr, by, itsaKeyOf(view.body), view.branch)), already: false, ...(current ? { previous: current } : {}) };
+    return { ...(await start(pr, by, itsaKeyOf(view.body), view.branch, cfg)), already: false, ...(current ? { previous: current } : {}) };
   });
 }
 
@@ -350,6 +361,7 @@ function outcome(r: MergeRun, code: number): MergeRun {
   const ended = new Date().toISOString();
   if (code === 0) return { ...r, state: 'merged', code, ended, sha: [...lines].reverse().find((l) => SHA.test(l)) ?? lines.at(-1) ?? '' };
   const refusal = [...lines].reverse().find((l) => /merge refused: /.test(l));
+  if (code === CANCELLED) return { ...r, state: 'cancelled', code, ended };
   if (code === REFUSED) return { ...r, state: 'refused', code, ended, reason: refusal?.replace(/^.*merge refused: /, '') ?? lines.slice(-TAIL).join('\n') };
   return { ...r, state: 'not_merged', code, ended, reason: lines.slice(-TAIL).join('\n') };
 }
@@ -502,6 +514,71 @@ export async function pruneWorkerFiles(now = Date.now(), keepMs = Number(process
   return removed;
 }
 
+// The stam CLI the failure routing runs (S-3802), as a local script: STAM_PR_MERGE_STAM stands in for it in a test home.
+const stamPath = (): string => testOnlyEnv('STAM_PR_MERGE_STAM') || fileURLToPath(new URL('../bin/stam', import.meta.url));
+async function stamCli(args: string[]): Promise<string> {
+  const env = { ...process.env };
+  delete env.STAM_AGENT_ID;
+  try {
+    return (await run(stamPath(), args, { encoding: 'utf8', timeout: 60_000, env })).stdout;
+  } catch (e: any) {
+    throw new Error(`stam ${args.slice(0, 2).join(' ')} failed: ${String(e?.stderr || e?.message || e).trim()}`);
+  }
+}
+
+// Whether the caller is known to be gone (archived or shut down), here or as a peer last saw it. An agent stam knows nothing
+// of (the assistant) is not: its mail goes as before, and a send refused for good reroutes then.
+function callerGone(by: string): boolean {
+  const lifecycle = db.getAgent(by)?.lifecycle ?? db.peerAgentLifecycle(by);
+  return lifecycle === 'archived' || lifecycle === 'shut_down';
+}
+
+// A PR the gate sent back unmerged whose caller is gone (S-3802): src/failure-route.ts finds who takes it (the ITSA's owner,
+// woken if gone, else up its tree, else cos), reopens the ITSA, and files a fallback ITSA when only cos is left. Returns the
+// recipient and the lines that lead its mail. A lookup that fails sends it to cos alone. Every step is idempotent, so a mail
+// that fails and is retried on the next poll changes nothing twice.
+async function rerouted(r: MergeRun): Promise<{ to: string; lead: string } | null> {
+  const why = `PR #${r.pr} was not merged (${r.state === 'refused' ? 'the merge gate refused it' : 'its merge run failed'}) and its caller ${r.by} is gone`;
+  const say = (m: string) => console.error(`pr_merge: PR #${r.pr}: ${m}`);
+  let x: ItsaView | null = null;
+  let picked: PickUp;
+  try {
+    // A saved outcome may be delivered long after it was decided: a PR merged since (by hand, or by a train) is nobody's to fix.
+    const cfg = r.gh && r.github ? ({ gh: r.gh, github: r.github } as PrOpenConfig) : prOpenConfig();
+    if ((await prView(cfg, r.pr)).state === 'MERGED') {
+      say('merged since its run was refused: not rerouted');
+      return null;
+    }
+    x = r.itsa ? await itsaOf(stamCli, r.itsa) : null;
+    picked = await pickUp(stamCli, x?.owner ?? r.by, `${why}: see your mail from pr-merge.`, say);
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e);
+    say(`routing failed, so cos hears: ${m}`);
+    return { to: COS, lead: `${why}, and looking up who else could take it failed (${m}): please route it.` };
+  }
+  const lines = [
+    picked.route === 'cos'
+      ? `${why}, and nobody up its owner's tree could take it: please route it.`
+      : `${why}, so it comes to you${picked.route === 'owner' && r.itsa ? ` as ${r.itsa}'s owner` : ''}${picked.woke ? ' (you were woken for it)' : ''}.`,
+  ];
+  try {
+    // Unmerged work was never done: only a review status comes back.
+    const status = x ? await reopen(stamCli, x.key, `${why}.`, picked, 'pr-merge', { fromDone: false }) : null;
+    if (status) lines.push(`${x!.key} is reopened (${status}).`);
+  } catch (e) {
+    say(`could not reopen ${r.itsa}: ${e instanceof Error ? e.message : e}`);
+  }
+  if (picked.route === 'cos') {
+    try {
+      const key = await fallback(stamCli, r.pr, 'unmerged', r.itsa, `Branch ${r.branch}, outcome ${r.state}.${r.reason ? `\n\n${r.reason}` : ''}`, 'pr-merge');
+      lines.push(`${key} tracks it: PR #${r.pr} is not merged.`);
+    } catch (e) {
+      say(`could not file the fallback ITSA: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  return { to: picked.to, lead: lines.join('\n') };
+}
+
 async function report(r: MergeRun): Promise<void> {
   const to = [...new Set([r.by, r.cancelBy].filter((x): x is string => !!x && x !== HUMAN))];
   if (!to.length) return;
@@ -514,7 +591,21 @@ async function report(r: MergeRun): Promise<void> {
         : r.state === 'refused'
           ? [`PR #${r.pr} refused${ref}`, `merge-pr.mjs refused PR #${r.pr} (${r.branch}); it goes back to its developer:\n\n${r.reason}`]
           : [`PR #${r.pr} not merged${ref}`, `merge-pr.mjs ended with status ${r.code ?? '?'} without merging PR #${r.pr} (${r.branch}). Call pr_merge again to retry. Its last lines:\n\n\`\`\`\n${r.reason}\n\`\`\``];
-  await sendMail({ from: '', system: 'pr-merge', to, subject, body, new_thread: true });
+  // Not merged and not cancelled: the PR goes back to whoever can take it, so a caller that is gone reroutes it (S-3802).
+  const culprit = r.state === 'refused' || r.state === 'not_merged';
+  // False when the PR merged since: the outcome then goes only to its caller, as before.
+  const reroute = async (): Promise<boolean> => {
+    const next = await rerouted(r);
+    if (!next) return false;
+    await sendMail({ from: '', system: 'pr-merge', to: [next.to], subject, body: `${next.lead}\n\n${body}`, new_thread: true });
+    return true;
+  };
+  if (culprit && r.by !== HUMAN && callerGone(r.by) && (await reroute())) return;
+  try {
+    await sendMail({ from: '', system: 'pr-merge', to, subject, body, new_thread: true });
+  } catch (e) {
+    if (!(culprit && e instanceof RefusedError) || !(await reroute())) throw e;
+  }
 }
 
 // Moves a run out of the open ones, to done/.
@@ -538,7 +629,10 @@ async function settle(pr: number): Promise<MergeRun | null> {
     // A cancel a restart cut short (S-2709). A run that already ended keeps its outcome, and so does one the helper finds decided
     // under the lock; otherwise the stop is redone. A held gate lock means a train runs, so try again on the next poll.
     const code = readJson<number>(r.status);
-    if (code !== null) r = { ...outcome(r, Number(code)), cancelBy: undefined };
+    if (code !== null) {
+      const ended = outcome(r, Number(code));
+      r = ended.state === 'cancelled' ? ended : { ...ended, cancelBy: undefined }; // the train dropped the PR on this cancel's claim (S-3679)
+    }
     else {
       const done = await stopRun(r);
       if (!done) return r;
@@ -586,6 +680,8 @@ export interface Cancelled {
   cancelled: true;
   // What was stopped: the relay's shell, the merge worker, and the queue tickets dropped.
   stopped: { shell: boolean; worker: boolean; tickets: number };
+  // 'train': the PR is in a running train, which drops it before its merge and ends the run as cancelled (S-3679); nothing was stopped yet.
+  pending?: 'train';
   // The run that was cancelled, when the relay started one; null for a merge run by hand.
   run: MergeRun | null;
 }
@@ -594,7 +690,7 @@ export interface Cancelled {
 // nothing was touched. The helper only stops recorded processes with a matching start time, and drops the PR's tickets.
 async function stopRun(r: { pr: number; pid?: number; start?: string }): Promise<{ decided?: string; shell: boolean; worker: boolean; tickets: string[] } | null> {
   requireGate(r.pr);
-  const lock = envVar('GATE_LOCK') || join(process.env.HOME ?? '', '.local/share/stam/gate.lock');
+  const lock = envVar('GATE_LOCK') || join(lockHome(), 'gate.lock');
   const script = fileURLToPath(new URL('../scripts/merge-cancel.mjs', import.meta.url));
   const args = [String(r.pr), ...(r.pid && r.start ? [String(r.pid), r.start] : [])];
   mkdirSync(join(lock, '..'), { recursive: true });
@@ -608,7 +704,9 @@ async function stopRun(r: { pr: number; pid?: number; start?: string }): Promise
 
 // On the ITSA home: checks who asks as a merge does, then takes the PR out of the merge queue (S-2709). The run is marked
 // cancelled by the caller first, then stopped under the gate lock, then settled: the caller and the run's requester get a
-// mail. A held lock refuses the cancel and leaves the run as it was. A PR with no run and no worker is an error.
+// mail. A held lock held by a running train that has the PR's ticket takes a cancel claim instead (S-3679): the train drops the PR
+// before its merge, the result says pending 'train', and the run settles as cancelled when its worker exits; a claim the train's
+// merge already holds refuses the cancel as "already merging". Any other held lock refuses it and leaves the run as it was. A PR with no run and no worker is an error.
 export async function cancelHere(input: { pr: unknown; by?: string | null }, via?: Via, cfg: PrOpenConfig = prOpenConfig()): Promise<Cancelled> {
   const pr = prNumber(input.pr);
   const by = input.by || via?.agent || HUMAN;
@@ -646,8 +744,25 @@ export async function cancelHere(input: { pr: unknown; by?: string | null }, via
       throw new Error(`can't cancel PR #${pr}: its merge already has an outcome (${done.decided}); nothing was cancelled, and the run's mail reports it`);
     }
     if (!done) {
-      if (r) save(r);
-      throw new Error(`can't cancel PR #${pr} now: the gate lock is held, so a train is running and may hold it. Nothing was changed; retry after it.`);
+      // The lock is held. A running train that has this PR's ticket is told to drop the PR before its merge (S-3679): one
+      // exclusive claim on the ticket decides between the train's merge and this cancel, and the run settles once the train ends.
+      const ticket = trainHere(g, pr)?.state === 'running' ? g.tickets(queue).find((t) => String(g.ticketBodyOf(queue, t)?.pr) === String(pr)) : undefined;
+      if (ticket === undefined) {
+        if (r) save(r);
+        throw new Error(`can't cancel PR #${pr} now: the gate lock is held by a train or gate run that doesn't carry this PR's queue ticket, so it can't be told to drop it. Nothing was changed; retry after it.`);
+      }
+      if (g.claimDecision(queue, ticket, 'cancel') !== 'cancel') {
+        if (r) save(r);
+        throw new Error(`can't cancel PR #${pr}: already merging; the run's mail reports the outcome`);
+      }
+      // The worker's cleanup removes the ticket before its claim, so a ticket gone now means the worker ended: the claim is moot.
+      if (!existsSync(join(queue, ticket))) {
+        rmSync(g.decisionFile(queue, ticket), { force: true });
+        if (r) save(r);
+        throw new Error(`can't cancel PR #${pr}: its merge already has an outcome (the ticket is gone); nothing was cancelled, and the run's mail reports it`);
+      }
+      console.log(`pr_merge: cancel claimed for PR #${pr} in the running train, for ${by}`);
+      return { pr, cancelled: true as const, pending: 'train' as const, stopped: { shell: false, worker: false, tickets: 0 }, run: r ? { ...r, cancelBy: by } : null };
     }
     let final: MergeRun | null = null;
     if (r) {

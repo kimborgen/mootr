@@ -27,6 +27,13 @@ func (f *fixture) asHuman(method, path, body string) *httptest.ResponseRecorder 
 	return f.do(call{method: method, path: path, header: map[string]string{"X-Stam-Test-Human": humanKey, "X-Stam-Human": "1"}, body: body})
 }
 
+// approve is the human's Approve on an ask, naming the revision of its text as the web UI shows it (S-2998).
+func (f *fixture) approve(ask string) *httptest.ResponseRecorder {
+	f.t.Helper()
+	rev := f.body(f.post2("GET", "/api/itsas/"+ask, "")).Text("rev")
+	return f.post2("POST", "/api/itsas/"+ask+"/act", `{"action":"approve","if_rev":"`+rev+`"}`)
+}
+
 func (f *fixture) reqStatus(key string) string {
 	f.t.Helper()
 	return f.count1("SELECT status FROM requirements WHERE key = '" + key + "'")
@@ -61,7 +68,7 @@ func TestRequirementApprovalHumanAsk(t *testing.T) {
 	if n := f.count("SELECT count(*) FROM req_approvals WHERE req_key = ? AND rev = 1 AND via = 'human'", key); n != 1 {
 		t.Errorf("stamp: %d", n)
 	}
-	rec := f.post2("POST", "/api/itsas/"+ask+"/act", `{"action":"approve"}`)
+	rec := f.approve(ask)
 	if rec.Code != 200 {
 		t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
 	}
@@ -91,7 +98,7 @@ func TestRequirementApprovalStaleRev(t *testing.T) {
 	}
 	// A change that slips in between the stamp and the Approve: the stamp is stale, so the requirement is not approved.
 	f.sql("UPDATE req_approvals SET rev = 1 WHERE req_key = ?", key)
-	if rec := f.post2("POST", "/api/itsas/"+ask+"/act", `{"action":"approve"}`); rec.Code != 200 {
+	if rec := f.approve(ask); rec.Code != 200 {
 		t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
 	}
 	until(t, "the ask raised again", func() bool { return f.itsaStatus(ask) == "needs_approval" && f.reqStatus(key) == "draft" })
@@ -176,16 +183,27 @@ func TestRequirementApprovalBatch(t *testing.T) {
 	if n := f.count("SELECT count(*) FROM req_batch_asks"); n != 3 {
 		t.Fatalf("members: %d", n)
 	}
-	// Dropping needs the human; an agent is refused.
+	// Dropping needs the human's proof, with or without the shared token beside it; an agent is refused even with it,
+	// and the shared token's x-stam-human proves nothing.
+	key := map[string]string{"X-Stam-Test-Human": humanKey, "X-Stam-Human": "1"}
 	if rec := f.sendH("POST", "/api/requirements/asks/"+ask+"/drop", agentTok, nil, `{"key":"R-3","if_rev":1}`); rec.Code != 403 {
 		t.Errorf("an agent's drop: %d %s", rec.Code, rec.Body.String())
 	}
-	if rec := f.asHuman("POST", "/api/requirements/asks/"+ask+"/drop", `{"key":"R-3","if_rev":1}`); rec.Code != 200 {
-		t.Fatalf("drop: %d %s", rec.Code, rec.Body.String())
+	if rec := f.sendH("POST", "/api/requirements/asks/"+ask+"/drop", agentTok, key, `{"key":"R-3","if_rev":1}`); rec.Code != 403 {
+		t.Errorf("an agent's drop with the human's proof: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.do(call{method: "POST", path: "/api/requirements/asks/" + ask + "/drop", header: map[string]string{"X-Stam-Test-Human": humanKey, "X-Stam-Human": "1", "X-Stam-Local": "1"}, body: `{"key":"R-3","if_rev":1}`}); rec.Code != 403 {
+		t.Errorf("the human's proof with x-stam-local and no token: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.sendH("POST", "/api/requirements/asks/"+ask+"/drop", sharedTok, map[string]string{"X-Stam-Human": "1"}, `{"key":"R-3","if_rev":1}`); rec.Code != 403 {
+		t.Errorf("the shared token's drop: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.sendH("POST", "/api/requirements/asks/"+ask+"/drop", sharedTok, key, `{"key":"R-3","if_rev":1}`); rec.Code != 200 {
+		t.Fatalf("the human's drop with the shared token: %d %s", rec.Code, rec.Body.String())
 	}
 	// One draft changes after the batch was shown: Approve approves none and asks again.
 	f.sql("UPDATE requirements SET rev = rev + 1 WHERE key = 'R-2'")
-	if rec := f.post2("POST", "/api/itsas/"+ask+"/act", `{"action":"approve"}`); rec.Code != 200 {
+	if rec := f.approve(ask); rec.Code != 200 {
 		t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
 	}
 	until(t, "the ask raised again", func() bool { return f.itsaStatus(ask) == "needs_approval" })
@@ -195,7 +213,7 @@ func TestRequirementApprovalBatch(t *testing.T) {
 		}
 	}
 	// Restamped by the refresh, a second Approve takes the two left.
-	if rec := f.post2("POST", "/api/itsas/"+ask+"/act", `{"action":"approve"}`); rec.Code != 200 {
+	if rec := f.approve(ask); rec.Code != 200 {
 		t.Fatalf("approve again: %d %s", rec.Code, rec.Body.String())
 	}
 	until(t, "the batch closed", func() bool { return f.itsaStatus(ask) == "done" })
@@ -219,7 +237,12 @@ func TestRequirementApprovalApproveDropRace(t *testing.T) {
 		var wg sync.WaitGroup
 		var dropCode int
 		wg.Add(2)
-		go func() { defer wg.Done(); <-start; f.post2("POST", "/api/itsas/"+ask+"/act", `{"action":"approve"}`) }()
+		rev := f.body(f.post2("GET", "/api/itsas/"+ask, "")).Text("rev")
+		go func() {
+			defer wg.Done()
+			<-start
+			f.post2("POST", "/api/itsas/"+ask+"/act", `{"action":"approve","if_rev":"`+rev+`"}`)
+		}()
 		go func() {
 			defer wg.Done()
 			<-start
@@ -254,7 +277,7 @@ func TestRequirementApprovalDropBeforeApprove(t *testing.T) {
 			t.Errorf("drop: %d %s", rec.Code, rec.Body.String())
 		}
 	}
-	if rec := f.post2("POST", "/api/itsas/"+ask+"/act", `{"action":"approve"}`); rec.Code != 200 {
+	if rec := f.approve(ask); rec.Code != 200 {
 		t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
 	}
 	until(t, "the ask closed", func() bool { return f.itsaStatus(ask) == "done" })
@@ -282,7 +305,7 @@ func TestRequirementApprovalEditAfterAct(t *testing.T) {
 				t.Errorf("edit: %d %s", rec.Code, rec.Body.String())
 			}
 		}
-		if rec := f.post2("POST", "/api/itsas/"+ask+"/act", `{"action":"approve"}`); rec.Code != 200 {
+		if rec := f.approve(ask); rec.Code != 200 {
 			t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
 		}
 		until(t, "the ask raised again", func() bool {
@@ -322,7 +345,7 @@ func TestRequirementApprovalOnlyTheAction(t *testing.T) {
 			}
 		}
 	}
-	if rec := f.post2("POST", "/api/itsas/"+ask+"/act", `{"action":"approve"}`); rec.Code != 200 {
+	if rec := f.approve(ask); rec.Code != 200 {
 		t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
 	}
 	until(t, "the stale Approve re-asks", func() bool {

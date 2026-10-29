@@ -50,6 +50,7 @@ type Ring struct {
 	Round, Turn, MaxRounds  int
 	Status                  string
 	Note                    string
+	CreatedAt               string
 }
 
 // Sub is one member's submission.
@@ -103,10 +104,14 @@ func VerdictLine(topic string, moderated bool) string {
 	return fmt.Sprintf("This ring reviews PR %s. %s with the pr_review tool (pr %s, approve or request_changes, a one-line summary, and head: the full sha of the PR's head the review checked)", first, who, first)
 }
 
+// ReviewsPR is reviewsPR: whether the topic names at least one PR (S-4199). Its members' verdicts are kept and must match for it to
+// end early even when the topic names more than one, such as a base PR beside the one under review, where VerdictLine stays "".
+func ReviewsPR(topic string) bool { return rePR.MatchString(topic) }
+
 // VerdictOf is verdictOf: a member's PR verdict, the one it passed, else one its text states. Approval is never read from prose, only
 // a line that is just `Verdict: approve`. "" when the ring reviews no PR or nothing states one. given is nil when none was passed.
 func VerdictOf(topic, text string, given *string) (string, error) {
-	if VerdictLine(topic, false) == "" {
+	if !ReviewsPR(topic) {
 		return "", nil
 	}
 	if given != nil {
@@ -130,7 +135,7 @@ func VerdictOf(topic, text string, given *string) (string, error) {
 
 // SplitLine is splitLine: each member's verdict in a PR ring's round whose verdicts don't all match, "" when they do.
 func SplitLine(topic string, subs []Sub, name func(string) string) string {
-	if VerdictLine(topic, false) == "" || len(subs) == 0 {
+	if !ReviewsPR(topic) || len(subs) == 0 {
 		return ""
 	}
 	same := true
@@ -153,10 +158,15 @@ func SplitLine(topic string, subs []Sub, name func(string) string) string {
 	return strings.Join(parts, ", ")
 }
 
-// finishBody is the mail when a ring ends.
-func (e Engine) finishBody(r Ring, reason, outcome string) (string, error) {
+// finishBody is the mail when a ring ends, with the verdict line for a PR review. missing names the members that never submitted:
+// an incomplete ring has no verdict to post, so its mail names none (S-3862).
+func (e Engine) finishBody(r Ring, reason, outcome string, missing []string) (string, error) {
+	pr := VerdictLine(r.Topic, r.ModeratorID != "")
+	if len(missing) > 0 {
+		pr = ""
+	}
 	return e.Render("ring-finished", map[string]string{"ring": r.Name, "format": r.Format, "round": strconv.Itoa(r.Round), "reason": reason,
-		"topic": r.Topic, "outcome": outcome, "pr": VerdictLine(r.Topic, r.ModeratorID != "")})
+		"topic": r.Topic, "outcome": outcome, "pr": pr})
 }
 
 func num(v jsfmt.Value, key string) int {
@@ -167,7 +177,7 @@ func num(v jsfmt.Value, key string) int {
 
 func ringOf(v jsfmt.Value) Ring {
 	r := Ring{ID: v.Text("id"), Name: v.Text("name"), Format: v.Text("format"), Topic: v.Text("topic"), ModeratorID: v.Text("moderator_id"),
-		CreatedBy: v.Text("created_by"), Round: num(v, "round"), Turn: num(v, "turn"), MaxRounds: num(v, "max_rounds"), Status: v.Text("status"), Note: v.Text("note")}
+		CreatedBy: v.Text("created_by"), CreatedAt: v.Text("created_at"), Round: num(v, "round"), Turn: num(v, "turn"), MaxRounds: num(v, "max_rounds"), Status: v.Text("status"), Note: v.Text("note")}
 	r.ModeratorDecides = num(v, "moderator_decides") != 0
 	if m, err := jsfmt.Parse([]byte(v.Text("members"))); err == nil && m.Kind == jsfmt.Array {
 		for _, it := range m.Items {
@@ -187,6 +197,9 @@ type session struct {
 	tx      db.RingTx
 	effects []Effect
 	names   map[string]string
+	// quiet: nothing is prompted. The restart sweep runs just before PromptOpenSeats, which prompts every open seat from the
+	// database, so a prompt there would be a second one (S-3070).
+	quiet bool
 }
 
 func (s *session) get(ref string) (Ring, bool, error) {
@@ -290,8 +303,8 @@ func (s *session) turnPrompt(r Ring, agentID string) (string, error) {
 		members[i] = s.name(m)
 	}
 	verdict := ""
-	if VerdictLine(r.Topic, false) != "" {
-		verdict = "Give your verdict on the PR in ring_submit's verdict (approve or request_changes), or as a line of its own in your text: `Verdict: approve` or `Verdict: request_changes`. Your agree is about your own verdict: the ring ends early only when every member's verdict is the same."
+	if ReviewsPR(r.Topic) {
+		verdict = "Give your verdict on the PR in ring_submit's verdict (approve or request_changes), or as a line of its own in your text: `Verdict: approve` or `Verdict: request_changes`. Also give a line of its own, `Head: ` and the full 40-character sha of the PR head you reviewed: an approve is posted only when every member names the same head. Your agree is about your own verdict: the ring ends early only when every member's verdict is the same."
 	}
 	text, err := s.e.Render("ring-turn", map[string]string{"ring": r.Name, "ring_id": r.ID, "format": r.Format, "round": strconv.Itoa(r.Round),
 		"max_rounds": strconv.Itoa(r.MaxRounds), "member": s.name(agentID), "members": strings.Join(members, ", "), "topic": r.Topic,
@@ -304,6 +317,9 @@ func (s *session) turnPrompt(r Ring, agentID string) (string, error) {
 
 // prompt: the turn goes to the member's live successor when it was taken over: a held predecessor runs nothing.
 func (s *session) prompt(r Ring, agentID string) error {
+	if s.quiet {
+		return nil
+	}
 	to, err := s.tx.ForwardTarget(agentID)
 	if err != nil {
 		return err
@@ -329,22 +345,38 @@ func (s *session) advance(r Ring) error {
 	return s.prompt(r, r.Members[r.Turn%len(r.Members)])
 }
 
-// agreement is whether the round's members agree, and the split line when their verdicts don't all match.
-func (s *session) agreement(r Ring) (split string, all bool, err error) {
+// missing is src/ring.ts missingOf: the names of the members the ring was created with that never started (S-3862). The member
+// list shrinks when one is dropped, and the count the ring decides on must not.
+func (s *session) missing(r Ring) ([]string, error) {
+	ids, err := s.tx.RingMissing(r.ID)
+	names := make([]string, len(ids))
+	for i, id := range ids {
+		names[i] = s.name(id)
+	}
+	return names, err
+}
+
+// agreement is whether the round's members agree, the split line when their verdicts don't all match, and the members who never
+// started. Agreement needs a submission from every member the ring was created with (S-3862): a missing one never agrees, even
+// when the rest of the list has submitted.
+func (s *session) agreement(r Ring) (split string, missing []string, all bool, err error) {
 	subs, err := s.subs(r, r.Round)
 	if err != nil {
-		return "", false, err
+		return "", nil, false, err
+	}
+	if missing, err = s.missing(r); err != nil {
+		return "", nil, false, err
 	}
 	split = SplitLine(r.Topic, subs, s.name)
-	all = split == "" && len(subs) >= len(r.Members)
+	all = split == "" && len(missing) == 0 && len(subs) >= len(r.Members)
 	for _, x := range subs {
 		all = all && x.Agree
 	}
-	return split, all, nil
+	return split, missing, all, nil
 }
 
 func (s *session) moderatePrompt(r Ring) (string, error) {
-	split, all, err := s.agreement(r)
+	split, missing, all, err := s.agreement(r)
 	if err != nil {
 		return "", err
 	}
@@ -353,7 +385,11 @@ func (s *session) moderatePrompt(r Ring) (string, error) {
 		return "", err
 	}
 	instructions := "Not all members agree yet."
-	if split != "" {
+	pr := VerdictLine(r.Topic, true)
+	if len(missing) > 0 {
+		instructions = strings.Join(missing, ", ") + " never submitted, so the ring is incomplete: there is no agreement and no verdict to give."
+		pr = ""
+	} else if split != "" {
 		instructions = "The members' verdicts don't all match (" + split + "), so they don't agree yet."
 	} else if all {
 		instructions = "All members agree to end."
@@ -363,10 +399,13 @@ func (s *session) moderatePrompt(r Ring) (string, error) {
 		decide = " with your decision"
 	}
 	return s.e.Render("ring-moderate", map[string]string{"ring": r.Name, "ring_id": r.ID, "format": r.Format, "round": strconv.Itoa(r.Round),
-		"max_rounds": strconv.Itoa(r.MaxRounds), "topic": r.Topic, "history": hist, "instructions": instructions, "decide": decide, "pr": VerdictLine(r.Topic, true)})
+		"max_rounds": strconv.Itoa(r.MaxRounds), "topic": r.Topic, "history": hist, "instructions": instructions, "decide": decide, "pr": pr})
 }
 
 func (s *session) notifyModerator(r Ring) error {
+	if s.quiet {
+		return nil
+	}
 	to, err := s.tx.ForwardTarget(r.ModeratorID)
 	if err != nil {
 		return err
@@ -387,7 +426,7 @@ func (s *session) roundComplete(r Ring) error {
 		}
 		return s.notifyModerator(r)
 	}
-	split, all, err := s.agreement(r)
+	split, _, all, err := s.agreement(r)
 	if err != nil {
 		return err
 	}
@@ -409,6 +448,15 @@ func (s *session) roundComplete(r Ring) error {
 }
 
 func (s *session) finish(r Ring, reason string, decision *string) error {
+	missing, err := s.missing(r)
+	if err != nil {
+		return err
+	}
+	// An incomplete ring says so first, so no submission below reads as an agreed verdict (S-3862).
+	notice := ""
+	if len(missing) > 0 {
+		notice = "Incomplete: " + strings.Join(missing, ", ") + " never submitted, so the ring reached no agreement and no approval. Do not approve from the submissions below.\n\n"
+	}
 	var outcome string
 	if decision != nil && *decision != "" {
 		outcome = "Moderator's decision:\n" + *decision
@@ -430,7 +478,8 @@ func (s *session) finish(r Ring, reason string, decision *string) error {
 		}
 		outcome = "Final submissions:\n\n" + strings.Join(parts, "\n\n")
 	}
-	body, err := s.e.finishBody(r, reason, outcome)
+	outcome = notice + outcome
+	body, err := s.e.finishBody(r, reason, outcome, missing)
 	if err != nil {
 		return err
 	}

@@ -12,7 +12,7 @@
 import { randomBytes } from 'node:crypto';
 import * as db from './db.ts';
 import { render, withFailureRetro } from './templates.ts';
-import { queueNotice, sendFromStam, stamSender, sendMail, HUMAN } from './mail.ts';
+import { queueNotice, sendFromSystem, sendMail, HUMAN } from './mail.ts';
 import { find as findItsa, participants as itsaParticipants, post as itsaPost, postRouted as itsaPostRouted, links as itsaLinks, isClosedStatus, onChange as onItsaChange } from './itsa.ts';
 import { mayManageTree } from './cost-auth.ts';
 import { chiefOfStaff } from './org.ts';
@@ -578,15 +578,13 @@ async function deliver(sub: Subscription, lines: string[], ended = false, failed
     const body = failed ? withFailureRetro(bodyFor(intro, lines)) : bodyFor(intro, lines);
     const a = db.getAgent(sub.subscriber_id);
     if (a && a.lifecycle === 'active' && a.activity === 'working') queueNotice(a.id, body);
-    else await sendFromStam([sub.subscriber_id], subject, body);
+    else await sendFromSystem('watch', [sub.subscriber_id], subject, body);
     return;
   }
   if (sub.subscriber_kind === 'human') {
     const body = bodyFor('You asked to hear about these events.', lines);
-    const sender = stamSender();
-    if (!sender) return;
     // One thread per subscription: the first delivery starts it, later ones reply into it.
-    const mail = await sendMail({ from: sender.id, to: [HUMAN], subject, body, reply_to: sub.last_mail_id ?? undefined, new_thread: !sub.last_mail_id, from_stam: true });
+    const mail = await sendMail({ from: '', system: 'watch', to: [HUMAN], subject, body, reply_to: sub.last_mail_id ?? undefined, new_thread: !sub.last_mail_id });
     db.open().prepare('UPDATE event_subscriptions SET last_mail_id = ? WHERE id = ?').run(mail.id, sub.id);
     return;
   }

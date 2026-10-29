@@ -94,7 +94,8 @@ const SECTION_KEY = 'stam/settings-section'
 const ITEM_KEY = 'stam/settings-item'
 // Sections that moved: an old link or saved section opens the section they became.
 // Reviewers are agent types now (S-412), so Settings › Reviewers opens Agent types.
-const SECTION_ALIASES: Record<string, string> = { reviewers: 'types' }
+// Old names still open their section: `reviewers` was Agent types, `fields` (the `#cfg=fields/...` links) is Fields and cards.
+const SECTION_ALIASES: Record<string, string> = { reviewers: 'types', fields: 'workcols' }
 const TEXT_SECTIONS = ['instructions', 'advanced', 'messages']
 
 // The instruction templates, grouped by the type of agent they apply to. `instructions.md`

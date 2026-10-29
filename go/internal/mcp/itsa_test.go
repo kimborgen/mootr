@@ -30,7 +30,7 @@ func (s *stub) itsaRoutes(w http.ResponseWriter, r *http.Request, body any) bool
 		}
 		return reply(200, `{"id":"i1","key":"S-9","title":"Made","status":"backlog","owner":"o1"}`)
 	case r.Method == "GET" && r.URL.Path == "/api/itsas/S-1":
-		return reply(200, `{"id":"i1","key":"S-1","title":"Big","status":"in_progress","kind":"project","summary":"sum","body":"line one\nline two","owner":"o1","parent_chain":[{"key":"S-0","title":"Root"}],"fields":{"stage":"dev","n":3,"flag":true,"o":{"a":[1,2]},"gone":null},"participants":["o1","p1","human","zz"],"links":[{"system":"github","external_id":"7","url":"https://x/7"},{"system":"url","external_id":null,"url":"https://y"}],"children":[{"key":"S-2","title":"Kid","status":"done","owner":"c1","rollup":{"backlog":0,"ready":1,"active":2,"review":3,"closed":4}},{"key":"S-3","title":"Orphan","status":"idea","owner":null}],"rollup":{"backlog":1,"ready":0,"active":0,"review":0,"closed":1}}`)
+		return reply(200, `{"id":"i1","key":"S-1","title":"Big","status":"in_progress","kind":"project","summary":"sum","body":"line one\nline two","owner":"o1","open_ask_detail":{"mail":"m7","kind":"ITSA"},"parent_chain":[{"key":"S-0","title":"Root"}],"fields":{"stage":"dev","n":3,"flag":true,"o":{"a":[1,2]},"gone":null},"participants":["o1","p1","human","zz"],"links":[{"system":"github","external_id":"7","url":"https://x/7"},{"system":"url","external_id":null,"url":"https://y"}],"children":[{"key":"S-2","title":"Kid","status":"done","owner":"c1","rollup":{"backlog":0,"ready":1,"active":2,"review":3,"closed":4}},{"key":"S-3","title":"Orphan","status":"idea","owner":null}],"rollup":{"backlog":1,"ready":0,"active":0,"review":0,"closed":1}}`)
 	case r.Method == "GET" && r.URL.Path == "/api/itsas/S-2":
 		return reply(200, `{"id":"i2","key":"S-2","title":"Bare","status":"done","kind":null,"owner":null,"participants":[],"links":[],"children":[],"rollup":null}`)
 	case r.Method == "GET" && r.URL.Path == "/api/mail/linked/i1":
@@ -146,7 +146,7 @@ func TestItsaToolsMatchTS(t *testing.T) {
 		}
 		answers = g.byID
 	}
-	for _, want := range []string{"Title is 6 words", "owner: owner-one", "participants: owner-one, part-one, human, zz", "linked mail (newest first):", "No ITSAs.", "Retro offered", "nothing changed", "reordered", "Recorded on link 3"} {
+	for _, want := range []string{"Title is 6 words", "owner: owner-one", "open ask: m7 · ITSA", "participants: owner-one, part-one, human, zz", "linked mail (newest first):", "No ITSAs.", "Retro offered", "nothing changed", "reordered", "Recorded on link 3"} {
 		found := false
 		for _, l := range answers {
 			found = found || strings.Contains(l, want)

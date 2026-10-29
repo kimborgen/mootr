@@ -92,25 +92,31 @@ export function nextSort(sort: Sort | null, col: SortCol): Sort | null {
 }
 
 // What each agent shows, looked up once per render: its own ITSA (the one waiting on you first, else its
-// first open one), how many agents it is the parent of, this machine, and the cost unit.
+// first open one), how many agents of the scope it is the parent of, this machine, and the cost unit.
 export interface Facts {
   machine: string
   costMode: CostMode
   owned: Map<string, Itsa>
+  // The scope's children of each agent: the fold's count.
   kids: Map<string, number>
+  // Whether an agent has any child in any scope: its cost shows the tree's spend, whatever the scope lists.
+  hasKids: Set<string>
 }
-export function factsOf(agents: Agent[], itsas: Itsa[], machine: string): Facts {
+export function factsOf(agents: Agent[], itsas: Itsa[], machine: string, scope: Scope = 'live'): Facts {
   const owned = new Map<string, Itsa>()
   for (const x of itsas) {
     if (!x.owner || isClosed(x)) continue
     const cur = owned.get(x.owner)
     if (!cur || (waitsOnHuman(x) && !waitsOnHuman(cur))) owned.set(x.owner, x)
   }
-  const shown = treeAgents(agents)
+  // The children a fold hides are the scope's, since buildLines lists only the scope's agents: an archived parent's
+  // chevron counts its archived children, not its live ones.
   const kids = new Map<string, number>()
-  for (const a of shown) for (const p of a.parents ?? []) kids.set(p, (kids.get(p) ?? 0) + 1)
-  const costMode = shown.find((a) => a.cost)?.cost?.mode ?? 'api'
-  return { machine, costMode, owned, kids }
+  for (const a of scopeAgents(agents, scope)) for (const p of a.parents ?? []) kids.set(p, (kids.get(p) ?? 0) + 1)
+  const costMode = treeAgents(agents).find((a) => a.cost)?.cost?.mode ?? 'api'
+  const hasKids = new Set<string>()
+  for (const a of agents) for (const p of a.parents ?? []) hasKids.add(p)
+  return { machine, costMode, owned, kids, hasKids }
 }
 
 // The value a column sorts by. Unknown costs and dates sort as the smallest.
@@ -140,6 +146,7 @@ export function compareAgents(x: Agent, y: Agent, sort: Sort, f: Facts): number 
 }
 
 const CREATED = (x: Agent, y: Agent) => x.created_at.localeCompare(y.created_at)
+const NEWEST: Sort = { col: 'age', dir: 'desc' }
 // With no sort: the assistant first, then the chief of staff, then the oldest.
 const ROOT_ORDER = (x: Agent, y: Agent) =>
   (Number(y.kind === 'assistant') - Number(x.kind === 'assistant')) || (Number(y.chief_of_staff ?? 0) - Number(x.chief_of_staff ?? 0)) || CREATED(x, y)
@@ -168,7 +175,10 @@ export interface LinesOpts {
 export function buildLines(agents: Agent[], f: Facts, o: LinesOpts): Line[] {
   const q = o.query.trim().toLowerCase()
   const shown = scopeAgents(agents, o.scope ?? 'live')
-  const inOrder = (xs: Agent[], root: boolean) => [...xs].sort((x, y) => (o.sort ? compareAgents(x, y, o.sort, f) : root ? ROOT_ORDER(x, y) : CREATED(x, y)))
+  // The Archived and Stopped lists in the tree, with no sort: newest first by Age, roots and siblings alike (S-3088).
+  const gone = o.scope === 'stopped' || o.scope === 'archived'
+  const sortBy = o.sort ?? (o.group === 'tree' && gone ? NEWEST : null)
+  const inOrder = (xs: Agent[], root: boolean) => [...xs].sort((x, y) => (sortBy ? compareAgents(x, y, sortBy, f) : root ? ROOT_ORDER(x, y) : CREATED(x, y)))
   if (o.group !== 'tree') {
     const rows = inOrder(shown.filter((a) => matches(a, q)), true)
     if (o.group === 'flat') return rows.map((agent) => ({ kind: 'agent' as const, agent, depth: 0, dup: false }))
@@ -229,3 +239,17 @@ export function buildLines(agents: Agent[], f: Facts, o: LinesOpts): Line[] {
 
 // The agents the keyboard can move between, in the order they show: a dup line is the same agent again.
 export const orderOf = (lines: Line[]) => lines.flatMap((l) => (l.kind === 'agent' && !l.dup ? [l.agent.id] : []))
+
+// The Agents header's step after a judge (S-3182, S-3489): up one level while it overflows, and back down when the level below
+// fits with `slack` to spare. A step back waits until the header is wider than the width that last overflowed, or the header
+// holds less than it did then (`overflowNeed`, the estimate of the level it stepped up from): a machine that leaves the strip
+// lets the header step back at the same width. Without that wait the estimate of the level below can say it fits while the
+// header still overflows, and the two steps alternate at one width.
+export interface HeaderStep { level: number; overflowAt: number | null; overflowNeed: number | null }
+export function headerStep(s: { level: number; max: number; overflows: boolean; width: number; here: number; need: number; slack: number; overflowAt: number | null; overflowNeed?: number | null }): HeaderStep {
+  if (s.overflows) return s.level < s.max ? { level: s.level + 1, overflowAt: s.width, overflowNeed: Number.isFinite(s.here) ? s.here : null } : { level: s.level, overflowAt: s.overflowAt, overflowNeed: s.overflowNeed ?? null }
+  const held = s.overflowNeed ?? null
+  const wider = s.overflowAt === null || s.width > s.overflowAt || (held !== null && s.need < held - 0.5)
+  if (s.level > 0 && wider && s.need <= s.width - s.slack) return { level: s.level - 1, overflowAt: null, overflowNeed: null }
+  return { level: s.level, overflowAt: s.overflowAt, overflowNeed: held }
+}

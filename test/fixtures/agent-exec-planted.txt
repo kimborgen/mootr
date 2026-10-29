@@ -1,0 +1,3 @@
+import { spawn } from 'node:child_process';
+const p = spawn('claude', []);
+process.kill(p.pid, 'SIGTERM');

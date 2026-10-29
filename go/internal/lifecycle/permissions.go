@@ -16,18 +16,21 @@ import (
 // changes.
 
 // AnswerDialog is src/adapters/claude.ts answerDialog: only the request's own dialog, in the session that showed it, is
-// answered. "gone" when the agent isn't blocked, has no tmux session, is in another harness session, or shows no
+// answered. A question dialog takes choice, its option's label, instead of a yes (S-3978). "gone" when the agent isn't blocked, has no tmux session, is in another harness session, or shows no
 // dialog; "unsafe" for a yes and "unsure" for a no the dialog on screen can't be tied to (a no checks it too, unlike TS:
 // see claude.DialogAnswer), or a yes it doesn't offer once; "failed" when a tmux call failed, or the pane or the harness
 // session changed after the screen was read (TS ran these synchronously; here a shutdown or resume isn't held off meanwhile),
 // so the key may not have been typed and the request stays as it is; else the key is sent and it is "typed". A harness
-// with no dialogs answers "gone".
-func (l *Lifecycle) AnswerDialog(ctx context.Context, a db.Agent, details string, approve bool) string {
+// with no dialogs answers "gone". An OpenCode ask is answered on the server instead (answerOpenCode).
+func (l *Lifecycle) AnswerDialog(ctx context.Context, a db.Agent, details string, approve bool, choice string) string {
+	if a.Harness == "opencode" {
+		return l.answerOpenCode(ctx, a, details, approve)
+	}
 	pane, owner, screen, outcome := l.dialogScreen(ctx, a, details)
 	if outcome != "" {
 		return outcome
 	}
-	key, outcome := claude.DialogAnswer(screen, details, approve)
+	key, outcome := claude.DialogAnswer(screen, details, approve, choice)
 	if outcome != "typed" {
 		return outcome
 	}
@@ -96,7 +99,7 @@ func (l *Lifecycle) TypeHumanInput(ctx context.Context, a db.Agent, text string)
 			return false
 		}
 	}
-	if err := l.tmux.SendKeys(ctx, a.ID, "-l", jsjson.Trim(spaces.ReplaceAllString(text, " "))); err != nil {
+	if err := l.tmux.SendKeys(ctx, a.ID, "-l", "--", jsjson.Trim(spaces.ReplaceAllString(text, " "))); err != nil {
 		return false
 	}
 	if sleep(ctx, 600*time.Millisecond) != nil {
@@ -106,29 +109,32 @@ func (l *Lifecycle) TypeHumanInput(ctx context.Context, a db.Agent, text string)
 }
 
 // AdmitHuman is src/admission.ts admit(a, 'human') for a turn the human's approval starts: it always starts, and a
-// cost blocker it goes past is a cost:override event; an agent taken over by a live successor records its refusal.
-func (l *Lifecycle) AdmitHuman(ctx context.Context, id string) {
+// cost blocker it goes past is a cost:override event; an agent taken over by a live successor records its refusal, and
+// is the one false, with the reason.
+func (l *Lifecycle) AdmitHuman(ctx context.Context, id string) (bool, string) {
 	a, err := l.db.GetAgent(ctx, id)
 	if err != nil {
-		return
+		return false, "no such agent"
 	}
 	if a.ForwardedTo != nil && *a.ForwardedTo != "" {
 		if s, err := l.db.GetAgent(ctx, *a.ForwardedTo); err == nil && s.Lifecycle != "archived" {
+			reason := "taken over by " + s.Name
 			l.event(ctx, a.ID, "cost:refused", struct {
 				Kind   string `json:"kind"`
 				Reason string `json:"reason"`
-			}{"human", "taken over by " + s.Name})
-			return
+			}{"human", reason})
+			return false, reason
 		}
 	}
-	blocked, err := l.db.Blockers(ctx, a.ID)
+	blocked, err := l.blockedBy(ctx, a.ID)
 	if err != nil || len(blocked) == 0 {
-		return
+		return true, ""
 	}
 	l.event(ctx, a.ID, "cost:override", struct {
 		Kind string `json:"kind"`
 		Held string `json:"held"`
 	}{"human", strings.Join(blocked, "; ")})
+	return true, ""
 }
 
 // OrgResync is src/org.ts syncChildrenWaits and announceTreeIdle for an agent whose pending requests changed: queued for

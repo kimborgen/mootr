@@ -79,7 +79,46 @@ func withItsas(conn *sqlite.Conn, row *jsfmt.Value, id string) error {
 		}
 		row.Set("agents", jsfmt.ArrayValue(ids))
 	}
+	// Where the body holds the ITSA text it showed (S-2998): the web draws that part above the rest.
+	ready, err := shownRevsReady(conn)
+	if err != nil || !ready {
+		return err
+	}
+	shown, err := rows(conn, "SELECT at, len FROM itsa_shown_revs WHERE mail_id = ? AND at IS NOT NULL AND len IS NOT NULL", id)
+	if err != nil {
+		return err
+	}
+	if len(shown) > 0 {
+		row.Set("shown", shown[0])
+	}
 	return nil
+}
+
+// EnsureShownRevs makes src/db.ts's itsa_shown_revs on a database that lacks it, and adds the at and len columns
+// to one made before them, as its migration does.
+func EnsureShownRevs(conn *sqlite.Conn) error {
+	if err := sqlitex.ExecuteTransient(conn, "CREATE TABLE IF NOT EXISTS itsa_shown_revs (mail_id TEXT PRIMARY KEY, itsa_id TEXT NOT NULL, rev TEXT NOT NULL, at INTEGER, len INTEGER)", nil); err != nil {
+		return err
+	}
+	for _, col := range []string{"at", "len"} {
+		has := false
+		if err := sqlitex.Execute(conn, "SELECT 1 FROM pragma_table_info('itsa_shown_revs') WHERE name = ?", &sqlitex.ExecOptions{Args: []any{col}, ResultFunc: func(*sqlite.Stmt) error { has = true; return nil }}); err != nil {
+			return err
+		}
+		if !has {
+			if err := sqlitex.ExecuteTransient(conn, "ALTER TABLE itsa_shown_revs ADD COLUMN "+col+" INTEGER", nil); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// shownRevsReady says itsa_shown_revs exists with its at and len columns, so a database from before them reads as none.
+func shownRevsReady(conn *sqlite.Conn) (bool, error) {
+	n := 0
+	err := sqlitex.Execute(conn, "SELECT COUNT(*) FROM pragma_table_info('itsa_shown_revs') WHERE name IN ('at', 'len')", &sqlitex.ExecOptions{ResultFunc: func(stmt *sqlite.Stmt) error { n = stmt.ColumnInt(0); return nil }})
+	return n == 2, err
 }
 
 // Inbox is the agent's mail, newest first, without bodies (src/db.ts inbox).

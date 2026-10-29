@@ -1,7 +1,7 @@
 // The Agents table's lines (S-1432): the sidebar's tree order and folds, the groupings, the sort among siblings,
 // and the columns the human picks.
 import { beforeAll, describe, expect, it } from 'vitest'
-import { ALL_COLS, SCOPES, buildLines, factsOf, nextSort, orderOf, sanitizeCols, sanitizeGroup, activityOf, sanitizeScope, scopeAgents, scopeCounts, sortValue, toggleCol, whenOf, type Group, type Line, type Scope } from './agents-table'
+import { ALL_COLS, SCOPES, buildLines, factsOf, headerStep, nextSort, orderOf, sanitizeCols, sanitizeGroup, activityOf, sanitizeScope, scopeAgents, scopeCounts, sortValue, toggleCol, whenOf, type Group, type Line, type Scope } from './agents-table'
 import { stateLabel } from './format'
 import { setData } from './store'
 import { agent } from './stories/fixtures'
@@ -83,6 +83,20 @@ describe('the tree', () => {
     const f = factsOf(FLEET, [], 'fixture-machine')
     // Costliest first among each parent's children: solo, then the two managers (no cost, by name), then dev under mgr.
     expect(ids(buildLines(FLEET, f, opts({ sort: { col: 'cost', dir: 'desc' } })))).toEqual(['cos', 'solo', 'mgr', 'dev', 'mgr2', 'dev*'])
+  })
+
+  // S-3088: the Archived and Stopped lists in the tree, with no sort, list the roots and their children newest first by Age.
+  it('lists the archived roots and their children newest first by age, unless a column sort is asked', () => {
+    const ARCHIVED: Agent[] = [
+      agent({ id: 'r1', name: 'fixture-r1', lifecycle: 'archived', created_at: '2026-09-01T07:00:00.000Z', updated_at: '2026-10-03T08:00:00.000Z' }),
+      agent({ id: 'r2', name: 'fixture-r2', lifecycle: 'archived', created_at: '2026-09-01T07:01:00.000Z', updated_at: '2026-10-09T08:00:00.000Z' }),
+      agent({ id: 'r3', name: 'fixture-r3', lifecycle: 'archived', created_at: '2026-09-01T07:02:00.000Z', updated_at: '2026-10-06T08:00:00.000Z' }),
+      agent({ id: 'c1', name: 'fixture-c1', lifecycle: 'archived', parents: ['r2'], created_at: '2026-09-01T07:03:00.000Z', updated_at: '2026-10-04T08:00:00.000Z' }),
+      agent({ id: 'c2', name: 'fixture-c2', lifecycle: 'archived', parents: ['r2'], created_at: '2026-09-01T07:04:00.000Z', updated_at: '2026-10-08T08:00:00.000Z' }),
+    ]
+    const f = factsOf(ARCHIVED, [], 'fixture-machine')
+    expect(ids(buildLines(ARCHIVED, f, opts({ scope: 'archived' })))).toEqual(['r2', 'c2', 'c1', 'r3', 'r1'])
+    expect(ids(buildLines(ARCHIVED, f, opts({ scope: 'archived', sort: { col: 'name', dir: 'asc' } })))).toEqual(['r1', 'r2', 'c1', 'c2', 'r3'])
   })
 })
 
@@ -168,5 +182,48 @@ describe('the scopes (S-2937)', () => {
     expect(whenOf(GONE[1])).toBe('2026-10-06T08:00:00.000Z')
     expect(whenOf(FLEET[0])).toBe(FLEET[0].created_at)
     expect(sortValue('age', GONE[1], f)).toBe(Date.parse('2026-10-06T08:00:00.000Z'))
+  })
+})
+
+describe('the fold count and the cost tree', () => {
+  it("keeps a parent's tree cost in a scope whose children it does not list, while its fold counts only that scope", () => {
+    const mgr = agent({ id: 'wm', name: 'wait-mgr', waits: [{ kind: 'human' }] as never })
+    const kid = agent({ id: 'wk', name: 'wait-kid', parents: ['wm'] })
+    const f = factsOf([mgr, kid], [], 'fixture-machine', 'waiting')
+    expect(f.hasKids.has('wm')).toBe(true)
+    expect(f.kids.get('wm') ?? 0).toBe(0)
+  })
+})
+
+// The header's steps (S-3182, S-3489): one level up while it overflows, back down only from a wider header or a smaller estimate.
+describe('headerStep', () => {
+  const base = { max: 4, slack: 8, here: 500 }
+  it('steps up while the header overflows, and remembers the width and the estimate', () => {
+    expect(headerStep({ ...base, level: 0, overflows: true, width: 831, need: Infinity, overflowAt: null, overflowNeed: null })).toEqual({ level: 1, overflowAt: 831, overflowNeed: 500 })
+  })
+  it('stays at the top level when it overflows there', () => {
+    expect(headerStep({ ...base, level: 4, overflows: true, width: 831, need: Infinity, overflowAt: null, overflowNeed: null })).toEqual({ level: 4, overflowAt: null, overflowNeed: null })
+  })
+  it('does not step back at the width that overflowed, even when the level below fits', () => {
+    // The estimate says the level below fits (500 px in 831 px), but the header overflowed at 831 px with the same estimate: it holds.
+    let s: { level: number; overflowAt: number | null; overflowNeed: number | null } = { level: 0, overflowAt: null, overflowNeed: null }
+    for (let i = 0; i < 10; i++) s = headerStep({ ...base, level: s.level, overflows: s.level === 0, width: 831, need: s.level > 0 ? 500 : Infinity, overflowAt: s.overflowAt, overflowNeed: s.overflowNeed })
+    expect(s).toEqual({ level: 1, overflowAt: 831, overflowNeed: 500 })
+  })
+  it('steps back at the same width once the level below needs less (a machine left the strip)', () => {
+    expect(headerStep({ ...base, level: 1, overflows: false, width: 831, need: 400, overflowAt: 831, overflowNeed: 500 })).toEqual({ level: 0, overflowAt: null, overflowNeed: null })
+  })
+  it('steps back on a drop of half a pixel or more, and holds on a smaller sub-pixel change', () => {
+    expect(headerStep({ ...base, level: 1, overflows: false, width: 831, need: 499.4, overflowAt: 831, overflowNeed: 500 })).toEqual({ level: 0, overflowAt: null, overflowNeed: null })
+    expect(headerStep({ ...base, level: 1, overflows: false, width: 831, need: 499.8, overflowAt: 831, overflowNeed: 500 })).toEqual({ level: 1, overflowAt: 831, overflowNeed: 500 })
+  })
+  it('keeps the level at the same width when the level below needs more (a machine joined)', () => {
+    expect(headerStep({ ...base, level: 1, overflows: false, width: 831, need: 520, overflowAt: 831, overflowNeed: 500 })).toEqual({ level: 1, overflowAt: 831, overflowNeed: 500 })
+  })
+  it('steps back once the header is wider than the width that overflowed', () => {
+    expect(headerStep({ ...base, level: 1, overflows: false, width: 840, need: 500, overflowAt: 831, overflowNeed: 500 })).toEqual({ level: 0, overflowAt: null, overflowNeed: null })
+  })
+  it('keeps the level when the level below does not fit with the slack to spare', () => {
+    expect(headerStep({ ...base, level: 1, overflows: false, width: 840, need: 834, overflowAt: 831, overflowNeed: 500 })).toEqual({ level: 1, overflowAt: 831, overflowNeed: 500 })
   })
 })

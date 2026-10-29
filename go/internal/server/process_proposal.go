@@ -31,8 +31,6 @@ import (
 // the PR. git and gh come in as proposalDeps, so a test runs with fakes.
 //
 // Not ported, each answering 501 before the first git call or write:
-//   - the PR's GitHub link: an ITSA with a link to a GitHub pull request is watched (watch.syncItsa), which this daemon does not do,
-//     and the link would be refused after the push. prLinkRefusal is the one check to delete when the watch is ported.
 //   - an agent's proposal (the process_propose tool): the ITSA is filed straight into needs_approval, which mails the human its ask
 //     when an agent files it, and that mail is not ported. The agent's 400s and the cap of open proposals (429) are answered as in TS.
 //   - the repo the pull requests go to when settings name neither itsa.prOpen.github nor a repo: TS reads the origin of the checkout.
@@ -140,19 +138,6 @@ func (s *Server) proposalRepoOf() (proposalRepo, error) {
 	return proposalRepo{name: name, path: path, github: st.PrOpenGithub, origin: st.PrOpenOrigin, gh: st.PrOpenGh, base: st.MainBranch}, nil
 }
 
-// prLinkRefusal answers 501 while the PR link of a proposal would be refused: a GitHub pull request link starts a watch on it
-// (watch.syncItsa), not ported. gh prints the PR's URL on the repo's host, github.com unless the repo is HOST/OWNER/NAME.
-func prLinkRefusal(github string) error {
-	host := "github.com"
-	if parts := strings.Split(github, "/"); len(parts) == 3 {
-		host, github = parts[0], parts[1]+"/"+parts[2]
-	}
-	if db.WatchedURL("https://" + host + "/" + github + "/pull/1") {
-		return unported("filing a process proposal links its GitHub pull request, which starts a watch on it (watch.syncItsa), which is not ported to the Go daemon yet")
-	}
-	return nil
-}
-
 func (s *Server) proposalDeps(repo proposalRepo) proposalDeps {
 	if s.proposals.deps != nil {
 		return s.proposals.deps
@@ -227,9 +212,6 @@ func (s *Server) processProposalRoute(r *http.Request, c auth.Resolved) (any, er
 	if err != nil {
 		return nil, err
 	}
-	if err := s.resolveItsaActors(ctx, c, &body); err != nil {
-		return nil, err
-	}
 	human := s.isHuman(r, c)
 	by := humanBox
 	if !human {
@@ -301,9 +283,6 @@ func (s *Server) propose(ctx context.Context, in proposalInput, loadedIDs []stri
 	}
 	repo, err := s.proposalRepoOf()
 	if err != nil {
-		return nil, err
-	}
-	if err := prLinkRefusal(repo.github); err != nil {
 		return nil, err
 	}
 	return s.proposeNow(ctx, in, id, summary, repo)
@@ -479,11 +458,20 @@ func (s *Server) proposeNow(ctx context.Context, in proposalInput, id, summary s
 		if _, _, err = s.db.AddItsaLink(ctx, createdID, actor, nl); err != nil {
 			return nil, asItsaErr(err)
 		}
+		s.syncItsaSubscriptions(ctx, createdID)
 	}
 	bodyBox := jsfmt.Value{Kind: jsfmt.Object}
 	bodyBox.Set("body", jsfmt.StringValue(proposalBody(id, summary, fmt.Sprintf("#%d %s", number, url), diff, sha)))
-	if _, err = s.setItsa(ctx, createdID, bodyBox, proposalWriter); err != nil {
+	set, err := s.setItsa(ctx, createdID, bodyBox, proposalWriter)
+	if err != nil {
 		return nil, err
+	}
+	// An agent's proposal was asked about with its opening body: the human is shown the final one, whose revision a thread's
+	// Approve then carries (S-2998).
+	if in.by != "" && in.by != humanBox {
+		if err = s.postShownAs(ctx, createdID, proposalWriter, "The proposal now links its PR. This is what you approve:\n\n", set.(jsfmt.Value), humanBox); err != nil {
+			return nil, err
+		}
 	}
 
 	pr := jsfmt.Value{Kind: jsfmt.Object}

@@ -390,6 +390,11 @@ export interface McpServer {
   headers?: Record<string, string>;
   auth?: McpAuth;
   enabled?: boolean;
+  // Lets a peer lease this server's access token from the home (S-3176). Off by default: sharing is per server.
+  shareWithPeers?: boolean;
+  // The longest lifetime, in seconds, a peer may lease for this server (S-3176). Absent means 3600; any
+  // other value refuses the lease.
+  leaseMaxSeconds?: number;
 }
 
 // The MCP servers every harness gets, from settings.mcpServers: the enabled ones only.

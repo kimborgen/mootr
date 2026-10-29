@@ -123,6 +123,9 @@ func TestAgentNodeMailsTheStandingLane(t *testing.T) {
 	if len(mails) != 1 || mails[0] != "S-2 entered plan\nThe process flow moved S-2 to `plan`. It is yours: take the next step." {
 		t.Errorf("the mail: %q", mails)
 	}
+	if n := f.count("SELECT COUNT(*) FROM mail WHERE from_id = 'system:process' AND subject = 'S-2 entered plan'"); n != 1 {
+		t.Errorf("from system:process: %d", n)
+	}
 	if n := f.count("SELECT COUNT(*) FROM itsa_events WHERE itsa_id = ? AND type = 'process-mail' AND json_extract(data, '$.node') = 'plan'", f.itsaID(other)); n != 1 {
 		t.Errorf("claims: %d", n)
 	}
@@ -243,6 +246,9 @@ func TestAgentSpawnFailure(t *testing.T) {
 		t.Errorf("the notes: %q", notes)
 	}
 	mails := f.texts("SELECT m.subject || char(10) || m.body FROM mail m JOIN mail_recipients r ON r.mail_id = m.id WHERE r.agent_id = 'aboss' AND m.notice = 1")
+	if n := f.count("SELECT COUNT(*) FROM mail WHERE from_id = 'system:process' AND subject = 'Process spawn for S-1 failed'"); n != 1 {
+		t.Errorf("from system:process: %d", n)
+	}
 	if len(mails) != 1 || mails[0] != "Process spawn for S-1 failed\nThe process flow could not spawn a developer for S-1: no room\n\nIt will not retry; the ITSA is unchanged." {
 		t.Errorf("the parent's mail: %q", mails)
 	}

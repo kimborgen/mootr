@@ -18,6 +18,8 @@ func TestItsaAskMatchesTS(t *testing.T) {
 		"itsaEvents":   "SELECT itsa_id, actor, type, data FROM itsa_events ORDER BY id",
 		"archive":      "SELECT mailbox_id, thread_id FROM thread_archive ORDER BY rowid",
 		"archived":     "SELECT mailbox_id, thread_id, mail_id FROM thread_archive_mail ORDER BY rowid",
+		// The revision each ask went out with (S-2998).
+		"shownRevs": "SELECT m.subject, s.itsa_id, s.rev, s.at, s.len FROM itsa_shown_revs s JOIN mail m ON m.id = s.mail_id ORDER BY m.rowid",
 	})
 }
 

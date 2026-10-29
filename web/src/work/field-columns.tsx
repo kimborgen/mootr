@@ -1,9 +1,9 @@
 // ITSA fields as Work columns (S-369): one WorkColumn per field, after the built-ins, drawn by the
-// field's type, and the same values on the phone's card. The pure parts (value emptiness, the
+// field's type. The pure parts (value emptiness, the
 // link's host, the date) are exported for tests.
 import type { ReactNode } from 'react'
 import { Icon } from '../Icon'
-import { fieldColId, fieldIdOf, TONE_CLASS, type Field } from '../itsa/fields'
+import { fieldApplies, fieldColId, fieldIdOf, TONE_CLASS, type Field } from '../itsa/fields'
 import type { Itsa } from '../types'
 import type { WorkColumn } from './columns'
 import { BLANK, countValues, type FilterKind, type SortFilterCol } from './sortfilter'
@@ -18,8 +18,9 @@ export const FIELD_WIDTH: Record<Field['width'], string> = {
 // The room (px) each field width adds to the pane width a field column needs (withFieldFit).
 const FIELD_PX: Record<Field['width'], number> = { s: 80, m: 130, l: 200 }
 
-// A field's value on an ITSA, or undefined: values are held by the field's key.
-export const valueOf = (it: Pick<Itsa, 'fields'>, f: Pick<Field, 'key'>): unknown => it.fields?.[f.key]
+// A field's value on an ITSA, or undefined: values are held by the field's key, and a field that doesn't
+// apply to the ITSA's kind has none shown (S-3180).
+export const valueOf = (it: Pick<Itsa, 'fields' | 'kind'>, f: Pick<Field, 'key' | 'kinds'>): unknown => (fieldApplies(f, it.kind) ? it.fields?.[f.key] : undefined)
 
 // No value to show: unset, an empty string, or a check that is off.
 export const isEmpty = (v: unknown): boolean => v === undefined || v === null || v === '' || v === false
@@ -70,7 +71,7 @@ function chipContent(f: Field, v: unknown): ReactNode {
 }
 
 // The text a field value stands for in a search, a values list, and a text filter: a choice's label.
-const textOf = (f: Field, v: unknown): string => {
+export const textOf = (f: Field, v: unknown): string => {
   if (isEmpty(v)) return ''
   if (f.type === 'choice') return f.options?.find((o) => o.value === v)?.label ?? String(v)
   if (f.type === 'link') return linkHost(String(v))
@@ -79,8 +80,8 @@ const textOf = (f: Field, v: unknown): string => {
 
 // What a field's value is for sorting, filtering and searching, by its type (S-1504).
 export function fieldValues(f: Field): Omit<SortFilterCol, 'id'> {
-  const raw = (r: { it: Pick<Itsa, 'fields'> }) => valueOf(r.it, f)
-  const base = { text: (r: { it: Pick<Itsa, 'fields'> }) => textOf(f, raw(r)) }
+  const raw = (r: { it: Pick<Itsa, 'fields' | 'kind'> }) => valueOf(r.it, f)
+  const base = { text: (r: { it: Pick<Itsa, 'fields' | 'kind'> }) => textOf(f, raw(r)) }
   switch (f.type) {
     case 'choice': {
       const order = (f.options ?? []).map((o) => o.value)
@@ -145,11 +146,4 @@ export function withFieldFit(cols: WorkColumn[], fields: Field[]): WorkColumn[] 
     } else after = Math.min(after, cols[i].hideBelow ?? 0)
   }
   return out
-}
-
-// What the phone's card shows of the shown fields: only the ones with a value, as chips or as
-// labelled meta, in the layout's order.
-export function cardFields(it: Itsa, fields: Field[]): { chips: { f: Field; v: unknown }[]; meta: { f: Field; v: unknown }[] } {
-  const set = fields.map((f) => ({ f, v: valueOf(it, f) })).filter((x) => !isEmpty(x.v))
-  return { chips: set.filter((x) => x.f.card === 'chip'), meta: set.filter((x) => x.f.card !== 'chip') }
 }

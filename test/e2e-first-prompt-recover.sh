@@ -51,9 +51,12 @@ events_has lost 'first-prompt:recover' || fail "lost was not recovered"
 delivered_marked() { events_has lost 'first-prompt:delivered'; }
 wait_until delivered_marked || fail "the re-delivered prompt was not recorded as delivered"
 [ "$(field lost activity)" != starting ] || fail "lost is still starting after the recovery"
-# The agent that already got its prompt, and one from before the markers, are left alone.
+# The agent that already got its prompt, and one from before the markers, are left alone by the
+# first-prompt recovery. They have a session and no tmux server here, so the lost-server path
+# takes them (S-1400). reconcile() runs the S-759 branch before markLost, so a 'tmux-lost' event
+# proves the first-prompt recovery skipped the agent; markLost writes it on the first tick.
 if events_has delivered 'first-prompt:recover'; then fail "delivered was recovered again"; fi
 if events_has unmarked 'first-prompt:recover'; then fail "unmarked (no pending marker) was recovered"; fi
-[ "$(field delivered activity)" = starting ] || fail "delivered is $(field delivered activity), not starting"
-[ "$(field unmarked activity)" = starting ] || fail "unmarked is $(field unmarked activity), not starting"
+events_has delivered 'tmux-lost' || fail "delivered was not taken by the lost-server path"
+events_has unmarked 'tmux-lost' || fail "unmarked was not taken by the lost-server path"
 echo "PASS e2e-first-prompt-recover"

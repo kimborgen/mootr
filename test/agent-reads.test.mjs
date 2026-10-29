@@ -98,7 +98,7 @@ test('one banners + reconcile + stale-working + archive-sweep round reads only l
     const t0 = performance.now();
     await daemon.bannersTick();
     await daemon.reconcileTick();
-    daemon.reconcileStaleWorking();
+    await daemon.reconcileStaleWorking();
     await lifecycle.runDueArchives();
     ms = performance.now() - t0;
   });

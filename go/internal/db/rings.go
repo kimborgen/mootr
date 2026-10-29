@@ -158,3 +158,39 @@ func (d *DB) RingView(ctx context.Context, ref string) (ring jsfmt.Value, subs [
 	})
 	return ring, subs, ok, wrap("ring", err)
 }
+
+// RingFallback is src/ring.ts fallbackOf: the data of the ring's latest ring:fallback event, ok false when none was recorded.
+func (t RingTx) RingFallback(ringID string) (jsfmt.Value, bool, error) {
+	found, err := textColumn(t.conn, "SELECT data FROM events WHERE type = 'ring:fallback' AND json_extract(data, '$.ring') = ? ORDER BY id DESC LIMIT 1", ringID)
+	if err != nil || len(found) == 0 {
+		return jsfmt.Value{}, false, err
+	}
+	v, err := jsfmt.Parse([]byte(found[0]))
+	return v, err == nil, err
+}
+
+// RingDropped is src/ring.ts droppedOf: every agent the ring dropped as never started that still has a row, with its type and
+// harness ("" for none).
+func (t RingTx) RingDropped(ringID string) ([]jsfmt.Value, error) {
+	return rows(t.conn, `SELECT id, COALESCE(type, '') AS type, COALESCE(harness, '') AS harness FROM agents WHERE id IN
+		(SELECT DISTINCT agent_id FROM events WHERE type = 'ring:dropped' AND json_extract(data, '$.ring') = ?)`, ringID)
+}
+
+// RingMissing is src/ring.ts missingOf's ids: the members the ring was created with that never started (S-3862), as ring:missing
+// events, and for a ring dropped before those existed, a dropped agent that had joined it (a moderator never joins).
+func (t RingTx) RingMissing(ringID string) ([]string, error) {
+	return textColumn(t.conn, `SELECT DISTINCT agent_id FROM events WHERE type = 'ring:missing' AND json_extract(data, '$.ring') = ?
+		UNION
+		SELECT DISTINCT agent_id FROM events WHERE type = 'ring:dropped' AND json_extract(data, '$.ring') = ?
+		  AND agent_id IN (SELECT agent_id FROM events WHERE type = 'ring:joined' AND json_extract(data, '$.ring') = ?)`, ringID, ringID, ringID)
+}
+
+// DiedInRing is src/ring.ts sweepDeadMembers' test of one seat: the agent has a starting:dead event later than its last join of
+// the ring, no older than the ring itself, and with no resume after it.
+func (t RingTx) DiedInRing(agentID, ringID, ringCreatedAt string) (bool, error) {
+	found, err := textColumn(t.conn, `SELECT 1 FROM events WHERE agent_id = ? AND type = 'starting:dead'
+		AND id > COALESCE((SELECT MAX(id) FROM events WHERE agent_id = ? AND type = 'ring:joined' AND json_extract(data, '$.ring') = ?), 0)
+		AND ts >= ? AND NOT EXISTS (SELECT 1 FROM events r WHERE r.agent_id = ? AND r.type = 'resume' AND r.id > events.id) LIMIT 1`,
+		agentID, agentID, ringID, ringCreatedAt, agentID)
+	return len(found) > 0, err
+}

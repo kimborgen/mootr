@@ -1,0 +1,2 @@
+import { newSession } from '../src/tmux.ts';
+newSession('s', '/', {}, ['x']);

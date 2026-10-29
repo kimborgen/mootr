@@ -28,10 +28,27 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Every agent on this machine and its peers, with the extras the web tree shows. */
+        /** The agents on this machine and its peers, with the extras the web tree shows; live agents unless state or ids asks for others (S-3816). */
         get: operations["listAgents"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mail-titles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** The mails the human's view shows; a stale title or summary is queued to be asked again, and the answer comes at once (S-1843). */
+        post: operations["mailTitlesShown"];
         delete?: never;
         options?: never;
         head?: never;
@@ -125,6 +142,8 @@ export interface components {
             type: string | null;
             paused_by: string | null;
             forwarded_to: string | null;
+            launched_at: string | null;
+            resumed_at: string | null;
             created_at: string;
             updated_at: string;
             /** @description Ids of every parent, not only `parent_id`. */
@@ -138,6 +157,14 @@ export interface components {
             chief_of_staff: boolean;
             blockers: components["schemas"]["AgentBlocker"][];
             waits: components["schemas"]["AgentWait"][];
+            /** @description The key of the open ask this agent waits on, as GET /api/asks keys it (S-3977); null when none. Set by the TS daemon only (the Go daemon does not port it yet). */
+            open_ask?: string | null;
+            /** @description The mail the open ask lives in and its kind, never its text (S-3982, src/asks.ts askDetail); null when none. */
+            open_ask_detail?: {
+                mail: string | null;
+                /** @enum {string} */
+                kind: "Permission" | "Harness dialog" | "Settings change" | "Suggested input" | "ITSA" | "Decision";
+            } | null;
             resting: components["schemas"]["AgentResting"];
             in_itsa: boolean;
             /** @description What stam's own view of the conversation offers. */
@@ -250,6 +277,12 @@ export interface components {
             /** @description The mail thread a human wait is tied to. */
             thread: string | null;
         };
+        MailTitlesShown: {
+            /** @description A title model is set (mail.titles.model); with none, nothing is asked and pending is empty. */
+            enabled: boolean;
+            /** @description The mails queued or being asked. */
+            pending: string[];
+        };
     };
     responses: {
         /** @description The error envelope. */
@@ -302,6 +335,10 @@ export interface operations {
     listAgents: {
         parameters: {
             query?: {
+                /** @description A comma list of lifecycle groups to list (live is active or paused, stopped is shut down, archived, all). Without it (or empty), and without ids, the list is live agents only; an unknown group is a 400. */
+                state?: string;
+                /** @description Agent ids or names, comma-separated, added in any state. Without state, the list is only these. */
+                ids?: string;
                 /** @description Keeps agents matching the text. */
                 q?: string;
                 /** @description Keeps agents whose role or name contains the text, standing agents first. */
@@ -315,13 +352,59 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description A bare array, not an envelope. */
+            /** @description A bare array, not an envelope. Each row sends `first_prompt` as null; the agent's detail (GET /api/agents/{id}) carries it (S-3808). */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["Agent"][];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    mailTitlesShown: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Mail ids, the first shown first; only the first 40 are looked at. */
+                    ids: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description Whether titles are on (a model set), and the mails still being asked, so the view asks again until they land. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailTitlesShown"];
+                };
+            };
+            /** @description ids is not a list of mail ids of at most 200 characters each. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The caller is not the human's view (an agent's token, a peer, the OpenCode server). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             default: components["responses"]["Error"];

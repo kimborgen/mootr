@@ -7,13 +7,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const apiMock = vi.hoisted(() => vi.fn())
 vi.mock('../api', () => ({ api: apiMock }))
 const opened = vi.hoisted(() => vi.fn())
+const diffOpened = vi.hoisted(() => vi.fn())
+vi.mock('../files/open', async (orig) => ({ ...(await orig<typeof import('../files/open')>()), openDiff: diffOpened }))
 vi.mock('../itsa/itsa', async (orig) => ({ ...(await orig<typeof import('../itsa/itsa')>()), openItsa: opened }))
 
 import type { Itsa } from '../types'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const mk = (id: string, key: string, title: string, status: string) => ({ id, key, title, summary: null, status, parent_id: null, updated_at: '2026-10-12T00:00:00Z', links: [], participants: [], fields: {} }) as unknown as Itsa
+const PR = 'https://github.com/example/repo/pull/15'
+const mk = (id: string, key: string, title: string, status: string) => ({ id, key, title, summary: null, status, parent_id: null, updated_at: '2026-10-12T00:00:00Z', links: id === 'i2' ? [{ n: 1, system: 'branch', external_id: 'stam/x', url: '' }, { n: 2, system: 'github', external_id: null, url: PR }] : [], participants: [], fields: {} }) as unknown as Itsa
 
 let host: HTMLDivElement
 let root: Root
@@ -26,6 +29,7 @@ async function setup(width: number) {
   vi.resetModules()
   localStorage.clear()
   opened.mockReset()
+  diffOpened.mockReset()
   apiMock.mockReset()
   apiMock.mockImplementation((method: string, path: string) => {
     if (path === '/api/itsas/fields') return Promise.resolve([])
@@ -245,7 +249,7 @@ describe('long-press a card value on the phone', () => {
     return act(async () => { el.dispatchEvent(e) })
   }
   const wait = (ms: number) => act(async () => { await new Promise((r) => setTimeout(r, ms)) })
-  const chip = () => q<HTMLElement>('.wg-card[data-itsa=i2] .w-status')!
+  const chip = () => q<HTMLElement>('.wg-card[data-itsa=i2] [data-cell=status]')!
   const longPress = async (el: Element) => { await ptr(el, 'pointerdown'); await wait(650); await ptr(el, 'pointerup'); await act(async () => { (el as HTMLElement).click() }) }
 
   it('opens the menu, Filter to this value filters, and the press does not open the ITSA', async () => {
@@ -313,9 +317,49 @@ describe('long-press a card value on the phone', () => {
   })
 
   it('a long-press away from any value opens nothing', async () => {
-    const title = q('.wg-card[data-itsa=i2] .wg-title')!
+    const title = q('.wg-card[data-itsa=i2] .bc-title')!
     await ptr(title, 'pointerdown')
     await wait(650)
     expect(q('.menu')).toBeNull()
+  })
+
+  // The links on a card are icons (the board's card, S-3560) that keep the table chip's behaviour.
+  const prLink = async () => {
+    const { resetDiffRepos } = await import('../diff/diffRepos')
+    resetDiffRepos([{ name: 'stam2', github: 'example/repo' }], true)
+    await flush()
+    return q<HTMLElement>('.wg-card[data-itsa=i2] [data-cell=github] a.bc-link')!
+  }
+
+  it('a tap on a PR link opens the diff, not the ITSA', async () => {
+    const a = await prLink()
+    expect(a.getAttribute('aria-label')).toBe('PR #15')
+    await act(async () => { a.click() })
+    expect(diffOpened).toHaveBeenCalledWith('stam2', 15)
+    expect(opened).not.toHaveBeenCalled()
+  })
+
+  it('a branch is only named: a span, not a link, and a tap opens the ITSA', async () => {
+    const b = q<HTMLElement>('.wg-card[data-itsa=i2] [data-cell=branch] .bc-link')!
+    expect(b.tagName).toBe('SPAN')
+    expect(b.getAttribute('aria-label')).toBe('stam/x')
+    await act(async () => { b.click() })
+    expect(opened).toHaveBeenCalledTimes(1)
+  })
+
+  it('a long-press on a PR link opens the cell menu naming the link, and the lift click opens neither diff nor ITSA', async () => {
+    const a = await prLink()
+    await longPress(a)
+    expect(menuLabels()).toEqual(expect.arrayContaining(['View diff', 'Open on GitHub']))
+    expect(document.querySelector('.menu')?.textContent).toContain('PR #15')
+    expect(diffOpened).not.toHaveBeenCalled()
+    expect(opened).not.toHaveBeenCalled()
+    await choose('View diff')
+    expect(diffOpened).toHaveBeenCalledWith('stam2', 15)
+  })
+
+  it('a long-press on a branch names it in the menu', async () => {
+    await longPress(q('.wg-card[data-itsa=i2] [data-cell=branch] .bc-link')!)
+    expect(document.querySelector('.menu')?.textContent).toContain('stam/x')
   })
 })

@@ -6,7 +6,7 @@
 import * as db from './db.ts';
 import { settings, humanMailAllows } from './settings.ts';
 import { render } from './templates.ts';
-import { sendMail, HUMAN } from './mail.ts';
+import { sendFromSystemMail, HUMAN } from './mail.ts';
 import * as costNotices from './cost-notices.ts';
 import { onReading } from './rules.ts';
 import { reconcile, snapshot } from './reconcile.ts';
@@ -170,14 +170,11 @@ export function startCreditPolling(): void {
   setInterval(pollIfActive, 60_000);
 }
 
-// Mail to the human needs a sender; the first running agent stands in, as stam itself has
-// no mailbox (mirrors usage.ts). Returns false when there is no sender or sending failed,
+// Mail to the human, from the `system:cost` sender. Returns false when sending failed,
 // so the caller keeps the warning pending and tries again.
 async function mailHuman(subject: string, body: string): Promise<boolean> {
-  const sender = db.listAgents().find((a) => a.lifecycle === 'active');
-  if (!sender) return false;
   try {
-    await sendMail({ from: sender.id, to: [HUMAN], subject: `[stam] ${subject}`, body, from_stam: true });
+    await sendFromSystemMail('cost', [HUMAN], `[stam] ${subject}`, body);
     return true;
   } catch {
     return false;

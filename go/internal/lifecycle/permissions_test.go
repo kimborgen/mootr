@@ -55,28 +55,28 @@ func TestAnswerDialog(t *testing.T) {
 	session := "11111111-2222-4333-8444-555555555555"
 	l.waiter("ald1")
 	l.set("ald1", db.Field{Col: "activity", Val: "blocked"}, db.Field{Col: "session_id", Val: session})
-	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true); got != "gone" {
+	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true, ""); got != "gone" {
 		t.Errorf("no pane: %s", got)
 	}
 	l.pane("ald1", readDialog...)
 	other := strings.Replace(readDetails, "menu.png", "other.png", 1)
 	for approve, want := range map[bool]string{true: "unsafe", false: "unsure"} {
-		if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), other, approve); got != want {
+		if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), other, approve, ""); got != want {
 			t.Errorf("another dialog's answer (approve %v): %s", approve, got)
 		}
 	}
 	if l.screenHas("ald1", "\n2") || l.screenHas("ald1", "^[") {
 		t.Error("a key reached another dialog")
 	}
-	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), strings.Replace(readDetails, "5555\"", "6666\"", 1), true); got != "gone" {
+	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), strings.Replace(readDetails, "5555\"", "6666\"", 1), true, ""); got != "gone" {
 		t.Errorf("another session: %s", got)
 	}
 	l.set("ald1", db.Field{Col: "activity", Val: "working"})
-	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true); got != "gone" {
+	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true, ""); got != "gone" {
 		t.Errorf("not blocked: %s", got)
 	}
 	l.set("ald1", db.Field{Col: "activity", Val: "blocked"})
-	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true); got != "typed" {
+	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true, ""); got != "typed" {
 		t.Fatalf("the yes: %s", got)
 	}
 	l.until("the 3 to echo", func() bool {
@@ -88,14 +88,14 @@ func TestAnswerDialog(t *testing.T) {
 	// only the owner check tells them apart. Nothing goes to the new pane, and nothing is gone.
 	l.life.onDialogStep = func(step string) {
 		if step == "captured" {
-			l.tmux.Run(l.ctx, nil, "kill-server")
+			l.killServer()
 			l.pane("ald1", readDialog...)
 			if id, _, _, _ := l.tmux.Pane(l.ctx, "ald1"); id != "%0" {
 				t.Errorf("the new pane is %s, not the old %%0", id)
 			}
 		}
 	}
-	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true); got != "failed" {
+	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true, ""); got != "failed" {
 		t.Errorf("a replaced pane: %s", got)
 	}
 	if s, _ := l.tmux.CapturePane(l.ctx, "ald1"); strings.Contains(s, "\n3") {
@@ -107,7 +107,7 @@ func TestAnswerDialog(t *testing.T) {
 			l.set("ald1", db.Field{Col: "session_id", Val: "another-session"})
 		}
 	}
-	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true); got != "failed" {
+	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true, ""); got != "failed" {
 		t.Errorf("a changed session: %s", got)
 	}
 	l.set("ald1", db.Field{Col: "session_id", Val: session})
@@ -117,13 +117,13 @@ func TestAnswerDialog(t *testing.T) {
 			l.tmux.Run(l.ctx, nil, "kill-session", "-t", "=ald1")
 		}
 	}
-	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true); got != "failed" {
+	if got := l.life.AnswerDialog(l.ctx, l.agent("ald1"), readDetails, true, ""); got != "failed" {
 		t.Errorf("a capture that failed: %s", got)
 	}
 	l.life.onDialogStep = nil
 	codex := l.agent("ald1")
 	codex.Harness = "codex"
-	if got := l.life.AnswerDialog(l.ctx, codex, readDetails, false); got != "gone" {
+	if got := l.life.AnswerDialog(l.ctx, codex, readDetails, false, ""); got != "gone" {
 		t.Errorf("another harness: %s", got)
 	}
 }
@@ -163,28 +163,92 @@ func TestTypeHumanInput(t *testing.T) {
 	if l.life.TypeHumanInput(l.ctx, l.agent("alt3"), "yes") {
 		t.Error("typed over a draft")
 	}
+
+	// Text that starts with a dash is text, not a tmux option.
+	l.waiter("alt4")
+	l.pane("alt4", "? for shortcuts", "❯ ")
+	if !l.life.TypeHumanInput(l.ctx, l.agent("alt4"), "-n dashed") {
+		t.Fatal("a prompt starting with a dash wasn't typed")
+	}
+	l.until("the dashed line", func() bool {
+		s, _ := l.tmux.CapturePane(l.ctx, "alt4")
+		return strings.Count(s, "-n dashed") == 2
+	})
 }
 
-// fakeDialogs records what the hooks report.
+// fakeDialogs records what the hooks report, and keeps one pending dialog as the server does: the same dialog again
+// keeps it, another replaces it, a close withdraws it. waiting, when set, runs once before the next show reads the
+// pending dialog, as if the show waited there for the server's lock.
 type fakeDialogs struct {
-	mu     sync.Mutex
-	shown  []claude.Dialog
-	closed int
-	fail   error
+	mu        sync.Mutex
+	shown     []claude.Dialog
+	closed    int
+	fail      error
+	pending   *claude.Dialog
+	requests  int
+	withdrawn []string
+	waiting   func()
 }
 
 func (f *fakeDialogs) DialogShown(_ context.Context, _ db.Agent, d claude.Dialog) error {
 	f.mu.Lock()
+	if w := f.waiting; w != nil {
+		f.waiting = nil
+		f.mu.Unlock()
+		w()
+		f.mu.Lock()
+	}
 	defer f.mu.Unlock()
+	if d.Choose != nil {
+		if d = d.Choose(); d.Details == "" {
+			return nil
+		}
+	}
 	f.shown = append(f.shown, d)
-	return f.fail
+	if f.fail != nil {
+		return f.fail
+	}
+	if f.pending != nil && (!d.Replaces || (f.pending.Action == d.Action && f.pending.Details == d.Details)) {
+		return nil
+	}
+	if f.pending != nil {
+		f.withdrawn = append(f.withdrawn, f.pending.Details)
+	}
+	f.pending = &d
+	f.requests++
+	return nil
 }
 
 func (f *fakeDialogs) DialogClosed(context.Context, db.Agent) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed++
+	if f.pending != nil {
+		f.withdrawn = append(f.withdrawn, f.pending.Details)
+		f.pending = nil
+	}
 	return nil
+}
+
+func (f *fakeDialogs) DialogClosedIf(_ context.Context, _ db.Agent, match func(string) bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pending != nil && match(f.pending.Details) {
+		f.closed++
+		f.withdrawn = append(f.withdrawn, f.pending.Details)
+		f.pending = nil
+	}
+	return nil
+}
+
+// state is the pending dialog's details ("" for none) and how many requests were made.
+func (f *fakeDialogs) state() (string, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pending == nil {
+		return "", f.requests
+	}
+	return f.pending.Details, f.requests
 }
 
 // TestHookDialogs: a PermissionRequest hook reports its dialog, after the hook's own write; a failure to record it is an

@@ -223,11 +223,11 @@ func (d *DB) OldestDecisionMails(ctx context.Context) ([][2]string, error) {
 }
 
 // ClearRequestDecisionMails is src/db.ts clearRequestDecisionMails: the agent's decision mails about a request, from
-// before `before`, are no longer waiting on the human.
+// before `before`, are no longer waiting on the human. A thread the ask only joined (its home, S-3827) doesn't tie them.
 func (d *DB) ClearRequestDecisionMails(ctx context.Context, agentID, requestID, before string) error {
 	return wrap("clear decision mails", d.Write(ctx, func(conn *sqlite.Conn) error {
-		return runSQL(conn, `DELETE FROM decision_mails WHERE mail_id IN (SELECT m.id FROM decision_mails d JOIN mail m ON m.id = d.mail_id WHERE m.from_id = ? AND m.created_at <= ?
-      AND (instr(m.subject, ?) > 0 OR instr(m.body, ?) > 0 OR d.thread_id IN (SELECT COALESCE(thread_id, id) FROM mail WHERE permission_id = ?)))`,
+		return deleteDecisions(conn, "settled", nil, `DELETE FROM decision_mails WHERE mail_id IN (SELECT m.id FROM decision_mails d JOIN mail m ON m.id = d.mail_id WHERE m.from_id = ? AND m.created_at <= ?
+      AND (instr(m.subject, ?) > 0 OR instr(m.body, ?) > 0 OR d.thread_id IN (SELECT id FROM mail WHERE permission_id = ? AND (thread_id IS NULL OR thread_id = id))))`,
 			agentID, before, requestID, requestID, requestID)
 	}))
 }

@@ -24,7 +24,17 @@ export interface Field {
   width: (typeof FIELD_WIDTHS)[number]
   align: (typeof FIELD_ALIGNS)[number]
   card: (typeof FIELD_CARDS)[number]
+  // The ITSA kinds the field applies to (S-3180); null, or absent from an older daemon, is every kind.
+  kinds?: string[] | null
   position: number
+}
+
+// Whether a field applies to an ITSA of this kind (S-3180): every kind when the field has no kinds, else the
+// kind must match one of them, ignoring case. The daemon hides the values of the others; this keeps the page to it too.
+export function fieldApplies(f: Pick<Field, 'kinds'>, kind: string | null | undefined): boolean {
+  if (!f.kinds) return true
+  const k = (kind ?? '').toLowerCase()
+  return !!k && f.kinds.some((x) => x.toLowerCase() === k)
 }
 
 // A tone as the `.badge` class that draws it: the status tokens, no new colour.

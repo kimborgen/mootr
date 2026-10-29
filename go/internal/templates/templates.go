@@ -3,8 +3,8 @@
 // checkout's templates/ folder, or for a template built from block files, blocks/NAME/, their bodies in order), and an
 // agent type's `blocks` composition (off, replace, order) applies to a template built from blocks.
 //
-// Not yet ported: the shared cache a non-home daemon reads registry.json and instructions.md from (peerShared), and
-// the template list, save and reset the settings UI uses.
+// A non-home daemon reads the home's registry, instructions for all agents and type templates from its shared cache
+// (config.PeerShared, S-387, S-417).
 package templates
 
 import (
@@ -34,9 +34,14 @@ type Set struct {
 	UserHome string
 	// Settings returns the current settings (humanMail).
 	Settings func() config.Settings
+	// Machine is this daemon's machine name: a settings.json that names another home makes it a peer, which reads the
+	// home's registry, instructions and type templates from its shared cache.
+	Machine string
 
 	mu    sync.Mutex
 	types typesMemo
+	// editMu serialises the read-modify-writes of STAM_HOME/registry.json.
+	editMu sync.Mutex
 }
 
 // ErrNoTemplate is wrapped by Template for a name that is no template.
@@ -57,17 +62,17 @@ func (s *Set) Template(name, typ string) (string, error) {
 			blocks, hasType = t.Blocks, t.HasBlocks
 		}
 	}
-	userDir := filepath.Join(s.Home, "templates")
-	for _, dir := range []string{userDir, filepath.Join(s.Root, "templates")} {
-		if b, err := os.ReadFile(filepath.Join(dir, name+".md")); err == nil {
-			return string(b), nil
+	if user, ok := s.UserTemplate(name); ok {
+		return user, nil
+	}
+	if b, err := os.ReadFile(filepath.Join(s.Root, "templates", name+".md")); err == nil {
+		return string(b), nil
+	}
+	if s.HasBlocks(name) {
+		if hasType && jsjson.Truthy(blocks) {
+			return s.ComposedText(name, blocks)
 		}
-		if dir != userDir && s.HasBlocks(name) {
-			if hasType && jsjson.Truthy(blocks) {
-				return s.ComposedText(name, blocks)
-			}
-			return s.BlocksText(name)
-		}
+		return s.BlocksText(name)
 	}
 	isType, err := s.isTypeTemplate(name)
 	if err != nil {
@@ -77,6 +82,27 @@ func (s *Set) Template(name, typ string) (string, error) {
 		return "", nil
 	}
 	return "", fmt.Errorf("%w %s", ErrNoTemplate, name)
+}
+
+// sharedTemplate is src/templates.ts SHARED_TEMPLATE: an agent type's instructions, which live on the settings home.
+var sharedTemplate = regexp.MustCompile(`^type-[\w-]+$`)
+
+// UserTemplate is src/templates.ts userTemplate: the user's override of a template. A type's template (type-NAME) lives
+// on the settings home (S-417): a non-home daemon with the home's cached copy reads that and ignores its own file, so
+// the home's removal or edit reaches it; else the file in STAM_HOME/templates.
+func (s *Set) UserTemplate(name string) (string, bool) {
+	if sharedTemplate.MatchString(name) {
+		if c := config.PeerShared(s.Home, s.Machine); c != nil && c.Templates != nil {
+			v, _ := c.Templates.Get(name)
+			text, ok := v.(string)
+			return text, ok
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(s.Home, "templates", name+".md"))
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
 }
 
 var varRe = regexp.MustCompile(`\{\{(\w+)\}\}`)
@@ -118,45 +144,53 @@ type AgentType struct {
 type typesMemo struct {
 	key   string
 	value map[string]AgentType
+	order []string
 }
 
-// Types is the registry's agent types: registry/defaults.json's, then STAM_HOME/registry.json's over them by name, a
-// null one dropped (src/registry.ts registry().types). A registry.json that is missing or not JSON counts as empty.
+// Types is the registry's agent types: registry/defaults.json's, then the user registry's over them by name, a null one
+// dropped (src/registry.ts registry().types). The user registry is config.UserRegistry: the home's cached copy on a
+// peer, else STAM_HOME/registry.json, which counts as empty when it is missing or not JSON.
 func (s *Set) Types() (map[string]AgentType, error) {
+	types, _, err := s.TypesInOrder()
+	return types, err
+}
+
+// TypesInOrder is Types with the type names in Object.keys(agentTypes()) order, from the same read.
+func (s *Set) TypesInOrder() (map[string]AgentType, []string, error) {
 	defaultsFile := filepath.Join(s.Root, "registry", "defaults.json")
-	userFile := filepath.Join(s.Home, "registry.json")
-	key := statKey(defaultsFile) + "|" + statKey(userFile)
+	key := statKey(defaultsFile)
+	for _, f := range []string{"registry.json", "settings.json", "settings.shared.json"} {
+		key += "|" + statKey(filepath.Join(s.Home, f))
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.types.value != nil && s.types.key == key {
-		return s.types.value, nil
+		return s.types.value, append([]string(nil), s.types.order...), nil
 	}
 	raw, err := os.ReadFile(defaultsFile)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defaults, err := jsjson.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", defaultsFile, err)
+		return nil, nil, fmt.Errorf("%s: %w", defaultsFile, err)
 	}
-	var user jsjson.Value
-	if b, err := os.ReadFile(userFile); err == nil {
-		user, _ = jsjson.Parse(b)
-	}
+	user := s.UserRegistry()
 	merged := jsjson.NewObject()
-	for _, doc := range []jsjson.Value{defaults, user} {
+	for _, doc := range []jsjson.Value{defaults, jsjson.Value(user)} {
 		if o, ok := doc.(*jsjson.Object); ok {
 			if types, ok := o.Get("types"); ok {
 				spread(merged, types)
 			}
 		}
 	}
-	out := map[string]AgentType{}
+	out, order := map[string]AgentType{}, []string{}
 	for _, name := range merged.Keys() {
 		v, _ := merged.Get(name)
 		if v == nil {
 			continue
 		}
+		order = append(order, name)
 		var t AgentType
 		if o, ok := v.(*jsjson.Object); ok {
 			t.Blocks, t.HasBlocks = o.Get("blocks")
@@ -165,9 +199,15 @@ func (s *Set) Types() (map[string]AgentType, error) {
 		}
 		out[name] = t
 	}
-	s.types = typesMemo{key: key, value: out}
-	return out, nil
+	s.types = typesMemo{key: key, value: out, order: order}
+	return out, append([]string(nil), order...), nil
 }
+
+// UserRegistry is config.UserRegistry for this home and machine.
+func (s *Set) UserRegistry() *jsjson.Object { return config.UserRegistry(s.Home, s.Machine) }
+
+// Registry is config.Registry for this checkout, home and machine.
+func (s *Set) Registry() *jsjson.Object { return config.Registry(s.Root, s.Home, s.Machine) }
 
 // spread copies v's own enumerable keys into o, as `{...o, ...v}` does: an object's keys, an array's indices, a
 // string's character indices; nothing for null, booleans and numbers.

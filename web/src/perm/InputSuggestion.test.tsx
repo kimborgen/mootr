@@ -39,6 +39,7 @@ beforeEach(() => {
   root = createRoot(host)
   vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
     if (init?.method === 'POST') posts.push({ path, body: JSON.parse(init.body as string) })
+    await new Promise((r) => setTimeout(r, 30)) // answers late on purpose: a click helper that waits a fixed time fails
     return { ok: true, status: 200, json: async () => answer }
   }))
 })
@@ -46,11 +47,20 @@ afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(
 
 const view = (p: Permission, canAnswer = true) => act(() => root.render(<InputSuggestion p={p} canAnswer={canAnswer} />))
 const text = () => host.textContent ?? ''
-// The answer's hash, the POST, and the state after it are async: let them settle inside act.
-const click = (sel: string) => act(async () => {
-  (host.querySelector(sel) as HTMLButtonElement).click()
-  await new Promise((r) => setTimeout(r, 20))
-})
+// The answer's hash, the POST, and the state after it are async: let them settle inside act. The card
+// disables its buttons while it works (busy) and enables or removes them when done, so wait on that,
+// not on a timer: a fixed wait let a loaded run assert before the answer's state had landed.
+const working = () => host.querySelector('[data-input-approve][disabled], [data-input-deny][disabled], [data-input-restart][disabled]') !== null
+const click = async (sel: string) => {
+  act(() => { (host.querySelector(sel) as HTMLButtonElement).click() })
+  // setBusy(true) runs in the click, so a card that is not busy now means the wait would pass on nothing.
+  expect(working()).toBe(true)
+  const giveUp = Date.now() + 2000
+  while (working()) {
+    if (Date.now() > giveUp) throw new Error('card still busy after click')
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+  }
+}
 
 describe('InputSuggestion', () => {
   it('shows the agent, the reason, and the text as written', () => {

@@ -19,11 +19,11 @@ function held(): { body: ReadableStream<Uint8Array>; fail: (e: Error) => void } 
 }
 const jsonRes = (body: unknown) => ({ ok: true, status: 200, json: async () => body }) as unknown as Response
 // A fetch that answers the daemon's poll routes with empty lists.
-function stubPolls(count: (path: string) => void) {
+function stubPolls(count: (path: string, url: string) => void) {
   return vi.fn(async (input: string | URL | Request) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
     const path = url.split('?')[0]
-    count(path)
+    count(path, url)
     return jsonRes(path.endsWith('/statuses') ? { statuses: [] } : [])
   })
 }
@@ -195,6 +195,55 @@ describe('live events applied to the store', () => {
   })
 })
 
+describe('agent objects across polls (S-3292)', () => {
+  // The daemon's answer to the agents poll; the other routes answer empty.
+  const pollWith = (list: Agent[]) => vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+    return jsonRes(url.split('?')[0] === '/api/agents' ? list : [])
+  }) as unknown as typeof fetch)
+
+  it('keeps the object of an agent a poll left unchanged, and replaces only the one that changed', async () => {
+    const a = agent({ id: 'a1', name: 'alice' })
+    const b = agent({ id: 'a2', name: 'bob' })
+    setData({ agents: [a, b] })
+    pollWith([{ ...a }, { ...b, unread: 2 }])
+    await refreshAgents()
+    const [a2, b2] = getData().agents
+    expect(a2).toBe(a)
+    expect(b2).not.toBe(b)
+    expect(b2.unread).toBe(2)
+  })
+
+  it('keeps the array when a poll changes nothing', async () => {
+    const list = [agent({ id: 'a1', name: 'alice' })]
+    setData({ agents: list })
+    pollWith([agent({ id: 'a1', name: 'alice' })])
+    await refreshAgents()
+    expect(getData().agents).toBe(list)
+  })
+
+  it('replaces only the agent a stream patch changed', () => {
+    const a = agent({ id: 'a1', name: 'alice' })
+    const b = agent({ id: 'a2', name: 'bob' })
+    setData({ agents: [a, b] })
+    applyLiveEvent('agent.changed', { id: 'a2', state: 'working' })
+    expect(getData().agents[0]).toBe(a)
+    expect(getData().agents[1].lifecycle).toBe('working')
+  })
+
+  it('adds and removes rows on a poll, keeping the rest', async () => {
+    const a = agent({ id: 'a1', name: 'alice' })
+    setData({ agents: [a] })
+    pollWith([{ ...a }, agent({ id: 'a2', name: 'bob' })])
+    await refreshAgents()
+    expect(getData().agents.map((x) => x.id)).toEqual(['a1', 'a2'])
+    expect(getData().agents[0]).toBe(a)
+    pollWith([{ ...a }])
+    await refreshAgents()
+    expect(getData().agents).toEqual([a])
+  })
+})
+
 describe('the reconnect backoff', () => {
   beforeEach(() => { vi.useFakeTimers() })
 
@@ -260,7 +309,8 @@ describe('the fallback polls', () => {
     let agents = 0
     let perms = 0
     let itsas = 0
-    vi.stubGlobal('fetch', stubPolls((p) => { if (p === '/api/agents') agents++; else if (p === '/api/permissions') perms++; else if (p === '/api/itsas') itsas++ }))
+    // The live agents' poll; the archived agents' read comes apart (S-3816).
+    vi.stubGlobal('fetch', stubPolls((p, url) => { if (p === '/api/agents' && !url.includes('state=archived')) agents++; else if (p === '/api/permissions') perms++; else if (p === '/api/itsas') itsas++ }))
     startPolls(false)
     await vi.advanceTimersByTimeAsync(2000)
     expect(agents).toBe(1)
@@ -321,5 +371,118 @@ describe('the fallback polls', () => {
     expect(itsas).toBe(1)
     stream.stop()
     startPolls(false)
+  })
+})
+
+describe('the archived agents, apart from the 2 s poll (S-3816)', () => {
+  // The daemon: live and stopped agents for the poll, archived ones for their own read. Records each list query.
+  let asked: string[] = []
+  const daemon = (live: Agent[], gone: Agent[] | Error) => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.split('?')[0] !== '/api/agents') return jsonRes([])
+      asked.push(url.split('?')[1] ?? '')
+      if (!url.includes('state=archived')) return jsonRes(live)
+      if (gone instanceof Error) return { ok: false, status: 500, json: async () => ({ error: gone.message }) } as unknown as Response
+      return jsonRes(gone)
+    }) as unknown as typeof fetch)
+  }
+  const a = agent({ id: 'a1', name: 'alice', lifecycle: 'active' })
+  const old = agent({ id: 'z9', name: 'zed', lifecycle: 'archived' })
+  // Each test starts well past the last archived read, so the first poll reads them.
+  let now = Date.UTC(2100, 0, 1)
+  beforeEach(() => { asked = []; now += 10 * 60_000; vi.useFakeTimers({ now, toFake: ['Date'] }) })
+
+  it('polls live and stopped agents, reads the archived ones once a minute, and lists them behind the live', async () => {
+    daemon([a], [old])
+    await refreshAgents()
+    expect(asked).toEqual(['state=live,stopped', 'state=archived'])
+    expect(getData().agents.map((x) => x.id)).toEqual(['a1', 'z9'])
+    asked = []
+    vi.setSystemTime(now + 30_000)
+    await refreshAgents()
+    expect(asked).toEqual(['state=live,stopped'])
+    expect(getData().agents.map((x) => x.id)).toEqual(['a1', 'z9'])
+    vi.setSystemTime(now + 61_000)
+    await refreshAgents()
+    expect(asked.slice(1)).toEqual(['state=live,stopped', 'state=archived'])
+  })
+
+  it('reads the archived agents as soon as one leaves the poll, once', async () => {
+    const b = agent({ id: 'b2', name: 'bob', lifecycle: 'active' })
+    daemon([a, b], [old])
+    await refreshAgents()
+    asked = []
+    daemon([a], [old, { ...b, lifecycle: 'archived' }])
+    await refreshAgents()
+    expect(asked).toEqual(['state=live,stopped', 'state=archived'])
+    expect(getData().agents.find((x) => x.id === 'b2')?.lifecycle).toBe('archived')
+    asked = []
+    await refreshAgents()
+    expect(asked).toEqual(['state=live,stopped'])
+  })
+
+  it('keeps the last archived agents when their read fails, and the live row wins over an archived one', async () => {
+    daemon([a], [old])
+    await refreshAgents()
+    vi.setSystemTime(now + 61_000)
+    daemon([a, { ...old, lifecycle: 'active' }], new Error('down'))
+    await refreshAgents()
+    expect(getData().agents.map((x) => `${x.id} ${x.lifecycle}`)).toEqual(['a1 active', 'z9 active'])
+    daemon([a], new Error('down'))
+    vi.setSystemTime(now + 62_000)
+    await refreshAgents()
+    expect(getData().agents.map((x) => `${x.id} ${x.lifecycle}`)).toEqual(['a1 active', 'z9 archived'])
+  })
+})
+
+describe('the archived agents between reads (S-3816, #1195 review)', () => {
+  let asked: string[] = []
+  const daemon = (live: Agent[], gone: Agent[] | Error) => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.split('?')[0] !== '/api/agents') return jsonRes([])
+      asked.push(url.split('?')[1] ?? '')
+      if (!url.includes('state=archived')) return jsonRes(live)
+      if (gone instanceof Error) return { ok: false, status: 500, json: async () => ({ error: gone.message }) } as unknown as Response
+      return jsonRes(gone)
+    }) as unknown as typeof fetch)
+  }
+  const a = agent({ id: 'a1', name: 'alice', lifecycle: 'active' })
+  const old = agent({ id: 'z9', name: 'zed', lifecycle: 'archived', unread: 0 })
+  let now = Date.UTC(2200, 0, 1)
+  beforeEach(() => { asked = []; now += 10 * 60_000; vi.useFakeTimers({ now, toFake: ['Date'] }) })
+
+  it("keeps a stream change to an archived agent through the polls before the next read", async () => {
+    daemon([a], [old])
+    await refreshAgents()
+    applyLiveEvent('agent.changed', { id: 'z9', unread: 4 })
+    vi.setSystemTime(now + 2_000)
+    await refreshAgents()
+    expect(asked.at(-1)).toBe('state=live,stopped')
+    expect(getData().agents.find((x) => x.id === 'z9')?.unread).toBe(4)
+  })
+
+  it('reads again 10 s after a read failed, not on every poll, so an agent that left comes back', async () => {
+    const b = agent({ id: 'b2', name: 'bob', lifecycle: 'active' })
+    daemon([a, b], [old])
+    await refreshAgents()
+    daemon([a], new Error('down'))
+    await refreshAgents()
+    expect(getData().agents.find((x) => x.id === 'b2')).toBeUndefined()
+    expect(getData().agents.find((x) => x.id === 'a1')).toBeDefined()
+    asked = []
+    vi.setSystemTime(now + 2_000)
+    await refreshAgents()
+    vi.setSystemTime(now + 4_000)
+    await refreshAgents()
+    expect(asked).toEqual(['state=live,stopped', 'state=live,stopped'])
+    expect(getData().agents.find((x) => x.id === 'a1')).toBeDefined()
+    asked = []
+    daemon([a], [old, { ...b, lifecycle: 'archived' }])
+    vi.setSystemTime(now + 11_000)
+    await refreshAgents()
+    expect(asked).toEqual(['state=live,stopped', 'state=archived'])
+    expect(getData().agents.find((x) => x.id === 'b2')?.lifecycle).toBe('archived')
   })
 })

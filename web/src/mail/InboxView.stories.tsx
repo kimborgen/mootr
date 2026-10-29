@@ -4,6 +4,7 @@ import { ALL_THREADS, AGENTS_STOPPED, STATUSES, T_ARCH, T_AWAIT, T_PERM, T_PLAIN
 import { OnMount } from '../stories/helpers'
 import type { Data } from '../store'
 import type { Thread } from '../types'
+import { MANY_ASKS } from './NeedsYouList.stories'
 
 // The While you were away card (S-2822) at the top of the page: a window the human was away for, with what happened and what needs them.
 const ago = (h: number) => new Date(Date.now() - h * 36e5).toISOString()
@@ -31,7 +32,7 @@ export const stories: Story[] = [{
   name: 'Inbox page',
   group: 'Mail',
   what: 'Your mail as a page (`w:inbox`, S-2054): a header with the title, how many things wait on you and how many threads are unread, a search box and the filter chips (To answer, Unread, All, Awaiting, Deferred, Archived), then the rows grouped Needs you (pinned, oldest first), Today and Earlier (newest first). A row is one thread: a mark for its kind (Decision, Blocker, Done, Mail), the mark of who wrote last, the subject, the ITSA it is about, the age and an unread dot, over one line of what the latest mail says. The page is a list only: a thread opens in its own pane to the list\'s right, and the next one you open takes that pane\'s place.',
-  when: 'The Mail tab of the sidebar, when it is showing and you click its name, opens it in main (also `#view=inbox`). On a phone the bottom bar\'s Mail opens it full width (the Mail list is gone from the phone). On a phone the header has Swipe (the cards mode) and History (what you visited, in place of the list), and All lists the dialogs with the parent or the chief of staff, and what waits with no thread of its own; the filter and search are kept there. The desktop page starts on All with none of these. Typing in the search box lists the threads the mail search (`GET /api/mail/search`) finds, best first, over every chip; Escape clears it. On a phone a tap pushes the thread as its own page and back returns to the list where it was.',
+  when: 'The Mail tab of the sidebar, when it is showing and you click its name, opens it in main (also `#view=inbox`). On a phone the bottom bar\'s Mail opens it full width (the Mail list is gone from the phone). On a phone the header has Needs you (N, the open asks; the Needs you list takes the list\'s place, S-3953), Swipe (the cards mode) and History (what you visited, in place of the list), and All lists the dialogs with the parent or the chief of staff, and what waits with no thread of its own; the filter and search are kept there. The desktop page starts on All with none of these. Typing in the search box lists the threads the mail search (`GET /api/mail/search`) finds, best first, over every chip; Escape clears it. On a phone a tap pushes the thread as its own page and back returns to the list where it was.',
   code: ['web/src/mail/InboxView.tsx#InboxView', 'web/src/mail/inbox-model.ts#grouped', 'web/src/actions.tsx#openInboxThread', 'web/src/itsa/WaitingList.tsx#useWaiting', 'web/src/mail/swipeRow.ts#swipeRow'],
   rules: [
     'Rows are two lines and at least `--size-row-inbox` (`--size-hit-touch`, 44 px) tall on every screen; the whole row is the target (' + ds('Density') + ').',
@@ -62,6 +63,7 @@ export const stories: Story[] = [{
     { name: 'Loading', data: { humanThreads: [], loaded: { agents: true, mail: false, itsas: true } }, render: () => page() },
     { name: 'Error', data: { humanThreads: [], error: 'fixture: the daemon is unreachable', loaded: { agents: true, mail: false, itsas: true } }, render: () => page() },
     { name: 'Long inbox, long subjects', data: inbox(MANY, { unread: 6 }), render: () => page('fx-inbox-3') },
+    { name: 'Needs you on a phone', data: inbox(ALL_THREADS, { ...waiting, asks: MANY_ASKS }), render: () => <OnMount run={(el) => el.querySelector<HTMLElement>('[data-needs-you]')?.click()}>{page()}</OnMount> },
     { name: 'With the away digest', data: inbox(ALL_THREADS, waiting), routes: { 'GET /api/digest': DIGEST }, render: () => page() },
   ],
 }]

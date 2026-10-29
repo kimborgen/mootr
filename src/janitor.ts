@@ -17,6 +17,7 @@ import { basename, join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { testTmpBase } from './config.ts';
 import { envVar } from './env.ts';
+import { classifyTmuxLs, isTestSocket, pidAlive, socketPid, tmuxSocketDir as socketDir } from './tmux-socket.ts';
 
 const MAX_AGE_MS = 3 * 60 * 60 * 1000;
 // A tmux or systemctl call that hasn't answered in this long is killed. A hung test tmux server
@@ -57,9 +58,17 @@ function run(file: string, args: string[]): Promise<Run> {
   });
 }
 const tmux = (socket: string, args: string[]) => run('tmux', ['-L', socket, ...args]);
+// Like run(), with the stderr: tmux's "no server running" is how a dead socket shows.
+function runErr(file: string, args: string[]): Promise<Run & { stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(file, args, { encoding: 'utf8', timeout: CALL_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+      const status = !err ? 0 : typeof err.code === 'number' ? err.code : null;
+      resolve({ status, stdout: stdout ?? '', stderr: stderr ?? '', timedOut: Boolean(err?.killed) });
+    });
+  });
+}
 
-// Where tmux keeps its sockets: TMUX_TMPDIR, else /tmp. tmux ignores TMPDIR, so a caller's TMPDIR (a test run's, S-2586) never moves them.
-const tmuxSocketDir = () => join(process.env.TMUX_TMPDIR || '/tmp', `tmux-${process.getuid?.() ?? 0}`);
+const tmuxSocketDir = socketDir;
 const systemctl = (...args: string[]) => run('systemctl', ['--user', ...args]);
 
 // What a tmux server that didn't answer leaves in the result: its socket is skipped this round.
@@ -371,6 +380,62 @@ async function testSockets(): Promise<string[]> {
   return names.filter((s) => s.startsWith('stam-test-') && s !== LIVE_SOCKET);
 }
 
+// Dead socket files of a known test name (S-3288): a test's `kill-server` can leave the file behind.
+// Only a name with a PID in it is looked at, and only when that process is gone. A child daemon of the test
+// can outlive that PID and keep the name; if its server is alive, `tmux ls` says so and the socket stays.
+// A name without a PID is fixed at its source (the test's own cleanup) and never swept. A socket then goes only when `tmux -L NAME ls`
+// says no server runs on it, and only if the file is still the one first seen (same inode and mtime).
+// Any other answer (a live server, a timeout, permission denied) keeps it. A pass makes at most
+// SOCKET_PROBES probes within about SOCKET_BUDGET_MS (one probe in flight may overrun it) and resumes after the last name next pass.
+const SOCKET_PROBES = 100;
+const SOCKET_BUDGET_MS = 10_000;
+let socketCursor = '';
+export interface SocketSweepDeps {
+  ls?: (name: string) => Promise<{ status: number | null; stderr: string; timedOut?: boolean }>;
+  alive?: (pid: number) => boolean;
+  now?: () => number;
+  probes?: number;
+  budgetMs?: number;
+}
+export async function sweepDeadSockets(opts: { dryRun?: boolean } & SocketSweepDeps = {}): Promise<{ removed: string[]; kept: Kept[]; probed: number }> {
+  const removed: string[] = [];
+  const kept: Kept[] = [];
+  const ls = opts.ls ?? ((name: string) => runErr('tmux', ['-L', name, 'ls']));
+  const alive = opts.alive ?? pidAlive;
+  const now = opts.now ?? Date.now;
+  const maxProbes = opts.probes ?? SOCKET_PROBES;
+  const budgetMs = opts.budgetMs ?? SOCKET_BUDGET_MS;
+  const start = now();
+  const all = (await readdir(socketDir()).catch((): string[] => [])).filter(isTestSocket).sort();
+  // From the name after the cursor, wrapping around, so every file is reached in turn.
+  const after = all.filter((n) => n > socketCursor);
+  const names = [...after, ...all.filter((n) => n <= socketCursor)];
+  let probed = 0;
+  for (const name of names) {
+    if (probed >= maxProbes || now() - start > budgetMs) break;
+    socketCursor = name;
+    await yieldLoop();
+    const path = join(socketDir(), name);
+    const st = await lstat(path).catch(() => undefined);
+    if (!st?.isSocket()) continue;
+    const pid = socketPid(name);
+    if (pid === undefined || alive(pid)) continue;
+    probed++;
+    const verdict = classifyTmuxLs(await ls(name));
+    if (verdict !== 'dead') {
+      if (verdict === 'unknown') kept.push({ path: name, why: 'tmux ls did not say "no server"; kept' });
+      continue;
+    }
+    // The file must be the one probed: a server started since replaced it.
+    const again = await lstat(path).catch(() => undefined);
+    if (!again?.isSocket() || again.ino !== st.ino || again.mtimeMs !== st.mtimeMs || alive(pid)) continue;
+    if (!opts.dryRun) await rm(path, { force: true });
+    removed.push(name);
+  }
+  if (names.length && probed < maxProbes && now() - start <= budgetMs) socketCursor = '';
+  return { removed, kept, probed };
+}
+
 // One sweep of every test folder. With dryRun nothing is stopped or removed; `only`
 // restricts it to these folders (and their daemons, tmux servers, and units).
 // activeAgents / knownAgents: the registry's active ids and all ids (the daemon passes both). Without
@@ -520,6 +585,13 @@ export async function sweep(opts: { dryRun?: boolean; only?: string[]; activeAge
       }
       result.actions.push({ kind: 'tmux', target: socket, dir: dir ?? '', detail: why });
     }
+  }
+
+  // Dead socket files no server serves, by test prefix. Scoped sweeps leave them alone.
+  if (!only.length) {
+    const dead = await sweepDeadSockets({ dryRun });
+    for (const socket of dead.removed) result.actions.push({ kind: 'tmux', target: socket, dir: '', detail: 'dead socket file' });
+    result.kept.push(...dead.kept);
   }
 
   // Hook payload leftovers are not test folders, so a scoped (--only) sweep leaves them alone.

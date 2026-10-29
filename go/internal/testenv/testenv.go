@@ -8,10 +8,12 @@ import "os"
 // names are the variables that reach the live home, daemon or identity, without their STAM_/MOOTR_ prefix.
 var names = []string{"HOME", "PORT", "URL", "TOKEN", "MACHINE", "AGENT_ID", "TMUX_SOCKET"}
 
-// Scrub removes each name under both prefixes.
+// Scrub removes each name under both prefixes, and stam's own OpenRouter key, so a test that polls the credit (the Go
+// daemon's start does, src/credits.ts) can never reach OpenRouter with a real one.
 func Scrub() {
 	for _, n := range names {
 		os.Unsetenv("STAM_" + n)
 		os.Unsetenv("MOOTR_" + n)
 	}
+	os.Unsetenv("OPENROUTER_API_KEY")
 }

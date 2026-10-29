@@ -90,6 +90,20 @@ const copy = <T>(x: T): T => JSON.parse(JSON.stringify(x));
 export function leaves(n: Node): Leaf[] {
   return n.split ? n.children.flatMap(leaves) : [n];
 }
+
+// The `image:PAGE.N` tabs (S-1475) whose page isn't live, as close ops. An image tab's pictures live in
+// the page that opened it, so one whose page is gone shows nothing on any device; `live` says whether a
+// page still holds its layout stream (src/layout.ts). A pane left empty closes with its last tab.
+export function deadImageTabOps(l: Layout, live: (page: string) => boolean): LayoutOp[] {
+  const dead = (world: string, w: World): LayoutOp[] =>
+    leaves(w.root).flatMap((leaf) => leaf.tabs)
+      .filter((key) => key.startsWith('image:') && !live(key.slice('image:'.length).split('.')[0]))
+      .map((key) => ({ op: 'close', world, key }));
+  return [
+    ...Object.entries(l.worlds).flatMap(([name, w]) => dead(name, w)),
+    ...Object.entries(l.agentWorlds).flatMap(([id, w]) => dead(id, w)),
+  ];
+}
 function parentOf(root: Node, node: Node): { parent: Split; index: number } | null {
   if (!root.split) return null;
   for (const [i, c] of root.children.entries()) {

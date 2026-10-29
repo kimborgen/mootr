@@ -22,15 +22,15 @@ import { render, humanMailPrompt } from '../templates.ts';
 import { orgPrompt, managerCostPrompt } from '../org.ts';
 import { instructionsPrompt, extraMcpServers, claudePluginDir } from '../instructions.ts';
 import { streamPush } from '../push.ts';
-import { execFile, execFileSync } from 'node:child_process';
-import { promisify } from 'node:util';
 import { hookWaits, replaceHookWaits } from './hook-waits.ts';
-import { dialogDetails, dialogKey, dialogNames, dialogTarget } from './claude-dialog.ts';
+import { dialogDetails, dialogKey, dialogNames, dialogPrompt, dialogQuestion, dialogTarget, questionNames } from './claude-dialog.ts';
 import { inputBox, inputShows, aroundBox, sameAround, menuUnderBox, boxRows } from './claude-input.ts';
 import { promptInBox } from './claude-ghost.ts';
+import { awaitFirstPrompt, firstPromptHook } from './claude-first-prompt.ts';
+import { nextCronFire, harnessTimerDetail } from './claude-timer.ts';
 import { envVar, setEnvVar } from '../env.ts';
+import { agentExec } from '../agent-exec.ts';
 
-const execFileAsync = promisify(execFile);
 // Tests point this at a scripted fake (test/fake-claude), so no model runs.
 const BIN = envVar('CLAUDE_BIN') ?? 'claude';
 
@@ -290,20 +290,6 @@ function note(s: TranscriptState): void {
 // next Stop.
 const JOB_LABEL: Record<string, string> = { shell: 'background command', subagent: 'background agent', monitor: 'monitor' };
 
-// The next time a one-shot cron with fixed minute and hour fires (Claude Code writes
-// ScheduleWakeup and one-shot CronCreate that way), in this machine's local time.
-export function nextCronFire(schedule: string, from = new Date()): string | null {
-  const [min, hour, dom, mon] = schedule.trim().split(/\s+/);
-  if (!/^\d+$/.test(min ?? '') || !/^\d+$/.test(hour ?? '')) return null;
-  const t = new Date(from);
-  t.setSeconds(0, 0);
-  t.setHours(Number(hour), Number(min));
-  if (/^\d+$/.test(mon ?? '')) t.setMonth(Number(mon) - 1, /^\d+$/.test(dom ?? '') ? Number(dom) : t.getDate());
-  else if (/^\d+$/.test(dom ?? '')) t.setDate(Number(dom));
-  if (t <= from && !/^\d+$/.test(dom ?? '')) t.setDate(t.getDate() + 1);
-  return t.toISOString();
-}
-
 function syncStopWaits(agentId: string, p: Record<string, any>): void {
   if (Array.isArray(p.background_tasks)) {
     const jobs = p.background_tasks.filter((t: any) => t?.id && (t.status ?? 'running') === 'running');
@@ -318,12 +304,15 @@ function syncStopWaits(agentId: string, p: Record<string, any>): void {
     replaceHookWaits(
       agentId,
       'timer',
-      crons.map((c: any) => ({
-        target: String(c.id),
-        detail: c.recurring ? `cron ${c.schedule}` : `timer ${c.schedule}`,
-        until: c.recurring ? null : nextCronFire(String(c.schedule ?? '')),
-        data: { schedule: c.schedule, recurring: !!c.recurring, prompt: c.prompt },
-      })),
+      crons.map((c: any) => {
+        const until = c.recurring ? null : nextCronFire(String(c.schedule ?? ''));
+        return {
+          target: String(c.id),
+          detail: harnessTimerDetail(c, until),
+          until,
+          data: { schedule: c.schedule, recurring: !!c.recurring, prompt: c.prompt },
+        };
+      }),
     );
   }
 }
@@ -383,6 +372,13 @@ async function clearOwnLeftover(agent: Agent, lines: string[], width: number, no
   const own = leftover.get(agent.id);
   if (!own) return false;
   const fresh = db.getAgent(agent.id);
+  // A completion menu under the box is the usual reason stam's own leftover stays: one Esc closes it, as the typing
+  // does, and the leftover is cleared once the screen is free. A menu that stays keeps the box a draft (S-3830).
+  if (fresh?.session_id === own.session && !notInsert && boxRows(lines) && inputShows(lines, own.text, width) && menuUnderBox(lines) && !lines.some((l) => /Enter to confirm|Esc to cancel/.test(l))) {
+    tmux.sendKeys(agent.id, 'Escape');
+    await sleep(150);
+    lines = tmux.capturePane(agent.id).split('\n');
+  }
   const rows = boxRows(lines);
   if (fresh?.session_id !== own.session || notInsert || !rows || !inputShows(lines, own.text, width) || lines.some((l) => /Enter to confirm|Esc to cancel/.test(l)) || menuUnderBox(lines)) {
     // Not its own leftover any more (the human's edit, a new session, a menu): never matched later.
@@ -414,7 +410,7 @@ async function clearOwnLeftover(agent: Agent, lines: string[], width: number, no
 export const claude: Adapter = {
   name: 'claude',
   upgradeCommand: 'claude update',
-  version: () => execFileSync(BIN, ['--version'], { encoding: 'utf8' }).trim(),
+  version: () => agentExec([BIN, '--version'], {}, { mode: 'fileSync' }).trim(),
 
   async launch(agent: Agent, opts: { resume?: boolean } = {}): Promise<LaunchSpec> {
     const dir = agentDir(agent.id);
@@ -502,8 +498,12 @@ export const claude: Adapter = {
         // A new process has none of the old one's jobs or session timers (see syncStopWaits).
         if (p.source === 'startup' || p.source === 'resume') for (const w of hookWaits(agent.id)) db.clearWait(w.id);
         if (agent.activity === 'starting' && agent.activity_detail === 'with prompt') return { session_id: p.session_id, transcript_path: p.transcript_path };
+        // S-3250: a launch's SessionStart that lands late (it retried while the daemon restarted) after
+        // reconcile settled the agent and a turn began doesn't end that turn.
+        if ((p.source === 'startup' || p.source === 'resume') && (agent.activity === 'working' || agent.activity === 'blocked')) return { session_id: p.session_id, transcript_path: p.transcript_path };
         return { activity: 'idle', detail: `session ${p.source ?? 'start'}`, session_id: p.session_id, transcript_path: p.transcript_path };
       case 'UserPromptSubmit':
+        firstPromptHook(agent.id, p.prompt);
         if (typeof p.prompt === 'string' && hookWaits(agent.id).length) {
           // Working first, so clearing the last wait doesn't pass through idle and tell parents.
           db.updateAgent(agent.id, { activity: 'working', activity_detail: null });
@@ -522,7 +522,8 @@ export const claude: Adapter = {
         if (waitsOnOtherDialog(agent, p)) return { afterTool: true };
         return { activity: 'working', detail: null, afterTool: true };
       case 'PermissionRequest':
-        if (p.tool_name === 'AskUserQuestion') return set('blocked', 'question');
+        // A question's dialog is an ask too: its card shows the question and options, and the human's choice is typed back (answerDialog).
+        if (p.tool_name === 'AskUserQuestion') return { ...set('blocked', 'question'), dialog: { action: 'Claude Code asks a question', details: JSON.stringify({ tool: p.tool_name, input: p.tool_input ?? {}, session: p.session_id ?? agent.session_id }), replaces: true } };
         // Auto mode still shows some dialogs, such as a read outside the working directories.
         return { ...set('blocked', `permission ${p.tool_name}`), dialog: { action: `Claude Code asks to allow ${p.tool_name}`, details: JSON.stringify({ tool: p.tool_name, input: p.tool_input ?? {}, session: p.session_id ?? agent.session_id }), replaces: true } };
       case 'Notification':
@@ -567,7 +568,7 @@ export const claude: Adapter = {
     // The command goes in on stdin: instructions on a command line would show in `ps`.
     const args = ['-p', '--resume', agent.session_id!, '--output-format', 'json'];
     if (agent.model) args.push('--model', agent.model);
-    const run = execFileAsync(BIN, args, { cwd: agent.cwd, timeout: 600_000, env: { ...process.env, ...{ STAM_AGENT_ID: '', STAM_COMPACTOR: `${agent.id}:${opts?.op ?? ''}` } } });
+    const run = agentExec([BIN, ...args], { STAM_AGENT_ID: '', STAM_COMPACTOR: `${agent.id}:${opts?.op ?? ''}` }, { mode: 'file', cwd: agent.cwd, timeout: 600_000 });
     // A compactor that exits before reading stdin fails this write with EPIPE. Unhandled, that
     // took the daemon down (S-2040); the run's own rejection reports the failure.
     run.child.stdin!.on('error', () => {});
@@ -601,9 +602,9 @@ export const claude: Adapter = {
   },
 
   // An empty input box, with no spinner or dialog on screen.
-  atPrompt(agent: Agent): boolean {
-    if (!tmux.hasSession(agent.id)) return false;
-    const screen = tmux.capturePane(agent.id);
+  async atPrompt(agent: Agent): Promise<boolean> {
+    if (!(await tmux.hasSessionAsync(agent.id))) return false;
+    const screen = await tmux.capturePaneByNameAsync(agent.id);
     return !SPINNER.test(screen) && inputFree(screen.split('\n'));
   },
 
@@ -613,7 +614,11 @@ export const claude: Adapter = {
   // option's number, since Enter would take whichever option the cursor is on, and never an
   // option that keeps allowing. A no is "No, and ask again next time" when offered, else Esc,
   // which Claude Code reads as No; neither denies anything the agent hasn't asked for.
-  answerDialog(agent: Agent, request: PermissionRequest, approve: boolean) {
+  // A question dialog (AskUserQuestion) takes the human's choice instead: `choice` must be one of its
+  // option labels, and the screen must show that question with those options in order (questionNames),
+  // else nothing is typed ('unsafe'). A no needs the same screen match for the question's text and labels
+  // (dialogPrompt), so it never cancels another dialog. The choice goes in as its option number. Free text is not typed yet.
+  answerDialog(agent: Agent, request: PermissionRequest, approve: boolean, choice?: string) {
     const d = dialogDetails(request.details);
     if (agent.activity !== 'blocked' || !tmux.hasSession(agent.id) || (d.session && d.session !== agent.session_id)) return 'gone' as const;
     const lines = tmux.capturePane(agent.id).split('\n');
@@ -621,6 +626,20 @@ export const claude: Adapter = {
     if (end < 0) return 'gone' as const;
     const top = lines.slice(0, end).findLastIndex((l) => /^\s*[╭─━]{3,}/.test(l));
     const body = top < 0 ? [] : lines.slice(top + 1, end);
+    if (d.tool === 'AskUserQuestion') {
+      // A no matches the screen to the question's text and every label, multi-select or not, so Esc only lands on this dialog.
+      const prompt = dialogPrompt(d.input);
+      if (!prompt || !questionNames(body, prompt.question, prompt.options)) return 'unsafe' as const;
+      if (!approve) {
+        tmux.sendKeys(agent.id, 'Escape');
+        return 'typed' as const;
+      }
+      const q = dialogQuestion(d.input);
+      const at = q && choice !== undefined ? q.options.indexOf(choice) : -1;
+      if (!q || at < 0 || !questionNames(body, q.question, q.options)) return 'unsafe' as const;
+      tmux.sendKeys(agent.id, String(at + 1));
+      return 'typed' as const;
+    }
     const key = dialogKey(body, approve);
     if (approve && (!dialogNames(body, d.tool ?? '', dialogTarget(d.input)) || !key)) return 'unsafe' as const;
     tmux.sendKeys(agent.id, key ?? 'Escape');
@@ -661,7 +680,7 @@ export const claude: Adapter = {
   // box is never touched: that is 'draft', as a busy agent or a dialog on screen is 'busy', and the
   // caller holds the approval. When it doesn't send, it erases what it typed: 'failed' when the
   // screen was wrong, 'cancelled' when `proceed` said no.
-  async typeLiteralInput(agent: Agent, text: string, proceed: () => boolean | Promise<boolean> = () => true) {
+  async typeLiteralInput(agent: Agent, text: string, proceed: (stillTyped: () => boolean) => boolean | Promise<boolean> = () => true) {
     if (agent.activity !== 'idle' && agent.activity !== 'waiting') return 'busy' as const;
     if (!tmux.hasSession(agent.id)) return 'busy' as const;
     const width = tmux.paneWidth(agent.id);
@@ -709,6 +728,8 @@ export const claude: Adapter = {
     const around = aroundBox(lines);
     const bytes = [...Buffer.from(text, 'utf8')].map((b) => b.toString(16).padStart(2, '0'));
     tmux.sendKeys(agent.id, '-H', ...bytes);
+    // Set when the box changed after the typing and before Enter, so the erase below is 'failed', not 'cancelled'.
+    let changed = false;
     // Erasing takes back only what stam typed: the box must show the text, or a start of it, and no
     // dialog, else nothing is sent. Claude Code deletes a grapheme per backspace; it leaves bash mode
     // on a backspace in an empty box, which the leading ! started. An Esc may have left vim's insert
@@ -762,9 +783,15 @@ export const claude: Adapter = {
       if (state === 'no') return erase(failed('the screen around the box, after one Esc', around));
     }
     if (state === 'busy') return erase('busy' as const);
-    // `proceed` claims the approval in the database; nothing re-reads the screen between it and
-    // Enter, which follows at once (the screen was checked just before).
-    if (!(await proceed())) return erase('cancelled' as const);
+    // `proceed` gets `stillTyped`, which reads the screen once more: `proceed` claims the approval only if
+    // the box still shows exactly the text, so a key typed into it since the check above (by the agent or
+    // the human) is never submitted with the text. Such a change is 'failed', not 'cancelled' (S-3830).
+    const stillTyped = () => {
+      const now = screen();
+      if (!inputShows(now, text, width) || !sameAround(around, aroundBox(now)) || menuUnderBox(now)) changed = true;
+      return !changed;
+    };
+    if (!(await proceed(stillTyped))) return erase((changed ? 'failed' : 'cancelled') as 'failed' | 'cancelled');
     tmux.sendKeys(agent.id, 'Enter');
     return 'typed' as const;
   },
@@ -877,16 +904,20 @@ async function answerLaunchDialogs(agent: Agent): Promise<void> {
 // more, and returns quietly (event first-prompt:superseded): the session under this agent's id is
 // the new launch's now.
 async function typeFirstPrompt(agent: Agent, text: string, admit?: () => boolean, current: () => boolean = () => true): Promise<void> {
+  const first = awaitFirstPrompt(agent.id);
   try {
-    await deliverFirstPrompt(agent, text, admit, current);
+    await deliverFirstPrompt(agent, text, first.taken, admit, current);
   } catch (e) {
     if (current()) throw e;
+  } finally {
+    first.done();
   }
   if (!current()) db.addEvent(agent.id, 'first-prompt:superseded');
 }
 
-async function deliverFirstPrompt(agent: Agent, text: string, admit: (() => boolean) | undefined, current: () => boolean): Promise<void> {
-  const delivered = () => db.getAgent(agent.id)?.activity !== 'starting';
+// `firstTaken` is true once a UserPromptSubmit that isn't a channel push has come (firstPromptHook).
+async function deliverFirstPrompt(agent: Agent, text: string, firstTaken: () => boolean, admit: (() => boolean) | undefined, current: () => boolean): Promise<void> {
+  const delivered = firstTaken;
   const screen = () => {
     const ansi = tmux.capturePaneAnsi(agent.id, 200).split('\n');
     return { lines: tmux.capturePane(agent.id).split('\n'), box: promptInBox(ansi, text) };

@@ -32,3 +32,25 @@ describe('a reply to a decision', () => {
     expect(replyRecipients(thread, [])).toEqual(['self-retro', 'assistant'])
   })
 })
+
+// A free-text reply under an ask placed in another thread (S-3827) goes to its asker only: the thread's people never saw the ask.
+describe('a reply under a placed ask', () => {
+  const y1 = { ...mail('peer1', ['oth1']), id: 'm1', thread_id: 'm1' } as Mail
+  const y2 = { ...mail('oth1', ['peer1']), id: 'm2', thread_id: 'm1' } as Mail
+  const ask = { ...mail('dev1', ['human']), id: 'm3', thread_id: 'm1', permission_id: 'r1' } as Mail
+  it('goes to the asker alone', () => {
+    expect(replyRecipients([y1, y2, ask], [])).toEqual(['dev1'])
+  })
+  it('stays with the asker after the human answered it once', () => {
+    const again = { ...mail('human', ['dev1']), id: 'm4', thread_id: 'm1', kind: 'ask-reply' } as Mail
+    expect(replyRecipients([y1, y2, ask, again], [])).toEqual(['dev1'])
+  })
+  it("goes to the thread's people once they wrote after the ask", () => {
+    const later = { ...mail('oth1', ['peer1']), id: 'm5', thread_id: 'm1' } as Mail
+    expect(replyRecipients([y1, y2, ask, later], [])).toEqual(['peer1', 'oth1'])
+  })
+  it('an own-thread ask is not placed', () => {
+    const own = { ...mail('dev1', ['human']), id: 'm6', thread_id: 'm6', permission_id: 'r2' } as Mail
+    expect(replyRecipients([own], [])).toEqual(['dev1'])
+  })
+})

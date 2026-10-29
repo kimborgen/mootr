@@ -40,6 +40,11 @@ test('the finished mail carries the line for a PR review, and only then', () => 
   assert.ok(!ring.finishBody(r('design the ring format'), 'all members agreed', 'ok').includes('pr_review'));
 });
 
+test('an incomplete ring\'s finished mail names no verdict line (S-3862)', () => {
+  const r = { name: 'r', format: 'rounds', round: 1, topic: 'review PR 42', moderator_id: null };
+  assert.ok(!ring.finishBody(r, 'm1 never started, so the ring is incomplete', 'ok', ['m1']).includes('pr_review'));
+});
+
 test('the turn and moderation prompts carry the line only when the topic names a PR', () => {
   const vars = (topic) => ({ ring: 'r', ring_id: 'r1', format: 'rounds', round: 1, max_rounds: 3, member: 'a', members: 'a, b', topic, instructions: 'x', history: 'y', pr: ring.verdictLine(topic, false), decide: '' });
   assert.ok(render('ring-turn', vars('review PR 42')).includes(LINE));

@@ -10,10 +10,9 @@
 import { createHash } from 'node:crypto';
 import * as db from './db.ts';
 import { settings, onSettingsChange } from './settings.ts';
-import { apiKey } from './credits.ts';
 import { recordSpend } from './decide.ts';
-import { complete } from './llm/index.ts';
-import { systemHeld } from './budgets.ts';
+import { complete, hasKey, parseModelRef } from './llm/index.ts';
+import { askBlocked, spendTo } from './tiny-spend.ts';
 import { configHash } from './config-hash.ts';
 
 const PURPOSE = 'block-summary';
@@ -134,16 +133,15 @@ function flushSkipped(): void {
 }
 
 async function summarize(job: Job, signal: AbortSignal): Promise<void> {
-  const key = apiKey();
   if (!current()) return;
   const m = job.model;
-  // The system budget is spent: fail the block, as with no key.
-  if (systemHeld()) {
+  // The model's provider has its system budget spent: fail the block, as with no key.
+  if (askBlocked(m) && hasKey(m)) {
     failed.set(job.hash, job.config);
     return;
   }
-  // No OpenRouter key: nothing can be asked, so the block is failed, not pending forever.
-  if (!key) {
+  // No key for the model's provider: nothing can be asked, so the block is failed, not pending forever.
+  if (!hasKey(m)) {
     failed.set(job.hash, job.config);
     return;
   }
@@ -170,13 +168,15 @@ async function summarize(job: Job, signal: AbortSignal): Promise<void> {
     });
     return;
   }
-  recordSpend(PURPOSE, data.model, data.costUsd ?? 0, data.usage.inputTokens, data.usage.outputTokens);
+  const to = spendTo(parseModelRef(m).provider);
+  const used = to ? `${to.provider}:${data.model}` : data.model;
+  recordSpend(PURPOSE, used, data.costUsd ?? 0, data.usage.inputTokens, data.usage.outputTokens, to);
   const s = cleanSummary(data.text);
   if (!s) {
     failed.set(job.hash, job.config);
     return;
   }
-  db.setBlockSummary(job.hash, s, data.model, job.config);
+  db.setBlockSummary(job.hash, s, used, job.config);
 }
 
 // The model's answer as a summary: one line, without Markdown marks, a "Summary:" label, or extra

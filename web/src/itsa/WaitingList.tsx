@@ -10,7 +10,7 @@
 import { selectAgent, selectThread } from '../actions'
 import { Icon } from '../Icon'
 import { ago } from '../format'
-import { byId, getData, permThread, useData, type Data } from '../store'
+import { byId, getData, ownPermThread, permThread, useData, type Data } from '../store'
 import { Loading } from '../Loading'
 import { hideMenu, showPopover } from '../ui/menu'
 import { isClosed, openItsa, personName, StatusGlyph, statusLabel } from './itsa'
@@ -43,7 +43,7 @@ export const isPlainWait = (r: WaitingRow) => r.icon === 'user' && !r.itsa && !r
 
 // A wait's thread can be a raw mail id the daemon couldn't resolve (mail held on a peer); opening it
 // would show an empty thread, so a thread the human doesn't hold opens the agent instead.
-const holds = (tid: string) => { const d = getData(); return [...d.humanThreads, ...d.humanArchived, ...d.humanDeferred].some((t) => t.thread_id === tid) }
+export const holds = (tid: string) => { const d = getData(); return [...d.humanThreads, ...d.humanArchived, ...d.humanDeferred].some((t) => t.thread_id === tid) }
 const openThreadOrAgent = (tid: string | undefined, agent?: Agent) => (tid && (holds(tid) || !agent) ? selectThread(tid) : agent && selectAgent(agent.id))
 
 const REQUEST_ID = /^p[0-9a-f]{6}$/
@@ -86,7 +86,9 @@ function allRows({ attention, agents, perms, decisions, humanDeferred = [] }: Pi
   // A reply wait tied to an ask's thread is the answer to that ask: the ITSA's row or the
   // permission request's row (below) stands for it. An untied wait keeps its own row.
   const asks = new Set(rows.map((r) => r.itsa!.ask_thread_id).filter(Boolean))
-  const pendingThreads = new Set(perms.filter((p) => p.status === 'pending').map((p) => permThread(p.id)).filter(Boolean))
+  // Only a thread a request started is its row: an ask placed in another thread (S-3827) leaves that thread's decisions
+  // and reply waits their own rows.
+  const pendingThreads = new Set(perms.filter((p) => p.status === 'pending').map((p) => ownPermThread(p.id)).filter(Boolean))
   // A decision mail is its thread's row. The latest one stands for a thread with several.
   const decided = new Map<string, DecisionMail>()
   for (const d of decisions) {

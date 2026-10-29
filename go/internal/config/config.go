@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -51,6 +52,16 @@ type Config struct {
 	TestHooks bool
 	// TestHumanKey stands in for the human in a test home only (STAM_TEST_HUMAN_KEY, S-634); empty elsewhere.
 	TestHumanKey Secret
+	// TestInputBarrier is the folder where typing an approved suggestion waits right before Enter while a `hold` file is
+	// there (STAM_TEST_INPUT_BARRIER, S-422), in a test home only; empty elsewhere.
+	TestInputBarrier string
+	// TestMismatchRetry shortens the sweep's wait before a held approval is typed again after a box that didn't show the
+	// text (STAM_TEST_MISMATCH_RETRY_MS, in ms), in a test home only; zero elsewhere, so the default applies.
+	TestMismatchRetry time.Duration
+	// TestHumanCodeDir and TestHumanCodeRootUID stand in for /run/stam-human and root in the local human login
+	// (STAM_TEST_HUMAN_CODE_DIR, STAM_TEST_HUMAN_CODE_ROOT_UID, S-613), and TestPasswordlessSudo answers whether sudo
+	// needs a password (STAM_TEST_PASSWORDLESS_SUDO, 1 or 0, S-2121); in a test home only, empty elsewhere.
+	TestHumanCodeDir, TestHumanCodeRootUID, TestPasswordlessSudo string
 }
 
 // Load reads the config from env (os.Getenv in the daemon) and the home's token files.
@@ -59,18 +70,23 @@ func Load(env func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("config: %w", err)
 	}
-	liveHome := filepath.Join(userHome, ".local", "share", "stam")
-	// Until the switch, an unset STAM_HOME is an error rather than the live home, so stamd never serves it by accident.
-	if env("STAM_HOME") == "" {
+	// An explicit MOOTR_HOME or STAM_HOME (MOOTR_ first) is honoured without inspecting the default home, so an error on the
+	// default can't break it. Both spellings of the default are live, whichever one DefaultHome would pick (S-3347).
+	liveHomes := DefaultHomes(userHome)
+	// Until the switch, an unset home is an error rather than the live home, so stamd never serves it by accident.
+	home := or(env("MOOTR_HOME"), env("STAM_HOME"))
+	if home == "" {
 		return Config{}, errors.New("config: STAM_HOME is not set; the Go daemon serves no default home yet")
 	}
 	c := Config{
-		Home:       env("STAM_HOME"),
+		Home:       home,
 		Release:    env("STAM_RELEASE_ID"),
 		DeployRepo: env("STAM_DEPLOY_REPO"),
 		TmuxSocket: or(env("STAM_TMUX_SOCKET"), DefaultTmuxSocket),
 	}
-	c.Live = sameFile(c.Home, liveHome)
+	for _, h := range liveHomes {
+		c.Live = c.Live || sameFile(c.Home, h)
+	}
 	c.Port = defaultPort
 	if p := env("STAM_PORT"); p != "" {
 		n, err := strconv.Atoi(p)
@@ -101,7 +117,7 @@ func Load(env func(string) string) (Config, error) {
 	}
 	c.TestHome = !c.Live && IsTestHome(c.Home)
 	// src/test-hooks.ts compares the home with the default path as written, not resolved; Live covers a symlink too.
-	c.TestHooks = env("STAM_TEST_COST_HOOKS") == "1" && c.Home != liveHome &&
+	c.TestHooks = env("STAM_TEST_COST_HOOKS") == "1" && c.Home != liveHomes[0] && c.Home != liveHomes[1] &&
 		strings.HasPrefix(c.TmuxSocket, "stam-test-") && c.TestHome
 	if key := env("STAM_TEST_HUMAN_KEY"); key != "" {
 		if c.TestHome {
@@ -109,6 +125,15 @@ func Load(env func(string) string) (Config, error) {
 		} else {
 			slog.Warn("STAM_TEST_HUMAN_KEY is set but ignored: not a test home")
 		}
+	}
+	if c.TestHome {
+		c.TestInputBarrier = env("STAM_TEST_INPUT_BARRIER")
+		if ms, err := strconv.Atoi(env("STAM_TEST_MISMATCH_RETRY_MS")); err == nil && ms > 0 {
+			c.TestMismatchRetry = time.Duration(ms) * time.Millisecond
+		}
+		c.TestHumanCodeDir = env("STAM_TEST_HUMAN_CODE_DIR")
+		c.TestHumanCodeRootUID = env("STAM_TEST_HUMAN_CODE_ROOT_UID")
+		c.TestPasswordlessSudo = env("STAM_TEST_PASSWORDLESS_SUDO")
 	}
 	return c, nil
 }

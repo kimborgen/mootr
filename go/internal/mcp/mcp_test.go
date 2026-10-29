@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -81,6 +82,15 @@ func newStub(t *testing.T, streamData string) *stub {
 			io.WriteString(w, `{"id":"a1","name":"worker","context_tokens":4200,"tags":[],"none":{},"nested":{"x":null,"n":1.50},"s":"é<&> \u2028 \u0001"}`)
 		case r.Method == "GET" && r.URL.Path == "/api/agents/n1":
 			io.WriteString(w, `{"id":"n1","name":"joined"}`)
+		case r.Method == "GET" && r.URL.Path == "/api/layout":
+			io.WriteString(w, stubLayout)
+		case r.Method == "POST" && r.URL.Path == "/api/layout/ops":
+			if base, _ := body.(map[string]any)["base"].(float64); base == 1 {
+				w.WriteHeader(409)
+				io.WriteString(w, `{"error":"layout is at version 2, not the base 1","layout":`+stubLayout+`}`)
+				break
+			}
+			io.WriteString(w, `{"version":3,"current":null,"agentWorlds":{},"worlds":{}}`)
 		case r.Method == "GET" && r.URL.Path == "/api/agents/gone":
 			w.WriteHeader(404)
 			io.WriteString(w, `{"error":"no agent gone"}`)
@@ -115,6 +125,37 @@ func newStub(t *testing.T, streamData string) *stub {
 			io.WriteString(w, `[{"id":"m0","subject":"Start","from_id":"boss","from_name":"boss","recipients":[{"id":"a1"},{"id":"a2"}],"created_at":"2026-09-30T00:00:00.000Z","body":"first","note":"n"},{"id":"m1","subject":"Plan","from_id":"a1","from_name":null,"recipients":[],"created_at":"2026-10-01T00:00:00.000Z","body":"second"}]`)
 		case r.Method == "GET" && r.URL.Path == "/api/threads/empty":
 			io.WriteString(w, `[]`)
+		case r.Method == "GET" && (r.URL.Path == "/api/mail/search" || r.URL.Path == "/api/itsas/search"):
+			// The query picks the answer: "none" finds nothing, "kw" ranks by keyword, anything else by meaning.
+			q, mail := r.URL.Query().Get("q"), r.URL.Path == "/api/mail/search"
+			by, s1, s2 := "meaning", "0.81", "0.4"
+			if q == "kw" {
+				by, s1, s2 = "keyword", "7", "2"
+			}
+			switch {
+			case q == "none":
+				io.WriteString(w, `[]`)
+			case mail:
+				io.WriteString(w, `[{"thread_id":"t1","subject":"Sign-in","latest":"m3","people":["boss","human"],"last":"2026-10-01T00:00:00.000Z","excerpt":"users keep…","score":`+s1+`,"by":"`+by+`","cosine":null,"keyword":3},`+
+					`{"thread_id":"t2","subject":"Other","latest":"m4","people":[],"last":"2026-10-02T00:00:00.000Z","excerpt":"","score":`+s2+`,"by":"`+by+`","cosine":null,"keyword":1}]`)
+			default:
+				io.WriteString(w, `[{"id":"i1","key":"S-1","title":"Login","status":"todo","owner":null,"excerpt":"e","score":`+s2+`,"by":"`+by+`","cosine":null,"keyword":2},`+
+					`{"id":"i2","key":"S-2","title":"Cost","status":"done","owner":"pm","excerpt":"f","score":0.9,"by":"`+by+`","cosine":null,"keyword":5}]`)
+			}
+		case r.Method == "POST" && r.URL.Path == "/api/mail/m7/attach":
+			io.WriteString(w, `{"attached":{"itsas":["i1","i2"],"agents":["a2"]}}`)
+		case r.Method == "POST" && r.URL.Path == "/api/mail/m7/withdraw-ask", r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/agents/a1/threads/t7/"):
+			io.WriteString(w, `{"withdrawn":[],"deferred":true}`)
+		case r.Method == "POST" && r.URL.Path == "/api/mail/m8/withdraw-ask":
+			w.WriteHeader(409)
+			io.WriteString(w, `{"error":"m8 isn't waiting on the human"}`)
+		case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/cost/"):
+			costStub(w, r.URL.Path, body)
+		case r.Method == "GET" && r.URL.Path == "/api/usage" && r.URL.Query().Get("tree") == "nope":
+			w.WriteHeader(403)
+			io.WriteString(w, `{"error":"an agent reads the usage of its own tree and its ancestors' trees only, not nope's"}`)
+		case r.Method == "GET" && r.URL.Path == "/api/usage":
+			io.WriteString(w, usageStub(r.URL.Query().Get("days")))
 		case r.Method == "POST" && r.URL.Path == "/api/register":
 			io.WriteString(w, `{"id":"n1","name":"joined","token":"`+agentTok+`"}`)
 		case r.Method == "POST" && r.URL.Path == "/api/steps/check":
@@ -141,7 +182,7 @@ func newStub(t *testing.T, streamData string) *stub {
 				io.WriteString(w, `{"allow":true}`)
 			}
 		default:
-			if !s.itsaRoutes(w, r, body) {
+			if !reqringRoutes(w, r, body) && !agentRoutes(w, r, body) && !s.itsaRoutes(w, r, body) && !s.eventsRoutes(w, r, body) {
 				w.WriteHeader(404)
 				io.WriteString(w, `{"error":"no route"}`)
 			}
@@ -324,7 +365,15 @@ func toolNames(t *testing.T, line string) []string {
 
 // portedTool is whether the Go server carries the tool.
 func portedTool(n string) bool {
-	return n == "whoami" || n == "register" || n == "list_inbox" || n == "read_mail" || n == "read_thread" || n == "send_mail" || strings.HasPrefix(n, "itsa_")
+	return n == "whoami" || n == "register" || n == "list_inbox" || n == "read_mail" || n == "read_thread" || n == "send_mail" ||
+		n == "mail_attach" || n == "withdraw_ask" || n == "defer_thread" || n == "search_mail" || n == "search" || n == "settings_ask" || strings.HasPrefix(n, "itsa_") ||
+		n == "usage_info" || n == "cost_allocate" || n == "cost_ack" || n == "cost_switch" || n == "cost_pause" ||
+		n == "workspace_share" || n == "find_agents" || n == "registry_info" || n == "spawn_agent" || n == "agent_control" || n == "compact_self" || n == "reconnect_mcp" ||
+		n == "feedback" || n == "retro" ||
+		n == "request_permission" || n == "suggest_input" || n == "answer_permission" || n == "ring_create" || n == "ring_submit" || n == "ring_decide" ||
+		n == "wait_for" || n == "wait_done" || n == "wake_me" || strings.HasPrefix(n, "req_") ||
+		n == "subscribe" || n == "unsubscribe" || n == "list_subscriptions" ||
+		n == "layout_get" || n == "layout_arrange"
 }
 
 // ported is the entries of whoami and register in a tools/list answer, as the server wrote them.
@@ -632,4 +681,35 @@ func TestRequestWithoutID(t *testing.T) {
 			t.Errorf("line %q", l)
 		}
 	}
+}
+
+// usageStub is a /api/usage answer with what the compact usage_info keeps and drops: seven trees, the caller a1 nested
+// under the first one and another caller outside the top five, a window with agents, history and other_trees, and long lists.
+func usageStub(days string) string {
+	tree := func(id string, kids string) string {
+		return `{"id":"` + id + `","name":"n-` + id + `","cost_usd":1.5,"tokens":10,"shares":{"claude":{"five_hour":{"estimate":true,"percent":2}}},"children":[` + kids + `],"extra":"drop"}`
+	}
+	// a1 holds 40 children (the dearest last), each with a child, so the compact answer must cap them.
+	var kids []string
+	for i := 0; i < 40; i++ {
+		kids = append(kids, strings.Replace(tree("a-"+strconv.Itoa(i), tree("g-"+strconv.Itoa(i), "")), `"cost_usd":1.5`, `"cost_usd":`+strconv.Itoa(i), 1))
+	}
+	trees := tree("t0", tree("a9", tree("a1", strings.Join(kids, ","))))
+	for _, id := range []string{"t1", "t2", "t3", "t4", "t5", "t6"} {
+		trees += "," + tree(id, tree("c-"+id, ""))
+	}
+	trees += "," + tree("other", "")
+	row := func(i int) string {
+		return `{"agent_id":"x` + strconv.Itoa(i) + `","agent":"x","type":"developer","harness":"claude","model":"m","cost_usd":1,"tokens_in":2,"tokens_out":3,"tokens_cache_read":4,"tokens_cache_write":5,"hourly":[1,2,3]}`
+	}
+	var by []string
+	for i := 0; i < 8; i++ {
+		by = append(by, row(i))
+	}
+	win := `{"estimate":true,"since":"s","change":1,"other":{"percent":3},"agents":[{"id":"a1"}],"by_agent":[{"id":"a1"},{"id":"zz"}],"trees":[{"id":"t0"}],"by_tree":[1],"by_model":[{"m":1},{"m":2},{"m":3},{"m":4},{"m":5},{"m":6}],` +
+		`"projection":{"hits_100_at":"later"},"other_trees":{"percent":4.5},"history":{"percent_per_hour":[1,2],"trees":[1]},"daily":[1,2,3]}`
+	return `{"note":"n","see_also":"replaced","days":"` + days + `","instructions":["i"],"allocations":[{"root_id":"t0"}],"machines":[{"machine":"m"}],` +
+		`"accounts":[{"name":"claude","shares":{"five_hour":` + win + `,"odd":null},"junk":1},{"name":"bare"}],"trees":[` + trees + `],` +
+		`"today":{"cost_usd":2,"tokens_in":1,"extra":1},"by_day":[{"day":"2026-10-01","cost_usd":1.5,"tokens_in":1,"hourly":[1]}],"by_model":[` + row(0) + "," + row(1) + "," + row(2) + "," + row(3) + "," + row(4) + "," + row(5) + `],` +
+		`"by_agent":[` + strings.Join(by, ",") + `],"by_account":[{"account":"claude","cost_usd":3,"x":1}],"blocked":[` + strings.Repeat(`{"agent_id":"b"},`, 11) + `{"agent_id":"b"}]}`
 }

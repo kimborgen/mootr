@@ -91,8 +91,17 @@ export function modelCode(m: string | null | undefined): string {
 
 export const baseSubject = (s: string | null | undefined) => String(s ?? '').replace(/^(re:\s*)+/i, '')
 export const plainSubject = (s: string | null | undefined) => baseSubject(s).replace(/`/g, '')
-// A thread's title for the mail list: the newest message's 1-3 word title (S-297), or null.
-export const threadTitle = (mails: { title?: string | null }[]) => mails.findLast((m) => m.title)?.title ?? null
+// An ask placed in a thread (S-3827): a permission request, its link line in the ITSA thread, the human's reply to it, or stam's note on it.
+type AskLike = { id?: string; thread_id?: string | null; permission_id?: string | null; kind?: string | null }
+const isAsk = (m: AskLike) => !!m.permission_id || m.kind === 'ask-link' || m.kind === 'ask-reply' || m.kind === 'ask-note'
+// An ask in a thread it didn't start (src/mail-visibility.ts isPlacedAsk): only its people read it.
+export const isPlacedAsk = (m: AskLike) => isAsk(m) && !!m.thread_id && m.thread_id !== m.id
+// A thread's title for the mail list: the newest message's 1-3 word title (S-297), or null. An ask in the thread doesn't
+// rename it (S-3827): only the thread's own mail counts, and the asks only in a thread of nothing else.
+export const threadTitle = (mails: { title?: string | null; permission_id?: string | null; kind?: string | null }[]) => {
+  const own = mails.filter((m) => !isAsk(m))
+  return (own.length ? own : mails).findLast((m) => m.title)?.title ?? null
+}
 
 // A file size as bytes, KB, MB or GB.
 export function formatSize(n: number): string {

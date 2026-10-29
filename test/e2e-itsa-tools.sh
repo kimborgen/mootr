@@ -4,7 +4,8 @@
 # down: itsa_create makes the creator a participant only when it owns the ITSA, itsa_get keeps the body and shows each
 # child's roll-up, and itsa_list's `mine` keeps the caller's owner and participant filters
 # (the owner is always a participant, so `mine` adds participant=me, intersecting when the
-# caller named another participant). Runs against its own daemon (test/lib.sh).
+# caller named another participant), and an archived owner still shows by name (S-3816). Runs against its own daemon
+# (test/lib.sh).
 set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 isolate
@@ -71,5 +72,9 @@ I=$(mcp "$AID" itsa_list "{\"mine\":true,\"participant\":\"$ONAME\"}")
 echo "$I" | grep -q "$O" || fail "mine+participant lost the shared ITSA"
 echo "$I" | grep -q "$R" && fail "mine+participant returned an ITSA the other participant isn't in"
 echo "$I" | grep -q "$P" && fail "mine+participant didn't require the caller to take part"
+
+# An owner's name resolves after it is archived: the tools ask the list for those ids in any state (S-3816).
+curl -sf -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d "{\"agent\":\"$OID\",\"lifecycle\":\"archived\"}" "$STAM_URL/api/test/agent" >/dev/null || fail "couldn't archive the other agent"
+mcp "$AID" itsa_get "{\"ref\":\"$O\"}" | grep -qx "owner: $ONAME" || fail "itsa_get lost the archived owner's name"
 
 echo "PASS e2e-itsa-tools"

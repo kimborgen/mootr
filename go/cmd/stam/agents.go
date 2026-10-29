@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"stam/internal/client"
+	"stam/internal/config"
 	"stam/internal/jsfmt"
+	"stam/internal/tmux"
 )
 
 // spawnUsage is the spawn lines of src/cli.ts USAGE, printed alone when spawn gets no NAME or --help.
@@ -330,4 +333,28 @@ func machine(e env) string {
 	}
 	h, _ := os.Hostname()
 	return h
+}
+
+// attach is `stam attach AGENT`: this terminal attaches to the agent's tmux session, as `tmux attach` does, until it
+// detaches or the session ends (src/cli.ts attach). A real terminal sizes the window only while no web viewer has it.
+func attach(ctx context.Context, args []string, e env) error {
+	ref, err := arg(args, "stam attach AGENT")
+	if err != nil {
+		return err
+	}
+	v, err := getJSON(ctx, client.New(e.getenv), "GET", "/api/agents/"+ref, nil, 0)
+	if err != nil {
+		return err
+	}
+	socket := e.getenv("STAM_TMUX_SOCKET")
+	if socket == "" {
+		socket = config.DefaultTmuxSocket
+	}
+	t := &tmux.Client{Socket: socket}
+	cmd := exec.CommandContext(ctx, t.Binary(), t.AttachArgs(v.Text("id"))...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.Env = e.environ()
+	// As spawnSync, tmux's exit status is not the CLI's.
+	_ = cmd.Run()
+	return nil
 }

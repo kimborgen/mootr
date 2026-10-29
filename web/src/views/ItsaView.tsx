@@ -11,6 +11,7 @@ import { CATEGORY_LABEL, HEALTH, isClosed, openBoard, openItsa, ownerMenu, Perso
 import { NewItsa } from '../itsa/IssuesSide'
 import { actItsa, ItsaActions } from '../itsa/ItsaActions'
 import { AskBlockLine } from '../itsa/AskBlockLine'
+import { OpenAskLink, openAskRow } from '../mail/OpenAskLink'
 import { Card, cardClick, MailAttachments, nameFor, resolveMailMedia, SupersededBy, VerdictMark } from '../mail/ThreadPanel'
 import * as mb from '../mail/mailblocks'
 import { ConvMailCard, MailKind, YouChip, youDir } from '../mail/ConvMailCard'
@@ -29,6 +30,10 @@ import { Composer, type ComposerHandle, type SendPayload } from '../Composer'
 import { assistantOpts, selectAgent, selectThread } from '../actions'
 import { ItsaReqs } from '../req/ItsaReqs'
 import { ReqBatch } from '../req/ReqBatch'
+import { useWorkExtras } from '../work/data'
+import { FieldValue, fmtDay, isEmpty, textOf, valueOf } from '../work/field-columns'
+import { fieldApplies, type Field } from '../itsa/fields'
+import type { Itsa } from '../types'
 import { activityOf, fmtDuration, waitColor, type ItsaActivity, type ItsaActivityReport } from '../work/links'
 
 export const itsaTitles = new Map<string, string>()
@@ -38,7 +43,27 @@ export const itsaTitles = new Map<string, string>()
 const Body = ({ text }: { text: string }) => <Rendered text={text} className="itsa-body" />
 
 // One line per event: who did what, and when.
-function eventText(e: ItsaEvent): React.ReactNode {
+// A field change (S-3834): "set Stage to Code", "set Stage, Link", "cleared Stage", by the fields' labels and
+// choice labels; a key the definitions no longer hold reads as the key.
+export function fieldsText(to: Record<string, unknown>, fields: Field[] | null): string {
+  const def = (k: string) => fields?.find((f) => f.key === k)
+  const name = (k: string) => def(k)?.label ?? k
+  // A check that is off is "No", not a cleared value; every other empty value is cleared.
+  const clear = (k: string) => (def(k)?.type === 'check' ? to[k] == null : isEmpty(to[k]))
+  // A value as the Work cell reads it: a choice by its label, a date as the page writes dates, a check as Yes or No.
+  const show = (k: string) => {
+    const f = def(k)
+    if (f?.type === 'date') return fmtDay(String(to[k]))
+    if (f?.type === 'check') return to[k] === true ? 'Yes' : 'No'
+    return f ? textOf(f, to[k]) : String(to[k])
+  }
+  const keys = Object.keys(to)
+  const set = keys.filter((k) => !clear(k))
+  const cleared = keys.filter(clear)
+  const parts = [...(set.length ? [set.length === 1 ? `set ${name(set[0])} to ${show(set[0])}` : `set ${set.map(name).join(', ')}`] : []), ...(cleared.length ? ['cleared ' + cleared.map(name).join(', ')] : [])]
+  return parts.join(' and ') || 'changed the fields'
+}
+function eventText(e: ItsaEvent, fields: Field[] | null = null): React.ReactNode {
   let d: { from?: unknown; to?: unknown; text?: unknown } = {}
   try { d = e.data ? JSON.parse(e.data) : {} } catch {}
   switch (e.type) {
@@ -51,6 +76,7 @@ function eventText(e: ItsaEvent): React.ReactNode {
     case 'kind': return d.to ? <>set the kind to <b>{String(d.to)}</b></> : 'cleared the kind'
     case 'parent': return d.to ? 'moved this under another ITSA' : 'made this a root'
     case 'participants': return 'changed the participants'
+    case 'fields': return d.to && typeof d.to === 'object' ? fieldsText(d.to as Record<string, unknown>, fields) : 'changed the fields'
     case 'link.added': return 'added a link'
     case 'link.removed': return 'removed a link'
     case 'process-run': return String(d.text ?? 'ran a process step')
@@ -61,10 +87,10 @@ function eventText(e: ItsaEvent): React.ReactNode {
 // A process-run line has no actor: the system wrote it, so it reads as stam, not as the human.
 const who = (e: ItsaEvent) => e.actor ?? (e.type === 'process-run' ? 'mootr' : 'human')
 const capital = (s: string) => (s === 'you' ? 'You' : s)
-function Events({ events }: { events: ItsaEvent[] }) {
+export function Events({ events, fields = null }: { events: ItsaEvent[]; fields?: Field[] | null }) {
   if (!events.length) return <p className="muted">No activity yet.</p>
   return <ol className="itsa-events">{events.map((e) => (
-    <li key={e.id}><PersonGlyph id={who(e)} /><span><b>{capital(nameFor(who(e)))}</b> {eventText(e)}</span><span className="t" title={new Date(e.ts).toLocaleString()}>{ago(e.ts)}</span></li>))}</ol>
+    <li key={e.id}><PersonGlyph id={who(e)} /><span><b>{capital(nameFor(who(e)))}</b> {eventText(e, fields)}</span><span className="t" title={new Date(e.ts).toLocaleString()}>{ago(e.ts)}</span></li>))}</ol>
 }
 
 // --- The ITSA's thread --------------------------------------------------------------------
@@ -280,15 +306,41 @@ function ActivityBlock({ k, tick }: { k: string; tick: unknown }) {
   )
 }
 
+// --- Fields (S-3834) ---------------------------------------------------------------------
+// Every Work column (ITSA field), in the Work page's order and labels, drawn by the Work cell's own
+// renderer. An empty value is an empty row, never left out.
+export function FieldsBlock({ it, fields }: { it: Pick<Itsa, 'fields' | 'kind'>; fields: Field[] | null }) {
+  if (!fields?.length) return null
+  return (
+    <section className="itsa-sec" aria-label="Fields" data-itsa-fields>
+      <div className="itsa-sec-head"><span className="eyebrow">Fields</span></div>
+      <dl className="itsa-fields">{[...fields].sort((a, b) => a.position - b.position).map((f) => {
+        const v = valueOf(it, f)
+        // A field limited to other kinds can't be set here: the row says so, so it doesn't look settable but empty.
+        const na = !fieldApplies(f, it.kind)
+        return <Fragment key={f.id}>
+          <dt title={f.hint ?? undefined}>{f.label}</dt>
+          <dd data-field={f.key} data-empty={isEmpty(v) || undefined} data-na={na || undefined}>{na ? <span className="muted">{it.kind ? `Not used on ${it.kind}s` : 'Not used without a kind'}</span> : <FieldValue f={f} v={v} />}</dd>
+        </Fragment>
+      })}</dl>
+    </section>
+  )
+}
+
 export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
-  const { itsas, mailTick, attention } = useData()
+  const { itsas, mailTick, attention, agents } = useData()
+  const { fields } = useWorkExtras()
   const [v, setV] = useState<View | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   // The action (Approve, Request changes, Answer) the human clicked; the comment box's Send applies it.
   const [staged, setStaged] = useState<string | null>(null)
+  // The revision of the text shown when the action was staged: Approve sends it (S-2998).
+  const stagedRev = useRef<string | undefined>(undefined)
   // A batch approval lists its drafts in ReqBatch, so its body (the same list) isn't shown again.
   const [batchAsk, setBatchAsk] = useState(false)
+  // The revision the listed batch was read with (S-2998): Approve sends it, and waits while it lags v.rev.
+  const [batchRev, setBatchRev] = useState<string | undefined>(undefined)
   const composer = useRef<ComposerHandle>(null)
   // A change anywhere in the list (this ITSA, its children, their children) reloads it.
   const sig = JSON.stringify(itsas.filter((x) => x.id === id || x.parent_id === id).map((x) => [x.id, x.updated_at]))
@@ -323,7 +375,8 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
     const act = v?.actions?.find((a) => a.id === staged)
     if (act) {
       // A refusal leaves the action staged and the text in the strip, to put back in the box.
-      await actItsa(id, act.id, text, act.to, `${client_id}:act`)
+      // Approve carries the revision of the text this view showed when it was staged (S-2998).
+      await actItsa(id, act.id, text, act.to, `${client_id}:act`, { if_rev: stagedRev.current })
       load(); reloadThread()
       return
     }
@@ -363,9 +416,14 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
   const health = HEALTH[latest?.health ?? v.health ?? ''] ?? null
   const actions: ItsaAction[] = v.actions ?? []
   const pending = actions.find((a) => a.id === staged)
+  const shownNow = shownForApprove(v, batchAsk, batchRev)
   const kids = [...v.children.filter((c) => !isClosed(c)), ...v.children.filter(isClosed)]
   // A child being added (createItsa) shows under the list until the daemon has it.
   const adds = unsavedKids(itsas.filter((x) => x.parent_id === id && x.pending), v.children)
+  // The ITSA's own ask is the Waiting-on-you card below, so it gets no link here. A link shows only for an ask that lives
+  // elsewhere: a permission or mail ask its owner holds, while that row is open (S-3977).
+  const ownerAsk = openAskRow(agents.find((a) => a.id === v.owner)?.open_ask)
+  const elsewhere = ownerAsk && ownerAsk.kind !== 'itsa' ? ownerAsk : undefined
   return (
     <div className="itsa-view" data-itsa={v.id} ref={root}>
       <div className="itsa-inner">
@@ -380,6 +438,7 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
               <StatusGlyph status={cur.status} /><span>{statusLabel(cur.status)}</span><Icon name="chevron-down" size="xs" /></button>
             <button type="button" className="prop" data-prop="owner" aria-haspopup="menu" title="Change the owner" onClick={(e) => pick(e, ownerMenu(cur, load))}>
               <PersonGlyph id={cur.owner} /><span className={cur.owner ? '' : 'muted'}>{personName(cur.owner)}</span><Icon name="chevron-down" size="xs" /></button>
+            {elsewhere ? <OpenAskLink row={elsewhere} /> : null}
             {v.kind ? <span className="chip kind" title="Kind">{v.kind}</span> : null}
             {row?.pending ? <span className="pending-mark muted" aria-live="polite">saving…</span> : null}
             {health ? <span className="health" style={{ color: health.tone }} title="Health, from the owner's latest update"><i />{health.label}</span> : null}
@@ -389,12 +448,14 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
         {actions.length ? <div className="itsa-ask" role="group" aria-label="Waiting on you" data-itsa-ask>
           <span className="ask-label"><Icon name="user" size="xs" />Waiting on you</span><span className="spacer" />
           <AskBlockLine thread={attention.find((x) => x.id === id)?.ask_thread_id} />
-          <ItsaActions itsa={v} staged={staged} onPick={(a) => { setStaged(staged === a.id ? null : a.id); (phone ? composer.current : bottomHandle())?.focus() }} />
+          <ItsaActions itsa={v} staged={staged} wait={shownNow.wait}
+            onPick={(a) => { stagedRev.current = shownNow.rev; setStaged(staged === a.id ? null : a.id); (phone ? composer.current : bottomHandle())?.focus() }} />
           {pending ? <span className="ask-hint muted">{pending.text === 'required' ? `Write what you want below, then send. It moves to ${statusLabel(pending.to)}.` : `Send applies it${pending.text === 'optional' ? ', with a comment if you add one' : ''}. It moves to ${statusLabel(pending.to)}.`}</span> : null}
         </div> : null}
-        <ReqBatch it={v} onBatch={setBatchAsk} />
+        <ReqBatch it={v} onBatch={(b, rev) => { setBatchAsk(b); setBatchRev(rev) }} />
         {v.summary && !batchAsk ? <p className="itsa-summary">{v.summary}</p> : null}
         {v.body && !batchAsk ? <Body text={v.body} /> : null}
+        <FieldsBlock it={v} fields={fields} />
         {latest ? <section className="itsa-sec itsa-update" aria-label="Latest update">
           <div className="itsa-sec-head"><span className="eyebrow">Latest update</span><HealthBadge health={latest.health} /></div>
           <ThreadItems items={[{ type: 'mail', ts: latest.created_at, mail: latest }]} /></section> : null}
@@ -450,7 +511,7 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
         {/* The thread once it exists (a comment or update starts it); until then, the activity. */}
         <section className="itsa-sec" aria-label={thread ? 'Thread' : 'Activity'} data-itsa-thread={thread ? 'thread' : 'events'}>
           <div className="itsa-sec-head"><span className="eyebrow">{thread ? 'Thread' : 'Activity'}</span></div>
-          {thread ? <ThreadItems items={thread} atEnd /> : <Events events={v.events ?? []} />}
+          {thread ? <ThreadItems items={thread} atEnd /> : <Events events={v.events ?? []} fields={fields} />}
           {phone ? <div className="itsa-reply">
             <Composer ref={composer} className="inline" assistant={assistantOpts} onSend={comment} staged={!!pending && pending.text !== 'required'}
               // The staged action goes with this submit; a failed send puts it back.
@@ -462,4 +523,13 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
       </div>
     </div>
   )
+}
+
+// What Approve sends from the ITSA view (S-2998): the revision of the text on screen. A batch
+// approval shows its drafts from their own fetch (ReqBatch), so Approve sends the revision those
+// were read with, and waits, disabled, while that lags the ITSA's own.
+export function shownForApprove(v: { rev?: string }, batch: boolean, batchRev: string | undefined): { rev?: string; wait?: string } {
+  if (!batch) return { rev: v.rev }
+  if (batchRev !== v.rev) return { wait: 'The drafts shown are reloading; Approve once they show' }
+  return { rev: batchRev }
 }

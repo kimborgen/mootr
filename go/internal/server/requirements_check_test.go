@@ -181,7 +181,7 @@ func TestRequirementsToolCheckBudget(t *testing.T) {
 func TestRequirementsDailyCap(t *testing.T) {
 	dir := startDecideStub(t)
 	f := newFixture(t, nil)
-	f.enforceBash(`{"requirements":{"enabled":true,"dailyCapUsd":0.01},"itsa":{"ownerNotices":"off"}}`)
+	f.enforceBash(`{"requirements":{"enabled":true,"dailyCapUsd":0.01},"itsa":{"ownerNotices":"off"},"humanMail":{"when":"important"}}`)
 	calls := func() string { b, _ := os.ReadFile(filepath.Join(dir, "count")); return strings.TrimSpace(string(b)) }
 	if rec := f.check(sharedTok, `{"agent":"aboss","tool":"Bash","args":{"c":"REQ:R-1=violates one"}}`); !strings.Contains(rec.Body.String(), `"allow":false`) {
 		t.Fatalf("under the cap: %d %s", rec.Code, rec.Body.String())
@@ -203,6 +203,9 @@ func TestRequirementsDailyCap(t *testing.T) {
 	if got := dumpTyped(t, f, "SELECT data FROM events WHERE type = 'req:cap'"); !strings.Contains(jsfmt.Compact(got), `{\"spent\":0.02,\"cap\":0.01}`) {
 		t.Errorf("req:cap data: %s", jsfmt.Compact(got))
 	}
+	until(t, "the cap notice", func() bool {
+		return f.count("SELECT count(*) FROM mail WHERE subject = '[stam] Requirement checks reached the daily cap' AND from_id = 'system:requirements'") == 1
+	})
 }
 
 // A requirement change rebuilds the enforced-tools index; while it does, the index of before still serves, so a scoped tool
@@ -249,7 +252,7 @@ func TestRequirementsRemoteIndexOnSwitchOn(t *testing.T) {
 	defer home.Close()
 	t.Setenv("STAM_REQ_INDEX_MS", "600000")
 	f := newFixture(t, nil)
-	writeFile(t, filepath.Join(f.home, "settings.json"), `{"home":"farhome","peers":[{"name":"farhome","url":"`+home.URL+`","token":"t"}]}`)
+	writeFile(t, filepath.Join(f.home, "settings.json"), `{"home":"farhome","peers":[{"name":"farhome","url":"`+home.URL+`","token":"test-peer-token"}]}`)
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	f.srv.StartRequirements(ctx)
@@ -260,7 +263,7 @@ func TestRequirementsRemoteIndexOnSwitchOn(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("fetched with requirements off: %d", n)
 	}
-	writeFile(t, filepath.Join(f.home, "settings.json"), `{"requirements":{"enabled":true},"home":"farhome","peers":[{"name":"farhome","url":"`+home.URL+`","token":"t"}]}`)
+	writeFile(t, filepath.Join(f.home, "settings.json"), `{"requirements":{"enabled":true},"home":"farhome","peers":[{"name":"farhome","url":"`+home.URL+`","token":"test-peer-token"}]}`)
 	until(t, "the fetch after the switch", func() bool {
 		f.srv.remoteIdx.mu.Lock()
 		defer f.srv.remoteIdx.mu.Unlock()
@@ -329,7 +332,7 @@ func TestRequirementsRemoteIndexPollAndPush(t *testing.T) {
 	defer home.Close()
 	setTools := func(v string) { mu.Lock(); tools = v; mu.Unlock() }
 	count := func() int { mu.Lock(); defer mu.Unlock(); return gets }
-	settings := `{"requirements":{"enabled":true},"home":"farhome","peers":[{"name":"farhome","url":"` + home.URL + `","token":"t"}]}`
+	settings := `{"requirements":{"enabled":true},"home":"farhome","peers":[{"name":"farhome","url":"` + home.URL + `","token":"test-peer-token"}]}`
 	edit := `{"agent":"aboss","tool":"Edit"}`
 
 	// The poll: a short interval picks up a change without any call or push.
@@ -391,7 +394,7 @@ func TestRequirementsHomePushesIndexChange(t *testing.T) {
 	}))
 	defer peer.Close()
 	f := newFixture(t, nil)
-	writeFile(t, filepath.Join(f.home, "settings.json"), `{"requirements":{"enabled":true},"peers":[{"name":"other","url":"`+peer.URL+`","token":"t"}]}`)
+	writeFile(t, filepath.Join(f.home, "settings.json"), `{"requirements":{"enabled":true},"peers":[{"name":"other","url":"`+peer.URL+`","token":"test-peer-token"}]}`)
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	f.srv.StartRequirements(ctx)

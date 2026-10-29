@@ -7,6 +7,7 @@
 //      killed with SIGKILL, the holder leaves the home free for the next start.
 // `node --test test/daemon-lock.test.mjs`; it starts a daemon on a throwaway home, so it is not in the LIGHT list.
 import { test, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -21,7 +22,7 @@ const children = new Set();
 const sockets = new Set();
 after(() => {
   for (const c of children) c.kill('SIGKILL');
-  for (const s of sockets) spawnSync('tmux', ['-L', s, 'kill-server'], { stdio: 'ignore' });
+  for (const s of sockets) killTmuxServer(s);
 });
 
 const freePort = () =>

@@ -7,12 +7,12 @@ import { actItsa } from '../itsa/ItsaActions'
 import { api, ApiError } from '../api'
 import { Composer, type ComposerHandle, type SendPayload } from '../Composer'
 import { bottomHandle, setBottomSlot, type BottomSlot } from '../bottom-slot'
-import { plainSubject } from '../format'
+import { isPlacedAsk, plainSubject } from '../format'
 import { getRows } from '../outbox'
 import { Icon } from '../Icon'
 import * as mb from '../mail/mailblocks'
 import { suggestedPicks, type SuggestedPick } from '../mail/suggestedPicks'
-import { nameFor, ThreadPanel, type ItsaAsk, type Stage } from '../mail/ThreadPanel'
+import { clearPermComment, nameFor, onPermComment, permComment, ThreadPanel, type ItsaAsk, type Stage } from '../mail/ThreadPanel'
 import { takeOpenFocus } from '../mail/diffOpen'
 import { isPhone, refreshTabs, registerView } from '../shell/layout'
 import { getData, refreshSlow, setData, threadWaitsOnHuman, useData } from '../store'
@@ -24,8 +24,11 @@ import { icon } from '../icons'
 // note on it; a note alone is an answer too (kind 'note').
 interface Answered { mailId: string; q: string; body: string; note?: string }
 type Staged =
-  | { kind: 'perm'; mailId: string; id: string; approve: boolean; action: string }
-  | { kind: 'itsa'; mailId: string; itsa: string; action: string; label: string }
+  // `note`: the comment on the card when it was staged; it is the answer's note (S-3829).
+  // `choice`: the question dialog's option (S-3978), which is the whole answer.
+  | { kind: 'perm'; mailId: string; id: string; approve: boolean; action: string; note?: string; choice?: string }
+  // `shown`: the newest mail the thread showed when the action was staged, which Approve sends (S-2998).
+  | { kind: 'itsa'; mailId: string; itsa: string; action: string; label: string; shown?: string }
   | (Answered & { kind: 'rank'; order: string[] })
   | (Answered & { kind: 'pick'; labels: string[] })
   | (Answered & { kind: 'choice' | 'defer' | 'note'; label?: string })
@@ -43,6 +46,11 @@ export function composeReply(all: Staged[], suggested: SuggestedPick[], t: strin
   const answered = [...all.filter((x) => !isAct(x)).map((x) => x.mailId), ...(answering ? suggested : []).map((p) => p.mailId)]
   return { body: [...answers, acts.length ? '' : t].filter(Boolean).join('\n\n'), perms: all.filter((x): x is Extract<Staged, { kind: 'perm' }> => x.kind === 'perm'), acts, answered }
 }
+// The note a permission answer sends: the comment typed on its card, then the reply's text when the reply answers
+// nothing else (the text is then the answer's note, as before). One note, so the agent gets one message (S-3829).
+const permNote = (p: { note?: string }, t: string, answersOnly: boolean) => [p.note, answersOnly ? t : ''].filter(Boolean).join(' ')
+// The staged answer with the comment as it stands now: a comment typed after the tap counts, and one cleared counts as none.
+const liveNote = (p: Extract<Staged, { kind: 'perm' }>) => ({ ...p, note: permComment(p.id) ?? p.note })
 const answerOf = (s: Answered) => [s.q ? `> ${s.q}` : '', s.body, s.note ? mb.noteText(s.note) : ''].filter(Boolean).join('\n\n')
 
 // A permission answer or an ITSA action has no decision block, so no note of its own.
@@ -73,7 +81,8 @@ const unsent = new Map<string, string>()
 // (system:NAME, such as the deploy watcher) is a script with no mailbox, so it is never one (S-542).
 const agent = (id: string) => id !== 'human' && !id.startsWith('system:')
 export function recipients(mails: Mail[]) {
-  const senders = [...new Set(mails.map((m) => m.from_id))].filter(agent)
+  // An ask placed in the thread (S-3827) makes its asker none of the thread's people.
+  const senders = [...new Set(mails.filter((m) => !isPlacedAsk(m)).map((m) => m.from_id))].filter(agent)
   return senders.length ? senders : [...new Set(mails.flatMap((m) => m.recipients.map((r) => r.id)))].filter(agent)
 }
 
@@ -83,15 +92,21 @@ export function askersOf(mails: Mail[], answered: string[]) {
   return [...new Set(answered.map((id) => mails.find((m) => m.id === id)?.from_id))].filter((id): id is string => !!id && agent(id))
 }
 
-// Whom a reply goes to: its askers, else the agents who wrote in the thread.
+// Whom a reply goes to: its askers, else the agents who wrote in the thread. A reply under an ask placed in the
+// thread (S-3827) goes to that asker alone: the thread's other people never saw the ask.
 export function replyRecipients(mails: Mail[], answered: string[]) {
   const asked = askersOf(mails, answered)
-  return asked.length ? asked : recipients(mails)
+  if (asked.length) return asked
+  const last = mails.findLast((m) => agent(m.from_id))
+  return last && isPlacedAsk(last) && isPlacedAsk(mails.at(-1)!) ? [last.from_id] : recipients(mails)
 }
 
 export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
   const { mailTick } = useData()
   const [mails, setMails] = useState<Mail[]>([])
+  // The mails shown, for a staged ITSA action to name the newest (S-2998).
+  const mailsRef = useRef(mails)
+  mailsRef.current = mails
   // Replies sent but not yet confirmed by the daemon, shown after the thread's mails.
   // What the send skipped because the request was answered meanwhile; the composer's hint is hidden on a phone.
   const [skipped, setSkipped] = useState<string[]>([])
@@ -102,6 +117,9 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
   const [noting, setNoting] = useState<Noting | null>(null)
   // On a phone the preview folds to one line until opened.
   const [previewOpen, setPreviewOpen] = useState(false)
+  // A card comment typed in the thread is read by the preview at once (S-3927); the send reads it too.
+  const [, setCommentTick] = useState(0)
+  useEffect(() => onPermComment(() => setCommentTick((n) => n + 1)), [])
   const sig = useRef<string | null>(null)
   const unreadIds = useRef<string[]>([])
   const root = useRef<HTMLDivElement>(null)
@@ -185,14 +203,15 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
     const key = a.kind === 'perm' ? 'perm:' + a.id : a.kind === 'itsa' ? 'itsa:' + a.itsa : `${a.mailId}:${a.block.dataset.decision}`
     const had = next.get(key)
     if (a.kind === 'perm') {
-      if (had?.kind === 'perm' && had.approve === a.approve) next.delete(key)
-      else next.set(key, { kind: 'perm', mailId: a.mailId, id: a.id, approve: a.approve, action: a.action })
+      // Tapped again with the same answer and comment takes it back; a changed comment restages it.
+      if (had?.kind === 'perm' && had.approve === a.approve && (had.note ?? '') === (a.note ?? '') && had.choice === a.choice) next.delete(key)
+      else next.set(key, { kind: 'perm', mailId: a.mailId, id: a.id, approve: a.approve, action: a.action, note: a.note, choice: a.choice })
       return commit(next)
     }
     // One action per ITSA; clicking the staged one again takes it back.
     if (a.kind === 'itsa') {
       if (had?.kind === 'itsa' && had.action === a.action) next.delete(key)
-      else next.set(key, { kind: 'itsa', mailId: a.mailId, itsa: a.itsa, action: a.action, label: a.label })
+      else next.set(key, { kind: 'itsa', mailId: a.mailId, itsa: a.itsa, action: a.action, label: a.label, shown: mailsRef.current.at(-1)?.id })
       return commit(next)
     }
     const q = mb.questionOf(a.block)
@@ -316,7 +335,11 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
           // A suggested input's approval sends the hash of its text (S-500), and says what came of it.
           const input = p.approve ? inputPerm(p.id) : undefined
           if (input) once.said = inputStatus(input, (await answerInput(input, input.text ?? '', true, `${client_id}:perm:${p.id}`)) || 'typed')
-          else await answerPermission(p.id, p.approve, answersOnly ? t : '', `${client_id}:perm:${p.id}`)
+          else {
+            // A question's choice is the whole answer: no comment, no reply text (S-3978).
+            await answerPermission(p.id, p.approve, p.choice ?? permNote(liveNote(p), t, answersOnly), `${client_id}:perm:${p.id}`)
+            clearPermComment(p.id)
+          }
         } catch (e) {
           // A lost connection or a 5xx is rethrown as it is, so the outbox retries it.
           if (!(e instanceof ApiError) || e.status >= 500) throw e
@@ -336,8 +359,9 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
       }
       if (once.stale.length) setSkipped([...once.stale])
       // The typed note was for answers that all turned out stale: it goes back in the box, not away.
-      if (t && answersOnly && !acts.length && once.stale.length === perms.length) box()?.restore(t, 'thread:' + tid)
-      for (const a of acts) if (!once.done.has('itsa:' + a.itsa)) { await actItsa(a.itsa, a.action, t, undefined, `${client_id}:act:${a.itsa}`); once.done.add('itsa:' + a.itsa) }
+      // A plain reply has no answers to go stale, so its text stays sent (S-3806).
+      if (t && answersOnly && !acts.length && perms.length && once.stale.length === perms.length) box()?.restore(t, 'thread:' + tid)
+      for (const a of acts) if (!once.done.has('itsa:' + a.itsa)) { await actItsa(a.itsa, a.action, t, undefined, `${client_id}:act:${a.itsa}`, { shown_mail: a.shown }); once.done.add('itsa:' + a.itsa) }
       once.answered = true
     }
     if (!((body && !(perms.length && answersOnly)) || files.length)) {
@@ -431,7 +455,7 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
                 <span>{`${staged.size} answer${staged.size > 1 ? 's' : ''} staged`}</span><span className="eyebrow">Preview</span></button>
               <span className="muted rp-to">{mailBody ? `Reply to ${to.map((id) => nameFor(id)).join(', ')}` : ''}{mailBody && perms.length ? ' · ' : ''}{perms.length ? `${perms.length} permission answer${perms.length > 1 ? 's' : ''}` : ''}</span>
               <span className="spacer" />{staged.size ? <button className="mb-own" type="button" onClick={() => setStaged(new Map())}>Clear answers</button> : null}</div>
-            {perms.map((p) => <div key={p.id} className={`rp-perm ${p.approve ? 'ok' : 'no'}`}><Icon name={p.approve ? 'check' : 'x'} size="xs" /><span>{p.approve ? 'Approve' : 'Deny'}: {p.action || p.id}</span>{trimmed && !compose('').body ? <span className="muted"> · note: {trimmed}</span> : null}</div>)}
+            {perms.map((p) => <div key={p.id} className={`rp-perm ${p.approve ? 'ok' : 'no'}`}><Icon name={p.approve ? 'check' : 'x'} size="xs" /><span>{p.approve ? 'Approve' : 'Deny'}: {p.action || p.id}</span>{permNote(liveNote(p), trimmed, !compose('').body) ? <span className="muted"> · note: {permNote(liveNote(p), trimmed, !compose('').body)}</span> : null}</div>)}
             {acts.map((a) => <div key={a.itsa} className="rp-perm ok"><Icon name="check" size="xs" /><span>{a.label}</span>{trimmed ? <span className="muted"> · comment: {trimmed}</span> : null}</div>)}
             {mailBody ? <div className="md" key={previewHtml} dangerouslySetInnerHTML={{ __html: previewHtml }} /> : null}
           </> : null}

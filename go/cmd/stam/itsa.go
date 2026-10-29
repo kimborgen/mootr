@@ -10,6 +10,7 @@ import (
 	"unicode/utf16"
 
 	"stam/internal/client"
+	"stam/internal/fieldsline"
 	"stam/internal/jsfmt"
 )
 
@@ -23,9 +24,10 @@ func itsaCmd(ctx context.Context, args []string, e env) error {
 	}
 	sub, rest := args[0], args[1:]
 	p, err := parseArgs(rest, optSpec{
-		str: []string{"parent", "subtree", "status", "category", "owner", "kind", "title", "summary", "body", "update", "system", "override",
-			"external-id", "repo", "remove", "type", "label", "description", "hint", "width", "align", "card"},
+		str: []string{"parent", "subtree", "status", "category", "owner", "kind", "since", "title", "summary", "body", "update", "system", "override",
+			"external-id", "repo", "remove", "type", "label", "description", "hint", "width", "align", "card", "if-status"},
 		multi: []string{"participant", "link", "to", "field", "option"},
+		bools: []string{"json"},
 	})
 	if err != nil {
 		return err
@@ -51,6 +53,10 @@ func itsaCmd(ctx context.Context, args []string, e env) error {
 		if len(pos) > 0 {
 			q = append(q, formEncode("text", strings.Join(pos, " ")))
 		}
+		// --since is passed as typed; the daemon reads it and refuses a bad one (S-1396).
+		if since, ok := p.str["since"]; ok {
+			q = append(q, formEncode("since", since))
+		}
 		path := "/api/itsas"
 		if len(q) > 0 {
 			path += "?" + strings.Join(q, "&")
@@ -58,6 +64,10 @@ func itsaCmd(ctx context.Context, args []string, e env) error {
 		rows, err := call("GET", path, nil)
 		if err != nil {
 			return err
+		}
+		if p.bools["json"] {
+			fmt.Fprintln(e.stdout, jsfmt.Stringify(rows))
+			return nil
 		}
 		for _, x := range rows.Items {
 			fmt.Fprintf(e.stdout, "%s %s %s %s\n", padEnd(displayField(x, "key"), 6), padEnd(displayField(x, "status"), 14), padEnd(orDash(x, "owner"), 16), displayField(x, "title"))
@@ -94,6 +104,7 @@ func itsaCmd(ctx context.Context, args []string, e env) error {
 		}
 		body.Set("links", jsfmt.ArrayValue(links))
 		setBy(&body, by)
+		setStrAs(&body, "as_system", "system", p)
 		x, err := call("POST", "/api/itsas", body)
 		if err != nil {
 			return err
@@ -238,6 +249,8 @@ func itsaSet(call apiCall, p parsed, by string, e env) error {
 	if ps := p.multi["participant"]; len(ps) > 0 {
 		patch.Set("participants", stringArray(ps))
 	}
+	// Compare-and-set (S-3802): refused, as "status changed", unless the ITSA is still in this status.
+	setStrAs(&patch, "ifStatus", "if-status", p)
 	if fs := p.multi["field"]; len(fs) > 0 {
 		// Values are typed by their field: a number field takes a finite number, a check true or false, the rest strings.
 		defs, err := call("GET", "/api/itsas/fields", nil)
@@ -293,6 +306,10 @@ func itsaSet(call apiCall, p parsed, by string, e env) error {
 	var changed []string
 	if ch, ok := r.Get("changes"); ok {
 		for i, k := range ch.Keys {
+			if k == "fields" {
+				changed = append(changed, fieldsline.Change(ch.Items[i]))
+				continue
+			}
 			changed = append(changed, fmt.Sprintf("%s: %s -> %s", k, orDash(ch.Items[i], "from"), orDash(ch.Items[i], "to")))
 		}
 	}

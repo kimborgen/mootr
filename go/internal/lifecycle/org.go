@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"stam/internal/clock"
 	"stam/internal/db"
 )
 
@@ -63,6 +64,42 @@ func (l *Lifecycle) SetOwnerStopped(fn func(ctx context.Context, id, name, what 
 	l.orgMu.Lock()
 	defer l.orgMu.Unlock()
 	l.ownerStopped = fn
+}
+
+// SetUnown sets what unowns an agent's ITSAs before a forget (src/itsa-owners.ts unownAgent): the server, which hands
+// them to the agent's heir or leaves them unowned. how is "forgotten" or "archived".
+func (l *Lifecycle) SetUnown(fn func(ctx context.Context, a db.Agent, how string) error) {
+	l.orgMu.Lock()
+	defer l.orgMu.Unlock()
+	l.unown = fn
+}
+
+// SetAgentGone sets what drops an archived agent's event subscriptions and deliveries (S-4317): the server's event
+// service. It runs after the agent is marked archived (or forgotten) and its notices are dropped, with no lifecycle lock held, since it
+// waits for a delivery in flight.
+func (l *Lifecycle) SetAgentGone(fn func(ctx context.Context, id string)) {
+	l.orgMu.Lock()
+	defer l.orgMu.Unlock()
+	l.agentGone = fn
+}
+
+// tellAgentGone runs the hook SetAgentGone set, for an agent archived or forgotten, with no lifecycle lock held.
+func (l *Lifecycle) tellAgentGone(ctx context.Context, id string) {
+	l.orgMu.Lock()
+	gone := l.agentGone
+	l.orgMu.Unlock()
+	if gone != nil {
+		gone(ctx, id)
+	}
+}
+
+// SetStartingDead sets what hears that an agent never started (src/lifecycle.ts startingDeadListeners, S-3070): the
+// server, whose rings drop it, which lifecycle can't import (a ring may fall back to spawning a reviewer). It is called
+// once the agent is marked stopped and its parent told, before a pending action runs.
+func (l *Lifecycle) SetStartingDead(fn func(ctx context.Context, a db.Agent)) {
+	l.orgMu.Lock()
+	defer l.orgMu.Unlock()
+	l.startingDead = fn
 }
 
 // reportStop hands an agent's stop to SetOwnerStopped's hook, off the org goroutine.
@@ -174,6 +211,10 @@ func (l *Lifecycle) handleOrg(ctx context.Context, c db.ActivityChange) error {
 		return l.announceTreeIdle(ctx, a)
 	case "lifecycle":
 		l.onLifecycle(c)
+	case "sync":
+		// The agent's parents changed (set-parent, an archive's reparent): its children wait and every ancestor's, as
+		// src/daemon.ts control and src/lifecycle.ts cascadeChildren call syncChildrenWaits.
+		return l.syncChildrenWaits(ctx, c.ID)
 	case "resync":
 		// A child was forgotten (Forget), or the agent's permission requests changed (OrgResync): its children wait and
 		// what going quiet owes, as src/daemon.ts forget and src/permissions.ts do.
@@ -240,6 +281,7 @@ func (l *Lifecycle) onActivity(ctx context.Context, c db.ActivityChange) error {
 		if text, err = l.render("child-turn-finished", map[string]string{"child": c.Name, "last": lastMessage(c.LastMessage)}); err != nil {
 			break
 		}
+		text += "\n" + noticeClock(a, false)
 		var parents []string
 		if parents, err = l.db.ParentsOf(ctx, a); err != nil {
 			break
@@ -275,10 +317,12 @@ func (l *Lifecycle) trouble(ctx context.Context, a db.Agent, name, template, sub
 	if err != nil {
 		return err
 	}
+	text += "\n" + noticeClock(a, false)
 	fallback, err := l.render(template, map[string]string{"agent": name, "relation": "an agent without a parent", "detail": detail})
 	if err != nil {
 		return err
 	}
+	fallback += "\n" + noticeClock(a, false)
 	var away []string
 	for _, p := range parents {
 		if _, err := l.db.GetAgent(ctx, p); err == nil {
@@ -340,11 +384,15 @@ func (l *Lifecycle) tell(ctx context.Context, child db.Agent, parent, text, want
 }
 
 // goBG runs fn off the org goroutine, counted in the daemon's background work; nothing once Wait began.
-func (l *Lifecycle) goBG(fn func(ctx context.Context)) {
+func (l *Lifecycle) goBG(fn func(ctx context.Context)) { l.tryBG(fn) }
+
+// tryBG is goBG, saying whether fn will run: false once the daemon stopped, so a caller holding something for fn can
+// let it go.
+func (l *Lifecycle) tryBG(fn func(ctx context.Context)) bool {
 	l.mu.Lock()
 	if l.waited || l.ctx.Err() != nil {
 		l.mu.Unlock()
-		return
+		return false
 	}
 	l.bg.Add(1)
 	l.bgRunning.Add(1)
@@ -354,6 +402,7 @@ func (l *Lifecycle) goBG(fn func(ctx context.Context)) {
 		defer l.bgRunning.Add(-1)
 		fn(l.ctx)
 	}()
+	return true
 }
 
 // Go runs fn in the daemon's background work, which Wait waits for; nothing once Wait began.
@@ -451,6 +500,44 @@ func lastMessage(m *string) string {
 		s = *m
 	}
 	return sliceUTF16(jsSpace.ReplaceAllString(s, " "), 600)
+}
+
+// span is src/org.ts span: a duration as a short age, 14s, 14m, 2h 5m, 3d 4h.
+func span(d time.Duration) string {
+	s := max(int64(d/time.Second), 0)
+	if s < 60 {
+		return strconv.FormatInt(s, 10) + "s"
+	}
+	m := s / 60
+	if m < 60 {
+		return strconv.FormatInt(m, 10) + "m"
+	}
+	h := m / 60
+	if h < 24 {
+		return strconv.FormatInt(h, 10) + "h " + strconv.FormatInt(m%60, 10) + "m"
+	}
+	return strconv.FormatInt(h/24, 10) + "d " + strconv.FormatInt(h%24, 10) + "h"
+}
+
+// noticeClock is src/org.ts noticeClock (S-3468): the line a child notice ends with, the daemon's now to the minute and
+// the child's age since its spawn. A tree-idle notice (idle) also says how long the child has been idle, from its stored
+// idle_since, when that is set. All of it comes from the stored rows.
+func noticeClock(a db.Agent, idle bool) string {
+	at := clock.Now()
+	line := "now " + at.UTC().Format("2006-01-02T15:04") + "Z · child age " + span(at.Sub(stamp(a.CreatedAt, at)))
+	if idle && a.IdleSince != nil && *a.IdleSince != "" {
+		line += " · idle " + span(at.Sub(stamp(*a.IdleSince, at)))
+	}
+	return line
+}
+
+// stamp parses an ISO time from a row; one it can't read counts as now, so its span is 0.
+func stamp(s string, now time.Time) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return now
+	}
+	return t
 }
 
 // ancestorsIn is src/tree.ts ancestorsIn: every agent above id in parents, each once, nearest first.
@@ -736,6 +823,7 @@ func (l *Lifecycle) announceTreeIdleOf(ctx context.Context, ids []string) error 
 		if err != nil {
 			return err
 		}
+		text += "\n" + noticeClock(a, true)
 		ps, err := l.db.ParentsOf(ctx, a)
 		if err != nil {
 			return err

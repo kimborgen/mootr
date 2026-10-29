@@ -2,13 +2,16 @@
 // Code through its settings, OpenCode through its session permissions, Codex through its sandbox
 // profile. This is the one list: a new secret file is added here and every adapter picks it up.
 import { realpathSync } from 'node:fs';
-import { DEFAULT_STAM_HOME, STAM_HOME } from './config.ts';
+import { DEFAULT_HOMES, STAM_HOME } from './config.ts';
 
 // Names under a home. A `*` is a glob in each harness's rule syntax (S-2114's secrets.json.* covers its
 // in-flight temp files too).
 export const SECRET_FILES = [
   'token',
   'peer-token',
+  // The MCP lease token (S-3176) and its rotation's temp files.
+  'mcp-lease-token',
+  'mcp-lease-token.*',
   'settings.json',
   'settings.shared.json',
   'settings.json.*',
@@ -22,7 +25,7 @@ export const SECRET_FILES = [
 ];
 
 // The homes whose secrets are denied: the daemon's own STAM_HOME as given and resolved (a
-// symlinked home is read through either path), plus the default home (S-903).
+// symlinked home is read through either path), plus both spellings of the default home (S-903, S-3347).
 export function secretHomes(stamHome: string = STAM_HOME): string[] {
   const homes = [stamHome];
   try {
@@ -30,7 +33,7 @@ export function secretHomes(stamHome: string = STAM_HOME): string[] {
   } catch {
     // not created yet: the given path is all there is
   }
-  homes.push(DEFAULT_STAM_HOME);
+  homes.push(...DEFAULT_HOMES);
   return [...new Set(homes)];
 }
 
@@ -42,5 +45,5 @@ export function secretPaths(stamHome: string = STAM_HOME): string[] {
 // Command-text patterns for a shell tool (a Bash command). Best effort: a command can name a secret
 // file in a form these don't match, so the path rules above are the real gate.
 export function secretCommandPatterns(): string[] {
-  return SECRET_FILES.map((f) => `*stam/${f}*`);
+  return SECRET_FILES.flatMap((f) => [`*stam/${f}*`, `*mootr/${f}*`]);
 }

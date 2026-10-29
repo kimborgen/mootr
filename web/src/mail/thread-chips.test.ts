@@ -100,4 +100,9 @@ describe('threadChips and threadHead', () => {
     expect(threadHead([mail('m1')], []).title).toBe('Deploy plan')
     expect(threadHead([], []).title).toBe('')
   })
+
+  it("keeps the thread's own subject when an ask joins it (S-3827)", () => {
+    const mails = [mail('m1', { subject: 'Release branch cleanup', to: ['a1'], from_id: 'human' }), mail('m2', { subject: 'Permission: Delete 14 branches', title: 'Permission: Delete 14', permission_id: 'p1' } as Partial<Mail>)]
+    expect(threadHead(mails, []).title).toBe('Release branch cleanup')
+  })
 })

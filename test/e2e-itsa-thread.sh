@@ -174,8 +174,12 @@ api home POST /api/mail "{\"from\":\"$ALICE\",\"to\":[\"$EVE_ID\"],\"subject\":\
 # A participant agent gets 403 too: frank joins the ITSA as a participant, and the 403 holds for frank's own token, with no mail body in the output.
 FRANK_REG=$(api home POST /api/register '{"name":"frank","role":"test","harness":"claude","token":true}')
 FRANK=$(echo "$FRANK_REG" | jget "d['id']"); FRANK_TOKEN=$(echo "$FRANK_REG" | jget "d['token']")
-on home "$STAM" itsa set "$KEY" --participant "$BOB" --participant "$CAROL" --participant "$FRANK" >/dev/null
+api home GET "/api/itsas/$KEY" | jget "sorted(d['participants'])" | grep -q human || fail "human isn't a participant before the add (section 6 should have joined it)"
+on home "$STAM" itsa set "$KEY" --add-participant "$FRANK" >/dev/null
 api home GET "/api/itsas/$KEY" | jget "sorted(d['participants'])" | grep -q "$FRANK" || fail "frank isn't a participant of the ITSA"
+api home GET "/api/itsas/$KEY" | jget "sorted(d['participants'])" | grep -q human || fail "--add-participant dropped human"
+api home GET "/api/itsas/$KEY" | jget "sorted(d['participants'])" | grep -q "$BOB" || fail "--add-participant dropped bob"
+api home GET "/api/itsas/$KEY" | jget "sorted(d['participants'])" | grep -q "$CAROL" || fail "--add-participant dropped carol"
 FRANK_ABOUT=$(curl -s -w '\n%{http_code}' -H "authorization: Bearer $FRANK_TOKEN" "$HOME_URL/api/itsas/$KEY/about-mails")
 [ "$(echo "$FRANK_ABOUT" | tail -n 1)" = 403 ] || fail "a participant agent read the mails about the ITSA"
 echo "$FRANK_ABOUT" | grep -q -F "PR #1?" && fail "the mails about the ITSA reached a participant agent's 403 response"

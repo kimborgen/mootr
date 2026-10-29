@@ -1,0 +1,2 @@
+import { sessionCommand } from '../src/tmux.ts';
+const argv = sessionCommand('s', '/', {}, ['x']);

@@ -15,7 +15,7 @@ import { decide, type Question } from './decide.ts';
 import { settings, humanMailAllows, onSettingsChange } from './settings.ts';
 import { MACHINE } from './config.ts';
 import { peerByName, peers, peerCall, peerNotify } from './peers.ts';
-import { HUMAN, tellAnywhere, sendFromStam } from './mail.ts';
+import { HUMAN, tellAnywhere, sendFromSystem } from './mail.ts';
 import { chiefOfStaff } from './org.ts';
 import * as itsa from './itsa.ts';
 import * as steps from './steps.ts';
@@ -165,8 +165,8 @@ function capNotice(spent: number, cap: number): void {
   const body = `Requirement checks stopped for today: they spent $${spent.toFixed(4)} of the $${cap} daily cap (settings.requirements.dailyCapUsd). Verdicts already stored still count; nothing new is recorded until tomorrow or the cap is raised.`;
   const subject = '[stam] Requirement checks reached the daily cap';
   const cos = chiefOfStaff();
-  if (cos) return void sendFromStam([cos.id], subject, body).catch(() => {});
-  if (humanMailAllows('important')) void sendFromStam([HUMAN], subject, body).catch(() => {});
+  if (cos) return void sendFromSystem('requirements', [cos.id], subject, body).catch(() => {});
+  if (humanMailAllows('important')) void sendFromSystem('requirements', [HUMAN], subject, body).catch(() => {});
 }
 
 // --- The check -------------------------------------------------------------------------------

@@ -93,6 +93,25 @@ func (s *Server) postAs(ctx context.Context, itsaID, by, text string) error {
 	return err
 }
 
+// postShownAs is src/itsa.ts post with opts.shown: lead, then the text of the ITSA a set left (`set`, shownText), whose revision
+// is recorded for a thread's Approve after it (S-2998).
+func (s *Server) postShownAs(ctx context.Context, itsaID, by, lead string, set jsfmt.Value, to ...string) error {
+	x, _ := set.Get("itsa")
+	text, rev := shownText(x)
+	in := jsfmt.Value{Kind: jsfmt.Object}
+	in.Set("by", jsfmt.StringValue(by))
+	if len(to) > 0 {
+		var tos []jsfmt.Value
+		for _, t := range to {
+			tos = append(tos, jsfmt.StringValue(t))
+		}
+		in.Set("to", jsfmt.ArrayValue(tos))
+	}
+	in.Set("body", jsfmt.StringValue(lead+text))
+	_, err := s.postShown(ctx, itsaID, in, false, text, rev)
+	return err
+}
+
 func (s *Server) moveItsa(ctx context.Context, itsaID, by string, fields ...string) (jsfmt.Value, error) {
 	f := jsfmt.Value{Kind: jsfmt.Object}
 	for i := 0; i+1 < len(fields); i += 2 {
@@ -300,11 +319,8 @@ func (s *Server) refreshApprovalErr(ctx context.Context, key, by string) error {
 	if stamp != nil {
 		via = stamp.Via
 	}
-	if err := s.requirements.SetStamp(ctx, x.Text("id"), *r, via); err != nil {
-		return err
-	}
 	if by == humanBox {
-		return nil
+		return s.requirements.SetStamp(ctx, x.Text("id"), *r, via)
 	}
 	// A human ask is owned by the draft's author. A chief-of-staff ask is owned by the chief of staff, so the editor posts,
 	// naming it, and the ask never moves to a human status.
@@ -317,7 +333,8 @@ func (s *Server) refreshApprovalErr(ctx context.Context, key, by string) error {
 	if v, ok := r.Get("text"); ok && v.Kind == jsfmt.String {
 		summary = v.Str
 	}
-	if _, err := s.moveItsa(ctx, x.Text("id"), sender, "body", requirements.Statement(*r, via), "summary", summary); err != nil {
+	set, err := s.moveItsa(ctx, x.Text("id"), sender, "body", requirements.Statement(*r, via), "summary", summary)
+	if err != nil {
 		return err
 	}
 	mention := ""
@@ -326,7 +343,13 @@ func (s *Server) refreshApprovalErr(ctx context.Context, key, by string) error {
 			mention = "@" + a.Name + " "
 		}
 	}
-	if err := s.postAs(ctx, x.Text("id"), sender, mention+"The draft changed. This is the text now:\n\n"+requirements.Statement(*r, via)); err != nil {
+	// It shows the text it set, and records that revision for a thread's Approve after it.
+	if err := s.postShownAs(ctx, x.Text("id"), sender, mention+"The draft changed. This is the text now:\n\n", set); err != nil {
+		return err
+	}
+	// The stamp moves only once the new text is shown (S-2998): an Approve before then still carries the old rev, which the
+	// draft no longer has, so it asks again instead.
+	if err := s.requirements.SetStamp(ctx, x.Text("id"), *r, via); err != nil {
 		return err
 	}
 	if via == "human" && x.Text("status") != "needs_approval" {
@@ -351,11 +374,8 @@ func (s *Server) refreshBatch(ctx context.Context, x jsfmt.Value, by string) err
 	if len(drafts) == 0 {
 		return nil
 	}
-	if err := s.requirements.StampBatch(ctx, x.Text("id"), drafts, via); err != nil {
-		return err
-	}
 	if by == humanBox {
-		return nil
+		return s.requirements.StampBatch(ctx, x.Text("id"), drafts, via)
 	}
 	owner := x.Text("owner")
 	sender := owner
@@ -363,7 +383,8 @@ func (s *Server) refreshBatch(ctx context.Context, x jsfmt.Value, by string) err
 		sender = by
 	}
 	statement := requirements.BatchStatement(drafts, via, s.reqKeyOf(ctx))
-	if _, err := s.moveItsa(ctx, x.Text("id"), sender, "body", statement); err != nil {
+	set, err := s.moveItsa(ctx, x.Text("id"), sender, "body", statement)
+	if err != nil {
 		return err
 	}
 	mention := ""
@@ -372,7 +393,13 @@ func (s *Server) refreshBatch(ctx context.Context, x jsfmt.Value, by string) err
 			mention = "@" + a.Name + " "
 		}
 	}
-	if err := s.postAs(ctx, x.Text("id"), sender, mention+"A draft in this batch changed. This is the batch now:\n\n"+statement); err != nil {
+	// It shows the text it set, and records that revision for a thread's Approve after it.
+	if err := s.postShownAs(ctx, x.Text("id"), sender, mention+"A draft in this batch changed. This is the batch now:\n\n", set); err != nil {
+		return err
+	}
+	// The stamps move only once the new texts are shown (S-2998): an Approve before then still carries the old revs, which the
+	// drafts no longer have, so it asks again instead.
+	if err := s.requirements.StampBatch(ctx, x.Text("id"), drafts, via); err != nil {
 		return err
 	}
 	if via == "human" && x.Text("status") != "needs_approval" {
@@ -596,12 +623,25 @@ func (s *Server) showAsk(r *http.Request, _ auth.Resolved) (any, error) {
 	return out, nil
 }
 
-// humanWays is src/daemon.ts humanWays, without the tailscale serve origin.
-func (s *Server) humanWays() string {
-	if s.settings.Get().Auth.LocalHuman {
-		return "through stam's login page at http://127.0.0.1:" + strconv.Itoa(s.cfg.Port) + "/"
+// humanWays is src/daemon.ts humanWays: how the human proves themselves, for a refusal, naming only the ways this
+// machine has (S-2121): stam's login page when local login is on, else how to turn it on. The Go daemon can't prove
+// the human through tailscale serve yet (no whois), so it names machine's served page only on a test daemon, where
+// the test key stands in for serve's proof.
+func (s *Server) humanWays(machine string) string {
+	var ways []string
+	s.web.mu.Lock()
+	served := s.web.served
+	s.web.mu.Unlock()
+	if served && s.cfg.TestHumanKey != "" {
+		ways = append(ways, "through "+machine+"'s page at "+s.canonicalWebOrigin()+" (tailscale serve)")
 	}
-	return "through stam's login page, once local login is on (auth.localHuman in settings.json), or through tailscale serve"
+	if s.settings.Get().Auth.LocalHuman {
+		ways = append(ways, "through stam's login page at http://127.0.0.1:"+strconv.Itoa(s.cfg.Port)+"/")
+	}
+	if len(ways) == 0 {
+		return "through stam's login page, once local login is on (auth.localHuman in settings.json)"
+	}
+	return strings.Join(ways, " or ")
 }
 
 // dropFromBatch is POST /api/requirements/asks/:id/drop: the human takes one draft out of an open batch ask. Only the human as
@@ -619,8 +659,8 @@ func (s *Server) dropFromBatch(r *http.Request, c auth.Resolved) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if c.Kind != auth.Owner || c.Caller.IsAgent() {
-		return nil, reqErr(Errorf(http.StatusForbidden, "only the human drops a draft from an approval, %s", s.humanWays()))
+	if !c.Owned {
+		return nil, reqErr(Errorf(http.StatusForbidden, "only the human drops a draft from an approval, %s", s.humanWays(s.cfg.Machine)))
 	}
 	v, _ := body.Get("if_rev")
 	f, ok := jsNumber(v)

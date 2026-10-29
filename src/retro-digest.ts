@@ -619,7 +619,7 @@ export async function sendDigest(now = new Date()): Promise<DigestResult> {
     record();
     return { sent: false, to: who, reason: 'nothing new since the last digest' };
   }
-  const sent = await mail.sendFromStam(to, `Retro digest: ${label}`, text);
+  const sent = await mail.sendFromSystem('retro', to, `Retro digest: ${label}`, text);
   if (sent) {
     record();
     for (const fn of digestHandlers) fn(label, text);

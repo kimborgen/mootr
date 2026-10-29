@@ -30,8 +30,18 @@ paths:
       operationId: listAgents
       tags:
         - agents
-      summary: Every agent on this machine and its peers, with the extras the web tree shows.
+      summary: The agents on this machine and its peers, with the extras the web tree shows; live agents unless state or ids asks for others (S-3816).
       parameters:
+        - name: state
+          in: query
+          description: A comma list of lifecycle groups to list (live is active or paused, stopped is shut down, archived, all). Without it (or empty), and without ids, the list is live agents only; an unknown group is a 400.
+          schema:
+            type: string
+        - name: ids
+          in: query
+          description: Agent ids or names, comma-separated, added in any state. Without state, the list is only these.
+          schema:
+            type: string
         - name: q
           in: query
           description: Keeps agents matching the text.
@@ -49,13 +59,56 @@ paths:
             type: string
       responses:
         "200":
-          description: A bare array, not an envelope.
+          description: A bare array, not an envelope. Each row sends `first_prompt` as null; the agent's detail (GET /api/agents/{id}) carries it (S-3808).
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: "#/components/schemas/Agent"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/mail-titles:
+    post:
+      operationId: mailTitlesShown
+      tags:
+        - mail
+      summary: The mails the human's view shows; a stale title or summary is queued to be asked again, and the answer comes at once (S-1843).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - ids
+              properties:
+                ids:
+                  type: array
+                  description: Mail ids, the first shown first; only the first 40 are looked at.
+                  items:
+                    type: string
+                    minLength: 1
+                    maxLength: 200
+      responses:
+        "200":
+          description: Whether titles are on (a model set), and the mails still being asked, so the view asks again until they land.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailTitlesShown"
+        "400":
+          description: ids is not a list of mail ids of at most 200 characters each.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The caller is not the human's view (an agent's token, a peer, the OpenCode server).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         default:
           $ref: "#/components/responses/Error"
 components:
@@ -198,6 +251,8 @@ components:
         - type
         - paused_by
         - forwarded_to
+        - launched_at
+        - resumed_at
         - created_at
         - updated_at
         - parents
@@ -357,6 +412,12 @@ components:
         forwarded_to:
           type: string
           nullable: true
+        launched_at:
+          type: string
+          nullable: true
+        resumed_at:
+          type: string
+          nullable: true
         created_at:
           type: string
         updated_at:
@@ -387,6 +448,31 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AgentWait"
+        open_ask:
+          type: string
+          nullable: true
+          description: The key of the open ask this agent waits on, as GET /api/asks keys it (S-3977); null when none. Set by the TS daemon only (the Go daemon does not port it yet).
+        open_ask_detail:
+          type: object
+          nullable: true
+          additionalProperties: false
+          description: The mail the open ask lives in and its kind, never its text (S-3982, src/asks.ts askDetail); null when none.
+          required:
+            - mail
+            - kind
+          properties:
+            mail:
+              type: string
+              nullable: true
+            kind:
+              type: string
+              enum:
+                - Permission
+                - Harness dialog
+                - Settings change
+                - Suggested input
+                - ITSA
+                - Decision
         resting:
           $ref: "#/components/schemas/AgentResting"
         in_itsa:
@@ -690,6 +776,21 @@ components:
           type: string
           nullable: true
           description: The mail thread a human wait is tied to.
+    MailTitlesShown:
+      type: object
+      additionalProperties: false
+      required:
+        - enabled
+        - pending
+      properties:
+        enabled:
+          type: boolean
+          description: A title model is set (mail.titles.model); with none, nothing is asked and pending is empty.
+        pending:
+          type: array
+          description: The mails queued or being asked.
+          items:
+            type: string
   responses:
     Error:
       description: The error envelope.

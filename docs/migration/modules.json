@@ -1,1 +1,12 @@
-[]
+[
+  {
+    "name": "mcp-auth",
+    "globs": ["src/mcp-auth.ts"],
+    "portSha": ""
+  },
+  {
+    "name": "events",
+    "globs": ["src/watch.ts", "src/events.ts"],
+    "portSha": ""
+  }
+]

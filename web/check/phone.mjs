@@ -96,7 +96,8 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
   // The daemon keeps one layout for every page; each run starts from the default one.
   const was = await api('/api/layout');
   await api('/api/layout/ops', 'POST', { ops: [...Object.keys(was.agentWorlds).map((world) => ({ op: 'dropWorld', world })), { op: 'current', world: null }] });
-  const ctx = await browser.newContext({ ...size.device, viewport: size.viewport, colorScheme: theme });
+  // WebKit-only: a request the service worker answers skips context.route, so the stubbed Process, Files and MCP routes never applied.
+  const ctx = await browser.newContext({ ...size.device, viewport: size.viewport, colorScheme: theme, ...(useWebkit ? { serviceWorkers: 'block' } : {}) });
   // Only the push routes get the stand-in header; on every request it would make the
   // page's cross-origin embeds send preflights that fail.
   const asHuman = (route) => route.continue({ headers: { ...route.request().headers(), ...humanHeaders } });
@@ -113,6 +114,9 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
   const writesAsHuman = (route) => (route.request().method() === 'GET' ? route.continue() : asHuman(route));
   if (testHuman) for (const r of ['config', 'templates', 'types']) await ctx.route(`${origin}/api/${r}/**`, writesAsHuman);
   await ctx.addInitScript((t) => { try { localStorage.setItem('stam/theme', t); } catch {} }, theme);
+  // WebKit-only: the synthetic touch below dispatches pointer events for a pointer id the browser never
+  // started, so setPointerCapture throws NotFoundError (real iOS touch has a live pointer); capture is a no-op.
+  if (useWebkit) await ctx.addInitScript(() => { for (const m of ['setPointerCapture', 'releasePointerCapture']) Element.prototype[m] = () => {}; });
   const p = await ctx.newPage();
   p.setDefaultTimeout(8000);
   p.on('pageerror', (e) => check(tag, 'no page errors', false, e.message));
@@ -121,8 +125,17 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
   const shot = async (step) => { await p.waitForTimeout(400); await p.screenshot({ path: `${out}/${step}-${tag}.png` }); };
   // A failed step leaves whatever it opened (a sheet, the search, another tab); the page
   // reloads to the Agents tab so the next step starts from a known state instead of failing too.
-  const home = async () => { await p.goto('about:blank'); await p.goto(origin + '/#token=' + token); await p.waitForSelector('#tree .node', { timeout: 20000 }); };
+  // The app reopens the view it was left in (a mail thread, Settings), so Agents is tapped when the tree isn't showing.
+  const home = async () => {
+    await p.goto('about:blank'); await p.goto(origin + '/#token=' + token);
+    await p.waitForSelector('#tree .node', { state: 'attached', timeout: 20000 });
+    if (!(await p.locator('#tree .node').first().isVisible())) await p.locator('[data-nav="left"]').tap();
+    await p.waitForSelector('#tree .node', { timeout: 20000 });
+  };
   const step = async (name, fn) => {
+    // WebKit-only: iOS doesn't move the focus to a tapped button, so a field a step typed into keeps it and the
+    // keyboard-aware layout hides the bottom navigation; a person puts the keyboard away between steps.
+    if (useWebkit) await p.evaluate(() => document.activeElement?.blur()).catch(() => {});
     try { await fn(); } catch (e) {
       check(tag, name, false, failureDetail(e.message));
       await p.screenshot({ path: `${out}/failed-${name.replace(/\W+/g, '-')}-${tag}.png` }).catch(() => {});
@@ -147,6 +160,14 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
       const ev = new TouchEvent(type.toLowerCase(), { bubbles: true, cancelable: true });
       for (const [k, v] of [['touches', list], ['targetTouches', list], ['changedTouches', [t]]]) Object.defineProperty(ev, k, { value: v });
       target.dispatchEvent(ev);
+      // A browser follows an uncancelled tap with a click; WebKit's synthetic events don't, so a
+      // short touch that stayed near its start clicks the element it began on.
+      if (type === 'touchStart') w.__touchStart = { x, y, at: Date.now(), cancelled: ev.defaultPrevented };
+      if (type === 'touchMove' && w.__touchStart && Math.hypot(x - w.__touchStart.x, y - w.__touchStart.y) > 10) w.__touchStart = null;
+      if (type === 'touchEnd' && w.__touchStart && !ev.defaultPrevented && !w.__touchStart.cancelled && Date.now() - w.__touchStart.at < 500) {
+        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y, view: w }));
+      }
+      if (type === 'touchEnd' || type === 'touchCancel') w.__touchStart = null;
     }, { type, x, y });
   };
   const drag = async (x, y, x2, y2, steps = 12) => {
@@ -183,13 +204,17 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     const sampled = await p.evaluate(sampleTargets, {
       selector: 'button, [role=button], [role=menuitem], input:not([type=hidden]):not([type=checkbox]):not([type=file]), select, textarea:not(.composer textarea), .cmp-box, .tab, .node, .mrow',
       exclude: '.md .mb-table, .xterm, .mb-chart, .mb-code, .mb-diagram, .msg header',
-      overlays: OVERLAYS, inset: 3,
+      overlays: OVERLAYS, inset: 3, edge: useWebkit ? 1.5 : 0,
     });
     r.small = [...new Set(sampled.filter((c) => Math.min(c.w, c.h) < 43.5).map((c) => `${c.t} ${Math.round(c.w)}x${Math.round(c.h)}`))].slice(0, 8);
     check(tag, `${where}: no sideways page scroll`, r.scrollW <= r.W && !r.wide.length, r.wide.join(', '));
     check(tag, `${where}: touch targets at least 44 px`, !r.small.length, r.small.join('; '));
     const classes = sampled.filter((c) => c.samples.some((x) => !x.inside)).map((c) => classify(where, c.t, c.samples, KNOWN_OVERLAPS, knownSeen));
-    const fresh = [...new Map(classes.flatMap((c) => c.fresh).map((c) => [describe(c), c])).values()];
+    let fresh = [...new Map(classes.flatMap((c) => c.fresh).map((c) => [describe(c), c])).values()];
+    // WebKit-only: the S-2249 overlaps of the Instructions page's Edit in Settings buttons stay, but Safari's line heights
+    // change which neighbouring row covers them, so the exact covers in KNOWN_OVERLAPS (Chromium's) don't match. Only a
+    // cover that is a neighbouring row's summary (span.inst-row, .inst-label or .inst-path) is that shift; any other cover is a real overlap.
+    if (useWebkit && where === 'instructions') fresh = fresh.filter((c) => !(/button\.btn\[Edit in Settings\]/.test(c.target) && /summary>span\.inst-(row|label|path)/.test(c.by)));
     for (const c of classes.flatMap((c) => c.known)) console.log(`known [${tag}] ${where}: ${describe(c)} (S-2249)`);
     for (const c of fresh) console.log(`overlap [${tag}] '${knownKey(where, c.target, c)}', // S-2249`);
     check(tag, `${where}: touch targets are tappable across their whole box`, !fresh.length, fresh.slice(0, 8).map(describe).join('; '));
@@ -207,6 +232,15 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     check(tag, `${where}: the messages get at least half the screen`, r.room >= r.vh / 2, `${r.room} of ${r.vh} px`);
   };
   const navVisible = () => p.locator('#mobile-nav').isVisible();
+  // The bottom bar as drawn: each slot's label and whether it is on (S-3346). Checked on every page it visits: no two slots share a label, and exactly one is on.
+  const bar = () => p.evaluate(() => [...document.querySelectorAll('#mobile-nav button')].map((b) => ({ nav: b.dataset.nav, label: b.querySelector('.nl')?.textContent ?? '', on: b.classList.contains('on') })));
+  const barCheck = async (where) => {
+    const b = await bar();
+    const labels = b.map((x) => x.label), on = b.filter((x) => x.on).map((x) => x.nav);
+    check(tag, `${where}: no two bottom slots share a label`, new Set(labels).size === labels.length, labels.join(', '));
+    check(tag, `${where}: exactly one bottom slot is on`, on.length === 1, on.join(', ') || 'none');
+    return b;
+  };
   // The keyboard: focus shows it, and the visible viewport shrinks by its height.
   const H = size.viewport.height, KB = Math.round(H * 0.42);
   const keyboard = async (up) => { await p.setViewportSize({ width: size.viewport.width, height: up ? H - KB : H }); await p.waitForTimeout(300); };
@@ -224,6 +258,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     check(tag, 'navigation has agents, mail, issues, main, work, assistant', n === 6, `${n} buttons`);
     check(tag, 'the Agents tab has one search entry, and the agent filter is hidden on the phone', await p.locator('[data-tree-search]').count() === 1 && !(await p.locator('#search').isVisible()));
     check(tag, 'the bottom bar has Work and no Search', await p.locator('#mobile-nav [data-nav="work"]').count() === 1 && await p.locator('#mobile-nav [data-nav="search"]').count() === 0);
+    await barCheck('home');
     const fontPx = await p.evaluate(() => parseFloat(getComputedStyle(document.querySelector('#search')).fontSize));
     check(tag, 'inputs are 16 px, so iOS doesn\'t zoom', fontPx >= 16, `${fontPx}px`);
     const vp = await p.evaluate(() => document.querySelector('meta[name=viewport]').content);
@@ -291,7 +326,8 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
 
   await step('legend', async () => {
     const ring = await p.locator('#tree .node .glyph .ring').first().evaluate((el) => parseFloat(getComputedStyle(el).borderTopWidth));
-    check(tag, 'legend: the state ring is at least 2 px', ring >= 2, `${ring}px`);
+    // WebKit floors a border to whole device pixels (2 px at 2.625x is 5 of 5.25), so it reads up to one device pixel short.
+    check(tag, 'legend: the state ring is at least 2 px', ring >= 2 - (useWebkit ? 1 / size.device.deviceScaleFactor : 0) - 0.001, `${ring}px`);
     await p.locator('#tree [data-legend-open]').tap();
     const pop = p.locator('.menu.popover[role=dialog]');
     await pop.waitFor();
@@ -328,6 +364,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     const t = await p.evaluate(() => { const s = [...window.stamDebug.sessions].find((x) => x.el.isConnected && x.el.offsetWidth); return s && { cols: s.term.cols, font: s.term.options.fontSize, w: s.el.offsetWidth }; });
     check(tag, 'the terminal fits the width at a legible size', !!t && t.font >= 11 && t.cols * t.font * 0.6 <= t.w + 2, JSON.stringify(t));
     await shot('agent');
+    await barCheck('agent world');
     await layout('agent world');
   });
 
@@ -391,59 +428,62 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     const chooser = await tapped;
     check(tag, 'a finger-paced tap on the paperclip opens the general picker', (await chooser.element().getAttribute('data-images')) === null);
     await chooser.setFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('phone check') });
-    // Long-press opens the image-only picker (Android's photo picker, recent screenshots first).
-    const box = await p.locator('#w-bottom .cmp-attach').boundingBox();
-    const held = p.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null);
-    const cdp = await p.context().newCDPSession(p);
-    const pt = { x: box.x + box.width / 2, y: box.y + box.height / 2, id: 1 };
-    // Every contextmenu event on the paperclip must be cancelled: an uncancelled one is the browser's own menu.
-    await p.evaluate(() => { window.__ctx = []; document.querySelector('#w-bottom .cmp-attach').addEventListener('contextmenu', (e) => setTimeout(() => window.__ctx.push(e.defaultPrevented), 0)); });
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [pt] });
-    await p.waitForTimeout(450);
-    check(tag, 'a held paperclip shows its cue before release', await p.locator('#w-bottom .cmp-attach.holding').count() === 1);
-    // S-776: the cue must be visible, not the 1.18:1 wash it once was: an accent ring the resting
-    // button doesn't carry.
-    const armed = await p.evaluate(() => {
-      const probe = document.createElement('span'); probe.style.color = 'var(--accent)'; document.body.appendChild(probe);
-      const accent = getComputedStyle(probe).color; probe.remove();
-      return { shadow: getComputedStyle(document.querySelector('#w-bottom .cmp-attach')).boxShadow, accent };
-    });
-    check(tag, 'the cue is an accent ring', armed.shadow.includes(armed.accent), `${armed.shadow} vs ${armed.accent}`);
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    const lp = await held; // the picker opens from the click that ends the hold
-    await cdp.detach();
-    await p.waitForTimeout(200);
-    // Emulated touch doesn't raise the event, so also send the one Android sends after a hold and see it cancelled.
-    await p.evaluate(() => { const b = document.querySelector('#w-bottom .cmp-attach'); b.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); });
-    const ctx = await p.evaluate(() => window.__ctx);
-    check(tag, 'no native context menu shows on the paperclip (every contextmenu event is cancelled)', ctx.length > 0 && ctx.every(Boolean), `${ctx.length} contextmenu event(s)`);
-    check(tag, 'the paperclip suppresses the native touch callout and text selection', await p.evaluate(() => { const c = getComputedStyle(document.querySelector('#w-bottom .cmp-attach')); return (c.webkitTouchCallout ?? 'none') === 'none' && c.userSelect === 'none'; }));
-    check(tag, 'the hold ends clean', await p.locator('#w-bottom .cmp-attach.holding').count() === 0);
-    check(tag, 'the cue clears with the hold', await p.evaluate(() => getComputedStyle(document.querySelector('#w-bottom .cmp-attach')).boxShadow) !== armed.shadow);
-    check(tag, 'a long-press on the paperclip opens the image-only picker', !!lp && /image/.test(await p.evaluate(() => document.querySelector('#w-bottom input[data-images]').accept)));
-    // A hold past the touch shim's 600 ms still ends in the picker: the shim leaves the paperclip alone.
-    const held7 = p.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null);
-    const cdp7 = await p.context().newCDPSession(p);
-    await cdp7.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [pt] });
-    await p.waitForTimeout(700);
-    await cdp7.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    check(tag, 'a 700 ms hold on the paperclip still opens the image-only picker', !!(await held7));
-    await cdp7.detach();
-    await p.waitForTimeout(200);
-    // S-703: real Android raises contextmenu during a hold and sends no click when it ends; emulated
-    // touch does neither, so the page gets both made Android's way: the picker must open anyway.
-    const heldA = p.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null);
-    await p.evaluate(() => { window.__noClick = (e) => { if (e.target.closest?.('.cmp-attach')) { e.stopImmediatePropagation(); e.preventDefault(); } }; addEventListener('click', window.__noClick, true); });
-    const cdpA = await p.context().newCDPSession(p);
-    await cdpA.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [pt] });
-    await p.waitForTimeout(550);
-    await p.evaluate(({ x, y }) => document.querySelector('#w-bottom .cmp-attach').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y })), pt);
-    await p.waitForTimeout(150);
-    await cdpA.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    const lpA = await heldA;
-    await cdpA.detach();
-    await p.evaluate(() => removeEventListener('click', window.__noClick, true));
-    check(tag, 'a hold on the paperclip opens the image-only picker with no click after it (Android)', !!lpA && (await lpA.element().getAttribute('data-images')) !== null);
+    // WebKit-only skip: these holds are driven by CDP Input.dispatchTouchEvent, which WebKit lacks, and are Android picker behaviour.
+    if (!useWebkit) {
+      // Long-press opens the image-only picker (Android's photo picker, recent screenshots first).
+      const box = await p.locator('#w-bottom .cmp-attach').boundingBox();
+      const held = p.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null);
+      const cdp = await p.context().newCDPSession(p);
+      const pt = { x: box.x + box.width / 2, y: box.y + box.height / 2, id: 1 };
+      // Every contextmenu event on the paperclip must be cancelled: an uncancelled one is the browser's own menu.
+      await p.evaluate(() => { window.__ctx = []; document.querySelector('#w-bottom .cmp-attach').addEventListener('contextmenu', (e) => setTimeout(() => window.__ctx.push(e.defaultPrevented), 0)); });
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [pt] });
+      await p.waitForTimeout(450);
+      check(tag, 'a held paperclip shows its cue before release', await p.locator('#w-bottom .cmp-attach.holding').count() === 1);
+      // S-776: the cue must be visible, not the 1.18:1 wash it once was: an accent ring the resting
+      // button doesn't carry.
+      const armed = await p.evaluate(() => {
+        const probe = document.createElement('span'); probe.style.color = 'var(--accent)'; document.body.appendChild(probe);
+        const accent = getComputedStyle(probe).color; probe.remove();
+        return { shadow: getComputedStyle(document.querySelector('#w-bottom .cmp-attach')).boxShadow, accent };
+      });
+      check(tag, 'the cue is an accent ring', armed.shadow.includes(armed.accent), `${armed.shadow} vs ${armed.accent}`);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      const lp = await held; // the picker opens from the click that ends the hold
+      await cdp.detach();
+      await p.waitForTimeout(200);
+      // Emulated touch doesn't raise the event, so also send the one Android sends after a hold and see it cancelled.
+      await p.evaluate(() => { const b = document.querySelector('#w-bottom .cmp-attach'); b.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); });
+      const ctx = await p.evaluate(() => window.__ctx);
+      check(tag, 'no native context menu shows on the paperclip (every contextmenu event is cancelled)', ctx.length > 0 && ctx.every(Boolean), `${ctx.length} contextmenu event(s)`);
+      check(tag, 'the paperclip suppresses the native touch callout and text selection', await p.evaluate(() => { const c = getComputedStyle(document.querySelector('#w-bottom .cmp-attach')); return (c.webkitTouchCallout ?? 'none') === 'none' && c.userSelect === 'none'; }));
+      check(tag, 'the hold ends clean', await p.locator('#w-bottom .cmp-attach.holding').count() === 0);
+      check(tag, 'the cue clears with the hold', await p.evaluate(() => getComputedStyle(document.querySelector('#w-bottom .cmp-attach')).boxShadow) !== armed.shadow);
+      check(tag, 'a long-press on the paperclip opens the image-only picker', !!lp && /image/.test(await p.evaluate(() => document.querySelector('#w-bottom input[data-images]').accept)));
+      // A hold past the touch shim's 600 ms still ends in the picker: the shim leaves the paperclip alone.
+      const held7 = p.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null);
+      const cdp7 = await p.context().newCDPSession(p);
+      await cdp7.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [pt] });
+      await p.waitForTimeout(700);
+      await cdp7.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      check(tag, 'a 700 ms hold on the paperclip still opens the image-only picker', !!(await held7));
+      await cdp7.detach();
+      await p.waitForTimeout(200);
+      // S-703: real Android raises contextmenu during a hold and sends no click when it ends; emulated
+      // touch does neither, so the page gets both made Android's way: the picker must open anyway.
+      const heldA = p.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null);
+      await p.evaluate(() => { window.__noClick = (e) => { if (e.target.closest?.('.cmp-attach')) { e.stopImmediatePropagation(); e.preventDefault(); } }; addEventListener('click', window.__noClick, true); });
+      const cdpA = await p.context().newCDPSession(p);
+      await cdpA.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [pt] });
+      await p.waitForTimeout(550);
+      await p.evaluate(({ x, y }) => document.querySelector('#w-bottom .cmp-attach').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y })), pt);
+      await p.waitForTimeout(150);
+      await cdpA.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      const lpA = await heldA;
+      await cdpA.detach();
+      await p.evaluate(() => removeEventListener('click', window.__noClick, true));
+      check(tag, 'a hold on the paperclip opens the image-only picker with no click after it (Android)', !!lpA && (await lpA.element().getAttribute('data-images')) !== null);
+    }
     await p.waitForTimeout(300);
     check(tag, 'a picked file shows as a chip', await p.locator('#w-bottom .cmp-file:not(.img)').count() === 1);
     await shot('prompt-keyboard');
@@ -777,6 +817,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.waitForTimeout(300);
     check(tag, 'Mail shows the Inbox page alone', await p.locator('#inbox-view').isVisible() && !(await p.locator('#tree').isVisible()));
     await shot('mail');
+    await barCheck('mail list');
     await layout('mail list');
   });
 
@@ -793,6 +834,32 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await layout('history');
     await p.locator('[data-history-toggle]').tap();
     check(tag, 'the switch goes back to the mail list', await p.locator('#history-side').count() === 0);
+  });
+
+  // The Needs you list on the Mail tab (S-3953): the toggle is pressed and its list takes the inbox's place, its count is
+  // the open rows, and a row is a touch target. The switch goes back to the inbox.
+  await step('needs you', async () => {
+    await p.locator('[data-needs-you]').tap();
+    const rows = p.locator('#inbox-view .needs-row');
+    await p.waitForSelector('#inbox-view .needs-row, #inbox-view .mail-empty', { timeout: 10000 });
+    check(tag, 'Needs you: the toggle is pressed', (await p.locator('[data-needs-you]').getAttribute('aria-pressed')) === 'true');
+    check(tag, 'Needs you: the list takes the inbox\'s place', await p.locator('#inbox-view [data-inbox-list]').isHidden());
+    check(tag, 'Needs you: the filter chips and the count line are hidden', await p.locator('#inbox-view .inbox-chip, #inbox-view [data-inbox-count]').count() === 0);
+    const open = await p.locator('#inbox-view .needs-row.open').count();
+    const n = Number((await p.locator('[data-needs-you]').innerText()).match(/\((\d+)\)/)?.[1] ?? -1);
+    check(tag, 'Needs you: the toggle counts the open rows', n === open, `${n} against ${open} rows`);
+    const rowN = await rows.count();
+    check(tag, 'Needs you: the list has rows to measure', rowN >= 1, `${rowN} rows`);
+    if (rowN) check(tag, 'Needs you: a row is at least 44 px tall', (await rows.first().boundingBox()).height >= 44);
+    await shot('needs-you');
+    await layout('needs-you');
+    // One mode at a time: History replaces Needs you, and Needs you replaces History.
+    await p.locator('[data-history-toggle]').tap();
+    check(tag, 'Needs you: History replaces the list, and Needs you is no longer pressed', await p.locator('#history-side').count() > 0 && await p.locator('#inbox-view .needs-row').count() === 0 && (await p.locator('[data-needs-you]').getAttribute('aria-pressed')) === 'false');
+    await p.locator('[data-needs-you]').tap();
+    check(tag, 'Needs you: Needs you replaces History', await p.locator('#history-side').count() === 0 && await p.locator('#inbox-view .needs-row').count() === rowN);
+    await p.locator('[data-needs-you]').tap();
+    check(tag, 'Needs you: the switch goes back to the inbox list', await p.locator('#inbox-view [data-inbox-list]').isVisible() && await p.locator('#history-side').count() === 0);
   });
 
   // A tapped image alone, full screen (S-86): pinch-zoom and pan live there, so the page is
@@ -1475,7 +1542,8 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     // row under Also waiting (keyed `i:`). Permission and decision asks are rows too, but not these.
     const rows = p.locator('#inbox-view .mrow.ask:has([data-chip="itsa"]), #inbox-view .mrow[data-waiting^="i:"]');
     check(tag, 'attention: the Mail page lists the ITSAs waiting on you', await rows.count() === att.length, `${await rows.count()} of ${att.length}`);
-    check(tag, 'attention: the header counts them', /to answer/.test(await p.locator('#inbox-view .inbox-count').innerText()));
+    // The count must also have room (S-3461: at 360 px the search box once left it a width of 0).
+    check(tag, 'attention: the header counts them', /to answer/.test(await p.locator('#inbox-view .inbox-count').innerText()) && await p.locator('#inbox-view .inbox-count').evaluate((e) => e.getBoundingClientRect().width >= e.scrollWidth - 1));
     check(tag, 'attention: the Mail tab badge counts them', Number(await p.locator('[data-nav="mail"] .badge').innerText()) >= att.length);
     await shot('attention');
     await layout('attention list');
@@ -1618,6 +1686,34 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.waitForSelector('.thread-view:visible .msg', { timeout: 10000 }).catch(async (e) => { await shot('itsa-no-thread'); console.log('DEBUG tab:', await p.locator('.pane .tab.active').count(), await p.locator('.pane .tab.active').getAttribute('data-key').catch(() => 'none'), 'ask:', await p.locator('.itsa-ask').count()); throw e; });
     await p.waitForSelector('.thread-view:visible .itsa-ask [data-act=approve]', { timeout: 10000 }).catch(async (e) => { await shot('itsa-no-approve'); console.log('DEBUG approve: ask', await p.locator('.itsa-ask').count(), 'html', (await p.locator('.thread-view:visible .thread-reply').count())); throw e; });
     await p.waitForTimeout(400);
+    // The ask shows the text it asks about, folded, and fits the phone (S-2998).
+    const what = p.locator('.thread-view:visible .msg details summary', { hasText: 'What you approve' });
+    check(tag, 'itsa mail: the ask shows the text it asks about', await what.count() > 0);
+    check(tag, 'itsa mail: the ask has no sideways scroll', await p.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    // The owner's comment it repeats carries CSS (seed.mjs) that would hide or cover the snapshot: it still shows, on top.
+    const shown = () => p.evaluate(() => {
+      const s = [...document.querySelectorAll('.thread-view .msg details summary')].find((x) => x.offsetParent && /What you approve/.test(x.textContent));
+      if (!s) return 'not shown';
+      if (document.querySelector('.thread-view style')) return 'a style element in the mail';
+      s.scrollIntoView({ block: 'center' });
+      const r = s.getBoundingClientRect();
+      if (!r.width || !r.height || getComputedStyle(s).visibility !== 'visible') return 'hidden';
+      const top = document.elementFromPoint(r.left + Math.min(24, r.width / 2), r.top + r.height / 2);
+      return s.contains(top) ? 'ok' : 'covered by ' + (top?.outerHTML.slice(0, 80) ?? 'nothing');
+    });
+    // KaTeX loads on first use: its raised box is measured once it is typeset.
+    const typeset = await p.waitForSelector('.thread-view:visible .msg .mb-math.typeset', { timeout: 10000 }).then(() => true, () => false);
+    check(tag, 'itsa mail: the comment\'s raised math is typeset', typeset);
+    let seen = await shown();
+    check(tag, 'itsa mail: comment CSS can\'t hide or cover the snapshot', seen === 'ok', seen);
+    await shot('itsa-ask-mail');
+    await p.setViewportSize({ width: 1280, height: 800 });
+    await p.waitForTimeout(400);
+    seen = await shown();
+    check(tag, 'itsa mail: comment CSS can\'t hide or cover the snapshot at 1280 px', seen === 'ok', seen);
+    await shot('itsa-ask-mail-1280');
+    await p.setViewportSize(size.viewport);
+    await p.waitForTimeout(400);
     const before = await p.locator('.pane .tab.active').getAttribute('data-key');
     await p.locator('.thread-view:visible .itsa-ask [data-act=approve]').tap();
     await p.locator('.thread-reply .cmp-send:visible').tap();
@@ -1743,7 +1839,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
       const sb = await stam.boundingBox();
       check(tag, 'mail: the stam icon stays with text typed, 44 px and on screen', !!sb && sb.width >= 44 && sb.height >= 44 && sb.x >= 0 && sb.x + sb.width <= 360, sb);
       const bar360 = await bar.locator('.cmp-bar > button:visible, .cmp-bar .seg:visible').evaluateAll((els) => Math.max(...els.map((e) => e.getBoundingClientRect().right)));
-      check(tag, 'mail: the bar with text has no button past the screen edge', bar360 <= 360, bar360);
+      check(tag, 'mail: the bar with text has no button past the screen edge', bar360 <= p.viewportSize().width, bar360);
       await stam.tap();
       await p.locator('.menu .rm-search').waitFor({ timeout: 5000 });
       check(tag, 'mail: with text typed the stam menu still offers the cc search, 44 px', (await p.locator('.menu .rm-search').boundingBox())?.height >= 44);
@@ -1783,6 +1879,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.waitForSelector('.settings-view');
     await p.waitForTimeout(500);
     await shot('settings');
+    await barCheck('settings');
     await layout('settings');
     // Executive assistant: the Assistant tab's default is on this section.
     await p.locator('.settings-nav .item:has-text("Executive assistant")').tap();
@@ -2070,6 +2167,22 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.locator('.mcp-registry button:has-text("Close")').evaluate((b) => b.click());
   });
 
+  // The Agents page (S-3346): its slot is on and the main slot reads Main, not Agents again. A phone has no tap to it
+  // (its Agents slot is the tree), so it opens the page as openWorld does, through the shell.
+  await step('agents page', async () => {
+    await p.locator('[data-nav="main"]').tap();
+    await p.waitForTimeout(300);
+    await p.evaluate(() => window.stamDebug.shell.showAgentWorld('w:agents'));
+    await p.waitForTimeout(600);
+    check(tag, 'agents page: the tab opens the Agents page in main', await p.evaluate(() => window.stamDebug.shell.currentWorld()) === 'w:agents');
+    const b = await barCheck('agents page');
+    check(tag, 'agents page: the Agents slot is on', b.filter((x) => x.on).map((x) => x.nav).join() === 'left', JSON.stringify(b));
+    check(tag, 'agents page: the main slot reads Main', b.find((x) => x.nav === 'main')?.label === 'Main', JSON.stringify(b));
+    await shot('agents-page');
+    await p.locator('[data-nav="main"]').tap();
+    await p.waitForTimeout(300);
+  });
+
   // The Work button opens the Work page in main, with the Main button then naming main, not Work.
   await step('work', async () => {
     await p.locator('[data-nav="work"]').tap();
@@ -2079,6 +2192,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     check(tag, 'work: the Main button reads Main, not Work', (await p.locator('[data-nav="main"] .nl').innerText()) === 'Main');
     check(tag, 'work: the Work button and Main are touch targets', await p.evaluate(() => [...document.querySelectorAll('#mobile-nav button')].every((b) => b.getBoundingClientRect().height >= 44)));
     await shot('work-page');
+    await barCheck('work');
     await p.locator('[data-nav="main"]').tap();
     await p.waitForTimeout(300);
   });
@@ -2170,7 +2284,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     check(tag, 'diff: Meat hides the test and the lockfile ("7 of 9 files")', (await p.locator('.dv-count').innerText()) === '7 of 9 files');
     // S-1917: the fixture PR isn't watched, so the chip says "no review"; it stays one line inside the viewport.
     const rv = await p.locator('.dv-review').boundingBox();
-    check(tag, 'diff: the review chip says "no review" and fits the phone width on one line', (await p.locator('.dv-review').innerText()) === 'no review' && !!rv && rv.x >= 0 && rv.x + rv.width <= 360 && rv.height < 48, JSON.stringify(rv));
+    check(tag, 'diff: the review chip says "no review" and fits the phone width on one line', (await p.locator('.dv-review').innerText()) === 'no review' && !!rv && rv.x >= 0 && rv.x + rv.width <= p.viewportSize().width && rv.height < 48, JSON.stringify(rv));
     check(tag, 'diff: the chips count the classes, tests and lockfiles hidden', (await p.locator('.dv-chip').allInnerTexts()).join('|') === 'Tests 1 hidden|Lockfiles 1 hidden|Docs 1', (await p.locator('.dv-chip').allInnerTexts()).join('|'));
     check(tag, 'diff: no file column and no Split/Unified toggle on the phone', await p.locator('.dv-side').count() === 0 && await p.locator('.dv-mode').count() === 0);
     // The editor mounts lazily, when its row intersects, and the first merge bundle fetch is slow under load: bring the row
@@ -2698,8 +2812,11 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     const touchIcon = await p.evaluate(async () => (await fetch(document.querySelector('link[rel=apple-touch-icon]').href)).status);
     check(tag, 'iOS gets a home-screen icon', touchIcon === 200);
     if (!(await p.evaluate(() => 'serviceWorker' in navigator))) { check(tag, 'service workers (skipped: none in this engine)', true); return; }
-    const scope = await p.evaluate(async () => (await navigator.serviceWorker.ready).scope);
-    check(tag, 'the service worker runs over the whole page', scope === origin + '/', scope);
+    // WebKit-only skip: the WebKit context blocks service workers (they would bypass the check's route stubs), so none registers.
+    if (!useWebkit) {
+      const scope = await p.evaluate(async () => (await navigator.serviceWorker.ready).scope);
+      check(tag, 'the service worker runs over the whole page', scope === origin + '/', scope);
+    }
     const ios = await p.evaluate(() => /iPhone/.test(navigator.userAgent));
     if (!ios) await p.evaluate(() => {
       const e = new Event('beforeinstallprompt');
@@ -2732,6 +2849,8 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
       await p.waitForTimeout(300);
       check(tag, 'tapping it opens the browser\'s install prompt', await p.evaluate(() => window.__prompted === true) && !(await p.locator('#install-app').count()));
     }
+    // WebKit-only skip: Playwright's WebKit build has no Notification or PushManager (the app reports push unsupported), so the browser's half can't be stubbed.
+    if (useWebkit && !(await p.evaluate(() => 'Notification' in window))) return;
     // The browser's half, stubbed: permission granted and a subscription with real keys.
     await p.evaluate(async (tag) => {
       const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
@@ -2819,9 +2938,9 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     check(tag, 'types: a type in the + menu adds an agent of that type', all.length === n + 1 && all.some((a) => a.type === 'coordinator'));
   });
 
-  // Work columns (S-370): the built-in and custom columns in one list, moved up and down by
-  // touch, and a custom column's edit form as a full-width sheet. Three fields are seeded once
-  // (one a choice with tones); the move is put back.
+  // Fields and cards (S-370, S-1438 PR 5): the Table tab lists the built-in and custom columns in one list,
+  // moved up and down by touch, and a field's edit form on the Fields tab is a full-width sheet. Three
+  // fields are seeded once (one a choice with tones); the move is put back.
   await step('workcols', async () => {
     const have = (await api('/api/itsas/fields')).map((f) => f.key);
     const seed = [
@@ -2834,7 +2953,10 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.locator('[data-nav="left"]').tap();
     await p.locator('#open-config').tap();
     await p.waitForSelector('.settings-view');
-    await p.locator('.settings-nav .item:has-text("Work columns")').tap();
+    await p.locator('.settings-nav .item:has-text("Fields and cards")').tap();
+    await p.waitForSelector('.wcol-tabs');
+    check(tag, 'workcols: the tabs are a segmented row, Fields first, the same tabs as the desktop', await p.locator('.wcol-tabs [role=tab]').evaluateAll((els) => els.map((e) => e.textContent).join(' ')) === 'Fields Table Issue card Agent card');
+    await p.locator('.wcol-tabs [role=tab]:has-text("Table")').tap();
     await p.waitForSelector('.wcol-card');
     const ids = () => p.locator('.wcol-row').evaluateAll((els) => els.map((e) => e.getAttribute('data-col')));
     const before = await ids();
@@ -2849,13 +2971,15 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     check(tag, 'workcols: a tap on up moves the column up', true);
     await p.locator(`[aria-label="Move ${label} down"]`).tap();
     await p.waitForFunction((b) => [...document.querySelectorAll('.wcol-row')].map((e) => e.getAttribute('data-col')).join(' ') === b, before.join(' '));
-    await p.locator('[aria-label="Edit Stage"]').tap();
+    await p.locator('.wcol-tabs [role=tab]:has-text("Fields")').tap();
+    await p.locator('.fld-row[aria-label="Edit Stage"]').tap();
     await p.waitForSelector('.wcol-form');
     check(tag, 'workcols: the edit form lists the options with tone swatches', await p.locator('.wcol-opt').count() === 4 && await p.locator('.wcol-tone.on').count() === 4);
+    check(tag, 'workcols: the form has the kinds picker and the phone card control', await p.locator('.wcol-kinds input[type=checkbox]').count() >= 1 && await p.locator('.wcol-form .set-label b', { hasText: 'On the phone' }).count() === 1);
     await shot('workcols-edit');
     await layout('workcols-edit');
     await p.locator('.wcol-form .type-back').tap();
-    await p.waitForSelector('.wcol-card');
+    await p.waitForSelector('.fld-list');
   });
 
   // The board on a phone (S-38): one column at a time with a strip of chips and counts; a tap
@@ -2949,17 +3073,16 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     // Ready to try: the staged ITSA, its links under it in the table's column order, each with
     // its kind's icon, each a 44 px target; a branch is only named.
     const card = wv.locator(`[data-sec="try"] .wg-card[data-itsa="${webUi.id}"]`);
-    const links = await card.locator('.wg-link').evaluateAll((els) => els.map((e) => ({ kind: [...e.classList].find((c) => c.startsWith('k-')), tag: e.tagName, href: e.getAttribute('href'), label: e.innerText.trim(), icon: !!e.querySelector('svg'), h: e.getBoundingClientRect().height })));
-    check(tag, 'work: a card lists its links by kind, each with its icon', JSON.stringify(links.map((l) => [l.kind, l.label, l.icon])) === JSON.stringify([['k-branch', 'stam/dash-data', true], ['k-github', 'PR #15', true], ['k-test', 'staging', true]]), JSON.stringify(links));
-    check(tag, 'work: the test link opens where to test it; a branch is not a link', links.find((l) => l.kind === 'k-test')?.href === 'https://staging.example.com/web' && links.find((l) => l.kind === 'k-branch')?.tag === 'SPAN');
+    // The card is the board's issue card (S-3560): a kind's links are icon anchors in its `data-cell` span, each a 44 px target.
+    const links = await card.locator('.bc-links .bc-link').evaluateAll((els) => els.map((e) => ({ kind: e.closest('[data-cell]').dataset.cell, tag: e.tagName, href: e.getAttribute('href'), name: e.getAttribute('aria-label'), icon: !!e.querySelector('svg'), h: e.getBoundingClientRect().height })));
+    check(tag, 'work: a card lists its links by kind, each with its icon and a name', JSON.stringify(links.map((l) => [l.kind, l.name, l.icon])) === JSON.stringify([['branch', 'stam/dash-data', true], ['github', 'PR #15', true], ['test', 'staging', true]]), JSON.stringify(links));
+    check(tag, 'work: the test link opens where to test it; a branch is not a link', links.find((l) => l.kind === 'test')?.href === 'https://staging.example.com/web' && links.find((l) => l.kind === 'branch')?.tag === 'SPAN' && links.find((l) => l.kind === 'branch')?.href === null);
     check(tag, 'work: each link is at least 44 px tall', links.length > 0 && links.every((l) => l.h >= 43.5), links.map((l) => Math.round(l.h)).join(','));
     check(tag, 'work: cards carry no action buttons (S-363)', await wv.locator('.wg-card button:not(.w-agent), .wg-card .btn').count() === 0);
     const cw = p.viewportSize().width;
     const box = await card.boundingBox();
     check(tag, 'work: cards fit the screen', box && box.x >= 0 && box.x + box.width <= cw + 1, box && `${box.x}+${box.width}`);
-    const tops = await card.locator('.wg-meta .w-agent').evaluateAll((els) => [...new Set(els.map((e) => Math.round(e.getBoundingClientRect().top)))]);
-    check(tag, 'work: a card\'s agents sit on one line', tops.length === 1, JSON.stringify(tops));
-    check(tag, 'work: a card shows a warning health', await card.locator('.w-health').count() === 1);
+    check(tag, 'work: a card shows a warning health', await card.locator('[data-cell=health]').count() === 1);
     await layout('work');
     // The Work composer clears the bottom bar: scrolled to the end, the last control stays above
     // the composer, and the composer above the tab bar.
@@ -2979,7 +3102,7 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     const lastBox = await browse.boundingBox();
     check(tag, 'work: the last control scrolls clear of the composer', !!cbox && !!lastBox && scrolled.found && lastBox.y + lastBox.height <= cbox.y + 1, JSON.stringify({ lastBox, cbox, scrolled }));
     await shot('work-composer-phone');
-    await card.locator('.wg-title').tap();
+    await card.locator('.bc-title').tap();
     await p.waitForTimeout(400);
     check(tag, 'work: a tap on a card opens its ITSA', await p.evaluate(() => window.stamDebug.shell.currentWorld()) === 'w:itsa:' + webUi.id);
     await p.locator('[data-nav="work"]').tap();

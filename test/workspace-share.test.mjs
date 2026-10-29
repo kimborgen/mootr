@@ -28,10 +28,11 @@ before(async () => {
 });
 after(() => rmSync(home, { recursive: true, force: true }));
 
-// The Codex profile of a default or auto agent: its writable roots, and every secret file denied (S-1888).
+// The Codex profile of a default or auto agent: its writable roots, and every secret file denied (S-1888), each
+// at its real path (S-3861).
 const profile = (roots) => ({
   'permissions.stam.extends': ':workspace',
-  'permissions.stam.filesystem': { ...Object.fromEntries(roots.map((p) => [p, 'write'])), ...Object.fromEntries(secretPaths().map((p) => [p, 'none'])) },
+  'permissions.stam.filesystem': { ...Object.fromEntries(roots.map((p) => [p, 'write'])), ...Object.fromEntries(secretPaths().map((p) => [codex.sandboxPath(p), 'none'])) },
 });
 
 let n = 0;

@@ -19,6 +19,15 @@ func (d *DB) NoteItsa(ctx context.Context, ref, typ string, data jsfmt.Value) er
 	return err
 }
 
+// AddItsaEvent is itsa.addEvent(id, actor, type, data): a line on the ITSA's history that actor made. A missing ITSA is
+// an error.
+func (d *DB) AddItsaEvent(ctx context.Context, ref, actor, typ string, data jsfmt.Value) error {
+	_, err := d.inItsa(ctx, ref, func(conn *sqlite.Conn, x jsfmt.Value) (jsfmt.Value, error) {
+		return jsfmt.Value{}, runSQL(conn, "INSERT INTO itsa_events (itsa_id, ts, actor, type, data) VALUES (?, ?, ?, ?, ?)", x.Text("id"), now(), actor, typ, jsfmt.Compact(data))
+	})
+	return err
+}
+
 // stageOf is the ITSA's `stage` field value, "" when it is unset or not a string.
 func stageOf(conn *sqlite.Conn, id string) (string, error) {
 	vals, err := fieldValues(conn, id)
@@ -65,11 +74,15 @@ func (d *DB) BackfillClosedStage(ctx context.Context, endNodeOf func(kind string
 		if err != nil || len(done) > 0 {
 			return err
 		}
-		fields, err := rows(conn, "SELECT id FROM itsa_fields WHERE id = ? OR key = ?", "stage", "stage")
+		fields, err := rows(conn, "SELECT id, kinds FROM itsa_fields WHERE id = ? OR key = ?", "stage", "stage")
 		if err != nil || len(fields) == 0 {
 			return err
 		}
 		fieldID := fields[0].Text("id")
+		stageKinds, err := parseKinds(fields[0].Text("kinds"))
+		if err != nil {
+			return err
+		}
 		seen := map[string]bool{}
 		for _, kind := range kinds {
 			if seen[kind] {
@@ -78,6 +91,13 @@ func (d *DB) BackfillClosedStage(ctx context.Context, endNodeOf func(kind string
 			seen[kind] = true
 			end := endNodeOf(kind)
 			if end == "" {
+				continue
+			}
+			applies, err := FieldApplies(stageKinds, kind)
+			if err != nil {
+				return err
+			}
+			if !applies {
 				continue
 			}
 			// `kind = ?` as TS's `kind IS ?` with a string: a kind the process lists matches exactly, and an ITSA with no kind (NULL) is

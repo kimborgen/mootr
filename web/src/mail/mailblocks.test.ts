@@ -343,3 +343,102 @@ describe('diff block (S-2100)', () => {
     expect(d.querySelector('.mb-name')?.textContent).toBe('a.ts');
   });
 });
+
+// S-2998: a mail's own markup can't hide or cover other text, such as an ask's snapshot.
+describe('mail markup that could hide text', () => {
+  const ask = '<details><summary>What you approve: S-1 Real</summary>\n\nThe real text.\n\n</details>\n\n'
+    + 'Owner says:\n\n<style>details{display:none!important}</style>\n\n'
+    + '<div style="position:fixed;inset:0;background:white" class="fsheet" id="img-view" popover>Cover</div>\n\n'
+    + '<svg overflow="visible" transform="translate(0,-500)"><rect width="9999" height="9999"/></svg>\n\n'
+    + `${F}progress\n2/4 Build <span style="position:fixed" class="fsheet">x</span>\n${F}`;
+  const el = (): HTMLElement => { const d = document.createElement('div'); d.innerHTML = mb.renderMail(ask); return d; };
+
+  it('drops style elements and the mail\'s own style, class, id and popover', () => {
+    const d = el();
+    expect(d.querySelector('style')).toBeNull();
+    const cover = [...d.querySelectorAll('div')].find((x) => x.textContent === 'Cover')!;
+    for (const a of ['style', 'class', 'id', 'popover']) expect(cover.hasAttribute(a)).toBe(false);
+    const svg = d.querySelector('p svg, svg:not(.i)')!;
+    expect(svg.hasAttribute('overflow')).toBe(false);
+    expect(svg.hasAttribute('transform')).toBe(false);
+    expect(d.querySelector('details summary')?.textContent).toBe('What you approve: S-1 Real');
+  });
+
+  it('cleans markup inside a component but keeps the component\'s own style and class', () => {
+    const d = el();
+    const label = d.querySelector('.mb-ptext span span')!;
+    expect(label.hasAttribute('style')).toBe(false);
+    expect(label.hasAttribute('class')).toBe(false);
+    expect(d.querySelector<HTMLElement>('.mb-bar i.spent')!.style.width).toBe('50%');
+    expect(d.innerHTML).not.toContain('data-mb-key');
+  });
+
+  it('drops SVG animation that could move or hide an element again', () => {
+    // DOMPurify drops from and to but keeps values, so values carries each move here.
+    const d = document.createElement('div');
+    d.innerHTML = mb.renderMail('<svg width="300" height="300"><rect width="300" height="300" fill="white"/>'
+      + '<animateTransform attributeName="transform" type="translate" values="0 -600;0 -600" dur="1s" fill="freeze"/>'
+      + '<animateMotion values="0,-600;0,-600" dur="1s" fill="freeze"/><animate attributeName="y" values="-600;-600" dur="1s" fill="freeze"/>'
+      + '<set attributeName="visibility" values="hidden"/><animateColor attributeName="fill" values="white;white" dur="1s"/></svg>');
+    expect(d.querySelector('svg rect')).not.toBeNull();
+    expect(d.innerHTML).not.toMatch(/animate|<set/i);
+  });
+
+  it('drops raw MathML, whose layout attributes can paint over other text, and keeps the math component', () => {
+    const d = document.createElement('div');
+    d.innerHTML = mb.renderMail('<math><mpadded voffset="600px" height="0" depth="0" mathbackground="white"><mspace width="300px" height="300px" mathbackground="white"/></mpadded></math>\n\n$$\nx^2\n$$');
+    expect(d.innerHTML).not.toMatch(/<math|mpadded|mspace|voffset|mathbackground/i);
+    expect(d.querySelector('.mb-math.display')?.getAttribute('data-tex')).toBe('x^2');
+  });
+
+  describe('the recorded snapshot range (S-2998)', () => {
+    const snap = '<details><summary>What you approve: S-1 Ærlig 💡</summary>\n\nThe real text.\n\n</details>';
+    const box = (body: string, shown?: mb.Shown | null): HTMLElement => { const d = document.createElement('div'); d.innerHTML = mb.renderMail(body, shown); return d; };
+
+    it('draws the snapshot in its own box above the rest, at the start or the end', () => {
+      const ask = snap + '\n\nOwner says: \\(\\raisebox{8em}{x}\\)';
+      let d = box(ask, { at: 0, len: snap.length });
+      expect(d.querySelector('.mb-shown > details > summary')?.textContent).toBe('What you approve: S-1 Ærlig 💡');
+      expect(d.querySelector('.mb-shown')?.textContent).not.toContain('Owner says');
+      expect(d.querySelector('.mb-shown + p')?.textContent).toContain('Owner says');
+      const re = 'The draft changed. This is the text now:\n\n' + snap;
+      d = box(re, { at: re.length - snap.length, len: snap.length });
+      expect(d.querySelector('p + .mb-shown summary')?.textContent).toContain('What you approve');
+    });
+
+    it('renders whole, with no box, when the range is off: out of range, mid-surrogate, or not the snapshot', () => {
+      const body = snap + '\n\nmore';
+      const emoji = snap.indexOf('💡');
+      for (const shown of [null, { at: 0, len: body.length + 1 }, { at: -1, len: 4 }, { at: 0.5, len: 4 }, { at: 0, len: 0 },
+        { at: 0, len: emoji + 1 }, { at: emoji + 1, len: 5 }, { at: 1, len: snap.length - 1 }, { at: 0, len: snap.length - 1 }, { at: snap.length + 2, len: 4 }]) {
+        const d = box(body, shown);
+        expect(d.querySelector('.mb-shown'), JSON.stringify(shown)).toBeNull();
+        expect(d.querySelector('details summary')?.textContent).toBe('What you approve: S-1 Ærlig 💡');
+      }
+    });
+
+    it('parses each part on its own, so a stray </div> or </details> can\'t close the box early or reach into it', () => {
+      const inner = '<details><summary>What you approve: S-1 X</summary>\n\nbody </div></details> still the ITSA text\n\n<div>open\n\n</details>';
+      const body = inner + '\n\nOwner: </div></details></div> <div style="position:fixed">after</div>';
+      const d = box(body, { at: 0, len: inner.length });
+      const b = d.querySelector('.mb-shown')!;
+      expect(b.textContent).toContain('still the ITSA text');
+      expect(b.textContent).not.toContain('Owner');
+      expect(b.parentElement).toBe(d);
+      expect(b.nextElementSibling?.textContent).toContain('Owner');
+      expect(d.querySelectorAll('.mb-shown').length).toBe(1);
+    });
+
+    it('comes only from the recorded range: a mail can\'t make the box itself', () => {
+      const d = box('<div class="mb-shown">Fake</div>\n\n' + snap);
+      expect(d.querySelector('.mb-shown')).toBeNull();
+    });
+  });
+
+  it('keeps a code block\'s language and a forged key does nothing', () => {
+    const d = document.createElement('div');
+    d.innerHTML = mb.renderMail(`${F}js\nlet a = 1;\n${F}\n\n<div data-mb-key="x" style="display:none">Hi</div>`);
+    expect(d.querySelector('code')?.className).toBe('language-js');
+    expect(d.innerHTML).not.toContain('display:none');
+  });
+});

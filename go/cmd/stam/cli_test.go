@@ -255,7 +255,7 @@ func TestUsage(t *testing.T) {
 		}
 	}
 	// A command the Go CLI doesn't have yet fails, so a script never takes the usage text for an answer.
-	for _, cmd := range []string{"ls", "nonsense"} {
+	for _, cmd := range []string{"doctor", "nonsense"} {
 		if o := runCLI(t, nil, "", cmd); o.code != 1 || o.stdout != "" || o.stderr != "stam: "+cmd+" is not ported to the Go CLI yet\n" {
 			t.Errorf("%s = %+v", cmd, o)
 		}
@@ -428,5 +428,93 @@ func TestStatuslineUserCommandIsLimited(t *testing.T) {
 	o := runCLI(t, v, "{}", "statusline", "claude")
 	if d := time.Since(start); o.code != 0 || o.stdout != "[stam a1] partial" || d > 8*time.Second {
 		t.Errorf("slow user command = %+v after %s", o, d)
+	}
+}
+
+// TestRegistryLines: `stam registry` prints the types (a ring type as "ring"), presets, harness versions and models as
+// src/cli.ts does.
+func TestRegistryLines(t *testing.T) {
+	s := newStub(t, map[string]func(int) (int, string){
+		"GET /api/registry": fixed(200, `{"types":{"reviewer":{"description":"Reviews.","harness":"codex","model":"gpt-6.1-sol","effort":"low"},"ring":{"description":"A ring.","harness":"","model":null}},`+
+			`"presets":{"fast":{"harness":"claude","model":null,"effort":null,"description":"Quick."}},"harnesses":{"claude":{"version":"2.1"},"codex":{"version":null}},`+
+			`"models":{"m1":{"harnesses":["claude","opencode"]}}}`),
+	})
+	o := runCLI(t, map[string]string{"STAM_URL": s.URL}, "", "registry")
+	want := "Agent types (stam spawn NAME --type T):\n  reviewer         codex/gpt-6.1-sol (low): Reviews.\n  ring             ring: A ring.\nPresets:\n" +
+		"  fast             claude/default: Quick.\nHarnesses:\n  claude           2.1\n  codex            not installed\nModels:\n" +
+		"  m1                                               claude, opencode\nAny other model name also works; it passes straight to the harness.\n"
+	if o.code != 0 || o.stdout != want {
+		t.Fatalf("registry = %+v\nwant %q", o, want)
+	}
+}
+
+// TestCos: `stam cos AGENT` names the chief of staff and `stam cos` clears it, with src/cli.ts's lines.
+func TestCos(t *testing.T) {
+	s := newStub(t, map[string]func(int) (int, string){
+		"POST /api/chief-of-staff": func(n int) (int, string) {
+			if n == 1 {
+				return 200, `{"chiefOfStaff":"boss"}`
+			}
+			return 200, `{"chiefOfStaff":null}`
+		},
+	})
+	v := map[string]string{"STAM_URL": s.URL}
+	if o := runCLI(t, v, "", "cos", "boss"); o.code != 0 || o.stdout != "chief of staff: boss\n" {
+		t.Errorf("cos boss = %+v", o)
+	}
+	if o := runCLI(t, v, "", "cos"); o.code != 0 || o.stdout != "no chief of staff\n" {
+		t.Errorf("cos = %+v", o)
+	}
+	if b := s.calls[0].body; b != `{"agent":"boss"}` {
+		t.Errorf("body %s", b)
+	}
+	if b := s.calls[1].body; b != `{"agent":null}` {
+		t.Errorf("clear body %s", b)
+	}
+}
+
+// TestRetro: `stam retro` runs RunRetro as STAM_AGENT_ID, and refuses without one; --effort parses as Number does;
+// --digest says what the digest route did.
+func TestRetro(t *testing.T) {
+	s := newStub(t, map[string]func(int) (int, string){
+		"POST /api/agents/a1/retro-final": fixed(200, `{}`),
+		"POST /api/retros/digest": func(n int) (int, string) {
+			if n == 1 {
+				return 200, `{"sent":true,"to":"cos","reason":""}`
+			}
+			return 200, `{"sent":false,"to":null,"reason":"no open retro items"}`
+		},
+	})
+	v := map[string]string{"STAM_URL": s.URL, "STAM_AGENT_ID": "a1"}
+	if o := runCLI(t, v, "", "retro", "--final", "--effort", "reading=50, testing = 25.0,waiting=0x10"); o.code != 0 || o.stdout != "Recorded the final retro round for a1: reading 50%, testing 25%, waiting 16%.\n" {
+		t.Errorf("final = %+v", o)
+	}
+	if b := s.calls[0].body; b != `{"by":"a1","effort":{"reading":50,"testing":25,"waiting":16}}` {
+		t.Errorf("final body %s", b)
+	}
+	if o := runCLI(t, v, "", "retro", "--final", "--effort", "reading=0b10,testing=0O10,waiting=0X1f,coordination=7=9"); o.code != 0 ||
+		o.stdout != "Recorded the final retro round for a1: reading 2%, testing 8%, waiting 31%, coordination 7%.\n" {
+		t.Errorf("prefixed final = %+v", o)
+	}
+	if b := s.calls[1].body; b != `{"by":"a1","effort":{"reading":2,"testing":8,"waiting":31,"coordination":7}}` {
+		t.Errorf("prefixed final body %s", b)
+	}
+	// Number() leaves these NaN, which the final round refuses before any request: no value, a signed or bad prefix.
+	for _, e := range []string{"reading=lots", "reading", "reading=0x-1", "reading=0b12", "reading=0o"} {
+		if o := runCLI(t, v, "", "retro", "--final", "--effort", e); o.code != 1 || o.stderr != "stam: effort reading must be a percentage from 0 to 100\n" {
+			t.Errorf("effort %q = %+v", e, o)
+		}
+	}
+	if len(s.calls) != 2 {
+		t.Errorf("a refused effort sent a request: %d calls", len(s.calls))
+	}
+	if o := runCLI(t, map[string]string{"STAM_URL": s.URL}, "", "retro", "--search", "x"); o.code != 1 || !strings.Contains(o.stderr, "STAM_AGENT_ID is not set") {
+		t.Errorf("no agent = %+v", o)
+	}
+	if o := runCLI(t, v, "", "retro", "--digest"); o.stdout != "Mailed the retro digest to cos.\n" {
+		t.Errorf("digest = %+v", o)
+	}
+	if o := runCLI(t, v, "", "retro", "--digest"); o.stdout != "No retro digest sent: no open retro items.\n" {
+		t.Errorf("no digest = %+v", o)
 	}
 }

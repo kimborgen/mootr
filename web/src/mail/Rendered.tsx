@@ -17,11 +17,12 @@ import * as mb from './mailblocks'
 
 // `base` says where a relative file path resolves (the writer's machine and cwd); it defaults to the enclosing FileBaseCtx provider, and `null` means none (the writer is unknown).
 // `resolve` finishes what needs the mail itself (its embedded and compared attachments) before the rest, when the html changes.
-export function Rendered({ text, className = '', base, resolve }: { text: string; className?: string; base?: FileBase | null; resolve?: (el: HTMLElement) => void }) {
+// `shown` is a mail's recorded snapshot range (S-2998), drawn above the rest.
+export function Rendered({ text, className = '', base, resolve, shown }: { text: string; className?: string; base?: FileBase | null; resolve?: (el: HTMLElement) => void; shown?: mb.Shown | null }) {
   const ref = useRef<HTMLDivElement>(null)
   // The ITSA list is a dependency, so an S-N key's status updates when its ITSA changes.
   const { itsas } = useData()
-  const html = useMemo(() => mb.renderMail(text), [text, itsas])
+  const html = useMemo(() => mb.renderMail(text, shown), [text, itsas, shown?.at, shown?.len])
   const fb = useFileBase(base)
   const repos = useDiffRepos()
   const res = useRef(resolve)

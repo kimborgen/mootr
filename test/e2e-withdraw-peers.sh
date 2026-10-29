@@ -107,6 +107,12 @@ ask() { [ "$(unread twin)" = 2 ]; }
 wait_until ask || fail "the ITSA ask doesn't reach the human (twin $(unread twin))"
 ID3=$(api twin GET '/api/agents/human/inbox?unread=1' '' human | jget "[m for m in d if m.get('kind')=='ask'][0]['id']")
 T3=$(api twin GET '/api/agents/human/inbox?unread=1' '' human | jget "[m for m in d if m.get('kind')=='ask'][0]['thread_id']")
+# Only the ITSA home records where the ask holds its snapshot (S-2998); a thread read through either daemon folds the
+# copies and keeps that range, so the web draws the snapshot above the rest on both.
+shown() { api "$1" GET "/api/threads/$T3?box=human" | jget "__import__('json').dumps([m.get('shown') for m in d if m['id']=='$ID3'][0])"; }
+SM=$(shown main)
+SW=$(shown twin)
+[ "$SM" != null ] && [ "$SM" = "$SW" ] && [ "$(printf '%s' "$SM" | jget "d['at']")" = 0 ] || fail "the ask's snapshot range doesn't read through both daemons (main $SM, twin $SW)"
 api twin PATCH "/api/itsas/$KEY" "{\"status\":\"in_progress\",\"by\":\"$BOSS\"}" >/dev/null
 gone() { [ "$(unread twin)" = 1 ] && [ "$(unread main)" = 1 ]; }
 wait_until gone || fail "the settled ask still counts (main $(unread main), twin $(unread twin))"

@@ -1,0 +1,9 @@
+[
+  { "file": "flock.txt", "token": "flock" },
+  { "file": "lib-sh.txt", "token": "lib.sh" },
+  { "file": "comment-only.txt", "token": null },
+  { "file": "clean.txt", "token": null },
+  { "file": "tmux-pure.txt", "token": null },
+  { "file": "tmux-start.txt", "token": "newSession(" },
+  { "file": "tmux-socket.txt", "token": "tmux-socket" }
+]

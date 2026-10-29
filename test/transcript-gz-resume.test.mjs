@@ -4,6 +4,7 @@
 // while the janitor compresses waits for it and then restores. A fake harness on a throwaway
 // STAM_HOME and tmux socket; no daemon, no model: `node --test test/transcript-gz-resume.test.mjs`.
 import { test, before, after, beforeEach } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -43,7 +44,7 @@ before(async () => {
   };
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 beforeEach(() => {

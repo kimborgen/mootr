@@ -2,7 +2,7 @@
 id: assistant-onboarding
 title: Assistant: onboard a new install
 summary: |
-  On an install that isn't fully set up, read stam onboarding, walk your user through each gap one at a time,
+  On an install that isn't fully set up, read mootr onboarding, walk your user through each gap one at a time,
   and offer to start the chief of staff.
 scope: type:assistant
 kind: rule

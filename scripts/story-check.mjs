@@ -162,7 +162,7 @@ export function checkStories({ files, changed, body, renames = {}, mode = 'full'
     const missing = exportedComponents(files[p]).filter((c) => !listed(p, c));
     if (ownStructure) {
       for (const c of missing) {
-        errors.push(`${p}: the component ${c} has no story. Add a story whose code lists '${p}#${c}' to ${p.replace(/\.tsx$/, '.stories.tsx')} (docs/stories.md).`);
+        errors.push(`${p}: the component ${c} has no story: add '${p}#${c}' to a story's code array in ${p.replace(/\.tsx$/, '.stories.tsx')} (docs/stories.md).`);
       }
     }
     if (exempt) {

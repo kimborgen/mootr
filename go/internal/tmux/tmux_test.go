@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"stam/internal/agentenv"
 	"stam/internal/proctree"
 )
 
@@ -79,7 +81,9 @@ func TestCommandsMatchTS(t *testing.T) {
 		t.Fatal(err)
 	}
 	const socket = "stam-test-golden"
-	env := []envKV{{"STAM_USER_STATUSLINE", "printf '%s' \"$x\""}, {"STAM_AGENT_ID", "a1"}, {"STAM_TOKEN", "tok'en $HOME ; {x}"}}
+	env := []envKV{{"STAM_USER_STATUSLINE", "printf '%s' \"$x\""}, {"STAM_AGENT_ID", "a1"}, {"MOOTR_AGENT_ID", "a1"}, {"STAM_TOKEN", "tok'en $HOME ; {x}"}}
+	// Every STAM_ name here has its MOOTR_ twin, so nothing is scrubbed and the command has no env prefix.
+	twinned := []envKV{{"STAM_AGENT_ID", "a2"}, {"MOOTR_AGENT_ID", "a2"}}
 	argv := []string{"/usr/bin/claude", "--session-id", "s 1", "--settings", "/h/agents/a1/claude-settings.json", "it's", "$HOME", "~", "a;b", "", "plain-word_1.2:/x=y@%+,"}
 	type call struct {
 		fn   string
@@ -87,6 +91,7 @@ func TestCommandsMatchTS(t *testing.T) {
 	}
 	calls := []call{
 		{"newSession", []any{"a1", "/work dir/x", env, argv}},
+		{"newSession", []any{"a2", "/work dir/x", twinned, argv}},
 		{"sendKeys", []any{"a1", "Escape", "-l", "hello world"}},
 		{"sendKeysToPane", []any{"%3", "Enter"}},
 		{"paste", []any{"a1", "line one\nline 'two' $x\n"}},
@@ -181,7 +186,7 @@ func TestCommandsMatchTS(t *testing.T) {
 	if !reflect.DeepEqual(gor.calls, ts.calls) {
 		t.Errorf("tmux calls differ:\n go %q\n ts %q", gor.calls, ts.calls)
 	}
-	if !reflect.DeepEqual(gor.confs, ts.confs) || len(ts.confs) != 1 {
+	if !reflect.DeepEqual(gor.confs, ts.confs) || len(ts.confs) != 2 {
 		t.Errorf("new-session.conf differs:\n go %#v\n ts %#v", gor.confs, ts.confs)
 	}
 	if !reflect.DeepEqual(gor.modes, ts.modes) {
@@ -464,5 +469,182 @@ func TestRunHasDeadline(t *testing.T) {
 	r := c.Run(ctx, nil, "list-panes")
 	if r.Status != -1 || time.Since(start) > 3*time.Second {
 		t.Fatalf("a hung tmux must end at the deadline: %+v after %v", r, time.Since(start))
+	}
+}
+
+// S-3345: WithTwins adds each MOOTR_ twin with its STAM_ value, keeps an explicit twin, and a twin survives the scrub.
+func TestWithTwins(t *testing.T) {
+	env := Env{{"STAM_AGENT_ID", "a1"}, {"PATH", "/bin"}, {"STAM_HOME", "/h"}, {"MOOTR_HOME", "/m"}}
+	got := env.WithTwins()
+	want := Env{{"STAM_AGENT_ID", "a1"}, {"PATH", "/bin"}, {"STAM_HOME", "/h"}, {"MOOTR_HOME", "/m"}, {"MOOTR_AGENT_ID", "a1"}}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+	if len(env) != 4 {
+		t.Fatalf("WithTwins changed its receiver: %v", env)
+	}
+	if conf := SessionConf("a1", "/w", Env{{"STAM_URL", "http://x"}}, []string{"claude"}); strings.Contains(conf, "-u MOOTR_URL") || !strings.Contains(conf, "'MOOTR_URL=http://x'") {
+		t.Fatalf("twin missing or scrubbed: %s", conf)
+	}
+	// S-3329: a session that sets no identity drops both names of it, and one that sets it keeps both (TS sessionCommand).
+	if conf := SessionConf("ox", "/w", Env{{"STAM_URL", "http://x"}}, []string{"opencode"}); !strings.Contains(conf, "-u MOOTR_AGENT_ID") || !strings.Contains(conf, "-u STAM_AGENT_ID") {
+		t.Fatalf("an unset identity kept: %s", conf)
+	}
+	if conf := SessionConf("a1", "/w", Env{{"STAM_AGENT_ID", "a1"}}, []string{"claude"}); strings.Contains(conf, "-u MOOTR_AGENT_ID") || !strings.Contains(conf, "MOOTR_AGENT_ID=a1") {
+		t.Fatalf("the agent's own identity scrubbed: %s", conf)
+	}
+}
+
+// S-3406: NewShell gives the human's shell none of an agent's identity, under either spelling, the token included. A fake
+// tmux records the env new-session is given, so the test reads what NewShell passes and starts no server.
+func TestNewShellDropsIdentity(t *testing.T) {
+	base := t.TempDir()
+	out := filepath.Join(base, "env")
+	fake := filepath.Join(base, "tmux")
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in *new-session*) /usr/bin/env > '%s';; esac\n", out)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range agentenv.Names() {
+		t.Setenv(name, name+"-secret")
+	}
+	t.Setenv("MOOTR_AGENTS_SKILLS", "skills-secret")
+	t.Setenv("KEEP_SHELL", "kept")
+	c := &Client{Socket: "stam-test-shell", Bin: fake, TempDir: base}
+	if _, err := c.NewShell(context.Background(), base, "m"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellEnv := string(b)
+	for _, name := range agentenv.Names() {
+		if strings.Contains(shellEnv, "\n"+name+"=") || strings.HasPrefix(shellEnv, name+"=") {
+			t.Errorf("%s reached the shell", name)
+		}
+	}
+	if !strings.Contains(shellEnv, "KEEP_SHELL=kept") {
+		t.Error("a name stam does not scrub is kept")
+	}
+	if strings.Contains(shellEnv, "-secret") {
+		t.Error("an identity value reached the shell")
+	}
+}
+
+// TestNewSessionAfterLastKill: a session started right after the last one on the socket was killed starts a fresh
+// server, though the old server may still be exiting when the start connects to it (S-3618).
+func TestNewSessionAfterLastKill(t *testing.T) {
+	c := liveClient(t)
+	ctx := context.Background()
+	for i := range 20 {
+		name := fmt.Sprintf("last-%d", i)
+		if err := c.NewSession(ctx, name, t.TempDir(), Env{{"STAM_AGENT_ID", name}}, []string{"sh", "-c", "exec sleep 300"}); err != nil {
+			t.Fatalf("session %d: %v", i, err)
+		}
+		if !c.HasSession(ctx, name) {
+			t.Fatalf("session %d not running", i)
+		}
+		c.Run(ctx, nil, "kill-session", "-t", "="+name)
+	}
+}
+
+// TestNewShellAfterLastKill: a human's terminal started right after the last session on the socket was killed starts
+// a fresh server, though the old one may still be exiting (S-3618).
+func TestNewShellAfterLastKill(t *testing.T) {
+	c := liveClient(t)
+	ctx := context.Background()
+	for i := range 20 {
+		sh, err := c.NewShell(ctx, t.TempDir(), "test-machine")
+		if err != nil {
+			t.Fatalf("shell %d: %v", i, err)
+		}
+		if !c.HasSession(ctx, sh.ID) {
+			t.Fatalf("shell %d not running", i)
+		}
+		c.Run(ctx, nil, "kill-session", "-t", "="+sh.ID)
+	}
+}
+
+// TestRetryExiting: only the exiting server's error is retried, and retries stop at the deadline.
+func TestRetryExiting(t *testing.T) {
+	ctx := context.Background()
+	t.Run("succeeds after the exit", func(t *testing.T) {
+		tries := 0
+		err := retryExiting(ctx, func() (string, error) {
+			tries++
+			if tries < 3 {
+				return exitingServer, errors.New("exiting")
+			}
+			return "", nil
+		})
+		if err != nil || tries != 3 {
+			t.Fatalf("err %v after %d tries", err, tries)
+		}
+	})
+	t.Run("another error is not retried", func(t *testing.T) {
+		tries := 0
+		err := retryExiting(ctx, func() (string, error) {
+			tries++
+			return "no space left", errors.New("failed")
+		})
+		if err == nil || tries != 1 {
+			t.Fatalf("err %v after %d tries", err, tries)
+		}
+	})
+	t.Run("the deadline ends the retries", func(t *testing.T) {
+		tries := 0
+		start := time.Now()
+		err := retryExiting(ctx, func() (string, error) {
+			tries++
+			return exitingServer, errors.New("exiting")
+		})
+		if err == nil || time.Since(start) < startDeadline || tries < 2 {
+			t.Fatalf("err %v after %d tries in %v", err, tries, time.Since(start))
+		}
+	})
+}
+
+// PanePID: only tmux's own "not there" is gone; a hung or failing tmux is an error, never gone (S-4237).
+func TestPanePIDUncertainty(t *testing.T) {
+	base := t.TempDir()
+	for _, c := range []struct {
+		name, script string
+		pid          int
+		live, failed bool
+	}{
+		{"no session", "echo \"can't find session: _opencode\" >&2; exit 1", 0, false, false},
+		{"no server", "echo 'error connecting to /tmp/tmux-1000/x (No such file or directory)' >&2; exit 1", 0, false, false},
+		{"no server, older tmux", "echo 'no server running on /tmp/tmux-1000/x' >&2; exit 1", 0, false, false},
+		{"refused", "echo 'error connecting to /tmp/tmux-1000/x (Connection refused)' >&2; exit 1", 0, false, true},
+		{"killed", "kill -9 $$", 0, false, true},
+		{"other failure", "echo 'lost server' >&2; exit 1", 0, false, true},
+		{"live", "echo '4242 0'", 4242, true, false},
+		{"dead pane", "echo '4242 1'", 4242, false, false},
+		{"garbage", "echo 'x'", 0, false, true},
+	} {
+		bin := filepath.Join(base, strings.ReplaceAll(c.name, " ", "-"))
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+c.script+"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		pid, live, err := (&Client{Socket: "stam-test-pane", Bin: bin}).PanePID(context.Background(), "_opencode")
+		if pid != c.pid || live != c.live || (err != nil) != c.failed {
+			t.Errorf("%s: %d %v %v; want %d %v, error %v", c.name, pid, live, err, c.pid, c.live, c.failed)
+		}
+	}
+	// A tmux that hangs past the deadline (status -1) is an error too.
+	slow := filepath.Join(base, "slow")
+	if err := os.WriteFile(slow, []byte("#!/bin/sh\nexec sleep 30\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, live, err := (&Client{Socket: "stam-test-pane", Bin: slow}).PanePID(ctx, "_opencode"); live || err == nil {
+		t.Errorf("a hung tmux: live %v, err %v; want an error", live, err)
 	}
 }

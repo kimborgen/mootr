@@ -16,10 +16,9 @@
 import { createHash } from 'node:crypto';
 import * as db from './db.ts';
 import { settings, onSettingsChange } from './settings.ts';
-import { apiKey } from './credits.ts';
 import { recordSpend } from './decide.ts';
-import { complete } from './llm/index.ts';
-import { systemHeld } from './budgets.ts';
+import { complete, parseModelRef } from './llm/index.ts';
+import { askBlocked, spendTo } from './tiny-spend.ts';
 import { configHash } from './config-hash.ts';
 import { toolSummaryConfig, TOOL_SUMMARY_FIELDS, type ToolSummaryConfig } from './tiny-models.ts';
 
@@ -96,7 +95,7 @@ export async function toolSummaries(agent: string, calls: ToolCallIn[], waitMs =
   const summaries: Record<string, ToolSummary> = {};
   const asked: Job[] = [];
   const seen = new Set<string>();
-  const canAsk = on && !!apiKey() && !systemHeld();
+  const canAsk = on && askBlocked(c.model) === null;
   for (const call of calls.slice(0, BATCH_MAX)) {
     if (seen.has(call.id)) continue;
     seen.add(call.id);
@@ -172,10 +171,9 @@ function pump(): void {
 
 async function summarize(j: Job, signal: AbortSignal): Promise<void> {
   const c = j.config;
-  const key = apiKey();
-  // A spent system budget or no OpenRouter key: nothing is asked, and not remembered as failed,
+  // A spent system budget or no key for the model's provider: nothing is asked, and not remembered as failed,
   // so a fixed key or a new budget window summarises the call on a later request.
-  if (systemHeld() || !key) return;
+  if (askBlocked(c.model)) return;
   let data;
   try {
     data = await complete({
@@ -206,8 +204,10 @@ async function summarize(j: Job, signal: AbortSignal): Promise<void> {
     db.addEvent('stam', canceled ? 'tool-summary:canceled' : 'tool-summary:error', { agent: j.agent, call: j.call.id, error: e instanceof Error ? e.message : String(e) });
     return;
   }
-  const model = data.model;
-  recordSpend(PURPOSE, model, data.costUsd ?? 0, data.usage.inputTokens, data.usage.outputTokens);
+  const to = spendTo(parseModelRef(c.model).provider);
+  // A non-default provider's model is kept with its prefix, so the record names who served it.
+  const model = to ? `${to.provider}:${data.model}` : data.model;
+  recordSpend(PURPOSE, model, data.costUsd ?? 0, data.usage.inputTokens, data.usage.outputTokens, to);
   const s = parseToolSummary(data.text, c.maxWords);
   if (!s) {
     failed.add(failedAt(j.key, j.cfg));

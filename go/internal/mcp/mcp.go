@@ -209,7 +209,7 @@ func (s *Server) handle(ctx context.Context, m jsfmt.Value) {
 			jsfmt.Quote(s.instructions)+`}`)
 		s.startStream()
 	case "tools/list":
-		s.reply(id, `{"tools":`+toolList()+`}`)
+		s.reply(id, `{"tools":`+s.toolList(ctx)+`}`)
 	case "tools/call":
 		s.reply(id, s.call(ctx, m))
 	default:
@@ -246,6 +246,11 @@ func (s *Server) call(ctx context.Context, m jsfmt.Value) string {
 	}
 	if args.Kind != jsfmt.Object {
 		return textResult("Error: arguments must be an object", true)
+	}
+	if tool.validate != nil {
+		if err := tool.validate(args); err != nil {
+			return textResult("Error: "+err.Error(), true)
+		}
 	}
 	if verdict := s.checkStep(ctx, tool.name, args); verdict != nil && !verdict.allow {
 		return textResult(verdict.error, true)

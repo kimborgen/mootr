@@ -1,5 +1,5 @@
 // The cell menu's entries for a PR the diff view can open (S-1533): "View diff" and "Open on GitHub" for each PR link of the
-// row whose repo the diff API serves. A plain click on the chip opens the diff; this menu (a right-click on the table cell, a
+// row ("View diff" only where the diff API serves its repo). A plain click on the chip opens the diff; this menu (a right-click on the table cell, a
 // long-press on a phone card's chip) and a modifier-click are the ways to the GitHub page. Pure, so the tests run in node.
 import { prUrlTarget, type DiffRepo } from '../diff/diffRepos'
 import type { DiffRef } from '../diff/diffKey'
@@ -13,8 +13,9 @@ export function prEntries(links: ItsaLink[] | undefined, repos: DiffRepo[]): PrE
   for (const l of links ?? []) {
     if (linkKind(l) !== 'github' || !isPull(l.url)) continue
     const diff = prUrlTarget(repos, l.url)
-    if (!diff) continue
-    out.push({ label: 'View diff', hint: linkLabel(l), url: l.url, diff }, { label: 'Open on GitHub', hint: linkLabel(l), url: l.url })
+    // A PR of a repo the diff API doesn't serve (or before the repos are known) still offers its GitHub page: the phone card's link is an icon, and this menu is where it is named and opened.
+    if (diff) out.push({ label: 'View diff', hint: linkLabel(l), url: l.url, diff })
+    out.push({ label: 'Open on GitHub', hint: linkLabel(l), url: l.url })
   }
   return out
 }

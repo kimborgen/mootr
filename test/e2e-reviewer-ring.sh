@@ -36,9 +36,9 @@ spawn() { human POST /api/agents "$1"; }
 get() { curl -sf -H "authorization: Bearer $TOKEN" "$STAM_URL$1"; }
 pyj() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 # agent NAME FIELD: a field of the agent with that name, empty when there is none.
-agent() { get /api/agents | pyj "next((a['$2'] for a in d if a['name'] == '$1'), '')"; }
+agent() { get "/api/agents?state=all" | pyj "next((a['$2'] for a in d if a['name'] == '$1'), '')"; }
 # live PREFIX: how many agents whose name starts with PREFIX are not archived.
-live_prefix() { get /api/agents | pyj "sum(a['name'].startswith('$1') and a['lifecycle'] != 'archived' for a in d)"; }
+live_prefix() { get "/api/agents?state=all" | pyj "sum(a['name'].startswith('$1') and a['lifecycle'] != 'archived' for a in d)"; }
 # ring NAME FIELD: a field of the ring, empty when there is none.
 ring_field() { curl -s -H "authorization: Bearer $TOKEN" "$STAM_URL/api/rings/$1" | pyj "'' if 'error' in d or d.get('$2') is None else d['$2']"; }
 ring_count() { get /api/rings | pyj "sum(r['name'] == '$1' for r in d)"; }
@@ -66,6 +66,22 @@ R=$(spawn "{\"name\":\"rr1\",\"type\":\"review-ring\",\"cwd\":\"$D\",\"prompt\":
 OUT=$(spawn "{\"name\":\"rr1b\",\"type\":\"review-ring\",\"cwd\":\"$D\"}")
 printf %s "$OUT" | grep -q 'give a prompt' || fail "a ring with no task spawned: $OUT"
 
+echo "-- 1b. each member starts on its type's brief, the task as its topic and the ring's steps, delivered once (S-3926)"
+# The list sends first_prompt as null (S-3808); the detail has it.
+brief() { get "/api/agents/$(agent "$1" id)" | pyj "d.get('first_prompt') or ''"; }
+events() { get "/api/test/events?agent=$(agent "$1" id)&type=$2"; }
+delivered() { [ "$(events "$1" first-prompt:delivered | pyj "len(d)")" -ge 1 ]; }
+for M in rr1-1 rr1-2; do
+  B=$(brief $M)
+  printf %s "$B" | grep -q '^Review: review the patch' || fail "$M has no type brief: $B"
+  printf %s "$B" | grep -q 'member of ring rr1' || fail "$M's brief lacks the ring's steps: $B"
+  ! printf %s "$B" | grep -q 'give your verdict with the `pr_review` tool' || fail "$M's brief has it post its own verdict: $B"
+  [ "$(events $M spawn | pyj "json.loads(d[0]['data'])['prompt']")" = True ] || fail "$M spawned without a prompt"
+  [ "$(events $M first-prompt:pending | pyj "len(d)")" = 1 ] || fail "$M's first prompt isn't recorded as pending"
+  wait_until delivered "$M"
+  [ "$(events $M first-prompt:delivered | pyj "len(d)")" = 1 ] || fail "$M's first prompt went in more than once"
+done
+
 echo "-- 2. a moderator by type, and the format, rounds, and decides from the type"
 settings '{"fire-ring":{"description":"x","harness":"","model":null,"effort":null,"review":{"fallback":"reviewer","ring":{"format":"fire","members":["reviewer","reviewer-opus"],"moderator":{"type":"reviewer-opus","decides":true},"maxRounds":2}}}}'
 R=$(spawn "{\"name\":\"rr2\",\"type\":\"fire-ring\",\"cwd\":\"$D\",\"prompt\":\"decide it\"}")
@@ -79,6 +95,8 @@ R=$(human POST /api/rings "{\"name\":\"rc1\",\"topic\":\"t\",\"format\":\"debate
 [ "$(printf %s "$R" | field name)" = rc1 ] || fail "ring_create: $R"
 [ "$(typeof rc1-1)" = reviewer ] && [ "$(typeof rc1-2)" = reviewer-opus ] && [ "$(typeof rc1-mod)" = reviewer-opus ] || fail "ring_create agent types"
 [ "$(ring_field rc1 format)/$(ring_field rc1 moderator_decides)" = "debate/1" ] || fail "ring_create ring row"
+brief rc1-1 | grep -q '^Review: t' || fail "a ring_create member has no type brief: $(brief rc1-1)"
+brief rc1-mod | grep -q 'moderator of ring rc1' || fail "the ring_create moderator lacks the ring's steps: $(brief rc1-mod)"
 R=$(human POST /api/rings "{\"name\":\"rc2\",\"topic\":\"t\",\"format\":\"rounds\",\"cwd\":\"$D\",\"members\":[\"rc1-1\"],\"spawn\":[{\"type\":\"reviewer-opus\"}],\"moderator\":\"holder\"}")
 [ "$(printf %s "$R" | field name)" = rc2 ] || fail "ring_create with an existing moderator: $R"
 
@@ -98,7 +116,7 @@ R=$(spawn "{\"name\":\"fr\",\"type\":\"fb-ring\",\"cwd\":\"$D\",\"prompt\":\"rev
 printf %s "$R" | field warning | grep -q "didn't start.*can't spawn fr-2" || fail "no reason in the warning: $(printf %s "$R" | field warning)"
 printf %s "$R" | field first_prompt | grep -q 'review it' || fail "fallback reviewer lost the brief"
 [ "$(live_prefix fr-)" = 0 ] || fail "members left running"
-[ "$(agent fr-1 lifecycle)" = archived ] || fail "fr-1 not archived"
+[ "$(agent fr-1 lifecycle)" = archived ] || fail "fr-1 not archived: $(agent fr-1 lifecycle)/$(agent fr-1 activity)/$(agent fr-1 activity_detail); $(events fr-1 % | pyj "[e['type'] for e in d]")"
 [ "$(ring_count fr)" = 0 ] || fail "a ring was left"
 
 echo "-- 6. no fallback: the spawn is refused, nothing is left"
@@ -111,7 +129,7 @@ echo "-- 7. an explicit model, harness, or preset is refused"
 for X in '"model":"claude-sonnet-5-5"' '"harness":"claude"' '"preset":"standard"'; do
   OUT=$(spawn "{\"name\":\"rx\",\"type\":\"review-ring\",\"cwd\":\"$D\",\"prompt\":\"x\",$X}")
   printf %s "$OUT" | grep -q 'takes no harness, model, or preset' || fail "spawned with $X: $OUT"
-  [ "$(get /api/agents | pyj "sum(a['name'].startswith('rx') for a in d)")" = 0 ] || fail "left an agent ($X)"
+  [ "$(get "/api/agents?state=all" | pyj "sum(a['name'].startswith('rx') for a in d)")" = 0 ] || fail "left an agent ($X)"
 done
 echo "-- 8. a member or moderator whose launch fails after its row exists is archived"
 launchfail() { human POST /api/test/launch-fail "{\"names\":$1}" >/dev/null; }

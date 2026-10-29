@@ -73,7 +73,7 @@ test('deny rules > cover the daemon STAM_HOME, given and resolved, not only the 
   symlinkSync(home, link);
   after(() => rmSync(link, { force: true }));
   const d = rules.denyRules(link);
-  const files = ['token', 'peer-token', 'settings.json', 'settings.shared.json', 'settings.json.*', 'opencode.env', 'voice.env', 'mcp-auth.json', 'secrets.json', 'secrets.json.*'];
+  const files = ['token', 'peer-token', 'mcp-lease-token', 'mcp-lease-token.*', 'settings.json', 'settings.shared.json', 'settings.json.*', 'opencode.env', 'voice.env', 'mcp-auth.json', 'secrets.json', 'secrets.json.*'];
   for (const h of [link, home, DEFAULT_STAM_HOME]) {
     for (const f of files) assert.ok(d.includes(`Read(/${h}/${f})`), `${h}/${f}`);
   }
@@ -82,7 +82,7 @@ test('deny rules > cover the daemon STAM_HOME, given and resolved, not only the 
 
 test('deny rules > Edit and Write refuse the secret files too, not only Read (S-1888)', () => {
   const d = rules.denyRules();
-  for (const f of ['token', 'peer-token', 'settings.json', 'settings.json.*', 'opencode.env', 'voice.env', 'mcp-auth.json', 'secrets.json', 'secrets.json.*']) {
+  for (const f of ['token', 'peer-token', 'mcp-lease-token', 'settings.json', 'settings.json.*', 'opencode.env', 'voice.env', 'mcp-auth.json', 'secrets.json', 'secrets.json.*']) {
     for (const tool of ['Edit', 'Write']) assert.ok(d.includes(`${tool}(/${DEFAULT_STAM_HOME}/${f})`), `${tool} ${f}`);
   }
 });

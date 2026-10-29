@@ -51,7 +51,7 @@ function fakeApi({ s1 = null, cos = 'cos', agents = [], events = {} } = {}) {
       mails.push(body);
       return {};
     }
-    if (method === 'GET' && path === '/api/agents') return agents;
+    if (method === 'GET' && path === '/api/agents?state=all') return agents;
     const ev = path.match(/^\/api\/agents\/([^/]+)\/events\?type=([^&]+)&limit=1$/);
     if (method === 'GET' && ev) {
       const got = events[`${ev[1]} ${ev[2]}`];

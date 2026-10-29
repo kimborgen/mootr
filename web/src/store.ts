@@ -1,5 +1,5 @@
 // The daemon's data the UI shows. The live stream (S-457) applies agent, ITSA, mail, and
-// usage events as they arrive; the fallback polls run agents every 2 s, pending permission
+// usage events as they arrive; the fallback polls run live agents every 2 s (archived ones every minute), pending permission
 // requests every 2 s, ITSAs every 4 s (15 s while connected), the human's threads and rings
 // every 8 s, each machine's load every 5 s. Components read it with useData().
 import { useSyncExternalStore } from 'react'
@@ -7,9 +7,9 @@ import { api, setKnownOrigins } from './api'
 import { rearmMailTitles } from './mail/mail-titles'
 import { rearmToolSummaries } from './mail/tool-summaries'
 import { rearmToolNames } from './mail/tool-names'
-import { live } from './format'
+import { isPlacedAsk, live } from './format'
 import { onLiveEvent } from './live'
-import type { Agent, CostMode, DecisionMail, Itsa, ItsaAttention, ItsaQueueRow, ItsaStatus, Machine, Permission, PlainShell, Ring, Thread, Thresholds } from './types'
+import type { Agent, Ask, CostMode, DecisionMail, Itsa, ItsaAttention, ItsaQueueRow, ItsaStatus, Machine, Permission, PlainShell, Ring, Thread, Thresholds } from './types'
 
 export interface Data {
   agents: Agent[]
@@ -58,6 +58,8 @@ export interface Data {
   attention: ItsaAttention[]
   // The agents' mail to the human that holds a decision and waits for their reply, oldest first.
   decisions: DecisionMail[]
+  // The Needs you list (GET /api/asks): open asks, then those settled in the last day.
+  asks: Ask[]
   // The merge queue (GET /api/itsas/queue): ready_to_merge ITSAs with a branch link.
   queue: ItsaQueueRow[]
   itsaError: string | null
@@ -71,7 +73,7 @@ export interface Data {
 let polled: Data = {
   agents: [], perms: [], delegateDialogs: [], rings: [], humanThreads: [], humanArchived: [], humanDeferred: [], openThreads: [], rapidWith: {}, unread: 0, machine: '',
   thresholds: { warnTokens: 300000, instructTokens: 400000, enforceTokens: 500000 }, agentView: 'conversation', assistantDefault: 'assistant', promptDefaultMode: 'mail', mailOpens: 'inbox', costMode: 'api',
-  shells: [], error: null, mailTick: 0, booted: false, loaded: { agents: false, mail: false, itsas: false }, itsas: [], itsaStatuses: [], attention: [], decisions: [], queue: [], itsaError: null, machines: [],
+  shells: [], error: null, mailTick: 0, booted: false, loaded: { agents: false, mail: false, itsas: false }, itsas: [], itsaStatuses: [], attention: [], decisions: [], asks: [], queue: [], itsaError: null, machines: [],
 }
 let data = polled
 const overlays = new Map<number, (d: Data) => Data>()
@@ -129,6 +131,12 @@ export function threadWaitsOnHuman(tid: string, d: Data = data): boolean {
 export const isArchivedThread = (tid: string) => data.humanArchived.some((t) => t.thread_id === tid)
 export const isDeferredThread = (tid: string) => data.humanDeferred.some((t) => t.thread_id === tid)
 export const permThread = (pid: string) => [...data.humanThreads, ...data.humanDeferred].find((t) => t.mails.some((m) => m.permission_id === pid))?.thread_id
+// The thread a request started, so the request's row stands for it; none for an ask placed in another thread (S-3827),
+// whose thread holds other work the human is asked about.
+export const ownPermThread = (pid: string) => {
+  const t = [...data.humanThreads, ...data.humanDeferred].find((t) => t.mails.some((m) => m.permission_id === pid))
+  return t && !t.mails.some((m) => m.permission_id === pid && isPlacedAsk(m)) ? t.thread_id : undefined
+}
 
 const fresh = new Set<() => void>()
 // Runs after each fast refresh that changed something (the tree view follows the tree).
@@ -260,19 +268,69 @@ export async function refresh() {
   await Promise.all([refreshAgents(), refreshPerms()])
 }
 
+// Keeps each agent's object from `prev` when its data is unchanged (S-3292), so a memoised row
+// redraws only for an agent that changed. Returns `prev` itself when nothing did.
+function keepUnchanged(prev: Agent[], next: Agent[]): Agent[] {
+  const before = new Map(prev.map((a) => [a.id, a]))
+  let changed = next.length !== prev.length
+  const out = next.map((a, i) => {
+    const p = before.get(a.id)
+    if (p && (p === a || JSON.stringify(p) === JSON.stringify(a))) {
+      if (prev[i] !== p) changed = true
+      return p
+    }
+    changed = true
+    return a
+  })
+  return changed ? out : prev
+}
+
+// The archived agents (S-3816): ~99% of the registry and none of them change, so the 2 s poll asks only for live and
+// stopped ones, and the archived come apart, at most every ARCHIVED_EVERY ms or as soon as a known agent leaves the
+// poll (it was archived). They sit behind the live ones in `agents`, so a view still finds an archived sender or owner
+// by id, and the first load waits for both, so no name shows as its id meanwhile.
+export const ARCHIVED_EVERY = 60_000
+let archived: Agent[] = []
+let archivedAt: number | null = null
+// The ids the last poll listed, to see one leave (once: a peer that went down doesn't refetch on every poll).
+let lastListed = new Set<string>()
+
 // The agent list. The live stream carries agent changes, but a poll still covers a missed
 // one, and the spawn/archive events come through here.
 export async function refreshAgents() {
   const startedAt = agentSeq
   try {
-    const listed = await api<Agent[]>('GET', '/api/agents')
-    // Re-apply an agent change that landed while this fetch was in flight.
-    const agents = listed.map((a) => {
+    const listed = await api<Agent[]>('GET', '/api/agents?state=live,stopped')
+    const here = new Set(listed.map((a) => a.id))
+    const left = [...lastListed].some((id) => !here.has(id))
+    lastListed = here
+    let read = false
+    if (archivedAt === null || left || Date.now() - archivedAt >= ARCHIVED_EVERY) {
+      // A failed read keeps the last archived set and tries again after 10 s (an agent that left waits for it).
+      try {
+        archived = await api<Agent[]>('GET', '/api/agents?state=archived')
+        archivedAt = Date.now()
+        read = true
+      } catch {
+        // Retry in 10 s, not on every 2 s poll; the live agents above are already in `listed`.
+        archivedAt = Date.now() - (ARCHIVED_EVERY - 10_000)
+      }
+    }
+    // Between reads, an archived row is the one shown now, so what the stream changed on it since the read stays.
+    if (!read) {
+      const shown = new Map(polled.agents.map((x) => [x.id, x]))
+      archived = archived.map((x) => { const s = shown.get(x.id); return s?.lifecycle === 'archived' ? s : x })
+    }
+    // Re-apply an agent change that landed while this fetch was in flight. A live row wins over an archived one.
+    const agents = keepUnchanged(polled.agents, [...listed, ...archived.filter((a) => !here.has(a.id))].map((a) => {
       const e = agentPatches.get(a.id)
       return e && e.seq > startedAt ? { ...a, ...e.patch } : a
-    })
+    }))
+    // The kept objects, so the next poll compares an unchanged archived agent by identity, not JSON.
+    const kept = new Map(agents.slice(listed.length).map((x) => [x.id, x]))
+    archived = archived.map((x) => kept.get(x.id) ?? x)
     const first = loadedOnce('agents')
-    if (JSON.stringify(agents) !== JSON.stringify(polled.agents) || polled.error || Object.keys(first).length) {
+    if (agents !== polled.agents || polled.error || Object.keys(first).length) {
       setData({ agents, error: null, ...first })
       for (const fn of fresh) fn()
     }
@@ -328,13 +386,15 @@ let slowApplied = 0
 export async function refreshSlow() {
   const seq = ++slowSeq
   try {
-    const [threads, archived, deferred, rs, decisions, rapidWith] = await Promise.all([
+    const [threads, archived, deferred, rs, decisions, rapidWith, asks] = await Promise.all([
       api<Thread[]>('GET', '/api/agents/human/threads?limit=60'),
       api<Thread[]>('GET', '/api/agents/human/threads?limit=60&archived=1'),
       api<Thread[]>('GET', '/api/agents/human/threads?limit=60&deferred=1'),
       api<Ring[]>('GET', '/api/rings'),
       api<DecisionMail[]>('GET', '/api/mail/decisions'),
       fetchRapid(),
+      // A daemon that predates the Needs you list has no route: keep the list empty rather than failing the refresh.
+      api<Ask[]>('GET', '/api/asks').catch((): Ask[] => []),
     ])
     if (seq < slowApplied) return
     slowApplied = seq
@@ -343,7 +403,8 @@ export async function refreshSlow() {
     const rings = rs.filter((r) => r.status !== 'done' && (JSON.parse(r.members || '[]') as string[]).some((id) => { const a = byId(id); return a && live(a) }))
     const changed = JSON.stringify(threads) !== JSON.stringify(polled.humanThreads) || JSON.stringify(archived) !== JSON.stringify(polled.humanArchived) || JSON.stringify(deferred) !== JSON.stringify(polled.humanDeferred) || JSON.stringify(rings) !== JSON.stringify(polled.rings) || JSON.stringify(rapidWith) !== JSON.stringify(polled.rapidWith)
     const decided = JSON.stringify(decisions) !== JSON.stringify(polled.decisions)
-    setData({ ...(changed ? { humanThreads: threads, humanArchived: archived, humanDeferred: deferred, rapidWith, unread, rings } : {}), ...(decided ? { decisions } : {}), ...loadedOnce('mail'), mailTick: polled.mailTick + 1 })
+    const asked = JSON.stringify(asks) !== JSON.stringify(polled.asks)
+    setData({ ...(changed ? { humanThreads: threads, humanArchived: archived, humanDeferred: deferred, rapidWith, unread, rings } : {}), ...(decided ? { decisions } : {}), ...(asked ? { asks } : {}), ...loadedOnce('mail'), mailTick: polled.mailTick + 1 })
   } catch {}
 }
 

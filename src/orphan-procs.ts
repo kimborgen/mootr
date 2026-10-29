@@ -7,9 +7,10 @@ import { execFile } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, posix } from 'node:path';
 import { readdir, readFile, readlink, stat } from 'node:fs/promises';
-import { DEFAULT_STAM_HOME } from './config.ts';
+import { DEFAULT_HOMES } from './config.ts';
 import { procStart, stopProcesses } from './proctree.ts';
 import { envVar, entryValue } from './env.ts';
+import { agentKill } from './agent-exec.ts';
 import { testHome } from './test-env.ts';
 import { promisify } from 'node:util';
 
@@ -129,9 +130,7 @@ export async function sweepOrphanProcs(liveDirs: string[], dryRun = false): Prom
   const picked = orphanTestPids(procs, liveDirs).map((pid) => byPid.get(pid)!);
   if (!dryRun) {
     for (const p of picked) {
-      try {
-        process.kill(p.pid, 'SIGTERM');
-      } catch {}
+      agentKill(p.pid, 'SIGTERM');
     }
   }
   return picked.map((p) => ({ pid: p.pid, cmd: p.cmd.slice(0, 120), ageS: p.ageS }));
@@ -190,7 +189,7 @@ export function orphanTestDaemons(procs: ProcInfo[], liveRunDirs: string[], minA
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   for (const p of procs) {
     if (p.pid <= 1 || p.ageS < minAgeS || !DAEMON.test(p.cmd)) continue;
-    if (!p.home || p.home === DEFAULT_STAM_HOME || !inTestRoot(p.home, roots)) continue;
+    if (!p.home || DEFAULT_HOMES.includes(p.home) || !inTestRoot(p.home, roots)) continue;
     const legacy = !p.testHome && p.legacy && p.ageS >= LEGACY_MIN_AGE_S && legacyProvenance(p, roots);
     if (!p.testHome && !legacy) continue;
     if (p.ppid !== 1 && !p.reaper) continue;

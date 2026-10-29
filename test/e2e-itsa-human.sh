@@ -82,7 +82,11 @@ api POST "/api/itsas/$KEY/post" "{\"by\":\"$ALICE\",\"body\":\"Fixed the flag.\"
 api PATCH "/api/itsas/$KEY" "{\"status\":\"needs_review\",\"by\":\"$ALICE\"}" >/dev/null
 sleep 1
 [ "$(asks "$KEY")" = 2 ] || fail "re-entering a human status didn't ask again"
-api POST "/api/itsas/$KEY/act" '{"action":"approve","text":""}' human >/dev/null || fail "Approve failed"
+# Approve carries the revision of the text it was shown (S-2998): none, or a stale one, is refused with 409.
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -H 'x-stam-human: 1' -d '{"action":"approve","text":""}' "$STAM_URL/api/itsas/$KEY/act")" = 409 ] || fail "Approve without if_rev wasn't refused with 409"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -H 'x-stam-human: 1' -d '{"action":"approve","text":"","if_rev":"0000000000000000"}' "$STAM_URL/api/itsas/$KEY/act")" = 409 ] || fail "Approve with a stale if_rev wasn't refused with 409"
+REV=$(api GET "/api/itsas/$KEY" | jget "d['rev']")
+api POST "/api/itsas/$KEY/act" "{\"action\":\"approve\",\"text\":\"\",\"if_rev\":\"$REV\"}" human >/dev/null || fail "Approve failed"
 sleep 1
 [ "$(api GET "/api/itsas/$KEY" | jget "d['status']")" = ready_to_merge ] || fail "Approve didn't move needs_review to ready_to_merge"
 [ "$(asks "$KEY")" = 2 ] || fail "ready_to_merge asked the human"
@@ -106,6 +110,7 @@ json.dump(s, open(sys.argv[1], "w"))
 PY
 KEY3=$("$STAM" itsa new "Override e2e" --owner alice --status needs_test | awk '{print $1}')
 [ "$(api GET "/api/itsas/$KEY3" | jget "[(a['label'], a['to']) for a in d['actions']]")" = "[('Ship it', 'deploying')]" ] || fail "settings.itsa.actions didn't override"
-api POST "/api/itsas/$KEY3/act" '{"action":"approve","text":""}' human >/dev/null || fail "the overridden action failed"
+REV=$(api GET "/api/itsas/$KEY3" | jget "d['rev']")
+api POST "/api/itsas/$KEY3/act" "{\"action\":\"approve\",\"text\":\"\",\"if_rev\":\"$REV\"}" human >/dev/null || fail "the overridden action failed"
 [ "$(api GET "/api/itsas/$KEY3" | jget "d['status']")" = deploying ] || fail "the overridden action didn't move it"
 echo "PASS: itsa-human e2e"

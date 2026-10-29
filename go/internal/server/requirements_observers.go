@@ -325,21 +325,25 @@ func (s *Server) childNoticesOf(mode string) string {
 	return s.settings.Get().ChildNotices
 }
 
-// sendFromStam is src/mail.ts sendFromStam: mail from stam itself, standing in as the oldest active agent (else the oldest).
-func (s *Server) sendFromStam(ctx context.Context, to []string, subject, body string) bool {
-	id, ok, err := s.db.FirstActiveAgentID(ctx)
-	if err == nil && !ok {
-		id, ok, err = s.db.FirstAgentID(ctx)
+// sendFromSystemMail is src/mail.ts sendFromSystemMail: stam's own mail from the system:NAME sender, in a new thread,
+// marked as stam's (a notice, not gated or checked), as sendMail marks every system sender's mail; with the mail's id.
+func (s *Server) sendFromSystemMail(ctx context.Context, name string, to []string, subject, body string) (string, bool) {
+	m, err := s.send(ctx, &sendIn{system: name, hasSystem: true, to: to, subject: subject, body: body, newThread: true, fromStam: true, inferred: map[string]bool{}})
+	if err != nil {
+		return "", false
 	}
-	if err != nil || !ok {
-		return false
-	}
-	_, err = s.send(ctx, &sendIn{from: id, fromShown: id, to: to, subject: subject, body: body, newThread: true, fromStam: true, inferred: map[string]bool{}})
-	return err == nil
+	return m.Text("id"), true
 }
 
-// capNotice is src/req-check.ts capNotice: one notice a day when the cap stops checks. Stam's own mail goes to the chief of
-// staff when there is one, else to the human, held back by the human's mail settings like the other stam notices.
+// sendFromSystem is src/mail.ts sendFromSystem: sendFromSystemMail without the id.
+func (s *Server) sendFromSystem(ctx context.Context, name string, to []string, subject, body string) bool {
+	_, ok := s.sendFromSystemMail(ctx, name, to, subject, body)
+	return ok
+}
+
+// capNotice is src/req-check.ts capNotice: one notice a day when the cap stops checks. Mail from system:requirements goes
+// to the chief of staff when there is one, else to the human, held back by the human's mail settings like the other stam
+// notices.
 func (s *Server) capNotice(ctx context.Context, spent, cap float64) {
 	s.capMu.Lock()
 	defer s.capMu.Unlock()
@@ -356,9 +360,9 @@ func (s *Server) capNotice(ctx context.Context, spent, cap float64) {
 	body := fmt.Sprintf("Requirement checks stopped for today: they spent $%s of the $%s daily cap (settings.requirements.dailyCapUsd). Verdicts already stored still count; nothing new is recorded until tomorrow or the cap is raised.", steps.ToFixed(spent, 4), jsjson.Number(cap))
 	subject := "[stam] Requirement checks reached the daily cap"
 	if cos := s.chiefOfStaffID(ctx); cos != "" {
-		go s.sendFromStam(context.WithoutCancel(ctx), []string{cos}, subject, body)
+		go s.sendFromSystem(context.WithoutCancel(ctx), "requirements", []string{cos}, subject, body)
 	} else if s.settings.Get().HumanMail.Allows("important") {
-		go s.sendFromStam(context.WithoutCancel(ctx), []string{humanBox}, subject, body)
+		go s.sendFromSystem(context.WithoutCancel(ctx), "requirements", []string{humanBox}, subject, body)
 	}
 }
 

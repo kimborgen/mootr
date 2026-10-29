@@ -5,8 +5,8 @@
 import { Icon } from '../Icon'
 import { TABS } from '../SidebarPanes'
 import {
-  activate, addPane, defaultPanes, MAX_PANES, movePane, moveTab, removePane, removeTab, sendTab, setSidebarPanes, setTabBar,
-  TAB_BARS, unusedTabs, useSidebarPanes, type TabBar,
+  activate, addPane, MAX_PANES, movePane, moveTab, removePane, removeTab, revertToMootrDefault, revertToUserDefault, saveUserDefault, sendTab, setSidebarPanes, setTabBar,
+  TAB_BARS, unusedTabs, useHasUserDefault, useSidebarPanes, type TabBar,
 } from '../sidebar-panes'
 
 const KNOWN = Object.keys(TABS)
@@ -15,6 +15,7 @@ const label = (id: string) => TABS[id]?.label ?? id
 
 export function SidebarSettings() {
   const { panes, tabBar } = useSidebarPanes(KNOWN)
+  const hasDefault = useHasUserDefault()
   const unused = unusedTabs(panes, KNOWN)
   const total = panes.reduce((n, p) => n + p.tabs.length, 0)
   return (
@@ -78,7 +79,12 @@ export function SidebarSettings() {
           </li>))}</ul> : <p className="muted">Every tab is in a pane.</p>}
       </div>
       <div className="sbs-foot">
-        <button type="button" className="btn" id="sidebar-reset" onClick={() => { setSidebarPanes(defaultPanes()); setTabBar('compact') }}><Icon name="rotate-ccw" />Reset to default</button>
+        <p className="muted">The layout above is your current one. Save it as your default, and revert to it, or to mootr's, whenever you like. Reverting changes only the sidebar.</p>
+        <div className="sbs-defaults">
+          <button type="button" className="btn" id="sidebar-save-default" onClick={saveUserDefault}><Icon name="check" />Save current as my default</button>
+          <button type="button" className="btn" id="sidebar-revert-user" disabled={!hasDefault} title={hasDefault ? undefined : 'No default saved yet'} onClick={() => { revertToUserDefault() }}><Icon name="rotate-ccw" />Revert to my default</button>
+          <button type="button" className="btn" id="sidebar-reset" onClick={revertToMootrDefault}><Icon name="rotate-ccw" />Revert to mootr's default</button>
+        </div>
       </div>
     </div>
   )

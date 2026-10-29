@@ -232,7 +232,12 @@ const full = (w: Win, now: number) => w.pct >= 100 && (w.resets_at == null || w.
 
 // One evaluation per account at a time, in arrival order.
 const chains = new Map<string, Promise<void>>();
+// A call from outside the wake timer is new input, so an overdue wake that already fired may fire again.
 export function evaluateRules(account: string, trigger: Trigger = {}, now: number = Date.now()): Promise<void> {
+  firedLate.delete(account);
+  return enqueue(account, trigger, now);
+}
+function enqueue(account: string, trigger: Trigger, now: number): Promise<void> {
   const next = (chains.get(account) ?? Promise.resolve()).then(() => evaluate(account, trigger, now)).catch((e) => {
     console.error(`cost rules for ${account}:`, e);
   });
@@ -579,6 +584,11 @@ const RESET_PASSED = 'its reset time passed; no fresh reading confirmed it';
 // gets one immediate re-evaluation, so a deadline that passed while a pause was delivered
 // isn't lost.
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+// The longest delay a timer takes; a wake further out re-arms at each cap. Tests lower it.
+let maxTimerMs = 2 ** 31 - 1;
+export function setMaxTimer(ms: number): void {
+  maxTimerMs = ms;
+}
 const dues = new Map<string, number>();
 const firedLate = new Map<string, number>();
 // When the account's timer next evaluates, or null: tests check a hold's wake-up.
@@ -610,12 +620,18 @@ function schedule(account: string, steps: Step[], now: number): void {
   // An overdue wake fires once. The mark is set when the timer fires, not here: a later
   // evaluation may replace a timer that never ran, and that wake must still happen.
   if (due <= wall && firedLate.get(account) === due) return;
+  const capped = due - wall > maxTimerMs;
   const t = setTimeout(() => {
     timers.delete(account);
     dues.delete(account);
-    firedLate.set(account, due);
-    void evaluateRules(account);
-  }, Math.min(Math.max(0, due - wall), 2 ** 31 - 1));
+    // Only the deadline wake counts as fired; a capped one may be evaluated short of the due time.
+    // Only the deadline wake counts as fired; a capped one may be evaluated short of the due time.
+    if (!capped) firedLate.set(account, due);
+    // A wake armed for the deadline itself is never evaluated earlier than it: a timer can fire a
+    // millisecond early, or the evaluation can wait behind a pause delivery, and a `now` short of the
+    // deadline would leave the wake marked fired. A capped wake evaluates at real time and re-arms.
+    void enqueue(account, {}, capped ? Date.now() : Math.max(Date.now(), due));
+  }, Math.min(Math.max(0, due - wall), maxTimerMs));
   t.unref?.();
   timers.set(account, t);
   dues.set(account, due);

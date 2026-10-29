@@ -10,39 +10,38 @@
 // Decide returns a Failure and records a `decide:error` event that names its cause. No key, token or header value is ever in
 // a failure's text or a log line.
 //
+// The budgets come in through Options: Held refuses a call once its provider's system budget is spent (src/budgets.ts
+// providerHeld), and LedgerChanged has the budgets evaluated after a call with a cost (ledgerChanged).
+//
+// A response's cost is billed money, so it is added to the reconcile's exact pending total (src/reconcile.ts
+// addExactPending), which the OpenRouter ledger's reconciliation takes out of the bill first.
+//
 // Not ported: a model on another provider (settings.providers: OpenAI-compatible, Azure, Bedrock, and the completion-based
-// askByCompletion they use) fails with a cause that says so, and a system budget (cost.accounts.openrouter-system.budget)
-// is not measured against the ledger, so a daemon with one makes no call and fails with a cause that says so. A response's
-// cost is not added to the reconcile pending total or the budget evaluation either (logged once when it is not zero).
+// askByCompletion they use) fails with a cause that says so.
 package decide
 
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
 
 	"stam/internal/config"
 	"stam/internal/jsfmt"
 	"stam/internal/jsjson"
+	"stam/internal/llm"
+	"stam/internal/secrets"
 )
 
 // DefaultTimeout is a decide call's, 20 seconds.
 const DefaultTimeout = 20 * time.Second
-
-// retryAfterMax caps a Retry-After header at 5 minutes.
-const retryAfterMax = 5 * time.Minute
 
 // Question is one question to the model: a noul (P(yes)), a choice among Criteria's keys, or a score with labels.
 type Question struct {
@@ -127,6 +126,7 @@ type Failure struct {
 type Events interface {
 	AddEvent(ctx context.Context, agentID, typ string, data any) error
 	RecordDecideSpend(ctx context.Context, purpose string, cost float64, tokensIn, tokensOut int64) error
+	AddExactPending(ctx context.Context, usd float64) error
 }
 
 // Options is what a Client needs from the daemon.
@@ -138,13 +138,16 @@ type Options struct {
 	Getenv func(string) string
 	// HTTP is the client for the calls; nil is a client with no timeout of its own (each call has its deadline).
 	HTTP *http.Client
+	// Held is why a call through the provider may not run now, its system budget spent, or ""; nil holds nothing.
+	Held func(provider string) string
+	// LedgerChanged runs after a call's cost is recorded, when it isn't zero; nil runs nothing.
+	LedgerChanged func()
 }
 
 // Client asks the decision model.
 type Client struct {
-	o          Options
-	client     *http.Client
-	costWarned sync.Once
+	o      Options
+	client *http.Client
 }
 
 // New returns a Client.
@@ -169,7 +172,7 @@ func (c *Client) base() string {
 // HasKey is whether stam's own OpenRouter key is set, so a caller can skip a call that cannot be made.
 func (c *Client) HasKey() bool { return c.key() != "" }
 
-func (c *Client) key() string { return keyFor(c.o.Home, "OPENROUTER_API_KEY", c.o.Getenv) }
+func (c *Client) key() string { return secrets.KeyFor(c.o.Home, "OPENROUTER_API_KEY", c.o.Getenv) }
 
 // provider is the provider a `provider:model` name means: a prefix that is a configured provider, else OpenRouter, which
 // takes the whole string (its ids hold colons: `meta-llama/llama-3:free`).
@@ -200,10 +203,12 @@ func (c *Client) Decide(ctx context.Context, state jsjson.Value, questions []Nam
 	if key == "" {
 		return nil, &Failure{Kind: "other", Error: "no API key"}
 	}
-	if set.SystemBudget {
-		return nil, c.fail(ctx, purpose, Failure{Kind: "other", Error: "cost.accounts.openrouter-system has a budget, and measuring it against the ledger is not ported to the Go daemon yet"})
+	if c.o.Held != nil {
+		if held := c.o.Held(prov); held != "" {
+			return nil, c.fail(ctx, purpose, Failure{Kind: "other", Error: held})
+		}
 	}
-	if !checkCredential(key) {
+	if !secrets.CheckCredential(key) {
 		return nil, c.fail(ctx, purpose, Failure{Kind: "other", Error: "invalid API key"})
 	}
 	if timeout <= 0 {
@@ -247,7 +252,7 @@ func (c *Client) post(ctx context.Context, key string, body []byte, timeout time
 	req.Header.Set("content-type", "application/json")
 	res, err := c.client.Do(req)
 	if err != nil {
-		return jsfmt.Value{}, &Failure{Kind: "other", Error: "request failed: " + transportCode(err)}
+		return jsfmt.Value{}, &Failure{Kind: "other", Error: "request failed: " + llm.TransportCode(err)}
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode > 299 {
@@ -257,7 +262,7 @@ func (c *Client) post(ctx context.Context, key string, body []byte, timeout time
 		} else if res.StatusCode >= 500 {
 			kind = "server"
 		}
-		ra, hasRA := retryAfter(res.Header.Get("retry-after"))
+		ra, hasRA := llm.RetryAfter(res.Header.Get("retry-after"))
 		return jsfmt.Value{}, &Failure{Kind: kind, Status: res.StatusCode, RetryAfter: ra, HasRetryAfter: hasRA, Error: fmt.Sprintf("HTTP %d", res.StatusCode)}
 	}
 	raw, err := io.ReadAll(res.Body)
@@ -270,47 +275,6 @@ func (c *Client) post(ctx context.Context, key string, body []byte, timeout time
 		return jsfmt.Value{Kind: jsfmt.Null}, nil
 	}
 	return v, nil
-}
-
-// transportCode is the cause's code (ECONNREFUSED) or the error's name (TimeoutError, AbortError), as send rethrows it.
-func transportCode(err error) string {
-	var dns *net.DNSError
-	switch {
-	case errors.Is(err, context.DeadlineExceeded):
-		return "TimeoutError"
-	case errors.Is(err, context.Canceled):
-		return "AbortError"
-	case errors.Is(err, syscall.ECONNREFUSED):
-		return "ECONNREFUSED"
-	case errors.Is(err, syscall.ECONNRESET):
-		return "ECONNRESET"
-	case errors.As(err, &dns):
-		return "ENOTFOUND"
-	}
-	return "Error"
-}
-
-// retryAfter is src/llm/http.ts retryAfterMs: seconds, or an HTTP date, capped at 5 minutes. It is false when the header is
-// absent or unreadable.
-func retryAfter(h string) (time.Duration, bool) {
-	if h == "" {
-		return 0, false
-	}
-	var d time.Duration
-	if secs, err := strconv.ParseFloat(h, 64); err == nil {
-		d = time.Duration(secs * float64(time.Second))
-	} else if t, err := http.ParseTime(h); err == nil {
-		d = time.Until(t)
-	} else {
-		return 0, false
-	}
-	if d < 0 {
-		d = 0
-	}
-	if d > retryAfterMax {
-		d = retryAfterMax
-	}
-	return d, true
 }
 
 // fail records the failure as a `decide:error` event, which names its cause, and returns it.
@@ -333,10 +297,10 @@ func (c *Client) recordSpend(ctx context.Context, purpose, model string, cost fl
 	if err := c.o.Events.RecordDecideSpend(ctx, purpose, cost, tokensIn, tokensOut); err != nil {
 		slog.Warn("decide: the spend was not recorded", "purpose", purpose)
 	}
-	if cost > 0 {
-		c.costWarned.Do(func() {
-			slog.Warn("decide: a call with a cost was recorded, but the reconcile total and the budget evaluation are not ported to the Go daemon yet")
-		})
+	// The response's own cost is billed money: the reconciliation takes it out of the bill before it scales OpenCode's.
+	// Every call here is OpenRouter's (a model on another provider fails before the call).
+	if err := c.o.Events.AddExactPending(ctx, cost); err != nil {
+		slog.Warn("decide: the exact pending cost was not recorded", "purpose", purpose)
 	}
 	data := struct {
 		Purpose   string  `json:"purpose"`
@@ -347,6 +311,10 @@ func (c *Client) recordSpend(ctx context.Context, purpose, model string, cost fl
 	}{purpose, model, cost, tokensIn, tokensOut}
 	if err := c.o.Events.AddEvent(ctx, "stam", "decide", data); err != nil {
 		slog.Warn("decide: the event was not recorded", "purpose", purpose)
+	}
+	// Stam's own calls count against the global budget (and the system account's).
+	if cost > 0 && c.o.LedgerChanged != nil {
+		c.o.LedgerChanged()
 	}
 }
 

@@ -89,6 +89,75 @@ func (o *Object) Keys() []string {
 	return append(idx, rest...)
 }
 
+// Delete removes key, as `delete o[k]` does; a later Set puts it last.
+func (o *Object) Delete(key string) {
+	if o == nil {
+		return
+	}
+	if _, ok := o.vals[key]; !ok {
+		return
+	}
+	delete(o.vals, key)
+	for i, k := range o.keys {
+		if k == key {
+			o.keys = append(o.keys[:i:i], o.keys[i+1:]...)
+			break
+		}
+	}
+}
+
+// Clone is a deep copy of v, as structuredClone of a parsed value.
+func Clone(v Value) Value {
+	switch x := v.(type) {
+	case []Value:
+		out := make([]Value, len(x))
+		for i, e := range x {
+			out[i] = Clone(e)
+		}
+		return out
+	case *Object:
+		out := NewObject()
+		for _, k := range x.keys {
+			out.Set(k, Clone(x.vals[k]))
+		}
+		return out
+	}
+	return v
+}
+
+// Equal is node:util isDeepStrictEqual for parsed values: the same values with the same keys, in any order.
+func Equal(a, b Value) bool {
+	switch x := a.(type) {
+	case []Value:
+		y, ok := b.([]Value)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !Equal(x[i], y[i]) {
+				return false
+			}
+		}
+		return true
+	case *Object:
+		y, ok := b.(*Object)
+		if !ok || x.Len() != y.Len() {
+			return false
+		}
+		for _, k := range x.keys {
+			w, has := y.vals[k]
+			if !has || !Equal(x.vals[k], w) {
+				return false
+			}
+		}
+		return true
+	case float64:
+		y, ok := b.(float64)
+		return ok && (x == y || (math.IsNaN(x) && math.IsNaN(y)))
+	}
+	return a == b
+}
+
 // arrayIndex is whether k is a canonical array index (0 to 2^32-2), which JavaScript orders before other keys.
 func arrayIndex(k string) bool {
 	if k == "" || len(k) > 10 || (len(k) > 1 && k[0] == '0') {

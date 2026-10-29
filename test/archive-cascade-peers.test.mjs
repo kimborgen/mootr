@@ -5,6 +5,7 @@
 // grandchild whose parent sits on another machine is reached on the next round. Throwaway
 // STAM_HOME, fake harness, no models: `node --test test/archive-cascade-peers.test.mjs`.
 import { test, before, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -48,7 +49,7 @@ await new Promise((r) => goneServer.close(r));
 const url = (s) => `http://127.0.0.1:${s.address().port}`;
 writeFileSync(
   join(home, 'settings.json'),
-  JSON.stringify({ peers: [{ name: 'ok', url: url(okPeer), token: 't' }, { name: 'bad', url: url(badPeer), token: 't' }, { name: 'gone', url: `http://127.0.0.1:${gonePort}`, token: 't' }] }),
+  JSON.stringify({ peers: [{ name: 'ok', url: url(okPeer), token: 'test-peer-token' }, { name: 'bad', url: url(badPeer), token: 'test-peer-token' }, { name: 'gone', url: `http://127.0.0.1:${gonePort}`, token: 'test-peer-token' }] }),
 );
 
 let db, lifecycle, daemon;
@@ -66,7 +67,7 @@ before(async () => {
   };
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   for (const s of [okPeer, badPeer]) s.closeAllConnections(), s.close();
   rmSync(home, { recursive: true, force: true });
 });

@@ -1,4 +1,5 @@
 import { test, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
@@ -12,7 +13,7 @@ process.env.STAM_TMUX_SOCKET = SOCKET;
 const tmux = await import('../src/tmux.ts');
 const run = (...args) => execFileSync('tmux', ['-L', SOCKET, ...args], { encoding: 'utf8' });
 const sessions = () => run('display-message', '-p', '#{server_sessions}').trim();
-after(() => spawnSync('tmux', ['-L', SOCKET, 'kill-server']));
+after(() => killTmuxServer(SOCKET));
 
 test('no server: no server and no sessions', () => {
   assert.deepEqual(tmux.snapshot(), { server: null, dead: new Map(), activity: new Map(), pane: new Map() });

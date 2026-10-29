@@ -88,7 +88,7 @@ func TestDaemonLifecycle(t *testing.T) {
 	port := freePort(t)
 	vars := map[string]string{
 		"STAM_HOME": home, "STAM_PORT": port, "STAM_MACHINE": "life-machine", "STAM_STAMD_BIN": bin,
-		"STAM_BIND": "127.0.0.1", "STAM_TOKEN": token, "STAM_AGENT_ID": "someagent", "STAM_AGENT_NAME": "x",
+		"STAM_BIND": "127.0.0.1", "STAM_TOKEN": token, "STAM_AGENT_ID": "someagent", "STAM_AGENT_NAME": "x", "MOOTR_AGENT_ID": "someagent",
 		// A socket of the test's own: stamd's reconcile and kill call tmux, and the default socket is the live one.
 		"STAM_TMUX_SOCKET": testSocket(t),
 	}
@@ -120,7 +120,7 @@ func TestDaemonLifecycle(t *testing.T) {
 	}
 	cmdline, _ := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
 	environ, _ := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/environ")
-	if strings.Contains(string(cmdline), token) || strings.Contains(string(environ), token) || strings.Contains(string(environ), "STAM_AGENT_ID") {
+	if strings.Contains(string(cmdline), token) || strings.Contains(string(environ), token) || strings.Contains(string(environ), "STAM_AGENT_ID") || strings.Contains(string(environ), "MOOTR_AGENT_ID") {
 		t.Error("the token or the agent's identity reached stamd")
 	}
 	if _, err := os.Stat(filepath.Join(home, "daemon.log")); err != nil {

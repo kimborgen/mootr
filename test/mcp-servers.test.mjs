@@ -17,6 +17,8 @@ process.env.STAM_TMUX_SOCKET = `mcp-servers-test-${process.pid}`;
 // Nothing here talks to a daemon; drop pointers to the live one anyway.
 for (const k of ['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT']) delete process.env[k];
 
+// The agent's own identity and token, as Codex forwards them: each STAM_ name with its MOOTR_ twin (S-3345).
+const AGENT_ENV_NAMES = ['STAM_AGENT_ID', 'MOOTR_AGENT_ID', 'STAM_URL', 'MOOTR_URL', 'STAM_TOKEN', 'MOOTR_TOKEN'];
 const CTX_SECRET = 'ctx-secret-5f3a';
 const REMOTE_SECRET = 'Bearer remote-secret-9b2c';
 const OAUTH_SECRET = 'oauth-secret-7d1e';
@@ -85,7 +87,8 @@ test('codex > overrides carry names, the environment carries the values', () => 
   const { overrides, env } = codex.codexMcpServers();
   assert.deepEqual(overrides['mcp_servers.ctx'], { command: '/usr/bin/echo', args: ['hi'], env_vars: ['CTX_API_KEY'] });
   assert.deepEqual(overrides['mcp_servers.remote'], { url: 'https://mcp.example.com/mcp', env_http_headers: { Authorization: 'STAM_MCP_REMOTE_AUTHORIZATION' } });
-  assert.deepEqual(overrides['mcp_servers.auth'], { command: STAM_BIN, args: ['mcp-proxy', 'auth'], env_vars: ['STAM_AGENT_ID', 'STAM_URL', 'STAM_TOKEN'] }, 'an auth server is the stdio proxy');
+  // Each STAM_ name carries its MOOTR_ twin (S-3345): the agent's own identity and token, nothing else.
+  assert.deepEqual(overrides['mcp_servers.auth'], { command: STAM_BIN, args: ['mcp-proxy', 'auth'], env_vars: AGENT_ENV_NAMES }, 'an auth server is the stdio proxy');
   assert.equal(overrides['mcp_servers.off'], undefined);
   assert.deepEqual(env, { CTX_API_KEY: CTX_SECRET, STAM_MCP_REMOTE_AUTHORIZATION: REMOTE_SECRET });
   const onArgv = JSON.stringify(overrides);
@@ -103,6 +106,13 @@ test('codex > the launch script puts the values in the app-server environment, n
   assert.ok(!script.includes(OAUTH_SECRET), 'the client secret reaches the Codex launch script');
   assert.ok(!script.includes('mcp_servers.off='), 'a disabled server reaches no harness');
   assert.ok(script.includes('"env_vars"=["CTX_API_KEY"]'), script);
+  // stam's own server gets the agent's STAM_ names with their MOOTR_ twins (S-3345), and no other MOOTR_ name.
+  const stamServer = script.match(/mcp_servers\.stam=\{[^}]*\}/)?.[0] ?? '';
+  assert.ok(stamServer.includes(`"env_vars"=[${AGENT_ENV_NAMES.map((n) => `"${n}"`).join(',')}]`), stamServer);
+  // Codex's default tool timeout is 60 s; pr_review waits up to 190 s, so stam's server gets more (S-3596).
+  assert.ok(stamServer.includes('"tool_timeout_sec"=240'), stamServer);
+  const mootrNames = script.match(/MOOTR_[A-Z_]+/g) ?? [];
+  assert.ok(mootrNames.every((n) => AGENT_ENV_NAMES.includes(n)), `a MOOTR_ name beyond the agent's twins: ${mootrNames}`);
   assert.ok(script.includes('"env_http_headers"={"Authorization"="STAM_MCP_REMOTE_AUTHORIZATION"}'), script);
   // The values are the app-server's environment, set by this script and nothing else.
   assert.ok(script.includes(`CTX_API_KEY=${CTX_SECRET}`) || script.includes(`CTX_API_KEY='${CTX_SECRET}'`), script);

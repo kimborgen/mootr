@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { bezAt, flightRoute, routeAt, type Bez } from './flights'
-import { bestColumns, columnLayout, columnWidth, descendants, packLayout, treeLayout, type TreeIn, type Wire } from './layout'
+import { agentBadgeRows, agentCardHeight, agentFootRows, bestColumns, columnLayout, columnWidth, descendants, nestedRows, packLayout, treeLayout, type TreeIn, type Wire } from './layout'
+import { defaultCardLayout } from '../card-layout'
 
 const DIMS = { w: 200, h: 100, gapX: 20, gapY: 50, indent: 20, rowGap: 10 }
 // human > cos > (release, mgr > (dev1, dev2, review), lead > (sub > (x)))
@@ -375,5 +376,46 @@ describe('columnLayout (Cards on a phone)', () => {
 
   it('leaves a folded manager\'s team out', () => {
     expect(columnLayout(NODES, DIMS, new Set(['mgr'])).pos.has('dev1')).toBe(false)
+  })
+})
+
+describe('agent card height (S-1438 PR 4)', () => {
+  it('is today\'s card with the default layout: one nested row, so the base height, and it moves a row per nested row', () => {
+    const rows = nestedRows(defaultCardLayout('issue'), defaultCardLayout('agent'))
+    expect(rows).toBe(1)
+    expect(agentCardHeight(96, 16, rows)).toBe(96)
+    expect(agentCardHeight(96, 16, 2)).toBe(112)
+    expect(agentCardHeight(96, 16, 0)).toBe(80)
+  })
+
+  it('is 96 px for the default agent layout, read through its own rows (PR 8)', () => {
+    const agent = defaultCardLayout('agent')
+    expect(agentCardHeight(96, 16, nestedRows(defaultCardLayout('issue'), agent), agentBadgeRows(agent), agentFootRows(agent))).toBe(96)
+  })
+
+  it('shrinks by one row for an empty BADGES, and for an empty FOOT, with no row left drawn (PR 8; the PR 4 code gives 96 for both)', () => {
+    expect(agentCardHeight(96, 16, 1, 0, 1)).toBe(80)
+    expect(agentCardHeight(96, 16, 1, 1, 0)).toBe(80)
+    expect(agentCardHeight(96, 16, 0, 0, 0)).toBe(48)
+    const agent = { ...defaultCardLayout('agent'), slots: { ...defaultCardLayout('agent').slots, BADGES: [], FOOT: [] } }
+    expect(agentBadgeRows(agent)).toBe(0)
+    expect(agentFootRows(agent)).toBe(0)
+    expect(agentCardHeight(96, 16, 1, agentBadgeRows(agent), agentFootRows(agent))).toBe(64)
+  })
+
+  it('counts the nested rows: the issue layout\'s BADGES and FOOT add one each, and an ISSUE slot left out adds none', () => {
+    const agent = defaultCardLayout('agent')
+    const issue = { ...defaultCardLayout('issue'), slots: { TOP: [], META: [], BADGES: ['status'], FOOT: ['updated'] } }
+    expect(nestedRows(issue, agent)).toBe(3)
+    expect(nestedRows(issue, { ...agent, slots: { ...agent.slots, ISSUE: [] } })).toBe(0)
+  })
+
+  it('draws no row for an owner alone, or for a BADGES item the agent card already draws (it draws once, on the agent card)', () => {
+    const agent = { ...defaultCardLayout('agent'), slots: { ...defaultCardLayout('agent').slots, BADGES: ['health', 'field:stage'] } }
+    const owner = { ...defaultCardLayout('issue'), slots: { TOP: [], META: [], BADGES: ['owner'], FOOT: ['owner'] } }
+    expect(nestedRows(owner, agent)).toBe(1)
+    const shared = { ...defaultCardLayout('issue'), slots: { TOP: [], META: [], BADGES: ['field:stage'], FOOT: [] } }
+    expect(nestedRows(shared, agent)).toBe(1)
+    expect(nestedRows({ ...shared, slots: { ...shared.slots, BADGES: ['field:stage', 'field:other'] } }, agent)).toBe(2)
   })
 })

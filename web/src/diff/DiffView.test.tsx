@@ -489,11 +489,14 @@ describe('go to declaration', () => {
     vi.stubGlobal('IntersectionObserver', class { constructor(_cb: unknown, o: IntersectionObserverInit) { opts.push(o) } observe() {} unobserve() {} disconnect() {} takeRecords() { return [] } })
     const host = await mount()
     const main = host.querySelector<HTMLElement>('.dv-main')!
-    expect(opts.length).toBeGreaterThan(0)
-    for (const o of opts) {
-      expect(o.root).toBe(main)
-      expect(o.rootMargin).toBe('800px 0px')
-    }
+    // The observer is made in an effect after the list draws, so mount() returning does not mean it exists yet.
+    await vi.waitFor(() => {
+      expect(opts.length).toBeGreaterThan(0)
+      for (const o of opts) {
+        expect(o.root).toBe(main)
+        expect(o.rootMargin).toBe('800px 0px')
+      }
+    })
   })
 })
 

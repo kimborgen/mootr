@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
-import { dialogNames, dialogTarget, dialogDetails, dialogKey } from '../src/adapters/claude-dialog.ts';
+import { dialogNames, dialogTarget, dialogDetails, dialogKey, dialogPrompt, dialogQuestion, questionNames } from '../src/adapters/claude-dialog.ts';
 
 const read = (path) => ['Read file', '', `  Read(${path})`, '', 'Do you want to proceed?', '❯ 1. Yes', '  2. No'];
 const LONG = 'echo ' + 'a'.repeat(60);
@@ -89,4 +89,51 @@ test('no one-time yes fails closed', () => {
 test('a no asks again next time when the dialog offers it, else Esc', () => {
   assert.equal(dialogKey(REAL, false), '3');
   assert.equal(dialogKey(read('/a/b'), false), undefined);
+});
+
+// A question dialog (AskUserQuestion, S-3978): a choice is typed only when the screen shows its one
+// question with its options in order, so a different question, a changed option, or a second question
+// fails closed.
+const ASK = { questions: [{ question: 'Which folder should I use?', options: [{ label: 'Alpha' }, { label: 'Beta' }] }] };
+const ASKED = ['─'.repeat(40), 'Which folder should I use?', '❯ 1. Alpha', '  2. Beta', 'Enter to confirm · Esc to cancel'];
+
+test('a question dialog names its one question and its option labels', () => {
+  assert.deepEqual(dialogQuestion(ASK), { question: 'Which folder should I use?', options: ['Alpha', 'Beta'] });
+  assert.equal(dialogQuestion({ questions: [ASK.questions[0], ASK.questions[0]] }), undefined);
+  assert.equal(dialogQuestion({}), undefined);
+  assert.equal(dialogQuestion({ questions: [{ question: 'Pick?', options: [{ label: '' }] }] }), undefined);
+});
+
+// dialogPrompt is the looser shape a no matches (S-3978 review): a multi-select question and repeated labels are still
+// the dialog's own, so their text and labels name it; several questions and an unlabelled option are not.
+test('a deny\'s prompt keeps a multi-select question or repeated labels, and still refuses several questions', () => {
+  assert.deepEqual(dialogPrompt({ questions: [{ question: 'Pick?', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] }] }), { question: 'Pick?', options: ['A', 'B'], multiSelect: true });
+  assert.deepEqual(dialogPrompt({ questions: [{ question: 'Pick?', options: [{ label: 'A' }, { label: 'A' }] }] }), { question: 'Pick?', options: ['A', 'A'], multiSelect: false });
+  assert.equal(dialogPrompt({ questions: [ASK.questions[0], ASK.questions[0]] }), undefined);
+  assert.equal(dialogPrompt({ questions: [{ question: 'Pick?', options: [{ label: '' }] }] }), undefined);
+});
+
+test('the screen must show the request\'s question and options, in order', () => {
+  assert.equal(questionNames(ASKED, 'Which folder should I use?', ['Alpha', 'Beta']), true);
+  // Wrapped question text and box borders still match.
+  assert.equal(questionNames(['│ Which folder should I │', '│ use?                    │', '│ ❯ 1. Alpha              │', '│   2. Beta               │'], 'Which folder should I use?', ['Alpha', 'Beta']), true);
+});
+
+test('a different question, a changed or reordered option, or a missing one fails closed', () => {
+  assert.equal(questionNames(ASKED, 'Which region should I use?', ['Alpha', 'Beta']), false);
+  assert.equal(questionNames(ASKED, 'Which folder should I use?', ['Alpha', 'Gamma']), false);
+  assert.equal(questionNames(ASKED, 'Which folder should I use?', ['Beta', 'Alpha']), false);
+  assert.equal(questionNames(ASKED, 'Which folder should I use?', ['Alpha', 'Beta', 'Gamma']), false);
+  assert.equal(questionNames(['Which folder should I use?', '❯ 1. Alpha'], 'Which folder should I use?', ['Alpha', 'Beta']), false);
+  assert.equal(questionNames([], 'Which folder should I use?', ['Alpha']), false);
+});
+
+// A multi-select question toggles an option per digit, so a typed choice would not answer it (S-3978), and
+// two options with one label would type the first one's number: neither is a question stam answers.
+test('a multi-select question, or one with a repeated label, is not a question stam answers', () => {
+  const single = { question: 'Which folder?', options: [{ label: 'Alpha' }, { label: 'Beta' }] };
+  assert.notEqual(dialogQuestion({ questions: [single] }), undefined);
+  assert.equal(dialogQuestion({ questions: [{ ...single, multiSelect: true }] }), undefined);
+  assert.notEqual(dialogQuestion({ questions: [{ ...single, multiSelect: false }] }), undefined);
+  assert.equal(dialogQuestion({ questions: [{ question: 'Which folder?', options: [{ label: 'Alpha' }, { label: 'Alpha' }] }] }), undefined);
 });

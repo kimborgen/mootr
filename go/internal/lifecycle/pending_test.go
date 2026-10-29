@@ -30,7 +30,7 @@ func (l *live) idle(id string) {
 // hook reports a Claude Code hook for the agent, as POST /api/hook/claude/:id does.
 func (l *live) hook(id, event string) {
 	l.t.Helper()
-	if _, err := l.life.OnHook(l.ctx, "claude", l.agent(id), jsjson.NewObject("hook_event_name", event)); err != nil {
+	if _, err := l.life.OnHook(l.ctx, "claude", l.agent(id), jsjson.NewObject("hook_event_name", event), new([]int64)); err != nil {
 		l.t.Fatal(err)
 	}
 }

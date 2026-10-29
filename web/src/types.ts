@@ -73,6 +73,8 @@ export interface Agent {
   // Set while the agent rests: its harness is stopped and its session kept. It stays live and wakes on mail, a notice or a prompt.
   resting?: Resting | null
   pending_requests?: number
+  // The key of the open ask it waits on (GET /api/asks), when it waits on one (S-3977); null or absent otherwise.
+  open_ask?: string | null
   // Whether the agent is in at least one open ITSA (step 10); false only when it is in none.
   in_itsa?: boolean
   // What stam's own view of its conversation offers (S-78), or null when it has none.
@@ -150,6 +152,8 @@ export interface Mail {
   from_name?: string | null
   subject?: string | null
   body: string
+  // Where the body holds the ITSA text it showed the human, in UTF-16 units, as the daemon recorded it (S-2998).
+  shown?: { at: number; len: number }
   recipients: Recipient[]
   attachments?: Attachment[]
   created_at: string
@@ -302,6 +306,25 @@ export interface DecisionMail {
   deferred?: boolean
 }
 
+// One row of the Needs you list (GET /api/asks, S-3831): an open ask, or one settled in the last day.
+export interface Ask {
+  key: string
+  kind: 'request' | 'dialog' | 'settings' | 'input' | 'itsa' | 'decision'
+  state: 'open' | 'settled'
+  // Settled only: approved, denied, typed, failed, expired, withdrawn, answered or superseded.
+  outcome: string | null
+  // One line: a permission's kind label, an ITSA's title, or a decision mail's subject.
+  what: string
+  agent_id: string | null
+  agent_name: string | null
+  // The daemon (home) that holds the ask: a machine name.
+  machine: string
+  thread_id: string | null
+  itsa_id: string | null
+  since: string
+  settled_at: string | null
+}
+
 export interface ItsaLink {
   n: number
   system: string
@@ -386,6 +409,8 @@ export interface ItsaView extends Itsa {
   children: (Itsa & { rollup: Rollup })[]
   events?: ItsaEvent[]
   actions?: ItsaAction[]
+  // The revision of its text (title, summary, body): Approve sends it back as if_rev (S-2998).
+  rev?: string
 }
 
 // GET /api/retros (S-162): the open retro items ranked by +1s, the effort split per model and

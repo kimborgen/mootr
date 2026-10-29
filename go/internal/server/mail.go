@@ -5,25 +5,28 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"slices"
+	"sort"
 	"strconv"
 
 	"stam/internal/auth"
 	"stam/internal/db"
 	"stam/internal/jsfmt"
+	"stam/internal/peers"
 )
 
 // The mail reads of src/daemon.ts (S-2824): GET /api/agents/:id/inbox, POST /api/agents/:id/read and GET
-// /api/threads/:id, for this daemon's own mail. Not ported: the fan-out to peers (the Go daemon has none yet), the ITSA
-// thread rules (a thread that belongs to an ITSA answers 501 to an agent), the permission request a mail carries (the
-// `permission` member is left out), and the read hold a test can set.
+// /api/threads/:id. A thread read adds the peers' part (S-3734). Not ported: the fan-out of the human's read to peers.
 
 // mailRoutes registers the mail routes, in this file so the routes of other modules don't collide with them.
 func (s *Server) mailRoutes() {
 	s.handle("GET /api/agents/{id}/inbox", s.inbox)
 	s.handle("POST /api/agents/{id}/read", s.readMail)
 	s.handle("GET /api/threads/{id}", s.thread)
+	s.handle("GET /api/mail/{id}", s.mailRoute)
 	s.sendRoutes()
+	s.threadRoutes()
 }
 
 // mailboxID is src/daemon.ts mailboxId: the human, or the id of the agent named; 404 for no such agent.
@@ -73,10 +76,27 @@ func (s *Server) inbox(r *http.Request, c auth.Resolved) (any, error) {
 	q := r.URL.Query()
 	limit := number(q.Get("limit"), q.Has("limit"), 20)
 	rows, err := s.db.Inbox(ctx, box, q.Get("unread") == "1", limit)
+	if err != nil {
+		return nil, err
+	}
 	if rows == nil {
 		rows = []jsfmt.Value{}
 	}
-	return rows, err
+	// The human's mail lives on whichever machine it was sent from: the peers' join, newest first, cut to the limit. A
+	// peer's own request is its own box only.
+	if box != humanBox || c.Local {
+		return rows, nil
+	}
+	path := r.URL.EscapedPath()
+	if r.URL.RawQuery != "" {
+		path += "?" + r.URL.RawQuery
+	}
+	rows = append(rows, s.peers.FanOut(ctx, path, s.viaOf(ctx, c))...)
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Text("created_at") > rows[j].Text("created_at") })
+	if limit >= 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
 }
 
 // jsonBody reads a request body as a JSON object; an empty body is {}.
@@ -107,6 +127,11 @@ func (s *Server) readMail(r *http.Request, c auth.Resolved) (any, error) {
 	body, err := jsonBody(r)
 	if err != nil {
 		return nil, err
+	}
+	// A test may hold this mailbox's read until it releases it (POST /api/test/read-hold); the read then finishes even
+	// if its client is gone.
+	if s.readHeld(box) {
+		ctx = context.WithoutCancel(ctx)
 	}
 	// An agent's read carries a batch id (its MCP client, S-357): the mail is handed out in it and stays owed until a
 	// batch holding it is acknowledged; the batch the client last got a reply to is acknowledged here.
@@ -147,6 +172,9 @@ func (s *Server) readMail(r *http.Request, c auth.Resolved) (any, error) {
 		ev.Set("at", jsfmt.StringValue(at))
 		_ = s.hub.Emit("mail.read", ev)
 	}
+	if box == humanBox && len(fresh) > 0 {
+		s.nudgeAutoArchive()
+	}
 	if mails == nil {
 		mails = []jsfmt.Value{}
 	}
@@ -179,17 +207,38 @@ func (s *Server) viewerBox(ctx context.Context, c auth.Resolved, raw string) (st
 		if !errors.Is(err, db.ErrNotFound) {
 			return "", err
 		}
-		me := c.Caller.Agent
-		if c.Caller.Kind != auth.Agent || !(id == me || c.Caller.Boss || s.chiefOfStaffID(ctx) == me || s.isAssistant(ctx, me)) {
-			who := "the OpenCode server"
-			if c.Caller.Kind == auth.Agent {
-				who = s.agentLabel(ctx, me)
-			}
-			return "", Errorf(http.StatusForbidden, "%s can't act as %s", who, id)
-		}
-		return id, nil
+		return id, s.mayActAsRemote(ctx, c, id)
 	}
 	return id, s.mayActAs(ctx, c.Caller, id, false)
+}
+
+// mayActAsRemote is src/daemon.ts mayActAsRemote: may the caller act for a box on another machine (S-263)? The caller
+// itself, a boss (here, or forwarded by a peer as its boss), the chief of staff and the assistant may; otherwise only a
+// parent of the box, which the box's own daemon confirms by answering a probe of its inbox as the caller (via). Anything
+// else, a peer answering for another id, or a peer that doesn't answer is a 403, before anything is read here. The
+// OpenCode server names only its own agents.
+func (s *Server) mayActAsRemote(ctx context.Context, c auth.Resolved, id string) error {
+	me := c.Caller.Agent
+	who := "the OpenCode server"
+	if c.Caller.Kind == auth.Agent {
+		who = s.agentLabel(ctx, me)
+	}
+	refuse := Errorf(http.StatusForbidden, "%s can't act as %s", who, id)
+	if c.Caller.Kind != auth.Agent {
+		return refuse
+	}
+	if id == me || c.Caller.Boss || s.chiefOfStaffID(ctx) == me || s.isAssistant(ctx, me) {
+		return nil
+	}
+	hit, found, err := s.peers.Locate(ctx, s.db, id)
+	if err != nil || found != peers.Found || hit.Peer == nil || hit.Agent.ID != id {
+		return refuse
+	}
+	r, err := s.peers.Call(ctx, *hit.Peer, http.MethodGet, "/api/agents/"+neturl.PathEscape(id)+"/inbox?limit=0", nil, peers.DefaultTimeout, false, s.viaOf(ctx, c))
+	if err != nil || r.Status != http.StatusOK {
+		return refuse
+	}
+	return nil
 }
 
 func (s *Server) thread(r *http.Request, c auth.Resolved) (any, error) {
@@ -201,10 +250,8 @@ func (s *Server) thread(r *http.Request, c auth.Resolved) (any, error) {
 	// The id may be any mail in the thread, such as one cited in a brief (S-448); a peer is handed the thread id itself.
 	tid := r.PathValue("id")
 	if !c.Local {
-		if t, err := s.db.MailThreadOf(ctx, tid); err != nil {
+		if tid, err = s.threadOfMail(ctx, tid, box, s.viaBox(ctx, c, box)); err != nil {
 			return nil, err
-		} else if t != "" {
-			tid = t
 		}
 	}
 	// A viewer reads only its own part of a thread, except one it may read whole.
@@ -218,11 +265,41 @@ func (s *Server) thread(r *http.Request, c auth.Resolved) (any, error) {
 			scope = s.boxRef(ctx, box)
 		}
 	}
-	rows, err := s.db.ThreadMail(ctx, tid, scope)
+	rows, err := s.threadMail(ctx, tid, scope)
+	if err != nil {
+		return nil, err
+	}
 	if rows == nil {
 		rows = []jsfmt.Value{}
 	}
-	return rows, err
+	if c.Local {
+		return rows, nil
+	}
+	// A whole thread is asked of the peers without the box, as the ITSA thread reads do.
+	path := "/api/threads/" + tid
+	if scope != "" {
+		path = withBox(path, box)
+	}
+	all := foldMails(append(rows, s.peers.FanOut(ctx, path, s.viaBox(ctx, c, box))...))
+	if all == nil {
+		all = []jsfmt.Value{}
+	}
+	byCreated(all)
+	return all, nil
+}
+
+// threadOfMail is src/daemon.ts threadOfMail: the thread a mail is in, asked of the peers when this daemon doesn't hold it,
+// else the id itself.
+func (s *Server) threadOfMail(ctx context.Context, id, box string, via *peers.Via) (string, error) {
+	if t, err := s.db.MailThreadOf(ctx, id); err != nil || t != "" {
+		return t, err
+	}
+	if rows := s.peers.FanOut(ctx, withBox("/api/mail/"+id+"/thread", box), via); len(rows) > 0 {
+		if t := rows[0].Text("thread_id"); t != "" {
+			return t, nil
+		}
+	}
+	return id, nil
 }
 
 // mayReadWholeThread is src/mail-visibility.ts mayReadWholeThread: a thread the agent was granted (by the box itself), a

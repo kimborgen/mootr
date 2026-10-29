@@ -40,7 +40,10 @@ checks() {
   W=$1; H1="authorization: Bearer $TOKEN"
   [ "$(code -X POST -H "$H1" -H "$J" -H 'x-stam-human: 1' -d '{"title":"strict probe"}' "$URL/api/itsas")" = "$W" ] || fail "ITSA create as the human wasn't $W: $(cat "$TEST_TMP/body")"
   [ "$(code -X POST -H "$H1" -H "$J" -H 'x-stam-human: 1' -d "{\"from\":\"human\",\"to\":\"$A\",\"subject\":\"s\",\"body\":\"b\"}" "$URL/api/mail")" = "$W" ] || fail "mail from human wasn't $W: $(cat "$TEST_TMP/body")"
-  [ "$(code -X POST -H "$H1" -H "$J" -d "{\"from\":\"human\",\"forwarded\":{\"from_name\":\"x\"},\"to\":\"$A\",\"subject\":\"s\",\"body\":\"b\"}" "$URL/api/mail")" = "$W" ] || fail "mail from human forwarded by the shared token wasn't $W: $(cat "$TEST_TMP/body")"
+  # Mail from the human forwarded by the shared token: refused under strict. With strict off TS allows it (and logs
+  # the line below), while the Go daemon refuses it always (docs/migration/README.md), so either is accepted there.
+  FWD=$(code -X POST -H "$H1" -H "$J" -d "{\"from\":\"human\",\"forwarded\":{\"from_name\":\"x\"},\"to\":\"$A\",\"subject\":\"s\",\"body\":\"b\"}" "$URL/api/mail")
+  [ "$FWD" = "$W" ] || { [ "$W" = 200 ] && [ "$FWD" = 403 ]; } || fail "mail from human forwarded by the shared token wasn't $W: $(cat "$TEST_TMP/body")"
   [ "$(code -X POST -H "$H1" -H "$J" -d '{"kind":"x"}' "$URL/api/agents/$A/waits")" = "$W" ] || fail "a wait with no by wasn't $W: $(cat "$TEST_TMP/body")"
   [ "$(code -X POST -H "$H1" -H "$J" -d '{}' "$URL/api/agents/$A/threads/t1/archive")" = "$W" ] || [ "$W" = 200 ] || fail "a thread archive with no by wasn't $W: $(cat "$TEST_TMP/body")"
   [ "$(code -X POST -H "$H1" -H "$J" -d '{"name":"spawned","harness":"none"}' "$URL/api/agents")" = "$W" ] || [ "$W" = 200 ] || fail "a spawn with no by wasn't $W: $(cat "$TEST_TMP/body")"
@@ -64,7 +67,7 @@ echo "-- strict off: the old rule stands, and the log names what strict would re
 checks 200
 grep -qF "$OFF_LOG POST /api/itsas " "$LOG" || fail "no would-refuse line for the ITSA create"
 [ "$(grep -cF "$OFF_LOG POST /api/itsas " "$LOG")" = 1 ] || fail "the would-refuse line wasn't logged once"
-grep -qF "$OFF_LOG forwarded mail from the human, not from a peer" "$LOG" || fail "no line for forwarded mail from the human"
+[ "$FWD" = 403 ] || grep -qF "$OFF_LOG forwarded mail from the human, not from a peer" "$LOG" || fail "no line for forwarded mail from the human"
 grep -qF "$OFF_LOG waits with no by" "$LOG" || fail "no line for a wait with no by (sent without x-stam-human)"
 grep -qF "$OFF_LOG agent control with no by" "$LOG" || fail "no line for agent control with no by"
 grep -qF "$OFF_LOG thread archive with no by" "$LOG" || fail "no line for a thread archive with no by"

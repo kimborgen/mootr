@@ -10,7 +10,7 @@ import { render, withFailureRetro } from './templates.ts';
 import { sendMail, queueNotice, holdingPushes, HUMAN } from './mail.ts';
 import { admit } from './admission.ts';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { testOnlyEnv } from './test-env.ts';
 import { parseProviderConfig } from './llm/openai.ts';
@@ -24,7 +24,10 @@ import * as budgets from './budgets.ts';
 import { unifiedDiff } from './textdiff.ts';
 import { adapters } from './adapters/index.ts';
 import { inputProblem, bashInputRecorded } from './adapters/claude-input.ts';
-import { withdrawQuietly } from './withdraw.ts';
+import { dialogQuestion } from './adapters/claude-dialog.ts';
+import { withdrawFromHuman, withdrawQuietly } from './withdraw.ts';
+import { askHome, NO_HOME_HINT, overrideNote, placement, postAskLink, type Home, type HomeInput } from './ask-home.ts';
+import { ASK_NOTE, isPlacedAsk } from './mail-visibility.ts';
 import { announceTreeIdle, syncChildrenWaits } from './org.ts';
 
 function reviewers(a: db.Agent): string[] {
@@ -74,41 +77,76 @@ export function dialogMail(requester: string, told: string[], action: string, de
     : '';
   try { const j = JSON.parse(details); if (j && typeof j === 'object') { tool = typeof j.tool === 'string' ? j.tool : tool; input = j.input && typeof j.input === 'object' ? j.input : {}; } } catch { return { line: `wants an answer to this dialog: ${action}`, shown: fenced(details), why: fallbackWhy, seen, subject: `Permission: ${action}`, next }; }
   const target = typeof input.command === 'string' ? input.command : typeof input.file_path === 'string' ? input.file_path : typeof input.url === 'string' ? input.url : typeof input.pattern === 'string' ? input.pattern : '';
-  const line = tool === 'Bash' ? 'wants to run a shell command.' : target ? `wants to use ${tool} with this input.` : `wants to use ${tool}.`;
-  const shown = target ? fenced(target, 'bash') : fenced(JSON.stringify(input, null, 2), 'json');
-  const why = typeof input.description === 'string' && input.description.trim() ? input.description.trim() : "Claude Code gave no reason with this dialog; ask the agent, or read its last message in its terminal.";
+  // A question dialog shows its question and options, numbered as the choice is typed (S-3978).
+  const q = tool === 'AskUserQuestion' ? dialogQuestion(input) : undefined;
+  const line = q ? 'asks a question, with these options.' : tool === 'Bash' ? 'wants to run a shell command.' : target ? `wants to use ${tool} with this input.` : `wants to use ${tool}.`;
+  const shown = q ? fenced([q.question, '', ...q.options.map((o, i) => `${i + 1}. ${o}`)].join('\n')) : target ? fenced(target, 'bash') : fenced(JSON.stringify(input, null, 2), 'json');
+  const why = typeof input.description === 'string' && input.description.trim() ? input.description.trim() : "The harness gave no reason with this dialog; ask the agent, or read its last message in its terminal.";
   // The subject says what is happening, so the mail list reads without opening the mail.
-  const subject = `${requester} ${tool === 'Bash' && target ? 'wants to run' : 'asks to use ' + tool}${target ? ': ' + target.replace(/\s+/g, ' ') : ''}`;
+  const subject = q ? `${requester} asks: ${q.question.replace(/\s+/g, ' ')}` : `${requester} ${tool === 'Bash' && target ? 'wants to run' : 'asks to use ' + tool}${target ? ': ' + target.replace(/\s+/g, ' ') : ''}`;
   return { line, shown, why, seen, subject: subject.length > 90 ? subject.slice(0, 89) + '…' : subject, next };
 }
 const DELEGATE_WAIT = 'your parent or the chief of staff';
 // Why a dialog went on to the human by itself, after settings.dialogEscalateMinutes.
 const timedOutWhy = (n: number) => (n > 0 ? `nobody answered within ${n} minute${n === 1 ? '' : 's'}` : "stam's settings send dialogs on without waiting for an answer");
 
+// Why a request can't be sent, or null when it can (S-3203): a blank action reached the human as an
+// empty ask. `toHuman` is whether the request reaches the human, which a delegate ask does when nobody
+// can decide it. Every caller of POST /api/permissions and requestPermission goes through this first, so
+// a refused request stores no row, sends no mail and makes no notice.
+export function askRefusal(action: unknown, reason: unknown, toHuman: boolean): string | null {
+  if (!String(action ?? '').trim()) return 'request_permission: `action` is required (what you need to do, in one line; put the exact command in `details`)';
+  if (toHuman && !String(reason ?? '').trim()) return 'request_permission: `reason` is required when the request reaches your user (why only your user\'s consent unblocks it)';
+  return null;
+}
+
+// askRefusal for this agent's ask, routed as requestPermission routes it: a delegate ask with a live reviewer
+// goes to that reviewer, and anything else reaches the human.
+export function refusalFor(a: db.Agent, action: unknown, reason: unknown, audience: unknown, payload = false): string | null {
+  const delegate = audience === 'delegate' && !payload && liveReviewers(a).length > 0;
+  return askRefusal(action, reason, !delegate);
+}
+
 // A settings change is always the human's; so is a delegate ask nobody can decide. A delegated
 // harness dialog lets the reviewers deny or escalate it, never approve it (answerDialog).
-export async function requestPermission(a: db.Agent, action: string, reason: string, details: string, dialog = false, extra: { payload?: string; fence?: string } = {}, audience: db.PermissionRequest['audience'] = 'human'): Promise<Omit<db.PermissionRequest, 'payload'>> {
+// `extra.home` names the ask's home thread (ask-home.ts, S-3827): an ask that reaches the human joins it, and one
+// without a home is refused before anything is stored. `extra.tool` names the tool in that refusal.
+// The result carries `hint` when the ask found no home, telling the agent how to name one next time.
+// Test seam (S-3979): awaited after an ask's row exists and before its mail is stored, so a test can close the request in that window.
+export const askMailHold: { before?: () => Promise<void> } = {};
+
+export async function requestPermission(a: db.Agent, action: string, reason: string, details: string, dialog = false, extra: { payload?: string; fence?: string; home?: HomeInput; tool?: string } = {}, audience: db.PermissionRequest['audience'] = 'human'): Promise<Omit<db.PermissionRequest, 'payload'> & { hint?: string }> {
+  const refused = refusalFor(a, action, reason, audience, !!extra.payload);
+  if (refused) throw new Error(refused);
   const live = liveReviewers(a);
   const delegate = audience === 'delegate' && !extra.payload && live.length > 0;
   const noDelegate = audience === 'delegate' && !delegate && !dialog && !extra.payload;
+  // A harness dialog names no home: one that goes straight to the human finds the agent's ITSA, or a new thread.
+  const home = await askHome(a, extra.home ?? {}, delegate ? 'delegate' : dialog ? 'fallback' : 'human', extra.tool);
   const r = db.createPermissionRequest(a.id, action, reason, details, dialog, extra.payload ?? null, delegate ? 'delegate' : 'human');
+  db.setRequestHome(r.id, { thread: home.thread, itsa: home.itsa?.id, override: home.override });
   // A pending request is one wait on the agent, keyed by the request. It makes the agent busy, so
   // its parents wait on it too. The human's is a 'human' wait; a delegate ask waits on the reviewers.
   if (delegate) db.addWait({ agent_id: a.id, kind: 'agent', target: live[0], detail: DELEGATE_WAIT, source: 'stam', data: r.id });
   else db.addWait({ agent_id: a.id, kind: 'human', target: r.id, detail: 'your approval', source: 'stam' });
   syncChildrenWaits(a.id);
-  // The request travels as a mail of its own thread; the web UI shows Approve and Deny on it.
+  // The request travels as a mail, in its home thread when it goes to the human; the web UI shows Approve and Deny on it.
   const why = noDelegate ? `_${a.name} has no parent or chief of staff to decide, so this comes to you._\n\n` : '';
   const footer = delegate
     ? `_You decide this: answer with \`answer_permission\` and id \`${r.id}\`, with decision approve, deny or escalate (escalate it to the human, with a one-line reason, when only the human can decide). Never leave it waiting: ${a.name} is blocked until someone answers._`
     : `_The human decides this. ${live.length ? 'Reviewing agents may only deny it' : 'Only the human approves'}: deny with \`answer_permission\` and id \`${r.id}\` if it must not happen._`;
   const d = dialog ? dialogMail(a.name, delegate ? live : [], action, details, reason, { id: r.id }) : undefined;
   const body = d ? render('permission-dialog', { requester: a.name, ...d, id: r.id }) : render('permission-request', { requester: a.name, action, reason, details: fenced(details, extra.fence), id: r.id, why, footer });
-  await sendMail({ from: a.id, to: delegate ? live : [HUMAN], subject: (d?.subject ?? `Permission: ${action}`).slice(0, 200), body, permission_id: r.id, new_thread: true });
+  await askMailHold.before?.();
+  // A delegate ask keeps its own thread with the reviewers (S-3827 leaves it as it was).
+  const sent = await sendMail({ from: a.id, to: delegate ? live : [HUMAN], subject: (d?.subject ?? `Permission: ${action}`).slice(0, 200), body: delegate ? body : overrideNote(home) + body, permission_id: r.id, ...(delegate ? { new_thread: true as const } : placement(home)) });
+  // Closed while its mail was being stored (S-3979): the mail is withdrawn at once, as the close would have pulled it had it been there.
+  if (db.getPermissionRequest(r.id)?.status !== 'pending') pullAsk(r.id, 'stam', 'Withdrawn: closed while it was being sent');
+  else if (!delegate) await postAskLink(a, home, sent.id, action);
   // A paused reviewer hears of a human ask too, when it next takes a turn.
   if (!delegate) for (const id of reviewers(a)) if (db.getAgent(id)) queueNotice(id, render('permission-human-notice', { requester: a.name, action, id: r.id }));
   db.addEvent(a.id, 'permission:requested', { id: r.id, action, audience: r.audience });
-  return db.publicRequest(r);
+  return { ...db.publicRequest(db.getPermissionRequest(r.id)!), ...(home.noHome ? { hint: NO_HOME_HINT } : {}) };
 }
 
 // A reviewer sends a delegate ask to the human (S-432): the audience changes, the human gets a mail that
@@ -127,13 +165,35 @@ export async function escalatePermission(id: string, by: string, reason: string,
 }
 
 // The ask is the human's now (escalatePermissionRequest moved it): the requester waits on the human,
-// the human gets one mail that stands alone, and the requester hears who sent it on and why.
+// the human gets one mail that stands alone, in the requester's home thread (S-3827: the thread or ITSA the ask
+// named, else the requester's ITSA, else a new thread), and the requester hears who sent it on and why.
 async function handToHuman(r: db.PermissionRequest, a: db.Agent, subject: string, body: string, escalator: string, why: string): Promise<void> {
   db.clearRequestWaits(a.id, r.id);
   db.addWait({ agent_id: a.id, kind: 'human', target: r.id, detail: 'your approval', source: 'stam' });
   syncChildrenWaits(a.id);
-  await sendMail({ from: a.id, to: [HUMAN], subject: subject.slice(0, 200), body, permission_id: r.id, new_thread: true });
+  // The stored home thread was checked when the ask was made, and is a thread id (an ITSA's has no mail of that id), so it
+  // isn't looked up again; askHome still finds the ITSA, for the link line.
+  const found = await askHome(a, { itsa: r.home_itsa, override: r.home_override }, 'fallback');
+  const home = r.home_thread ? { ...found, thread: r.home_thread, override: null, noHome: false } : found;
+  db.setRequestHome(r.id, { thread: home.thread, itsa: home.itsa?.id, override: home.override });
+  const sent = await sendMail({ from: a.id, to: [HUMAN], subject: subject.slice(0, 200), body: overrideNote(home) + body, permission_id: r.id, ...placement(home) });
+  await postAskLink(a, home, sent.id, r.action);
   queueNotice(a.id, render('permission-escalation-notice', { id: r.id, action: r.action, escalator, why }));
+}
+
+// Pulls a settled or withdrawn ask's mail from the human (withdraw.ts). An ask placed in its home thread (S-3827)
+// leaves that thread open: it holds the work's other mail, which the ask's settling doesn't answer. Whether it was
+// placed is read from this daemon's copy of its mail; a mail missing here, of a request that has a home thread, counts
+// as placed, so a miss keeps the thread open and never archives a home thread.
+function pullAsk(id: string, by: string, note: string): void {
+  const ids = db.permissionMailIds(id);
+  const homed = !!db.getPermissionRequest(id)?.home_thread;
+  const placed = ids.some((m) => {
+    const x = db.getMail(m);
+    return x ? isPlacedAsk(x) : homed;
+  });
+  if (!placed) return withdrawQuietly(ids, by, note);
+  withdrawFromHuman(ids, by, note, { keepThread: true, closeKept: true }).catch((e) => console.error(`withdraw: ${note}: ${e instanceof Error ? e.message : e}`));
 }
 
 // A harness dialog with the parent and the chief of staff that none of them answered within
@@ -196,9 +256,20 @@ export function withdrawStaleRequests(a: db.Agent, before: string, note: string)
   return stale.length;
 }
 
+// A suggestion that is still pending when its agent stops, is archived or is forgotten can't be answered for
+// anything: it is withdrawn, its ask pulled from the human's inbox, its waits cleared (S-3830).
+export function withdrawPendingInputs(a: db.Agent, note: string): void {
+  for (const r of db.inputRequests('pending', a.id)) {
+    if (!db.moveInputRequest(r.id, 'pending', 'withdrawn', { note })) continue;
+    db.addEvent(a.id, 'permission:withdrawn', { id: r.id, note });
+    pullAsk(r.id, 'stam', `Withdrawn: ${note}`);
+    settle(a, r.id);
+  }
+}
+
 function withdrawDialog(a: db.Agent, r: db.PermissionRequest, note: string): void {
   db.withdrawPermissionRequest(r.id, note);
-  withdrawQuietly(db.permissionMailIds(r.id), 'stam', `Withdrawn: ${note}`);
+  pullAsk(r.id, 'stam', `Withdrawn: ${note}`);
   db.addEvent(a.id, 'permission:withdrawn', { id: r.id, note });
   // Its own try: a failed clear leaves the wait, but the withdrawal and the other requests still go on (S-3016).
   try {
@@ -219,7 +290,7 @@ export async function answerPermission(id: string, approve: boolean, by: string,
   const out = await answer(id, approve, by, note, peer);
   // Someone else settled it: the human's mail about it is pulled (S-413). Their own answer stays theirs to read.
   // A delegate ask never reached the human, so there is nothing to pull.
-  if (by !== HUMAN && !delegate) withdrawQuietly(db.permissionMailIds(id), by, `Answered by @${db.getAgent(by)?.name ?? db.findPeerAgent(by)?.name ?? by}: ${approve ? 'approved' : 'denied'}`);
+  if (by !== HUMAN && !delegate) pullAsk(id, by, `Answered by @${db.getAgent(by)?.name ?? db.findPeerAgent(by)?.name ?? by}: ${approve ? 'approved' : 'denied'}`);
   return out;
 }
 
@@ -252,6 +323,12 @@ export function approvedTyped(id: string, action: string, note: string): string 
   return render('permission-typed', { id, action: short, note: kept && kept.toLowerCase() !== 'i authorize' ? ` The user's note: ${kept}.` : '' });
 }
 
+// The human's comment on an answer (S-3829): the note, unless it is the default a bare Approve or Deny sends.
+export function commentOf(note: string): string {
+  const kept = note.trim();
+  return kept && kept.toLowerCase() !== 'i authorize' && kept !== 'Denied' ? kept : '';
+}
+
 // The closing line of the notice an agent gets when its request is answered (S-640): approved says go
 // ahead, denied says don't do it, so neither reads as a request to try again.
 export function answeredNext(approve: boolean): string {
@@ -263,11 +340,19 @@ async function answer(id: string, approve: boolean, by: string, note: string, pe
   const text = note || (approve ? 'I authorize' : 'Denied');
   const name = db.getAgent(by)?.name ?? db.findPeerAgent(by)?.name ?? by;
   const who = by === HUMAN ? 'your user (the human), in stam' : `${name}, ${assistant ? "your user's executive assistant" : by === a.parent_id ? 'your parent agent' : boss ? 'the chief of staff agent on another machine' : 'the chief of staff agent'}`;
-  if (r.dialog) return answerDialog(r, a, approve, by, text, who);
+  // A question dialog's choice is the note: the option the human picked. Empty when none was given.
+  if (r.dialog) return await answerDialog(r, a, approve, by, text, who, note || undefined);
   if (r.kind === 'input') return denyInput(r, a, approve, by, text, who);
   if (r.payload) return answerSettings(r, a, approve, by, text, who);
   if (approve && by !== HUMAN && r.audience === 'human') throw new Error(`request ${id} is the human's to approve: leave it to the human, or deny it if it must not happen`);
-  db.decidePermissionRequest(id, approve, by, text);
+  // A deny is a failure the agent should record a retro about; an approval is not (S-726).
+  const notice = render('permission-answered', { id, action: r.action, verdict: approve ? 'approved' : 'denied', who, note: text, next: answeredNext(approve) });
+  const noticeText = approve ? notice : withFailureRetro(notice);
+  // The decision and its notice's row commit together (S-3923): no answer exists without its row.
+  const row = db.transaction(() => {
+    db.decidePermissionRequest(id, approve, by, text);
+    return db.addAnswerNotice(a.id, noticeText);
+  });
   // The human's approval is typed into the agent's input when that's safe, since auto mode
   // takes only typed input as the user's consent. Agents' answers stay notices.
   let typed = false;
@@ -276,10 +361,10 @@ async function answer(id: string, approve: boolean, by: string, note: string, pe
     admit(a, 'human');
     typed = (await adapters[a.harness]?.typeHumanInput?.(a, approvedTyped(id, r.action, note))) ?? false;
   }
-  // A deny is a failure the agent should record a retro about; an approval is not (S-726).
-  if (!typed) {
-    const notice = render('permission-answered', { id, action: r.action, verdict: approve ? 'approved' : 'denied', who, note: text, next: answeredNext(approve) });
-    queueNotice(a.id, approve ? notice : withFailureRetro(notice));
+  if (typed) {
+    if (row) db.deleteAnswerNotice(row);
+  } else {
+    queueNotice(a.id, noticeText, { row: row || undefined });
   }
   db.addEvent(a.id, 'permission:answered', { id, approve, by, typed });
   // The answered request's human wait clears, so the agent may go idle, and an ancestor's
@@ -296,23 +381,30 @@ async function answer(id: string, approve: boolean, by: string, note: string, pe
 // since a yes typed there is the user's consent; anyone reviewing can deny it, so the agent
 // carries on without the action. A dialog no longer on screen, or in an ended session,
 // closes the request instead; a yes that can't be tied to the request's dialog types nothing.
-function answerDialog(r: db.PermissionRequest, a: db.Agent, approve: boolean, by: string, text: string, who: string): Omit<db.PermissionRequest, 'payload'> & { typed?: boolean } {
+// A harness that answers over its API (OpenCode) throws when the answer fails, and the request stays pending.
+async function answerDialog(r: db.PermissionRequest, a: db.Agent, approve: boolean, by: string, text: string, who: string, choice?: string): Promise<Omit<db.PermissionRequest, 'payload'> & { typed?: boolean }> {
   if (approve && by !== HUMAN) throw new Error(`only the human approves a harness dialog; deny it so ${a.name} carries on without it, or ${r.audience === 'delegate' ? 'escalate it to the human with a one-line reason' : 'leave it to the human'}`);
-  const done = adapters[a.harness]?.answerDialog?.(db.getAgent(a.id)!, r, approve) ?? 'gone';
-  if (done === 'unsafe') throw new Error(`${a.name}'s dialog on screen doesn't show exactly this request's action with a one-time Yes, so nothing was typed; deny it, or answer it in the terminal`);
+  const done = (await adapters[a.harness]?.answerDialog?.(db.getAgent(a.id)!, r, approve, choice)) ?? 'gone';
+  if (done === 'unsafe') throw new Error(`${a.name}'s dialog on screen doesn't show exactly this request's action or question with the answer given, so nothing was typed; deny it, or answer it in the terminal`);
   if (done === 'gone') {
     withdrawDialog(a, r, 'no dialog on screen');
     throw new Error(`${a.name} no longer shows this dialog, so request ${r.id} is closed and nothing was typed`);
   }
-  db.decidePermissionRequest(r.id, approve, by, text);
+  // A bare approval says nothing more than the key typed; one with a comment says it in the same notice (S-3829).
+  const noticeText = !approve
+    ? withFailureRetro(render('permission-answered', { id: r.id, action: r.action, verdict: 'denied', who, note: text, next: answeredNext(false) }))
+    : commentOf(text) ? render('permission-answered', { id: r.id, action: r.action, verdict: 'approved', who, note: text, next: answeredNext(true) }) : undefined;
+  // The decision and its notice's row commit together (S-3923).
+  const row = db.transaction(() => {
+    db.decidePermissionRequest(r.id, approve, by, text);
+    return noticeText ? db.addAnswerNotice(a.id, noticeText) : 0;
+  });
   db.addEvent(a.id, 'permission:answered', { id: r.id, approve, by, typed: true });
   db.clearRequestWaits(a.id, r.id);
   // Claude Code reads Esc as an interrupt, which runs no hook: the agent is idle now, and the
   // notice saying why starts its next turn. A harness that carries on sends a hook that says so.
-  if (!approve) {
-    db.updateAgent(a.id, { activity: 'idle', activity_detail: 'dialog denied' });
-    queueNotice(a.id, withFailureRetro(render('permission-answered', { id: r.id, action: r.action, verdict: 'denied', who, note: text, next: answeredNext(false) })));
-  }
+  if (!approve) db.updateAgent(a.id, { activity: 'idle', activity_detail: 'dialog denied' });
+  if (noticeText) queueNotice(a.id, noticeText, { row: row || undefined });
   syncChildrenWaits(a.id);
   announceTreeIdle(a);
   return { ...db.publicRequest(db.getPermissionRequest(r.id)!), typed: true };
@@ -525,14 +617,14 @@ export function keyDestinationNotes(current: string, next: string): string {
 }
 
 // Validates the change and asks the human. Returns the request, or the reason the change is invalid (a 400).
-export async function requestSettingsChange(a: db.Agent, change: SettingsChange): Promise<{ request: Omit<db.PermissionRequest, 'payload'> } | { error: string }> {
+export async function requestSettingsChange(a: db.Agent, change: SettingsChange, home: HomeInput = {}): Promise<{ request: Omit<db.PermissionRequest, 'payload'> & { hint?: string } } | { error: string }> {
   if (change.kind === 'registry') {
     const current = currentRegistryText();
     const r = resultOf(change, current);
     if ('error' in r) return r;
     const diff = unifiedDiff(current, r.text, 'registry now', 'registry if approved') || 'No visible change.';
     const payload: SettingsPayload = { change, baseHash: hash(current) };
-    const request = await requestPermission(a, 'Change stam registry', `${a.name} wants to change stam's registry (STAM_HOME/registry.json)`, diff, false, { payload: JSON.stringify(payload), fence: 'diff' });
+    const request = await requestPermission(a, 'Change stam registry', `${a.name} wants to change stam's registry (STAM_HOME/registry.json)`, diff, false, { payload: JSON.stringify(payload), fence: 'diff', home, tool: 'settings_ask' });
     return { request };
   }
   // On a non-home daemon the diff is against the settings it uses (S-398); the route has refused an
@@ -545,7 +637,7 @@ export async function requestSettingsChange(a: db.Agent, change: SettingsChange)
   // Secrets are redacted on both sides, so the mail never carries one.
   const diff = unifiedDiff(redactSettingsText(current), redactedForDiff(current, next), 'settings now', 'settings if approved') || 'No visible change (only redacted values differ, or none).';
   const payload = settingsPayload(change, current);
-  const request = await requestPermission(a, 'Change stam settings', `${a.name} wants to change stam's settings (secrets hidden in the diff below)${keyDestinationNotes(current, next)}`, diff, false, { payload: JSON.stringify(payload), fence: 'diff' });
+  const request = await requestPermission(a, 'Change stam settings', `${a.name} wants to change stam's settings (secrets hidden in the diff below)${keyDestinationNotes(current, next)}`, diff, false, { payload: JSON.stringify(payload), fence: 'diff', home, tool: 'settings_ask' });
   return { request };
 }
 
@@ -605,45 +697,74 @@ function finishSettings(r: db.PermissionRequest, a: db.Agent, applied: boolean, 
 // Code input, such as `! git status`. The human approves it, through the web UI as trustedHuman
 // proves it (the daemon's route checks that; nothing here takes `by` as proof), and stam types it
 // in as written. Anyone who may answer a permission request can deny it.
+// An approval waits for a clear box for this long, then expires with its end told in its thread (S-3830). A suggestion
+// has no TTL: it waits until the human answers it, the agent withdraws it, or the agent ends.
 export const INPUT_TTL_MS = 30 * 60_000;
-const ago = (iso: string | null) => !iso || iso <= new Date().toISOString();
+const approvalExpiry = () => new Date(Date.now() + INPUT_TTL_MS).toISOString();
+const ago = (iso: string | null) => !!iso && iso <= new Date().toISOString();
+// How long a held approval waits before the 5 s sweep types it again after a box that didn't show the text (S-3830).
+const MISMATCH_RETRY_MS = 60_000;
+// A test home may shorten the wait (STAM_TEST_MISMATCH_RETRY_MS), so the sweep's retry is tested without a minute.
+const mismatchRetryMs = () => Number(testOnlyEnv('STAM_TEST_MISMATCH_RETRY_MS')) || MISMATCH_RETRY_MS;
 // A fence longer than any run of backticks in the text, so the text shows exactly as written.
 const fencedExact = (text: string) => {
   const fence = '`'.repeat(Math.max(3, ...(text.match(/`+/g) ?? []).map((f) => f.length + 1)));
   return `${fence}\n${text}\n${fence}`;
 };
-const inputNotice = (a: db.Agent, r: db.PermissionRequest, result: string) => queueNotice(a.id, render('input-answered', { id: r.id, result }));
+const inputText = (r: db.PermissionRequest, result: string) => render('input-answered', { id: r.id, result });
+// An input answer's notice, durable (S-3923). `stored` is the text the row keeps, when it must differ: a draft's text
+// never goes into a row.
+const inputNotice = (a: db.Agent, r: db.PermissionRequest, result: string, stored?: string) => {
+  const text = inputText(r, result);
+  queueNotice(a.id, text, { row: db.addAnswerNotice(a.id, stored === undefined ? text : inputText(r, stored)) || undefined });
+};
+// A held approval's move and its notice commit in one transaction (S-3923): the move happens only with its row. False
+// when the move didn't happen.
+function moveInputNotice(a: db.Agent, r: db.PermissionRequest, move: () => boolean, result: string): boolean {
+  const text = inputText(r, result);
+  const row = db.transaction(() => (move() ? db.addAnswerNotice(a.id, text) : null));
+  if (row === null) return false;
+  queueNotice(a.id, text, { row: row || undefined });
+  return true;
+}
 
-export async function suggestInput(a: db.Agent, text: string, reason: string): Promise<db.PublicRequest> {
+export async function suggestInput(a: db.Agent, text: string, reason: string, homeInput: HomeInput = {}): Promise<db.PublicRequest & { hint?: string }> {
   if (a.harness !== 'claude') throw new Error(`suggest_input types into a Claude Code input box only; ${a.name} runs ${a.harness}, whose input stam can't type into this way. Use request_permission instead`);
   const problem = inputProblem(text);
   if (problem) throw new Error(problem);
-  // A new suggestion replaces the agent's earlier one, approved and waiting to be typed or not.
-  for (const old of [...db.inputRequests('pending', a.id), ...db.inputRequests('held', a.id)]) {
-    if (db.moveInputRequest(old.id, old.status, 'withdrawn', { note: 'a newer suggestion replaced it' })) {
+  // An unreadable named home is refused before an earlier suggestion is replaced (S-3827).
+  const home: Home = await askHome(a, homeInput, 'human', 'suggest_input');
+  // A new suggestion replaces the agent's earlier unanswered one. An approved one is never withdrawn by a newer
+  // suggestion: it waits, in order, to be typed (S-3830).
+  for (const old of db.inputRequests('pending', a.id)) {
+    if (db.moveInputRequest(old.id, 'pending', 'withdrawn', { note: 'a newer suggestion replaced it' })) {
       db.addEvent(a.id, 'permission:withdrawn', { id: old.id, note: 'a newer suggestion replaced it' });
-      if (old.status === 'pending') withdrawQuietly(db.permissionMailIds(old.id), 'stam', 'Withdrawn: a newer suggestion replaced it');
+      pullAsk(old.id, 'stam', 'Withdrawn: a newer suggestion replaced it');
       db.clearRequestWaits(a.id, old.id);
     }
   }
   const sha256 = hash(text);
-  const expires_at = new Date(Date.now() + INPUT_TTL_MS).toISOString();
-  const r = db.createPermissionRequest(a.id, 'Type suggested input', reason, '', false, null, 'human', { text, sha256, expires_at });
+  const r = db.createPermissionRequest(a.id, 'Type suggested input', reason, '', false, null, 'human', { text, sha256, expires_at: null });
+  db.setRequestHome(r.id, { thread: home.thread, itsa: home.itsa?.id, override: home.override });
   db.addWait({ agent_id: a.id, kind: 'human', target: r.id, detail: 'your approval', source: 'stam' });
   syncChildrenWaits(a.id);
-  const pub = db.publicRequest(r);
-  const body = render('permission-input', { requester: a.name, machine: pub.machine, reason: reason || '(none given)', text: fencedExact(text), expires: expires_at, id: r.id });
-  await sendMail({ from: a.id, to: [HUMAN, ...reviewers(a)], subject: `Input for ${a.name}: ${text}`.slice(0, 200), body, permission_id: r.id, new_thread: true });
+  const pub = db.publicRequest(db.getPermissionRequest(r.id)!);
+  const body = render('permission-input', { requester: a.name, machine: pub.machine, reason: reason || '(none given)', text: fencedExact(text), id: r.id });
+  const sent = await sendMail({ from: a.id, to: [HUMAN, ...reviewers(a)], subject: `Input for ${a.name}: ${text}`.slice(0, 200), body: overrideNote(home) + body, permission_id: r.id, ...placement(home) });
+  await postAskLink(a, home, sent.id, `Type suggested input: ${text}`);
   db.addEvent(a.id, 'permission:requested', { id: r.id, action: r.action, kind: 'input' });
-  return pub;
+  return { ...pub, ...(home.noHome ? { hint: NO_HOME_HINT } : {}) };
 }
 
 // A denial types nothing. An approval never comes this way: only approveInput, called by the
 // route once trustedHuman holds, approves a suggestion.
 function denyInput(r: db.PermissionRequest, a: db.Agent, approve: boolean, by: string, text: string, who: string): db.PublicRequest {
   if (approve) throw new Error(`only the human approves suggested input, from stam's web UI on ${db.publicRequest(r).machine}; deny it, or leave it to the human`);
-  if (!db.moveInputRequest(r.id, 'pending', 'denied', { by, note: text })) throw new Error(`request ${r.id} is already ${db.getPermissionRequest(r.id)?.status}`);
-  queueNotice(a.id, withFailureRetro(render('permission-answered', { id: r.id, action: r.action, verdict: 'denied', who, note: text, next: answeredNext(false) })));
+  const noticeText = withFailureRetro(render('permission-answered', { id: r.id, action: r.action, verdict: 'denied', who, note: text, next: answeredNext(false) }));
+  // The denial and its notice's row commit together (S-3923).
+  const row = db.transaction(() => (db.moveInputRequest(r.id, 'pending', 'denied', { by, note: text }) ? db.addAnswerNotice(a.id, noticeText) : null));
+  if (row === null) throw new Error(`request ${r.id} is already ${db.getPermissionRequest(r.id)?.status}`);
+  queueNotice(a.id, noticeText, { row: row || undefined });
   db.addEvent(a.id, 'permission:answered', { id: r.id, approve: false, by, typed: false });
   settle(a, r.id);
   return db.publicRequest(db.getPermissionRequest(r.id)!);
@@ -674,21 +795,29 @@ export async function approveInput(id: string, sha256: unknown): Promise<db.Publ
       throw new InputRefused(`request ${id} expired at ${r.expires_at}`);
     }
     heldWhy.delete(id);
-    const outcome = await typeHeld(r);
+    const outcome = await tryHeld(a.id, id);
     return { ...db.publicRequest(db.getPermissionRequest(id)!), typed: outcome === 'typed', outcome, ...(outcome === 'held' && heldWhy.has(id) ? { why: heldWhy.get(id) } : {}) };
   }
   if (r.status !== 'pending') throw new InputRefused(`request ${id} is already ${r.status}`);
-  if (ago(r.expires_at)) {
-    expireInputs();
-    throw new InputRefused(`request ${id} expired at ${r.expires_at}`);
-  }
   if (typeof sha256 !== 'string' || sha256 !== r.sha256) throw new InputRefused(`text_sha256 doesn't match request ${id}'s text; reload it and approve what it shows`);
-  if (!db.moveInputRequest(id, 'pending', 'held', { by: HUMAN, note: 'approved', unexpired: true, session: a.session_id ?? '' })) throw new InputRefused(`request ${id} is already ${db.getPermissionRequest(id)?.status}`);
+  if (!db.moveInputRequest(id, 'pending', 'held', { by: HUMAN, note: 'approved', session: a.session_id ?? '', expires: approvalExpiry() })) throw new InputRefused(`request ${id} is already ${db.getPermissionRequest(id)?.status}`);
   db.addEvent(a.id, 'permission:answered', { id, approve: true, by: HUMAN, kind: 'input' });
   settle(a, id);
   heldWhy.delete(id);
-  const outcome = await typeHeld(db.getPermissionRequest(id)!, true);
+  const outcome = await tryHeld(a.id, id, true);
   return { ...db.publicRequest(db.getPermissionRequest(id)!), typed: outcome === 'typed', outcome, ...(outcome === 'held' && heldWhy.has(id) ? { why: heldWhy.get(id) } : {}) };
+}
+
+// Types the agent's first held approval, the oldest, so approvals go in the order the human gave them. `id` is the
+// approval the caller asked about: its outcome is 'held' while an earlier one waits (why: queued). `first` is set
+// when the human's approval is the call, so a busy agent is told to end its turn (held).
+async function tryHeld(agentId: string, id: string, first = false): Promise<Outcome> {
+  const head = db.inputRequests('held', agentId)[0];
+  if (!head) return 'held';
+  if (head.id === id) return typeHeld(head, first);
+  const r = db.getPermissionRequest(id);
+  if (r?.status === 'held') held(db.getAgent(agentId)!, r, true, 'queued');
+  return 'held';
 }
 
 type Outcome = 'typed' | 'held' | 'failed' | 'cancelled' | 'expired';
@@ -705,12 +834,15 @@ async function testBarrier(): Promise<void> {
 // The prompt each typed suggestion should submit, checked at the agent's next UserPromptSubmit.
 const submitted = new Map<string, { r: db.PermissionRequest; until: number }>();
 const EXPECT_MS = 60_000;
+// Claude Code appends a bash-mode command's record only when the command finishes (S-3188: a ~80 s
+// install showed 82 s after Enter), so the transcript check waits well past a typed prompt's bound.
+export const BASH_EXPECT_MS = 15 * 60_000;
 
 // Types a held approval into its own agent's input, at most one at a time per agent. 'held' when
 // the box isn't free yet: the agent is busy, shows a dialog, or someone's draft is in it. Right
 // before Enter, one conditional UPDATE moves it from held to approved only if it is still held
 // and not expired, and the agent's session is still the approved one; else what was typed is
-// erased ('cancelled'), so a suggestion withdrawn or expired mid-typing is never sent.
+// erased ('cancelled'), so an approval that expired mid-typing is never sent.
 const typing = new Set<string>();
 async function typeHeld(r: db.PermissionRequest, first = false): Promise<Outcome> {
   const a = db.getAgent(r.agent_id);
@@ -731,13 +863,17 @@ async function typeHeld(r: db.PermissionRequest, first = false): Promise<Outcome
     // and one taken over by another agent gets none.
     const admitted = admit(a, 'human');
     if (!admitted.ok) {
-      if (db.moveInputRequest(r.id, 'held', 'failed', { note: `not typed: ${admitted.reason}` })) inputNotice(a, r, `was approved, but stam didn't type it: ${admitted.reason}.`);
+      if (moveInputNotice(a, r, () => db.moveInputRequest(r.id, 'held', 'failed', { note: `not typed: ${admitted.reason}` }), `was approved, but stam didn't type it: ${admitted.reason}.`)) {
+        noteOutcome(a, r, 'failed', `stam didn't type it: ${admitted.reason}.`);
+      }
       return 'failed';
     }
     // The transcript's size right before Enter: a bash-mode command is looked for after it.
     let offset = 0;
-    const proceed = async () => {
+    // The box is read again here, right before Enter (stillTyped): a key typed since the adapter's check is never sent.
+    const proceed = async (stillTyped: () => boolean) => {
       await testBarrier();
+      if (!stillTyped()) return false;
       offset = transcriptSize(a);
       return sameSession() && db.moveInputRequest(r.id, 'held', 'approved', { unexpired: true });
     };
@@ -749,7 +885,9 @@ async function typeHeld(r: db.PermissionRequest, first = false): Promise<Outcome
       else if (!now.text!.startsWith('/')) submitted.set(a.id, { r: now, until: Date.now() + EXPECT_MS });
       heldWhy.delete(r.id);
       db.addEvent(a.id, 'input:typed', { id: r.id });
+      forgetHeld(r.id);
       inputNotice(a, r, 'was approved by your user (the human) and typed into your input as written.');
+      noteOutcome(a, r, 'typed', 'sent to its input exactly as approved.');
       return 'typed';
     }
     if (done === 'cancelled') {
@@ -758,10 +896,12 @@ async function typeHeld(r: db.PermissionRequest, first = false): Promise<Outcome
       if (db.getPermissionRequest(r.id)?.status === 'held') expireHeld(a, now, 'its harness session changed while stam typed it');
       return 'cancelled';
     }
-    if (done === 'failed' && db.moveInputRequest(r.id, 'held', 'failed', { note: "the input box didn't show exactly the text" })) {
+    // The box didn't show exactly the text, so nothing was sent and what stam typed is erased (or left, when the
+    // erase found other text in the box). The approval stays held and is typed once the box is clear (S-3830).
+    if (done === 'failed') {
       db.addEvent(a.id, 'input:failed', { id: r.id });
-      inputNotice(a, r, "was approved, but after typing it your input box didn't show exactly the text with nothing under it, so stam erased what it typed and sent nothing. Suggest it again if you still need it.");
-      return 'failed';
+      held(a, now, first, 'mismatch');
+      return 'held';
     }
     // An erase that found the screen not as typed is 'failed' even when cancelled; the request moved on.
     if (db.getPermissionRequest(r.id)?.status !== 'held') return 'cancelled';
@@ -780,14 +920,25 @@ function held(a: db.Agent, r: db.PermissionRequest, first: boolean, why: string)
   heldWhy.set(r.id, why);
   // The card names the text in the box while it blocks (S-534), and drops it when something else does.
   db.setHeldBox(r.id, why === 'draft' ? (adapters[a.harness]?.inputText?.(a) ?? '').slice(0, 200) : null);
-  if (why === 'draft') {
+  if (why === 'queued') return 'held';
+  if (why === 'mismatch') {
+    // Typed and erased again by the next try: the sweep waits MISMATCH_RETRY_MS before it tries again.
+    retryAt.set(r.id, Date.now() + mismatchRetryMs());
+    if (!mismatchTold.has(r.id)) {
+      mismatchTold.add(r.id);
+      db.addEvent(a.id, 'input:held', { id: r.id, why });
+      inputNotice(a, r, `was approved by your user (the human), but after typing it your input box didn't show exactly the text with nothing under it, so stam erased what it typed and sent nothing. It stays approved: stam types it once your input box is clear, until ${r.expires_at}.`);
+    }
+  } else if (why === 'draft') {
     // Whenever a draft first blocks the input, also after a busy start: the agent is told what to clear, and the chief of staff why.
     if (draftTold.has(r.id)) return 'held';
     draftTold.add(r.id);
     const box = adapters[a.harness]?.inputText?.(a);
     db.addEvent(a.id, 'input:held', { id: r.id, why, ...(box !== undefined ? { box: box.slice(0, 200) } : {}) });
     const shown = box === undefined ? 'text' : `\`${box.slice(0, 200).replace(/`/g, "'")}\``;
-    inputNotice(a, r, `was approved by your user (the human), but stam can't type it: your input box holds ${shown}, which stam didn't type. Clear your input box (Ctrl+U) and stam types it at once; until ${r.expires_at}.`);
+    // The draft's text is the agent's to see now, and never stored: the row keeps the notice with the draft left out.
+    const draftNotice = (box: string) => `was approved by your user (the human), but stam can't type it: your input box holds ${box}, which stam didn't type. Clear your input box (Ctrl+U) and stam types it at once; until ${r.expires_at}.`;
+    inputNotice(a, r, draftNotice(shown), draftNotice('(a draft, not stored)'));
     const cos = settings().chiefOfStaff;
     if (cos && cos !== a.id) sendMail({ from: a.id, to: [cos], subject: `Approved input for ${a.name} is held by text in its box`, body: `Your user approved input ${r.id} for @${a.name}, but its input box holds ${shown}, which stam didn't type. stam told the agent to clear it; the approval expires at ${r.expires_at}.`, from_stam: true }).catch((e) => db.addEvent(a.id, 'permission-error', String(e)));
   } else if (first) {
@@ -797,17 +948,36 @@ function held(a: db.Agent, r: db.PermissionRequest, first: boolean, why: string)
   return 'held';
 }
 
+const mismatchTold = new Set<string>();
+// Per held approval, the time before which the sweep doesn't try it again (MISMATCH_RETRY_MS).
+const retryAt = new Map<string, number>();
+// An approval that is typed or expires keeps none of its bookkeeping.
+function forgetHeld(id: string): void {
+  mismatchTold.delete(id);
+  retryAt.delete(id);
+}
+
 // A held approval that won't be typed: the agent hears, and the human is told once in its thread.
 function expireHeld(a: db.Agent, r: db.PermissionRequest, why: string): void {
-  if (!db.moveInputRequest(r.id, 'held', 'expired', { note: why })) return;
+  if (!moveInputNotice(a, r, () => db.moveInputRequest(r.id, 'held', 'expired', { note: why }), `expired: ${why}, so nothing was typed.`)) return;
+  forgetHeld(r.id);
   db.addEvent(a.id, 'input:expired', { id: r.id, was: 'held', why });
-  inputNotice(a, r, `expired: ${why}, so nothing was typed.`);
   tellHuman(a, r, `[stam] Approved input for ${a.name} expired untyped`, render('input-expired-human', { requester: a.name, id: r.id, why }));
 }
 
+// One line in the request's thread, for the end states the human needs: typed or failed. Held and withdrawn
+// aren't noted (busy is normal; a withdrawal already closes the ask), and expiry is told by expireHeld (S-3830).
+// The note is sealed under a placed ask, as tellHuman makes it.
+function noteOutcome(a: db.Agent, r: db.PermissionRequest, outcome: 'typed' | 'failed', line: string): void {
+  tellHuman(a, r, `[stam] Input for ${a.name}: ${outcome}`, `${outcome[0].toUpperCase()}${outcome.slice(1)}: ${line}`);
+}
+
+// Under an ask placed in its home thread (S-3827) the note is sealed like the ask (ASK_NOTE): the thread's other readers
+// never saw the ask, and the note may quote the agent's prompt.
 function tellHuman(a: db.Agent, r: db.PermissionRequest, subject: string, body: string): void {
   const m = db.permissionMail(r.id);
-  sendMail({ from: a.id, to: [HUMAN], subject, body, reply_to: m?.id, from_stam: true }).catch((e) => db.addEvent(a.id, 'permission-error', String(e)));
+  const kind = m && isPlacedAsk({ ...m, permission_id: r.id }) ? ASK_NOTE : undefined;
+  sendMail({ from: a.id, to: [HUMAN], subject, body, reply_to: m?.id, from_stam: true, kind }).catch((e) => db.addEvent(a.id, 'permission-error', String(e)));
 }
 
 // The agent's harness took a prompt (its UserPromptSubmit hook): the first one after a typed
@@ -836,16 +1006,45 @@ const transcriptSize = (a: db.Agent): number => {
   }
 };
 
-// A typed bash-mode command must show in the agent's transcript within EXPECT_MS (bashInputRecorded).
+// Where a poll left off in a transcript: the next byte to read, and a last row still being written.
+export type RowTail = { pos: number; carry: Buffer };
+
+// The whole rows appended to `file` since the last call (from tail.pos), so a poll reads only new
+// bytes, never the whole transcript. A last row without its newline waits in tail.carry for the next call.
+export function tailRows(file: string, tail: RowTail): string {
+  const size = statSync(file).size;
+  if (size < tail.pos) {
+    tail.pos = size;
+    tail.carry = Buffer.alloc(0);
+  }
+  if (size > tail.pos) {
+    const buf = Buffer.alloc(size - tail.pos);
+    const fd = openSync(file, 'r');
+    try {
+      const n = readSync(fd, buf, 0, buf.length, tail.pos);
+      tail.carry = Buffer.concat([tail.carry, buf.subarray(0, n)]);
+      tail.pos += n;
+    } finally {
+      closeSync(fd);
+    }
+  }
+  const end = tail.carry.lastIndexOf(10) + 1;
+  const rows = tail.carry.subarray(0, end).toString('utf8');
+  tail.carry = tail.carry.subarray(end);
+  return rows;
+}
+
+// A typed bash-mode command must show in the agent's transcript within BASH_EXPECT_MS (bashInputRecorded).
 // Only what was appended after Enter counts (from `offset`), since the agent's own suggest_input
 // call earlier in the transcript holds the text too. If another command shows first, or none does,
 // the human is told once.
 async function checkTranscript(a: db.Agent, r: db.PermissionRequest, offset: number): Promise<void> {
-  for (const until = Date.now() + EXPECT_MS; Date.now() < until; await new Promise((res) => setTimeout(res, 1000))) {
+  const tail: RowTail = { pos: offset, carry: Buffer.alloc(0) };
+  for (const until = Date.now() + BASH_EXPECT_MS; Date.now() < until; await new Promise((res) => setTimeout(res, 1000))) {
     const file = db.getAgent(a.id)?.transcript_path;
     try {
-      const all = file ? readFileSync(file) : undefined;
-      const seen = all ? bashInputRecorded(all.subarray(Math.min(offset, all.length)).toString('utf8'), r.text!) : 'none';
+      const rows = file ? tailRows(file, tail) : '';
+      const seen = rows ? bashInputRecorded(rows, r.text!) : 'none';
       if (seen === 'match') {
         db.addEvent(a.id, 'input:submitted', { id: r.id, matched: true, prompt: r.text!.slice(0, 200), via: 'transcript' });
         return;
@@ -858,28 +1057,20 @@ async function checkTranscript(a: db.Agent, r: db.PermissionRequest, offset: num
 }
 
 // The agent went idle or waiting (a hook): its held approval, if any, is typed now. The pane
-// may still be drawing the box, so it tries a few times; the sweep below tries again later.
+// may still be drawing the box, so it tries a few times; the sweep below tries again later. A box
+// that didn't show the text waits for the sweep's MISMATCH_RETRY_MS, so it isn't retried here (S-3830).
 export async function typeHeldInput(agentId: string): Promise<void> {
   for (let i = 0; i < 6; i++) {
     const r = db.inputRequests('held', agentId)[0];
     if (!r || (await typeHeld(r)) !== 'held') return;
+    if ((retryAt.get(r.id) ?? 0) > Date.now()) return;
     await new Promise((res) => setTimeout(res, 300));
   }
 }
 
-// Every few seconds: suggestions past expires_at expire (a held one tells the human once, in its
-// thread, and types nothing; one being typed is erased before Enter), and held ones whose agent is
-// idle are tried again.
+// Every few seconds: an approval past its TTL expires (the human is told once, in its thread, and nothing is
+// typed), and held ones whose agent is idle are tried again. A suggestion has no TTL (S-3830).
 export function expireInputs(): void {
-  for (const r of db.inputRequests('pending')) {
-    if (!ago(r.expires_at) || !db.moveInputRequest(r.id, 'pending', 'expired')) continue;
-    const a = db.getAgent(r.agent_id);
-    if (!a) continue;
-    db.addEvent(a.id, 'input:expired', { id: r.id, was: 'pending' });
-    withdrawQuietly(db.permissionMailIds(r.id), 'stam', `Withdrawn: it expired at ${r.expires_at} without an answer`);
-    inputNotice(a, r, `expired at ${r.expires_at} without an answer, so nothing was typed.`);
-    settle(a, r.id);
-  }
   for (const r of db.inputRequests('held')) {
     const a = db.getAgent(r.agent_id);
     if (ago(r.expires_at) && a) expireHeld(a, r, `it expired at ${r.expires_at} before the input box was free`);
@@ -888,10 +1079,14 @@ export function expireInputs(): void {
   }
 }
 
+// The sweep: each agent's oldest held approval is tried again while the agent is idle or waiting, after a
+// mismatch's wait. Approvals of one agent are typed one at a time, in order.
 export async function retryHeldInputs(): Promise<void> {
   expireInputs();
-  for (const r of db.inputRequests('held')) {
+  const heads = new Map<string, db.PermissionRequest>();
+  for (const r of db.inputRequests('held')) if (!heads.has(r.agent_id)) heads.set(r.agent_id, r);
+  for (const r of heads.values()) {
     const a = db.getAgent(r.agent_id);
-    if (a && (a.activity === 'idle' || a.activity === 'waiting')) await typeHeld(r).catch((e) => db.addEvent(r.agent_id, 'permission-error', String(e)));
+    if (a && (a.activity === 'idle' || a.activity === 'waiting') && (retryAt.get(r.id) ?? 0) <= Date.now()) await typeHeld(r).catch((e) => db.addEvent(r.agent_id, 'permission-error', String(e)));
   }
 }

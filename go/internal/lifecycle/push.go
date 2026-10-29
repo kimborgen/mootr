@@ -34,6 +34,11 @@ type promptEvent struct {
 	Kind string `json:"kind"`
 }
 
+// promptNullEvent is prompt:sent's {kind: null}.
+type promptNullEvent struct {
+	Kind *string `json:"kind"`
+}
+
 // SchedulePush is src/mail.ts schedulePush: the agent's push runs pushDebounce after the last call.
 func (l *Lifecycle) SchedulePush(id string) {
 	l.mu.Lock()
@@ -77,14 +82,19 @@ func (l *Lifecycle) SchedulePush(id string) {
 }
 
 // HoldingPushes is src/mail.ts holdingPushes: while fn types into the agent's input, no prompt is pushed to it, so a
-// pushed turn can't start in the middle of the typing.
+// pushed turn can't start in the middle of the typing. The hold is taken under the agent's push lock, so a push already
+// past its hold check finishes before fn starts (TS's push runs from the check to the prompt with no await); a push
+// that comes while fn runs sees the hold and waits for the next one.
 func (l *Lifecycle) HoldingPushes(id string, fn func() error) error {
+	lock := l.pushLock(id)
+	lock.Lock()
 	l.mu.Lock()
 	if l.pushHolds == nil {
 		l.pushHolds = map[string]int{}
 	}
 	l.pushHolds[id]++
 	l.mu.Unlock()
+	lock.Unlock()
 	defer func() {
 		l.mu.Lock()
 		if l.pushHolds[id]--; l.pushHolds[id] <= 0 {
@@ -114,6 +124,11 @@ func (l *Lifecycle) pushLock(id string) *sync.Mutex {
 // stream are the notices it held dropped and the mail it named marked pushed; anything that arrived meanwhile waits for
 // the next push.
 func (l *Lifecycle) pushIfIdle(ctx context.Context, id string) {
+	// The hold is checked under the push lock, which HoldingPushes takes to set it: no hold can start between the check
+	// and the push.
+	lock := l.pushLock(id)
+	lock.Lock()
+	defer lock.Unlock()
 	l.mu.Lock()
 	held := l.pushHolds[id] > 0
 	l.mu.Unlock()
@@ -121,9 +136,6 @@ func (l *Lifecycle) pushIfIdle(ctx context.Context, id string) {
 		l.SchedulePush(id)
 		return
 	}
-	lock := l.pushLock(id)
-	lock.Lock()
-	defer lock.Unlock()
 	a, err := l.db.GetAgent(ctx, id)
 	if err != nil || !running(a) || (a.Activity != "idle" && a.Activity != "waiting") {
 		return
@@ -160,10 +172,14 @@ func (l *Lifecycle) pushIfIdle(ctx context.Context, id string) {
 		}
 		parts = append(parts, text)
 	}
+	if l.pushing != nil {
+		l.pushing(id)
+	}
 	if !l.pushPrompt(ctx, a, strings.Join(parts, "\n\n")) {
 		return
 	}
 	l.dropNotices(id, pending)
+	l.forgetRows(ctx, pending)
 	if err := l.db.MarkPushed(ctx, id, mail); err != nil {
 		l.event(ctx, id, "push-error", "Error: "+err.Error())
 	}
@@ -192,24 +208,34 @@ func (l *Lifecycle) dropNotices(id string, delivered []notice) {
 }
 
 // pushPrompt is the adapter's pushPrompt: a Claude Code agent's prompt goes over its own shim's stream (src/adapters/
-// claude.ts), never into a pane. Other harnesses aren't ported, so nothing reaches them.
+// claude.ts), never into a pane, and an OpenCode agent's into its session through the server (pushOpenCode). Codex
+// isn't ported, so nothing reaches it.
 func (l *Lifecycle) pushPrompt(ctx context.Context, a db.Agent, text string) bool {
+	if a.Harness == "opencode" {
+		return l.pushOpenCode(ctx, a, text)
+	}
 	if a.Harness != "claude" {
 		return false
 	}
 	return l.streams.Push(ctx, a.ID, text, map[string]string{"kind": "mail"})
 }
 
-// prompt is src/lifecycle.ts prompt: stam's own prompt into the agent, through the admission gate under kind. A prompt
-// on its way is recorded as prompt:sent.
+// prompt is src/lifecycle.ts prompt: stam's own prompt into the agent, through the admission gate under kind; an empty
+// kind (TS's null, as for the pause notice) skips the gate. A prompt on its way is recorded as prompt:sent.
 func (l *Lifecycle) prompt(ctx context.Context, a db.Agent, text, kind string) bool {
-	if ok, _ := l.admit(ctx, a.ID, kind); !ok {
-		return false
+	if kind != "" {
+		if ok, _ := l.admit(ctx, a.ID, kind); !ok {
+			return false
+		}
 	}
 	if !l.pushPrompt(ctx, a, text) {
 		return false
 	}
-	l.event(ctx, a.ID, "prompt:sent", promptEvent{Kind: kind})
+	if kind == "" {
+		l.event(ctx, a.ID, "prompt:sent", promptNullEvent{})
+	} else {
+		l.event(ctx, a.ID, "prompt:sent", promptEvent{Kind: kind})
+	}
 	return true
 }
 
@@ -218,14 +244,37 @@ func (l *Lifecycle) prompt(ctx context.Context, a db.Agent, text, kind string) b
 // a tool call; "" when there is nothing new. The notices leave the queue. Mail that can't be read now is noted at a
 // later tool call.
 func (l *Lifecycle) InTurnNotice(ctx context.Context, id string) string {
+	text, _ := l.InTurnTake(ctx, id)
+	return text
+}
+
+// InTurnTake is InTurnNotice for one hook (S-3923): its text, and the answer rows it carried. The rows stay until the
+// hook's client acknowledges them (AckNotice), since the response may not reach the agent.
+func (l *Lifecycle) InTurnTake(ctx context.Context, id string) (string, []int64) {
+	return l.inTurnTakeIf(ctx, id, nil)
+}
+
+// inTurnTakeIf is InTurnTake that takes nothing unless held (nil: always) says so, checked under the lifecycle's lock, in
+// the one step with the take: a notice queued since is not in it, and one taken is the agent's at that step. The check
+// reads the owner's state (owner.mu follows Lifecycle.mu in the lock order).
+func (l *Lifecycle) inTurnTakeIf(ctx context.Context, id string, held func() bool) (string, []int64) {
 	l.mu.Lock()
+	if held != nil && !held() {
+		l.mu.Unlock()
+		return "", nil
+	}
 	var parts []string
-	var kept []notice
+	var kept, taken []notice
+	var rows []int64
 	for _, n := range l.notices[id] {
 		if n.IdleOnly {
 			kept = append(kept, n)
 		} else {
 			parts = append(parts, n.Text)
+			taken = append(taken, n)
+			if n.Row != 0 {
+				rows = append(rows, n.Row)
+			}
 		}
 	}
 	if len(kept) > 0 {
@@ -233,13 +282,14 @@ func (l *Lifecycle) InTurnNotice(ctx context.Context, id string) string {
 	} else {
 		delete(l.notices, id)
 	}
+	l.heldRows(id, taken)
 	l.mu.Unlock()
 	if count, _, err := l.db.MailNotice(ctx, id, true, 0); err == nil && count > 0 {
 		if list, err := l.mailList(ctx, id, "mail-notice", true); err == nil {
 			parts = append(parts, list)
 		}
 	}
-	return strings.Join(parts, "\n\n")
+	return strings.Join(parts, "\n\n"), rows
 }
 
 // mailList renders the template with src/mail.ts noticeList's count and list of the agent's unread mail.

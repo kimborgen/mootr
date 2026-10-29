@@ -194,7 +194,8 @@ button.wait-badge { cursor: pointer; }
 .node .chev.open svg { transform: rotate(90deg); }
 .node .name { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .node .role { min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-muted); font-size: var(--type-chrome-sm); }
-.node .meta { display: flex; align-items: center; gap: var(--space-1); flex: 0 1 auto; min-width: 0; }
+/* The meta's items are not shrunk, so on a narrow row they would run past the meta's box onto the row's action buttons (S-4066): the meta clips them at its own edge instead. */
+.node .meta { display: flex; align-items: center; gap: var(--space-1); flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .node .meta > * { flex: none; }
 /* The cost is the only part of the meta that shrinks. Its numbers are one line tall: /tree wraps onto a hidden second line when it doesn't fit, so it disappears whole. The own number never shrinks (min-width auto keeps the span at its width), and badges and the model code never clip. Under the numbers sits the spend hairline (S-698): a track, and a fill scaled by transform: scaleX against the biggest spender shown. */
 .node .meta .cost { display: flex; flex-direction: column; justify-content: center; gap: var(--space-05); flex: 0 1 auto; min-width: 0; color: var(--text-muted); font-size: var(--type-chrome-xs); }
@@ -208,7 +209,7 @@ button.wait-badge { cursor: pointer; }
    so a mail landing stamps it rather than mounting it. */
 .node .stamp { display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .node .meta .badge.empty { display: none; }
-.node .hover-actions { display: none; gap: 2px; }
+.node .hover-actions { display: none; flex: none; gap: 2px; }
 .node:hover .hover-actions, .node:focus-within .hover-actions { display: flex; }
 .node:hover .meta .chip { display: none; }
 .guide { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border-subtle); }
@@ -243,16 +244,78 @@ button.wait-badge { cursor: pointer; }
 /* The Agents page (S-1428): the agent tree full width under a header the height of a page tab bar. */
 .agents-view { display: flex; flex-direction: column; height: 100%; min-width: 0; background: var(--surface-pane); }
 .agents-head { flex: none; display: flex; align-items: center; gap: var(--space-3); height: var(--size-tab-bar); padding: 0 var(--space-4); min-width: 0; }
-.agents-title { margin: 0; font-size: var(--type-chrome-lg); font-weight: var(--weight-semibold); }
+.agents-title { flex: none; margin: 0; font-size: var(--type-chrome-lg); font-weight: var(--weight-semibold); }
 .agents-count { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: var(--type-chrome-sm); font-variant-numeric: tabular-nums; }
 .agents-count .asks { color: var(--status-warning-fg); font-weight: var(--weight-medium); }
 .agents-desk .agents-head { gap: var(--space-2); }
-.agents-group { height: var(--size-row-table); max-width: calc(var(--space-12) * 2); min-width: 0; font-size: var(--type-chrome-sm); color: var(--text-primary); }
-.agents-search { flex: 0 1 calc(var(--space-12) * 3); min-width: 0; height: var(--size-row-table); font-size: var(--type-chrome-sm); }
+.agents-group { flex: 0 1 auto; height: var(--size-row-table); max-width: calc(var(--space-12) * 2); min-width: var(--space-12); font-size: var(--type-chrome-sm); color: var(--text-primary); }
+/* The search keeps room for its placeholder: the header gives way to the count and the search, then to the machines strip (S-3182). */
+.agents-search { flex: 0 1 calc(var(--space-12) * 3); min-width: calc(var(--space-12) * 2.5); height: var(--size-row-table); font-size: var(--type-chrome-sm); }
 /* The scope chips (S-2937) keep their width; the page's button under the table pages in the next rows. */
 .agents-scope { flex: none; height: var(--size-row-table); }
 .agents-scope button { height: 100%; }
+/* The machines strip (S-3182): one item per machine, its name and CPU and RAM meters; collapsed, one button with a dot for the worst level. */
+.mstrip { display: flex; align-items: center; gap: var(--space-1); flex: none; min-width: 0; }
+.mstrip-item { display: inline-flex; align-items: center; gap: var(--space-15); flex: none; height: var(--size-row-table); padding: 0 var(--space-2); border-radius: var(--radius-sm); color: var(--text-primary); font-size: var(--type-chrome-sm); }
+.mstrip-item:hover, .mstrip-item:focus-visible { background: var(--tree-row-hover); }
+.mstrip-item:focus-visible { box-shadow: inset 0 0 0 var(--focus-ring-width) var(--focus-ring); }
+.mstrip-item .mname { max-width: calc(var(--space-12) * 2); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.mstrip-item.off .mname, .mall-line.off .mname { color: var(--text-muted); }
+.mstrip-item .moff { font-size: var(--type-chrome-sm); }
+.mstrip-collapsed { position: relative; }
+.mstrip-collapsed .mdot { position: absolute; top: var(--space-05); right: var(--space-05); width: var(--space-15); height: var(--space-15); border-radius: 50%; background: var(--status-neutral-fg); }
+.mstrip-collapsed .mdot[data-level='warn'] { background: var(--status-warning-fg); }
+.mstrip-collapsed .mdot[data-level='err'] { background: var(--status-error-fg); }
+.mall-line { display: flex; align-items: center; gap: var(--space-2); min-height: var(--size-row-menu); font-size: var(--type-chrome-sm); }
+.mall-line .mname { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.agents-spawn { flex: none; }
+/* The narrow header's forms (S-3182): Spawn as its plus, and the scope chips as one select that keeps its width. */
+.agents-spawn.compact { width: var(--size-control); padding: 0; justify-content: center; }
+.agents-scope-select { flex: none; width: auto; max-width: calc(var(--space-12) * 2.5); height: var(--size-row-table); font-size: var(--type-chrome-sm); color: var(--text-primary); }
+/* The phone's Spawn (S-3182): the 44 px touch target with an accent plus, as the header's icon buttons take their ink. */
+.agents-spawn-m { color: var(--accent-text); }
+.agents-spawn-m:hover { background: var(--accent-subtle); color: var(--accent-text); }
 .agents-more { flex: none; justify-content: center; margin: var(--space-1) var(--space-4); }
+/* The phone's Agents list (S-1432): the scope chips in one row that scrolls sideways, and two-line rows at least a touch
+   target tall. A row's indent is set inline (12 px a level, capped at 3). */
+.agents-chips { flex: none; display: flex; flex-wrap: nowrap; gap: var(--space-2); padding: 0 var(--space-4) var(--space-2); overflow-x: auto; scrollbar-width: none; }
+.agents-chips::-webkit-scrollbar { display: none; }
+.agents-chip { flex: none; min-height: var(--size-hit-touch); padding: 0 var(--space-3); border-radius: var(--radius-lg); font-size: var(--type-chrome-sm); color: var(--text-secondary); }
+.agents-chip.on { background: var(--accent-subtle); color: var(--accent-text); }
+.agents-list { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.arow { display: flex; align-items: center; min-height: var(--size-hit-touch); padding-right: var(--space-2); border-bottom: var(--stroke-card) solid var(--table-border); }
+.arow.dup { color: var(--text-muted); }
+.arow.off .arow-name { color: var(--text-secondary); }
+.arow-chev { flex: none; width: var(--size-hit-touch); height: var(--size-hit-touch); display: grid; place-items: center; color: var(--text-muted); }
+.arow-main { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: stretch; gap: var(--space-05); padding: var(--space-2) 0; text-align: left; }
+.arow-l1, .arow-l2 { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.arow-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.arow-cost { flex: none; font-size: var(--type-chrome-sm); color: var(--text-secondary); }
+.arow-cost .cost-tree { color: var(--text-muted); }
+/* Text for a screen reader only: clipped to nothing, still read out (the design system's sr-only). */
+.sr-only { position: absolute; width: var(--stroke-card); height: var(--stroke-card); margin: calc(var(--stroke-card) * -1); padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.arow-l2 { font-size: var(--type-chrome-xs); color: var(--text-muted); overflow: hidden; white-space: nowrap; }
+.arow-state { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.arow-model, .arow-itsa, .arow-kids, .arow-parent { flex: none; }
+.arow-parent { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.arow-more { flex: none; width: var(--size-hit-touch); height: var(--size-hit-touch); }
+/* Select mode (S-3282): the checkbox sits in the fold chevron's 44 px slot, so no row's text moves; a checked row takes the
+   row hover tint. The header's Select, Select all and Done are 44 px targets. */
+.arow-check { display: grid; place-items: center; }
+.arow-check .agents-check { pointer-events: none; }
+.arow.on { background: var(--table-row-hover); }
+.agents-select, .agents-select-all, .agents-select-done { min-height: var(--size-hit-touch); }
+/* The phone's bulk bar (S-3282): fixed on the phone's bottom bar, whose height already holds the safe-area inset, and the
+   list pads its foot by the bar's height so the last row scrolls clear of it. */
+.agents-bulk-dock { position: fixed; left: 0; right: 0; bottom: var(--nav-h); z-index: var(--z-reveal); }
+.agents-bulk-dock .agents-bulk { min-height: var(--size-hit-touch); }
+.agents-bulk-dock .btn { min-height: var(--size-hit-touch); }
+/* The phone's bar is one row (S-3282): icon and count buttons at the 44 px target, spread across the width. */
+.agents-bulk.compact { flex-wrap: nowrap; justify-content: space-between; gap: var(--space-1); padding: var(--space-1) var(--space-3); }
+/* Four equal columns: the icon over its name and count, a 44 px target. A disabled one keeps its tap and reads as .btn:disabled. */
+.agents-bulk.compact .btn { flex: 1 1 0; min-width: 0; min-height: var(--size-hit-touch); flex-direction: column; justify-content: center; gap: 0; padding: var(--space-05) var(--space-1); }
+.agents-bulk.compact .btn[aria-disabled='true'] { background: transparent; border-color: var(--border-default); color: var(--text-disabled); cursor: default; }
+.agents-bulk-n { font-size: var(--type-chrome-xs); line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* The desk's body (S-3048): the table takes what the detail pane leaves, and a pane narrower than the page's overlay
    threshold lies over the table instead. The table's own box measures its width, so its columns drop as it narrows. */
 .agents-body { flex: 1; min-height: 0; display: flex; position: relative; }
@@ -289,15 +352,27 @@ table.data.agents-table { max-width: none; width: 100%; margin: 0; table-layout:
 .agents-table .ctxbar { display: inline-block; vertical-align: middle; }
 .agents-table th.ac-cost, .agents-table th.ac-age { width: calc(var(--space-12) * 2); }
 .agents-table .ac-itsa .ichip { max-width: 100%; }
-/* Drop order as the table narrows: age, unread, machine, role and model, then activity and ITSA. Each step keeps the name at about 200 px.
-   Activity and ITSA drop at 600 px (not 560), so with the detail pane open (S-3048) a 1280 px window keeps the name at about 200 px. */
+/* Drop order as the table narrows: age, unread, machine, role and model, then activity and ITSA. Each step fires while the name
+   is still at least 200 px: the name is least just above a step, where the column that drops is still shown, so each step
+   sits where that name is at about 200 px (S-3023, measured with web/check/agents-name.mjs). */
 /* A stopped or archived list keeps its age, the time it changed, and drops activity and context first (they read the same there). */
 @container (max-width: 1040px) { .agents-table.agents-gone .ac-activity, .agents-table.agents-gone .ac-context { display: none; } }
-@container (max-width: 1000px) { .agents-table:not(.agents-gone) .ac-age { display: none; } }
-@container (max-width: 920px) { .agents-table .ac-unread { display: none; } }
-@container (max-width: 800px) { .agents-table .ac-machine { display: none; } }
-@container (max-width: 760px) { .agents-table .ac-role, .agents-table .ac-model { display: none; } }
-@container (max-width: 600px) { .agents-table .ac-activity, .agents-table .ac-itsa { display: none; } }
+@container (max-width: 1020px) { .agents-table:not(.agents-gone) .ac-age { display: none; } }
+@container (max-width: 930px) { .agents-table .ac-unread { display: none; } }
+@container (max-width: 900px) { .agents-table .ac-machine { display: none; } }
+@container (max-width: 810px) { .agents-table .ac-role, .agents-table .ac-model { display: none; } }
+@container (max-width: 620px) { .agents-table .ac-activity, .agents-table .ac-itsa { display: none; } }
+/* The checked set (S-3117): a checkbox column at the row's start, a checked row's tint, the bulk bar under the table, and the
+   confirm that names what a bulk action will do. Desk only: the phone keeps its tree. */
+.agents-table th.ac-check, .agents-table td.ac-check { width: var(--size-agents-check-col); padding: 0 0 0 var(--space-2); }
+.agents-check { width: var(--size-agents-check); height: var(--size-agents-check); margin: 0; accent-color: var(--accent); }
+.agents-table tr.chk td { background: var(--table-row-hover); }
+.agents-bulk { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: var(--size-row-table); padding: var(--space-1) var(--space-4); border-top: 1px solid var(--table-border); background: var(--surface-pane); }
+.agents-bulk-count { flex: 1; min-width: 0; color: var(--text-muted); font-size: var(--type-chrome-sm); font-variant-numeric: tabular-nums; }
+.agents-confirm { display: grid; gap: var(--space-2); width: var(--size-agents-confirm); max-width: 100%; padding: var(--space-3) var(--space-4); font-size: var(--type-chrome-sm); }
+.agents-confirm-lead { margin: 0; font-weight: var(--weight-medium); }
+.agents-confirm-names { margin: 0; padding-left: var(--space-4); }
+.agents-confirm-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 
 /* Agent glyph: the harness mark inside a state ring. State owns colour; nothing spins. */
 .glyph { position: relative; width: 20px; height: 20px; flex: none; display: grid; place-items: center; color: var(--hc, var(--text-secondary)); }
@@ -1251,6 +1326,13 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 
 /* Math: KaTeX in the text colour; the TeX source shows until it's typeset, or if it fails. */
 .mb-math.display { margin: 0 0 0.75em; overflow-x: auto; text-align: center; }
+/* Inline math is clipped to its own box, so a raised or smashed box can't paint over the text around it (S-2998). */
+.mb-math:not(.display) { display: inline-block; max-width: 100%; overflow: clip; }
+/* The ITSA text an ask or re-show shows the human (S-2998): drawn above everything after it in the mail, on the
+   card's own surface, so nothing later in the mail can cover it. */
+.mb-shown { position: relative; z-index: 1; background: var(--mb-surface, var(--surface-page)); }
+.conv-mail:not(.human) .mb-shown, .msg:not(.mine) .mb-shown { background: var(--surface-page); }
+.mail-card.sel .mb-shown { background: var(--accent-subtle); }
 .mb-math.failed code { color: var(--status-error-fg); }
 .mb-math .katex { font-size: 1.1em; }
 
@@ -1501,6 +1583,33 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .mrow.ask .astat { flex: none; color: var(--is-waiting); font-size: var(--type-chrome-xs); }
 .mrow.ask > svg.i { color: var(--status-warning-fg); width: var(--icon-xs); height: var(--icon-xs); margin: 0 -4px; }
 .mrow.awaiting > svg.i { color: var(--text-muted); width: var(--icon-xs); height: var(--icon-xs); margin: 0 -4px; }
+/* The Needs you list (S-3831): line one is kind, agent, home and age, and it never wraps: the agent truncates first,
+   then the home chip, and the age stays on the right. A second line, when the row has one, is the what. A settled ask is dimmed. */
+.mrow.needs-row { flex-direction: column; align-items: stretch; justify-content: center; gap: var(--space-05); height: auto; min-height: var(--size-row-tree); padding-block: var(--space-1); }
+@media (max-width: 760px) { .mrow.needs-row { min-height: var(--size-hit-touch); } }
+.needs-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.needs-line > .astat { flex: none; }
+.needs-line > .ikey { flex: 0 1 auto; min-width: 0; max-width: var(--mail-title-max); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: var(--type-chrome-sm); }
+.needs-line > .needs-home { flex: 0 1 auto; min-width: 0; max-width: var(--mail-title-max); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
+.needs-line > .t { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mrow.needs-row > .s { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mrow.needs-row.settled { color: var(--text-muted); }
+.mrow.needs-row.settled .astat { color: var(--text-muted); }
+/* The link from an agent or an ITSA to the open ask it waits on (S-3977): a button in the warning colour, with the user mark. */
+.open-ask { display: inline-flex; align-items: center; gap: var(--space-1); padding: 0; border: 0; background: none; font: inherit; color: var(--status-warning-fg); font-weight: var(--weight-medium); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; white-space: nowrap; }
+/* Inset, not the outer halo: the tree row's meta clips at its edge (S-4066), and the link sits flush with it. */
+.node .open-ask:focus-visible { box-shadow: inset 0 0 0 var(--focus-ring-width) var(--focus-ring); }
+/* On the phone's agent row the link is a sibling of the row's button, at a 44 px touch target. */
+.arow-ask { flex: none; min-width: var(--size-hit-touch); min-height: var(--size-hit-touch); justify-content: center; padding-inline: var(--space-2); }
+/* On the phone the link is a 44 px touch target wherever it sits, the ITSA page's status row too. */
+@media (max-width: 760px) { .open-ask { min-width: var(--size-hit-touch); min-height: var(--size-hit-touch); } }
+/* On the phone the tree's row is one tap target for the agent; its link would take that tap, so the phone's Agents row keeps the link (S-3982). */
+@media (max-width: 760px) { .node .open-ask { display: none; } }
+/* The Needs you entry at the head of the mail rail (S-3831): a full-width row, pressed in the accent. */
+.needs-rail { display: flex; align-items: center; width: 100%; min-height: var(--size-row-tree); padding: 0 var(--space-3); color: var(--text-secondary); font-size: var(--type-chrome-sm); text-align: left; }
+.needs-rail:hover { background: var(--control-hover-bg); }
+.needs-rail[aria-pressed="true"] { color: var(--accent-text); }
+@media (max-width: 760px) { .needs-rail { min-height: var(--size-hit-touch); } }
 /* Hover or keyboard focus replaces the timestamp with one icon-only archive button in the
    same slot, at the row's height. The button stays in the tab order, so focus reveals it. */
 .mrow .row-act { position: relative; flex: none; margin-left: auto; display: inline-flex; align-items: center; justify-content: flex-end; min-width: var(--size-row-tree); }
@@ -1819,6 +1928,10 @@ table.data.rq-matrix th, table.data.rq-matrix td { border-right: 1px solid var(-
 .itsa-cost-val { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .itsa-cost-config { margin: var(--space-1) 0 0; font-size: var(--type-chrome-sm); }
 .itsa-activity { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-1) var(--space-3); margin: 0; font-variant-numeric: tabular-nums; }
+.itsa-fields { display: grid; grid-template-columns: fit-content(40%) minmax(0, 1fr); gap: var(--space-1) var(--space-3); margin: 0; }
+.itsa-fields dt { color: var(--text-secondary); min-width: 0; overflow-wrap: anywhere; }
+.itsa-fields dd { margin: 0; min-width: 0; min-height: 1lh; overflow-wrap: anywhere; }
+.itsa-fields .w-ftext { max-width: none; height: auto; padding: 0; overflow: visible; white-space: normal; text-overflow: clip; }
 .itsa-activity dt { color: var(--text-secondary); }
 .itsa-activity dd { margin: 0; min-width: 0; }
 .itsa-activity-kinds, .itsa-activity-kinds ul { margin: var(--space-1) 0 0; padding: 0 0 0 var(--space-3); list-style: none; }
@@ -2194,6 +2307,8 @@ pre.tiny-instr { padding: var(--space-2); background: var(--input-bg); border: 1
 .sbs-tab .wcol-ctl { flex-wrap: wrap; justify-content: flex-end; max-width: 100%; }
 .sbs-unused { margin: var(--space-4) 0; }
 .sbs-foot { margin: var(--space-4) 0; }
+.sbs-defaults { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
+@media (max-width: 760px) { .sbs-defaults .btn { min-height: var(--size-hit-touch); flex: 1 1 100%; } }
 .check { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 /* A segmented choice: options side by side; the chosen one takes the selection fill. */
 .seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--border-default); border-radius: var(--radius-sm); overflow: hidden; }
@@ -2365,7 +2480,6 @@ fieldset.ro { border: 0; margin: 0; padding: 0; min-width: 0; color: var(--text-
 .wcol-opts { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-05); }
 .wcol-row.off .wcol-head b, .wcol-row.off .wcol-meta { color: var(--text-muted); }
 .wcol-ctl { flex: none; display: inline-flex; align-items: center; gap: var(--space-1); }
-.wcol-edit-gap { width: var(--space-6); }
 .wcol-empty { margin: var(--space-3) 0; }
 .wcol-error { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-3); }
 .wcol-error .sp-error { margin: 0; flex: 1; min-width: 0; }
@@ -2388,12 +2502,109 @@ fieldset.ro { border: 0; margin: 0; padding: 0; min-width: 0; color: var(--text-
 .wcol-opt-moves { display: inline-flex; gap: var(--space-1); }
 .wcol-add-opt { margin-top: var(--space-3); }
 .wcol-form .set-field textarea { width: 100%; min-height: calc(var(--space-12) + var(--space-2)); }
+.wcol-tabs { margin: 0 0 var(--space-3); }
+/* The issue card editor (S-1438 PR 6a): a live preview, then one row per slot, then the Available list. Its menus
+   open under their trigger; the editor is desktop only (the tab is hidden on a phone until PR 7). */
+.ice { display: grid; gap: var(--space-3); max-width: var(--size-ice-max); }
+.ice-preview { display: grid; gap: var(--space-2); }
+.ice-preview-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.ice-pick { display: inline-flex; align-items: center; gap: var(--space-2); }
+.ice-preview-card { width: calc(var(--space-12) * 5); }
+.ice-row { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border-subtle); }
+.ice-slot-name { width: var(--space-12); flex: none; color: var(--text-muted); font-size: var(--type-chrome-sm); padding-top: var(--space-1); }
+.ice-chips { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); flex: 1; min-width: 0; }
+.ice-chip { position: relative; display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-05) var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-xs); background: var(--surface-page); font-size: var(--type-chrome-sm); }
+.ice-chip.locked { color: var(--text-muted); }
+.ice-lines-label { font-size: var(--type-chrome-sm); }
+.ice-menu { position: absolute; top: 100%; left: 0; z-index: var(--z-popover); display: grid; gap: var(--space-05); min-width: calc(var(--space-12) * 2); padding: var(--space-1); margin-top: var(--space-1); background: var(--surface-raised); border: 1px solid var(--border-default); border-radius: var(--radius-sm); box-shadow: var(--shadow-raised); }
+.ice-menu input[type=search] { margin-bottom: var(--space-05); }
+.ice-menu button { text-align: left; padding: var(--space-1) var(--space-2); border-radius: var(--radius-xs); }
+.ice-menu button:hover:not(:disabled) { background: var(--control-hover-bg); color: var(--control-hover-fg); }
+.ice-menu button:disabled { color: var(--control-disabled-fg); }
+.ice-none { margin: 0; padding: var(--space-1) 0; }
+.ice-available h3 { margin: var(--space-2) 0; }
+.ice-avail-list { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.ice-avail-list li { position: relative; }
+.ice-avail { padding: var(--space-05) var(--space-2); border: 1px dashed var(--border-default); border-radius: var(--radius-xs); font-size: var(--type-chrome-sm); }
+.ice-avail:hover { background: var(--control-hover-bg); }
+.ice-said { min-height: var(--space-4); margin: 0; font-size: var(--type-chrome-sm); }
+.ice-foot { display: flex; justify-content: flex-end; }
+/* The agent card's ISSUE switch and its hairline toggle (AgentCardEditor): a checkbox drawn as a switch's label. */
+.ice-switch { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--type-chrome-sm); }
+/* Drag and keys (S-3314): a touch drag starts on a chip, so the chip takes no scroll. The source dims in place, the gap
+   takes the chip's height where the item would land, and a refusal shows in the slot it was for. */
+.ice-chip, .ice-avail { touch-action: none; }
+.ice.dragging { user-select: none; }
+.ice-chip.dragging, .ice-avail.dragging { opacity: 0.5; }
+/* The inset ring keeps the focus ring: a raised box-shadow would otherwise replace the :focus-visible ring. */
+.ice-chip.raised, .ice-avail.raised { background: var(--surface-raised); box-shadow: var(--shadow-raised), inset 0 0 0 var(--focus-ring-width) var(--focus-ring); }
+.ice-gap { flex: none; align-self: stretch; min-width: var(--space-6); border: 1px dashed var(--drop-border); border-radius: var(--radius-xs); background: var(--drop-fill); }
+.ice-available.drop { background: var(--drop-fill); border-radius: var(--radius-sm); }
+/* A refusal hangs under its row, over the rows below: it takes no room, so no row moves when it shows. */
+.ice-refusal { position: absolute; top: 100%; left: 0; z-index: var(--z-popover); pointer-events: none; margin-top: var(--space-05); padding: var(--space-05) var(--space-2); max-width: 100%; background: var(--surface-raised); border: 1px solid var(--border-default); border-radius: var(--radius-xs); box-shadow: var(--shadow-float); color: var(--status-error-fg); font-size: var(--type-chrome-sm); }
+.ice-available { position: relative; }
+.ice-ghost { position: fixed; left: 0; top: 0; z-index: var(--z-drag); pointer-events: none; padding: var(--space-05) var(--space-2); border: 1px solid var(--border-default); border-radius: var(--radius-xs); background: var(--surface-raised); box-shadow: var(--shadow-float); font-size: var(--type-chrome-sm); white-space: nowrap; }
+
+/* The issue card editor on a phone (S-1438 PR 7): a sticky live preview over one list per slot. Touch targets are
+   --size-hit-touch; a drag's handle takes no scroll (touch-action) and its text takes no selection or callout. */
+.ipe { display: grid; gap: var(--space-3); }
+.ipe-preview { position: sticky; top: 0; z-index: var(--z-sticky); display: grid; gap: var(--space-2); padding: var(--space-2) 0; background: var(--surface-pane); }
+.ipe-pick { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: var(--size-hit-touch); }
+.ipe-pick select { min-height: var(--size-hit-touch); max-width: 70%; }
+.ipe-switch { display: inline-flex; align-items: center; gap: var(--space-2); min-height: var(--size-hit-touch); font-size: var(--type-chrome-sm); }
+.ipe-preview-card { width: 100%; }
+.ipe-preview-card > * { width: 100%; }
+.ipe-slot { display: grid; gap: var(--space-05); }
+.ipe-slot h3 { margin: var(--space-2) 0 0; display: flex; justify-content: space-between; }
+.ipe-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.ipe-row { display: flex; align-items: center; gap: var(--space-2); min-height: var(--size-hit-touch); border-bottom: 1px solid var(--border-subtle); user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.ipe-row.dragging { opacity: 0.5; }
+.ipe-row.locked { color: var(--text-muted); }
+.ipe-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ipe-controls { display: flex; align-items: center; flex: none; }
+.ipe-controls button, .ipe-lock { display: inline-flex; align-items: center; justify-content: center; min-width: var(--size-hit-touch); min-height: var(--size-hit-touch); padding: 0; background: none; border: 0; color: var(--text-primary); }
+.ipe-controls button:disabled { color: var(--control-disabled-fg); }
+.ipe-handle { touch-action: none; cursor: grab; font-size: var(--type-chrome-sm); }
+.ipe-gap { display: block; min-height: var(--size-hit-touch); border: 1px dashed var(--drop-border); border-radius: var(--radius-xs); background: var(--drop-fill); }
+.ipe-refusal { margin: var(--space-05) 0 0; color: var(--status-error-fg); font-size: var(--type-chrome-sm); }
+.ipe-lines-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: var(--size-hit-touch); }
+.ipe-lines button { min-width: var(--size-hit-touch); min-height: var(--size-hit-touch); }
+.ipe-add { min-height: var(--size-hit-touch); justify-self: start; }
+.ipe-said { min-height: var(--space-4); margin: 0; font-size: var(--type-chrome-sm); }
+.ipe-foot { display: flex; justify-content: flex-end; }
+.ipe-foot .btn { min-height: var(--size-hit-touch); }
+.ipe-sheet { display: grid; gap: var(--space-05); }
+.ipe-sheet .eyebrow { margin: 0; }
+.ipe-sheet .ipe-sheet-item { height: auto; }
+.ipe-sheet-item { display: flex; flex-direction: column; justify-content: center; min-height: var(--size-hit-touch); padding: var(--space-1) var(--space-2); text-align: left; border-radius: var(--radius-xs); }
+.ipe-sheet-item:disabled { color: var(--control-disabled-fg); }
+.ipe-sheet-item.danger { color: var(--status-error-fg); }
+.ipe-why { font-size: var(--type-chrome-sm); color: var(--text-muted); }
+.ipe-add-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); min-height: var(--size-hit-touch); padding: var(--space-05) 0; border-bottom: 1px solid var(--border-subtle); }
+.ipe-add-row .ipe-add-select, .ipe-add-row .ipe-add-btn { width: auto; flex: none; height: var(--size-hit-touch); min-height: var(--size-hit-touch); }
+.ipe-add-row .ipe-add-btn { min-width: var(--size-hit-touch); padding: 0 var(--space-2); justify-content: center; }
+.ipe-add-name { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ipe-add-row .ipe-add-select { max-width: 40%; }
+.ipe-add-why { flex-basis: 100%; font-size: var(--type-chrome-sm); color: var(--status-error-fg); }
+/* The lifted row, under the finger: raised, as on the desktop, and it keeps the grab offset (see IssueCardPhoneEditor). */
+.ipe-ghost { position: fixed; z-index: var(--z-drag); pointer-events: none; display: flex; align-items: center; gap: var(--space-2); box-sizing: border-box; min-height: var(--size-hit-touch); padding: 0 var(--space-2); background: var(--surface-raised); border-radius: var(--radius-sm); box-shadow: var(--shadow-raised); color: var(--text-primary); font-size: var(--type-chrome-md); }
+.fld-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border-default); }
+.fld-list li { border-bottom: 1px solid var(--border-subtle); }
+.fld-row { display: flex; align-items: center; gap: var(--space-2); width: 100%; padding: var(--space-3) 0; text-align: left; color: inherit; }
+.fld-row:hover { background: var(--control-hover-bg); }
+.fld-row:focus-visible { box-shadow: inset 0 0 0 var(--focus-ring-width) var(--focus-ring); }
+.fld-row > svg { flex: none; color: var(--text-muted); }
+.fld-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--space-05); }
+.fld-line { color: var(--text-secondary); font-size: var(--type-chrome-sm); line-height: var(--leading-chrome-sm); overflow-wrap: anywhere; }
+.wcol-kinds { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
+.wcol-kinds .check { display: inline-flex; align-items: center; gap: var(--space-15); }
+.wcol-kind-add { display: inline-flex; flex: 1 1 100%; gap: var(--space-2); }
+.wcol-kind-add input { flex: 1; min-width: 0; }
 @media (max-width: 760px) {
   .wcol-grip { display: none; }
   .wcol-show { width: var(--size-hit-touch); min-height: var(--size-hit-touch); margin-left: calc(var(--space-3) * -1); }
   .wcol-ctl { gap: 0; margin-right: calc(var(--space-3) * -1); }
   .wcol-ctl .icon-btn, .wcol-opt .icon-btn { width: var(--size-hit-touch); height: var(--size-hit-touch); }
-  .wcol-edit-gap { width: var(--size-hit-touch); }
   .wcol-desc { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .wcol-opt { flex-direction: column; align-items: stretch; gap: var(--space-1); }
   .wcol-opt-a, .wcol-opt-b { display: flex; align-items: center; gap: var(--space-2); }
@@ -2403,7 +2614,13 @@ fieldset.ro { border: 0; margin: 0; padding: 0; min-width: 0; color: var(--text-
   .wcol-tone { height: var(--size-hit-touch); min-width: var(--size-hit-touch); }
   .wcol-tones { gap: 0; }
   .wcol-opt-moves { gap: 0; margin-left: auto; margin-right: calc(var(--space-3) * -1); }
-  #add-column, .wcol-add-opt, .wcol-error .btn, .wcol-form .type-actions .btn, .wcol-form .type-back, .wcol-more summary { min-height: var(--size-hit-touch); }
+  .wcol-tabs { display: flex; }
+  .wcol-tabs button { flex: 1; min-height: var(--size-hit-touch); justify-content: center; }
+  .fld-row { min-height: var(--size-hit-touch); padding: var(--space-2) 0; }
+  .fld-line { white-space: normal; }
+  .wcol-kinds .check { min-height: var(--size-hit-touch); }
+  .wcol-kind-add input, .wcol-kind-add .btn { min-height: var(--size-hit-touch); }
+  #add-field, .wcol-add-opt, .wcol-error .btn, .wcol-form .type-actions .btn, .wcol-form .type-back, .wcol-more summary { min-height: var(--size-hit-touch); }
   .wcol-form input.wide { width: 100%; min-height: var(--size-hit-touch); }
   .skill-import input, .skill-import .btn, .skill-origin .btn { min-height: var(--size-hit-touch); }
 }
@@ -2462,6 +2679,10 @@ fieldset.ro { border: 0; margin: 0; padding: 0; min-width: 0; color: var(--text-
   .mail-delegated > summary { height: var(--size-hit-touch); }
   .inbox-chip, .inbox-mode { min-width: var(--size-hit-touch); min-height: var(--size-hit-touch); height: auto; justify-content: center; }
   .mrow-act { display: flex; }
+  /* Title, search, Swipe and History fill a 360 px row; the count (S-3461) takes the line under them instead of a width of 0. */
+  .inbox-head { flex-wrap: wrap; row-gap: 0; }
+  .inbox-search { flex: 1 1 0; min-width: 0; max-width: none; }
+  .inbox-count { order: 1; flex: 1 0 100%; padding-bottom: var(--space-1); }
   .tree .section, .mail-side .section, .issues-side .section, .machines-side .section { height: var(--size-hit-touch); padding-top: 0; }
   .machine-row { height: var(--size-hit-touch); -webkit-touch-callout: none; }
   .machines-side .fold { min-height: var(--size-hit-touch); }
@@ -2479,8 +2700,12 @@ fieldset.ro { border: 0; margin: 0; padding: 0; min-width: 0; color: var(--text-
   .new-itsa .btn { min-width: var(--size-hit-touch); }
   .itsa-inner { padding: var(--space-3) var(--space-3) var(--space-8); }
   .crumb-link, .prop { min-height: var(--size-hit-touch); }
+  .itsa-cost-agents .crumb-link { min-width: var(--size-hit-touch); } /* a short agent name (kid) is under 44 px wide in Safari's text metrics */
   .prop { padding: 0 var(--space-3); }
   .itsa-activity-kinds summary { min-height: var(--size-hit-touch); align-content: center; }
+  .itsa-fields dt, .itsa-fields dd { min-height: var(--size-hit-touch); align-content: center; }
+  .itsa-fields dd { display: flex; align-items: center; }
+  .itsa-fields .w-flink { min-height: var(--size-hit-touch); }
   .itsa-activity-agents .crumb-link { margin-left: calc(var(--space-3) * -1); }
   .ikid { min-height: var(--size-hit-touch); flex-wrap: wrap; padding: var(--space-1) var(--space-2); }
   .ikid .ititle { flex-basis: 0; }
@@ -2977,6 +3202,13 @@ a.w-link-body:hover .w-link-label { text-decoration: underline; }
 .wg-head .count { color: var(--text-muted); font-weight: var(--weight-regular); font-variant-numeric: tabular-nums; }
 .wg-sec[data-sec=needs] .wg-head svg { color: var(--is-waiting); }
 .wg-card { position: relative; display: flex; flex-direction: column; justify-content: center; gap: var(--space-1); min-height: var(--size-hit-touch); box-sizing: border-box; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--table-border); cursor: pointer; color: var(--text-primary); font-size: var(--type-chrome-sm); }
+/* A Needs-you row is the whole target; a moving card is the board's issue card (S-3560) inside the row: a box of its own, the rule left to the row. */
+.wg-card:has(> .bcard) { padding: var(--space-1) var(--space-3); border-bottom: 0; }
+.wg-card > .bcard { min-height: var(--size-hit-touch); box-sizing: border-box; padding-right: var(--space-3); }
+.wg-card .ic-cell { display: contents; }
+/* The card's links are 44 px targets: a line with links is taller, so a target never lies over the title or a neighbour. */
+.wg-card .bc-links .bc-link { display: inline-grid; place-items: center; width: var(--size-hit-touch); height: var(--size-hit-touch); border-radius: var(--radius-xs); color: var(--text-secondary); }
+.wg-card .bc-links a.bc-link:focus-visible { outline: none; box-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring); }
 .wg-card:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--focus-ring-width) var(--focus-ring); }
 .wg-card.sub { padding-left: calc(var(--space-3) + var(--space-4)); }
 .wg-need::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--is-waiting); }
@@ -2987,19 +3219,6 @@ a.w-link-body:hover .w-link-label { text-decoration: underline; }
 .wg-top .w-time { line-height: var(--space-5); }
 .wg-why { display: flex; align-items: center; gap: var(--space-1); min-width: 0; }
 .wg-why > span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-/* The agents keep a 44 px target that overlaps the row's padding, not a taller line. */
-.wg-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-3); min-height: var(--space-6); }
-.wg-meta .w-agents { flex-wrap: nowrap; min-width: 0; }
-.wg-meta .w-agent { min-height: var(--size-hit-touch); margin: calc((var(--space-6) - var(--size-hit-touch)) / 2) 0; }
-.wg-meta .w-cost { margin-left: auto; }
-/* Links the same way: a line of icon and label, each a 44 px target over the row's padding. Under a
-   row of agents, the links start a 44 px target below it, so the two targets don't overlap (S-2249). */
-.wg-links { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-4); min-height: var(--space-6); }
-.wg-meta:has(.w-agent) ~ .wg-links { margin-top: calc(var(--size-hit-touch) - var(--space-6)); }
-.wg-link { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; min-height: var(--size-hit-touch); margin: calc((var(--space-6) - var(--size-hit-touch)) / 2) 0; color: var(--text-primary); text-decoration: none; }
-.wg-link svg { flex: none; color: var(--text-secondary); }
-a.wg-link .w-link-label { color: var(--accent-text); }
-a.wg-link:focus-visible { outline: none; box-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring); border-radius: var(--radius-xs); }
 /* ITSA fields (S-369): a column's value by type, and on a card chips in the meta line and the rest labelled under it. */
 .w-fnum { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .w-flink { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; color: var(--accent-text); text-decoration: none; }
@@ -3007,12 +3226,8 @@ a.wg-link:focus-visible { outline: none; box-shadow: 0 0 0 var(--focus-ring-widt
 .w-flink:hover .w-link-label { text-decoration: underline; }
 .w-flink:focus-visible { outline: none; box-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring); border-radius: var(--radius-xs); }
 .w-fcheck { display: inline-flex; color: var(--status-success-fg); }
-.wg-fields { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-4); color: var(--text-secondary); font-size: var(--type-chrome-sm); }
 /* A value that a long-press filters by (S-1518): no browser callout or text selection over the menu. */
 .wg-card [data-cell] { -webkit-touch-callout: none; user-select: none; }
-.wg-field { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; }
-.wg-flabel { color: var(--text-muted); }
-.wg-field .w-flink { min-height: var(--size-hit-touch); margin: calc((var(--space-6) - var(--size-hit-touch)) / 2) 0; }
 .wg-ghead { display: flex; align-items: center; gap: var(--space-15); width: 100%; min-height: var(--size-hit-touch); padding: 0 var(--space-3); border-bottom: 1px solid var(--table-border); background: var(--surface-app); color: var(--text-secondary); font-size: var(--type-chrome-sm); text-align: left; }
 .wg-ghead .ikey { font-family: var(--font-mono); }
 /* A column group's head on the glance: a label and a count, not a button (S-1520). */
@@ -3141,6 +3356,15 @@ a.wg-link:focus-visible { outline: none; box-shadow: 0 0 0 var(--focus-ring-widt
 .ask-block { font-size: var(--type-chrome-sm); color: var(--text-muted); }
 .perm.pending:not(.itsa-ask) { flex-wrap: wrap; }
 .perm.pending:not(.itsa-ask) > .ask-block { flex-basis: 100%; }
+/* The comment on a permission card (S-3829): a freestanding input on its own row, so Approve and Deny sit under it on a phone. */
+.perm.pending .perm-comment { flex: 1 1 100%; min-width: 0; height: var(--size-control); }
+.perm.pending .perm-hint { flex: 1 1 100%; font-size: var(--type-chrome-sm); }
+/* A question dialog (S-3978): its question at body size, then one row per option with its description, then Skip. Text wraps, never scrolls sideways. */
+.perm.pending .perm-question { flex: 1 1 100%; min-width: 0; font-size: var(--type-chrome-md); overflow-wrap: anywhere; }
+.perm.pending .perm-choices { display: flex; flex: 1 1 100%; flex-direction: column; align-items: stretch; gap: var(--space-2); min-width: 0; }
+.perm.pending .perm-choice { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-05); height: auto; min-height: var(--size-hit-touch); max-width: 100%; white-space: normal; text-align: left; }
+.perm.pending .perm-choice-label { font-weight: 600; overflow-wrap: anywhere; }
+.perm.pending .perm-choice-desc { font-size: var(--type-chrome-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
 .mrow .ask-block { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--type-chrome-xs); }
 .ichip { display: inline-flex; align-items: center; gap: var(--space-05); height: var(--icon-sm); padding: 0 var(--space-15); border-radius: var(--radius-xs); background: var(--status-neutral-bg); color: var(--tc, var(--text-secondary)); font-size: var(--type-chrome-xs); flex: none; cursor: pointer; }
 .ichip.waits { background: var(--status-warning-bg); color: var(--status-warning-fg); }

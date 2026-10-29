@@ -18,7 +18,9 @@ STAM_TEST_REAL_KEY=1
 T=$(date +%s)
 daemon_home main; use main
 HM="ARGVHEADER$T$$"
-printf '{\n  "peers": [],\n  "mcpServers": { "argv-mcp": { "url": "http://127.0.0.1:9/mcp", "headers": { "Authorization": "Bearer %s" } } }\n}\n' "$HM" >"$STAM_HOME/settings.json"
+# The agents mail the human: this home lets Claude Haiku do it (the defaults keep it from, settings.humanMail.models,
+# src/mail.ts humanMailBlock) and skips the mail gate.
+printf '{\n  "peers": [],\n  "humanMail": { "when": "necessary", "models": { "claude-haiku-5-5": true } },\n  "decisions": { "mailGate": false },\n  "mcpServers": { "argv-mcp": { "url": "http://127.0.0.1:9/mcp", "headers": { "Authorization": "Bearer %s" } } }\n}\n' "$HM" >"$STAM_HOME/settings.json"
 daemon_up main
 DIR="$(mktemp -d "$TEST_TMP/work.XXXX")"
 fail() { echo "FAIL: $1"; "$STAM" ls; exit 1; }

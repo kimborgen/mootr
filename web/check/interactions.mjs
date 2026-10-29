@@ -828,8 +828,9 @@ async function typesFlow() {
   console.log('# types');
   const p = await page(undefined, /status of 409/);
   const all = () => api('/api/agents');
-  const added = async (before) => {
-    for (let i = 0; i < 40; i++) { const a = (await all()).find((x) => !before.some((b) => b.id === x.id)); if (a) return a; await sleep(250); }
+  // The agent of the clicked type that wasn't there before: another agent (a retro-steward the digest spawns) doesn't count.
+  const added = async (before, type) => {
+    for (let i = 0; i < 40; i++) { const a = (await all()).find((x) => x.type === type && !before.some((b) => b.id === x.id)); if (a) return a; await sleep(250); }
     return null;
   };
   const items = () => p.locator('.menu [role^=menuitem]').allInnerTexts();
@@ -849,7 +850,7 @@ async function typesFlow() {
   await shot(p, 'types-1-menu');
   let before = await all();
   await p.locator('.menu [role=menuitem]').filter({ hasText: /^manager/ }).first().click();
-  let a = await added(before);
+  let a = await added(before, 'manager');
   check(a && a.type === 'manager' && a.model === 'claude-opus-5-5' && a.effort === 'medium', 'clicking a type adds an agent of that type', a && [a.type, a.model, a.effort]);
   const manager = a;
 
@@ -867,7 +868,7 @@ async function typesFlow() {
   await p.locator('.spawn-panel .sp-field input').first().fill('types-advisor');
   before = await all();
   await p.keyboard.press('Control+Enter');
-  a = await added(before);
+  a = await added(before, 'advisor');
   check(a && a.type === 'advisor' && a.model === 'claude-fable-5-1' && a.role === 'advisor', 'the panel adds an agent of the picked type', a && [a.type, a.model, a.role]);
 
   // Settings › Agent types.
@@ -2401,6 +2402,7 @@ async function work() {
   check(await doc.getAttribute('target') === '_blank' && (await doc.innerText()).trim() === 'example.com', 'Fields: a link opens in a new tab, labelled by its host');
   check(await row(webUi.id).locator('.wc-field\\:' + fPts.id).evaluate((el) => el.classList.contains('end')) && await row(webUi.id).locator('.wc-field\\:' + fPts.id).innerText() === '5', 'Fields: a number is end-aligned');
   same(await row(review.id).locator('.wc-field\\:' + fDoc.id).innerText(), '', 'Fields: an empty value draws nothing');
+  await row(webUi.id).scrollIntoViewIfNeeded();
   await shot(p, 'work-fields-desktop-1500');
   // Hide Points; a reload keeps it hidden, and the seen list is saved with the layout.
   await w().locator('.w-tools button', { hasText: 'Columns' }).click();
@@ -2419,14 +2421,18 @@ async function work() {
   check(await until(async () => !(await w().locator('.w-head [role=columnheader]').allInnerTexts()).includes('Team')), 'Fields: a removed field drops out of the page');
   await w().locator('.w-tools button', { hasText: 'Columns' }).click();
   await p.locator('.menu [role=menuitemcheckbox]', { hasText: 'Points' }).click();
-  // The glance and the phone's card: chips in the meta line, the rest labelled, only values that are set.
+  // The glance and the phone's card (S-3560): the issue layout's IssueCard. Where a field sits follows the stored layout, or the
+  // seed (`card: 'meta'` into META, a chip into BADGES), so only the choice's slot is fixed here; each value is in a data-cell span.
   await p.setViewportSize({ width: 390, height: 844 });
   await p.waitForTimeout(300);
   const card = (it) => w().locator(`.wg-card[data-itsa="${it.id}"]`).first();
   await card(webUi).waitFor();
-  same(await card(webUi).locator('.wg-meta .wg-field .badge').innerText(), 'High', 'Fields: a chip field is in the card\'s meta line');
-  same(await card(webUi).locator('.wg-fields .wg-flabel').allInnerTexts(), ['Spec', 'Points'], 'Fields: a meta field is labelled under it');
-  check(await card(review).locator('.wg-fields').count() === 0, 'Fields: a card shows no empty field');
+  const fcell = (it, f) => card(it).locator(`[data-cell="field:${f.id}"]`);
+  same(await card(webUi).locator(`.bc-badges [data-cell="field:${fPrio.id}"] .badge`).innerText(), 'High', 'Fields: a choice field is a chip on the card');
+  check(await fcell(webUi, fDoc).count() === 1 && await fcell(webUi, fPts).count() === 1, 'Fields: the other fields with a value are on the card too');
+  check(await fcell(review, fPrio).count() === 1, 'Fields: the card with a value draws it');
+  check(await fcell(review, fDoc).count() === 0 && await fcell(review, fPts).count() === 0, 'Fields: a card shows no empty field');
+  await card(webUi).scrollIntoViewIfNeeded();
   await shot(p, 'work-fields-card-390');
   await p.setViewportSize({ width: 1500, height: 900 });
   await p.context().close();
@@ -3666,7 +3672,9 @@ async function batchApprovalFlow() {
     await shot(ph, 'requirements-360-batch-light');
     await ph.context().close();
     ph = null;
-    await api(`/api/itsas/${x.id}/act`, { method: 'POST', body: JSON.stringify({ action: 'approve', text: '' }) });
+    // Approve carries the revision of the text it was shown (S-2998).
+    const { rev } = await api(`/api/itsas/${x.id}`);
+    await api(`/api/itsas/${x.id}/act`, { method: 'POST', body: JSON.stringify({ action: 'approve', text: '', if_rev: rev }) });
     let closed = false;
     for (let i = 0; i < 40 && !closed; i++) { closed = (await api(`/api/itsas/${x.id}`)).status === 'done'; if (!closed) await sleep(200); }
     check(closed, 'Approve all closes the approval');

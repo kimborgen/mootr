@@ -891,7 +891,7 @@ export function gapWait(item: RawItem, ctx: GapContext): { wait: string; name: s
   if (/New events for your subscription/.test(s)) return { wait: 'event.external', name: 'event' };
   if (/Your permission request/.test(s)) return { wait: 'human.permission', name: 'permission' };
   if (/Your wait for .* timed out/.test(s)) return { wait: 'event.timer', name: 'timer' };
-  if (/Stam paused you for cost/.test(s)) return { wait: 'throttle.cost', name: 'unpause' };
+  if (/paused you for cost/.test(s)) return { wait: 'throttle.cost', name: 'unpause' };
   if (/You are no longer paused/.test(s)) return { wait: 'throttle.scheduler', name: 'unpause' };
   const mail = /unread mail[\s\S]*?Latest unread:\s*-\s*\S+ from ([^:\n]+):\s*([^\n]*)/.exec(s);
   if (mail) {

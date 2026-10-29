@@ -60,3 +60,38 @@ test('an approved notice that could not be typed closes with "Go ahead; don\'t r
   assert.equal(t, '[stam] Your permission request p1a2b3 (Run npm test) was approved by your user (the human), in stam. Their words: "I authorize" Go ahead; don\'t request it again.');
   assert.ok(!/try again/i.test(t));
 });
+
+test('a bash-mode command that takes minutes is still waited for (S-3188)', async () => {
+  const { BASH_EXPECT_MS } = await import('../src/permissions.ts');
+  const { bashInputRecorded } = await import('../src/adapters/claude-input.ts');
+  const { readFileSync } = await import('node:fs');
+  const slow = readFileSync(new URL('fixtures/claude-input/bash-input-slow.jsonl', import.meta.url), 'utf8');
+  const cmd = '! cd /work/web && sudo -n env "PATH=$PATH" npx tool install-deps 2>&1 | tail -5; df -h / | tail -1';
+  // The record shows 80 s after Enter and the command is the typed one, with a leading space.
+  assert.equal(bashInputRecorded(slow, cmd), 'match');
+  // A different command, or a row that has not been appended yet, is not a match.
+  assert.equal(bashInputRecorded(slow, '! pwd'), 'other');
+  assert.equal(bashInputRecorded(slow.split('\n').slice(0, 2).join('\n'), cmd), 'none');
+  // The check waits past the incident's 82 s and past a long install, not the typed-prompt bound.
+  assert.ok(BASH_EXPECT_MS >= 10 * 60_000, `${BASH_EXPECT_MS}`);
+});
+
+test('the transcript poll reads only new bytes, and a row split across two reads is returned once whole (S-3188)', async () => {
+  const { tailRows } = await import('../src/permissions.ts');
+  const { bashInputRecorded } = await import('../src/adapters/claude-input.ts');
+  const { writeFileSync, appendFileSync } = await import('node:fs');
+  const file = join(mkdtempSync(join(tmpdir(), 'tail-rows-')), 't.jsonl');
+  writeFileSync(file, 'old\n');
+  const tail = { pos: 4, carry: Buffer.alloc(0) };
+  assert.equal(tailRows(file, tail), '');
+  const row = JSON.stringify({ type: 'user', message: { content: '<bash-input> ls</bash-input>' } });
+  appendFileSync(file, row.slice(0, 20));
+  assert.equal(tailRows(file, tail), '');
+  appendFileSync(file, `${row.slice(20)}\nnext`);
+  const rows = tailRows(file, tail);
+  assert.equal(rows, `${row}\n`);
+  assert.equal(bashInputRecorded(rows, '! ls'), 'match');
+  assert.equal(tailRows(file, tail), '');
+  appendFileSync(file, '\n');
+  assert.equal(tailRows(file, tail), 'next\n');
+});

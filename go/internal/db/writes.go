@@ -31,6 +31,7 @@ var updatable = map[string]bool{
 	"standing": true, "capabilities": true, "permission_mode": true, "permission_source": true, "visibility": true,
 	"child_notices": true, "kind": true, "type": true, "first_prompt": true, "pending_action": true, "paused_by": true,
 	"idle_since": true, "idle_notified": true, "context_level": true, "tokens_after_compaction": true, "usage_last": true,
+	"launched_at": true, "resumed_at": true,
 }
 
 // UpdateAgent sets fields on the agent and its updated_at, in one transaction (src/db.ts updateAgent). As in TS, an
@@ -48,6 +49,29 @@ func (d *DB) UpdateAgent(ctx context.Context, id string, fields ...Field) error 
 		return fmt.Errorf("db: update agent %s: %w", id, err)
 	}
 	return nil
+}
+
+// UpdateAgentIf is UpdateAgent when ok holds for the agent's row, read in the same transaction, so no write lands
+// between the check and the update. It reports whether it updated.
+func (d *DB) UpdateAgentIf(ctx context.Context, id string, ok func(Agent) bool, fields ...Field) (bool, error) {
+	for _, f := range fields {
+		if !updatable[f.Col] {
+			return false, fmt.Errorf("db: update agent: column %q isn't updatable", f.Col)
+		}
+	}
+	done := false
+	err := d.Write(ctx, func(conn *sqlite.Conn) error {
+		a, err := agentOn(conn, id)
+		if err != nil || !ok(a) {
+			return err
+		}
+		done = true
+		return d.updateAgent(conn, id, fields)
+	})
+	if err != nil {
+		return false, fmt.Errorf("db: update agent %s: %w", id, err)
+	}
+	return done, nil
 }
 
 // updateAgent is UpdateAgent's work inside a write.
@@ -179,6 +203,24 @@ func setField(fs []Field, col string, v any) []Field {
 	return append(fs, Field{col, v})
 }
 
+// ReplacePendingAction sets the agent's pending_action to next if it still is want, and reports whether it did: a
+// compare and set in one write, so the pending action is never absent between a clear and a rewrite.
+func (d *DB) ReplacePendingAction(ctx context.Context, id, want, next string) (bool, error) {
+	replaced := false
+	err := d.Write(ctx, func(conn *sqlite.Conn) error {
+		cur, err := rows(conn, "SELECT pending_action FROM agents WHERE id = ?", id)
+		if err != nil || len(cur) == 0 || cur[0].Text("pending_action") != want {
+			return err
+		}
+		replaced = true
+		return d.updateAgent(conn, id, []Field{{"pending_action", next}})
+	})
+	if err != nil {
+		return false, fmt.Errorf("db: replace pending action of %s: %w", id, err)
+	}
+	return replaced, nil
+}
+
 // TakePendingAction clears the agent's pending_action if it still is want, and reports whether it did: a compare and
 // clear, so of two callers that read the same pending action only one runs it.
 func (d *DB) TakePendingAction(ctx context.Context, id, want string) (bool, error) {
@@ -199,8 +241,19 @@ func (d *DB) TakePendingAction(ctx context.Context, id, want string) (bool, erro
 // errored in the idle period idleSince names (nil for none), and reports whether it did: a compare and set, so a turn
 // that started since the caller read the row is never taken over.
 func (d *DB) ClaimIdle(ctx context.Context, id string, idleSince *string, detail string) (bool, error) {
+	return d.ClaimIdleWhile(ctx, id, idleSince, detail, nil)
+}
+
+// ClaimIdleWhile is ClaimIdle only while ok (when not nil) holds for the agent's row, read in the same transaction.
+func (d *DB) ClaimIdleWhile(ctx context.Context, id string, idleSince *string, detail string, ok func(Agent) bool) (bool, error) {
 	claimed := false
 	err := d.Write(ctx, func(conn *sqlite.Conn) error {
+		if ok != nil {
+			a, err := agentOn(conn, id)
+			if err != nil || !ok(a) {
+				return err
+			}
+		}
 		before, err := rows(conn, "SELECT activity FROM agents WHERE id = ?", id)
 		if err != nil || len(before) == 0 {
 			return err
@@ -275,30 +328,36 @@ func (d *DB) HasPendingDialog(ctx context.Context, id string) (bool, error) {
 // ForgetAgent removes the agent and what is its alone (src/db.ts forgetAgent): its events, mailbox rows, blockers,
 // waits, view, workspace grants and the agent row; its pending permission requests are withdrawn.
 func (d *DB) ForgetAgent(ctx context.Context, id string) error {
-	err := d.Write(ctx, func(conn *sqlite.Conn) error {
-		for _, q := range []string{
-			"DELETE FROM events WHERE agent_id = ?",
-			"DELETE FROM mail_recipients WHERE agent_id = ?",
-			"DELETE FROM mail_deliveries WHERE agent_id = ?",
-			"DELETE FROM blockers WHERE agent_id = ?",
-			"DELETE FROM waits WHERE agent_id = ?",
-			"DELETE FROM agent_views WHERE agent_id = ?",
-			"DELETE FROM workspace_grants WHERE grantee_id = ?",
-		} {
-			if err := sqlitex.Execute(conn, q, &sqlitex.ExecOptions{Args: []any{id}}); err != nil {
-				return err
-			}
-		}
-		if err := sqlitex.Execute(conn, "UPDATE permission_requests SET status = 'withdrawn', decided_at = ? WHERE agent_id = ? AND status = 'pending'",
-			&sqlitex.ExecOptions{Args: []any{now(), id}}); err != nil {
-			return err
-		}
-		return sqlitex.Execute(conn, "DELETE FROM agents WHERE id = ?", &sqlitex.ExecOptions{Args: []any{id}})
-	})
+	err := d.Write(ctx, func(conn *sqlite.Conn) error { return forgetAgentOn(conn, id) })
 	if err != nil {
 		return fmt.Errorf("db: forget %s: %w", id, err)
 	}
 	return nil
+}
+
+// forgetAgentOn is ForgetAgent inside a write.
+func forgetAgentOn(conn *sqlite.Conn, id string) error {
+	for _, q := range []string{
+		"DELETE FROM events WHERE agent_id = ?",
+		"DELETE FROM mail_recipients WHERE agent_id = ?",
+		"DELETE FROM mail_deliveries WHERE agent_id = ?",
+		"DELETE FROM blockers WHERE agent_id = ?",
+		"DELETE FROM waits WHERE agent_id = ?",
+		"DELETE FROM agent_views WHERE agent_id = ?",
+		"DELETE FROM workspace_grants WHERE grantee_id = ?",
+	} {
+		if err := sqlitex.Execute(conn, q, &sqlitex.ExecOptions{Args: []any{id}}); err != nil {
+			return err
+		}
+	}
+	if _, err := redactPayloads(conn, "agent_id = ? AND status = 'pending'", id); err != nil {
+		return err
+	}
+	if err := sqlitex.Execute(conn, "UPDATE permission_requests SET status = 'withdrawn', decided_at = ? WHERE agent_id = ? AND status = 'pending'",
+		&sqlitex.ExecOptions{Args: []any{now(), id}}); err != nil {
+		return err
+	}
+	return sqlitex.Execute(conn, "DELETE FROM agents WHERE id = ?", &sqlitex.ExecOptions{Args: []any{id}})
 }
 
 // ItsaTies is what ties the agent to ITSAs on this daemon: an unown still waiting for the ITSA home

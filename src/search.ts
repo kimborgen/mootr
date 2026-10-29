@@ -152,7 +152,7 @@ const SECTIONS = [
   { key: 'agents', label: 'New agents' },
   { key: 'view', label: 'Agent view' },
   { key: 'tools', label: 'Tools' },
-  { key: 'workcols', label: 'Work columns' },
+  { key: 'workcols', label: 'Fields and cards' },
   { key: 'mail', label: 'Mail to you' },
   { key: 'context', label: 'Context and compaction' },
   { key: 'spend', label: 'Spending' },

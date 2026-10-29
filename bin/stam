@@ -1,17 +1,17 @@
 #!/bin/sh
 # Entry point for the stam CLI, daemon, hooks, and MCP shim.
 here=$(dirname "$(readlink -f "$0")")
-# Help and usage text print the name the user invoked: bin/mootr passes it as STAM_CLI_INVOKED.
+# Help and usage text print the name the user invoked: bin/mootr passes it as MOOTR_CLI_INVOKED and STAM_CLI_INVOKED.
 # Set only for the node CLI, which removes it from its environment, so it never reaches children.
 name=${MOOTR_CLI_INVOKED:-${STAM_CLI_INVOKED:-stam}}
 unset MOOTR_CLI_INVOKED STAM_CLI_INVOKED
 # Hooks and the status line run on every tool call and every refresh, so they take the
 # shell fast path (bin/stam-fast), which never starts node.
 case "${1:-}" in
-  hook | statusline) STAM_CLI_NAME=$name exec "$here/stam-fast" "$@" ;;
+  hook | statusline) MOOTR_CLI_NAME=$name STAM_CLI_NAME=$name exec "$here/stam-fast" "$@" ;;
 esac
 # The broad-kill guard (a PreToolUse hook) imports only its own module, so it starts fast.
 case "${1:-}" in
   guard) exec node --no-warnings "$here/../src/guard-hook.ts" ;;
 esac
-STAM_CLI_NAME=$name exec node --no-warnings "$here/../src/cli.ts" "$@"
+MOOTR_CLI_NAME=$name STAM_CLI_NAME=$name exec node --no-warnings "$here/../src/cli.ts" "$@"

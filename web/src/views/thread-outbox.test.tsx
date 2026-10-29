@@ -7,6 +7,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getRows, resetOutbox } from '../outbox'
 import { sha256Hex } from '../perm/input'
+import { permComment } from '../mail/ThreadPanel'
 import { getData, setData } from '../store'
 import { ThreadView } from './ThreadView'
 
@@ -79,6 +80,74 @@ describe('a thread reply with a staged answer', () => {
     expect(new Set(mails.map((m) => m.body.client_id)).size).toBe(1)
     expect(answers[0].body.client_id).toBe(`${mails[0].body.client_id}:perm:p1`)
     expect(mails.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('sends the comment typed on the card as the answer\'s note, once (S-3829)', async () => {
+    await act(async () => { root.render(<ThreadView tid="t1" viewKey="thread:t1" />) })
+    await flush(); await flush()
+    const card = host.querySelector<HTMLInputElement>('[data-perm-note="p1"]')!
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    await act(async () => { set.call(card, 'yes, but only after the backup'); card.dispatchEvent(new Event('input', { bubbles: true })) })
+    await act(async () => { host.querySelector<HTMLButtonElement>('[data-perm="p1"][data-approve="1"]')!.click() })
+    await act(async () => { host.querySelector<HTMLButtonElement>('.cmp-send')!.click() })
+    await flush(); await flush()
+    const answers = posts.filter((p) => p.path === '/api/permissions/p1/answer')
+    expect(answers).toHaveLength(1)
+    expect(answers[0].body.approve).toBe(true)
+    expect(answers[0].body.note).toBe('yes, but only after the backup')
+  })
+
+  it('sends a comment typed after Approve was tapped, and clears it once sent (S-3829)', async () => {
+    await act(async () => { root.render(<ThreadView tid="t1" viewKey="thread:t1" />) })
+    await flush(); await flush()
+    const card = host.querySelector<HTMLInputElement>('[data-perm-note="p1"]')!
+    await act(async () => { host.querySelector<HTMLButtonElement>('[data-perm="p1"][data-approve="1"]')!.click() })
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    await act(async () => { set.call(card, 'only after the backup'); card.dispatchEvent(new Event('input', { bubbles: true })) })
+    await act(async () => { host.querySelector<HTMLButtonElement>('.cmp-send')!.click() })
+    await flush(); await flush()
+    const answers = posts.filter((p) => p.path === '/api/permissions/p1/answer')
+    expect(answers).toHaveLength(1)
+    expect(answers[0].body.note).toBe('only after the backup')
+    // The comment is cleared once its answer is sent, so a later card starts empty (S-3927).
+    expect(permComment('p1')).toBeUndefined()
+  })
+
+  it('shows a comment typed on the card in the preview as it is typed, before the send (S-3927)', async () => {
+    await act(async () => { root.render(<ThreadView tid="t1" viewKey="thread:t1" />) })
+    await flush(); await flush()
+    await act(async () => { host.querySelector<HTMLButtonElement>('[data-perm="p1"][data-approve="1"]')!.click() })
+    const card = host.querySelector<HTMLInputElement>('[data-perm-note="p1"]')!
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    await act(async () => { set.call(card, 'only after the backup'); card.dispatchEvent(new Event('input', { bubbles: true })) })
+    expect(host.querySelector('.rp-perm')!.textContent).toContain('note: only after the backup')
+    await act(async () => { set.call(card, 'only after the backup, and a check'); card.dispatchEvent(new Event('input', { bubbles: true })) })
+    expect(host.querySelector('.rp-perm')!.textContent).toContain('note: only after the backup, and a check')
+    expect(posts.filter((p) => p.path.startsWith('/api/permissions/'))).toHaveLength(0)
+  })
+
+  it('tapping Approve again after a comment is typed restages the answer with it, not takes it back (S-3927)', async () => {
+    await act(async () => { root.render(<ThreadView tid="t1" viewKey="thread:t1" />) })
+    await flush(); await flush()
+    await act(async () => { host.querySelector<HTMLButtonElement>('[data-perm="p1"][data-approve="1"]')!.click() })
+    const card = host.querySelector<HTMLInputElement>('[data-perm-note="p1"]')!
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    await act(async () => { set.call(card, 'after the backup'); card.dispatchEvent(new Event('input', { bubbles: true })) })
+    await act(async () => { host.querySelector<HTMLButtonElement>('[data-perm="p1"][data-approve="1"]')!.click() })
+    expect(host.querySelector('.rp-perm')!.textContent).toContain('note: after the backup')
+    expect(host.querySelector('[data-perm="p1"][data-approve="1"]')!.classList.contains('staged')).toBe(true)
+  })
+
+  it('a plain reply in a thread with an open ask answers nothing (S-3829)', async () => {
+    await act(async () => { root.render(<ThreadView tid="t1" viewKey="thread:t1" />) })
+    await flush(); await flush()
+    const ta = host.querySelector<HTMLTextAreaElement>('textarea')!
+    const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+    await act(async () => { set.call(ta, 'Not yet, I want to look first.'); ta.dispatchEvent(new Event('input', { bubbles: true })) })
+    await act(async () => { host.querySelector<HTMLButtonElement>('.cmp-send')!.click() })
+    await flush(); await flush()
+    expect(posts.filter((p) => p.path.startsWith('/api/permissions/'))).toHaveLength(0)
+    expect(posts.filter((p) => p.path === '/api/mail').length).toBeGreaterThanOrEqual(1)
   })
 
   it('brings back an answer that was never sent when the reply fails for good', async () => {
@@ -263,5 +332,63 @@ describe('a thread reply with a staged answer', () => {
     await act(async () => { host.querySelector<HTMLButtonElement>('.cmp-send')!.click() })
     await flush()
     expect(host.querySelector('.rp-info')).toBeNull()
+  })
+})
+
+// S-3806: a sent reply never comes back. A plain reply has no answers to go stale, so nothing puts
+// its text back; a box made fresh for the thread (the phone's, or after a reload) starts empty.
+// A reply never sent still comes back, once.
+describe('a plain thread reply', () => {
+  const plain = [{ id: 'q1', from_id: 'a1', from_name: 'lead', subject: 'A question', body: 'What do you think?', created_at: '2026-10-24T10:00:00Z', recipients: [{ id: 'human', read_at: '2026-10-24T10:01:00Z' }] }]
+  let live: unknown[]
+  beforeEach(() => {
+    live = plain
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      if (init?.method !== 'POST') return { ok: true, status: 200, json: async () => (String(path).startsWith('/api/threads/') ? live : []) }
+      posts.push({ path, body: JSON.parse(String(init.body ?? '{}')) })
+      return { ok: true, status: 200, json: async () => ({}) }
+    }))
+  })
+  const type = async (text: string) => {
+    const ta = host.querySelector<HTMLTextAreaElement>('textarea')!
+    const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+    await act(async () => { set.call(ta, text); ta.dispatchEvent(new Event('input', { bubbles: true })) })
+  }
+  const remount = async () => {
+    act(() => root.unmount())
+    root = createRoot(host)
+    await act(async () => { root.render(<ThreadView tid="t2" viewKey="thread:t2" />) })
+    await flush(); await flush()
+  }
+
+  it('leaves the box empty after the agent replies, with no copy kept as a draft', async () => {
+    await act(async () => { root.render(<ThreadView tid="t2" viewKey="thread:t2" />) })
+    await flush(); await flush()
+    await type('ship it')
+    await act(async () => { host.querySelector<HTMLButtonElement>('.cmp-send')!.click() })
+    await flush(); await flush(); await flush()
+    expect(posts.filter((p) => p.path === '/api/mail').map((p) => p.body.body)).toEqual(['ship it'])
+    expect(host.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('')
+    expect(sessionStorage.getItem('stam/draft/thread:t2')).toBeNull()
+    // The agent answers in the thread.
+    live = [...plain, { id: 'q2', from_id: 'human', subject: 'Re: A question', body: 'ship it', created_at: '2026-10-24T10:02:00Z', recipients: [{ id: 'a1' }] },
+      { id: 'q3', from_id: 'a1', from_name: 'lead', subject: 'Re: A question', body: 'Shipped.', created_at: '2026-10-24T10:03:00Z', recipients: [{ id: 'human' }] }]
+    await act(async () => { setData({ mailTick: getData().mailTick + 1 }) })
+    await flush(); await flush()
+    expect(host.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('')
+    // A fresh box for the thread starts empty, and the preview shows nothing.
+    await remount()
+    expect(host.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('')
+    expect(host.querySelector<HTMLElement>('.reply-preview')!.hidden).toBe(true)
+    expect(sessionStorage.getItem('stam/draft/thread:t2')).toBeNull()
+  })
+
+  it('still brings back a reply that was never sent, once', async () => {
+    await act(async () => { root.render(<ThreadView tid="t2" viewKey="thread:t2" />) })
+    await flush(); await flush()
+    await type('half a thought')
+    await remount()
+    expect(host.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('half a thought')
+    expect(posts.filter((p) => p.path === '/api/mail')).toEqual([])
   })
 })

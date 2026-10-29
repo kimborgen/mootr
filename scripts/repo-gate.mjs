@@ -24,7 +24,7 @@ import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, stat
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { GATES_CONTEXT, RepoConfigError, parseRepoGates, readRepoConfig, selectGates } from './repo-config.mjs';
-import { envVar } from '../src/env.ts';
+import { envVar, withTwins } from '../src/env.ts';
 import { isMain } from './main-guard.mjs';
 
 const DESCRIPTION_MAX = 140;
@@ -155,7 +155,7 @@ export function gateEnv(env, home) {
   const extra = String(envVar('REPO_GATE_ENV', env) ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   const out = {};
   for (const [k, v] of Object.entries(env)) if (ENV_ALLOW.includes(k) || k.startsWith('LC_') || extra.includes(k)) out[k] = v;
-  return { ...out, HOME: home, ...{ STAM_GATE: '1' } };
+  return { ...out, HOME: home, ...withTwins({ STAM_GATE: '1' }) };
 }
 
 // Removes a run's log folders older than KEEP_LOG_DAYS.

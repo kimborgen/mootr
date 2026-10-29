@@ -1,0 +1,1 @@
+[stam] Your running turn was cut off when you were paused, so you never got the pause notice. Check what that turn left half done, and stop any programs, servers, or background jobs it started that your work no longer needs.

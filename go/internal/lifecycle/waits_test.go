@@ -228,7 +228,7 @@ func (l *live) hookPayload(id, raw string) {
 	if err != nil {
 		l.t.Fatal(err)
 	}
-	if _, err := l.life.OnHook(l.ctx, "claude", l.agent(id), v.(*jsjson.Object)); err != nil {
+	if _, err := l.life.OnHook(l.ctx, "claude", l.agent(id), v.(*jsjson.Object), new([]int64)); err != nil {
 		l.t.Fatal(err)
 	}
 }

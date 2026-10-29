@@ -25,5 +25,6 @@
   {"do": "send", "input": {"from": "aw2", "to": ["aw1"], "subject": "Reply guess", "body": "x"}},
   {"do": "send", "input": {"from": "system:x", "to": ["aw1"], "subject": "x", "body": "x"}},
   {"do": "send", "input": {"system": "deploy-watch", "to": ["aw1"], "subject": "Deployed", "body": "A notice", "new_thread": true}},
-  {"do": "send", "input": {"system": "Bad Name", "to": ["aw1"], "subject": "Deployed", "body": "x", "new_thread": true}}
+  {"do": "send", "input": {"system": "Bad Name", "to": ["aw1"], "subject": "Deployed", "body": "x", "new_thread": true}},
+  {"do": "send", "input": {"from": "aw2", "to": ["human"], "subject": "Comment kind", "body": "x", "new_thread": true, "kind": "comment"}}
 ]

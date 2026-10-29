@@ -47,7 +47,7 @@ const picked = (cols: string[]) => () => { setUi({ collapsed: {}, stoppedOpen: f
 export const stories: Story[] = [{
   name: 'Agent tree',
   group: 'Tree and shell',
-  what: "The org tree of running agents in the left sidebar. A row is the agent's mark, its name, its role, and on the right the facts that need a glance: the ITSAs it owns, a waiting approval, what it waits for, unread mail, bypass mode, a different machine, no ITSA, context used, cost, and a model code. A parent folds its children; an agent with several parents also shows, linked, under each. Under the agents come the running rings, then a fold of stopped agents.",
+  what: "The org tree of running agents in the left sidebar. A row is the agent's mark, its name, its role, and on the right the facts that need a glance: the ITSAs it owns, a waiting approval, what it waits for, the open ask it waits on (Open ask), unread mail, bypass mode, a different machine, no ITSA, context used, cost, and a model code. A parent folds its children; an agent with several parents also shows, linked, under each. Under the agents come the running rings, then a fold of stopped agents.",
   when: "The left sidebar (`#w-left`) whenever it is open; on a phone it is the Agents tab of the bottom navigation. It reads the agent list, the ITSAs, and the rings from the store; before the first agent list arrives it shows a loading mark, and an unreachable daemon shows its error in place of the rows.",
   code: ['web/src/Tree.tsx#Tree', 'web/src/format.ts#treeAgents', 'web/src/format.ts#live'],
   rules: [
@@ -62,6 +62,7 @@ export const stories: Story[] = [{
     'A mark stamps once when its state changes (the ring, the owned ITSA\'s chip, the unread badge), and a row nudges once when its owned issue changes status, further when it starts waiting on you. Each goes through the motion gate (' + ds('Motion') + '): nothing moves while the tree scrolls, for an off-screen row, under reduced motion, or with that kind off in Settings › Motion (S-698).',
     'Mail sent between two rows the tree shows flies a small envelope along the indent gutter from the sender\'s row to the recipient\'s unread badge, which stamps as it lands; mail to or from you travels to the top of the list, and an end that is scrolled away is clipped to the list\'s edge (S-699, see `Sidebar mail motion`).',
     'Roots sort the executive assistant first, then a chief of staff, then by creation time; children sort by creation time. Stopped agents sort by last update, newest first, and at most 40 show.',
+    'A blocked agent whose ask is open shows "Open ask" in the row\'s meta, after the ITSA chip, and it goes straight to the ask\'s card, as the Agents page\'s link does (S-3982). It shows only while that row is open in the Needs you list, so it goes when the ask settles, and it names the kind of ask, never its text. On a phone (760 px and narrower) the tree\'s row hides the link: the whole row is the tap target, and the phone\'s Agents row keeps the link.',
     'A resting agent (S-1969) keeps its row: a dashed ring with a dash pip, and the resting badge after its name, the wake time alone (`~14:20`, local; none when unknown) with the full line in its tooltip. It counts as live, so its other marks stay.',
     "Colour never carries a state alone: the mark's pip and ring style do too, and each badge has an icon or a count (" + ds('State vocabulary') + ').',
   ],
@@ -79,6 +80,21 @@ export const stories: Story[] = [{
     },
     { name: 'Nested', data: { agents: NESTED }, setup: ui({ treeFocus: 'n-dev' }), render: () => <Side><Tree /></Side> },
     { name: 'A parent folded', data: { agents: NESTED }, setup: ui({ collapsed: { 'n-mgr': true } }), render: () => <Side><Tree /></Side> },
+    {
+      name: 'Blocked on an open ask',
+      data: {
+        agents: [
+          agent({ id: 'k-dev', name: 'fixture-blocked', role: 'developer', activity: 'waiting', open_ask: 'request:fx-k1' }),
+          agent({ id: 'k-itsa', name: 'fixture-itsa-wait', role: 'reviewer', activity: 'waiting', open_ask: 'itsa:fx-k2' }),
+          agent({ id: 'k-free', name: 'fixture-free', role: 'developer', activity: 'idle', open_ask: null }),
+        ],
+        asks: [
+          { key: 'request:fx-k1', kind: 'request', state: 'open', outcome: null, what: 'Permission request', agent_id: 'k-dev', agent_name: 'fixture-blocked', machine: 'fixture-machine', thread_id: 'fx-k-thread', itsa_id: null, since: T0, settled_at: null },
+          { key: 'itsa:fx-k2', kind: 'itsa', state: 'open', outcome: null, what: 'Fixture issue', agent_id: 'k-itsa', agent_name: 'fixture-itsa-wait', machine: 'fixture-machine', thread_id: 'fx-k-ask', itsa_id: 'fx-k2', since: T0, settled_at: null },
+        ],
+      },
+      setup: ui(), render: () => <Side><Tree /></Side>,
+    },
     {
       name: 'Each harness, with cost and unread',
       data: { agents: [

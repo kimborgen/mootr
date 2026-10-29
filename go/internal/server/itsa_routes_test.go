@@ -54,6 +54,32 @@ func TestItsaListQuery(t *testing.T) {
 	}
 }
 
+// ?since= filters on created_at by an age or an ISO time, and a bad one is a 400, not an empty list (S-1396).
+func TestItsaListSince(t *testing.T) {
+	f := newFixture(t, nil)
+	f.createItsa(`{"title":"fresh one"}`)
+	old := f.createItsa(`{"title":"old one"}`)
+	f.sql("UPDATE itsas SET created_at = '2020-01-02T03:04:05.000Z' WHERE key = ?", old)
+	for q, n := range map[string]int{
+		"?since=24h":                         1,
+		"?since=2d":                          1,
+		"?since=2020-01-02T03:04:05Z":        2,
+		"?since=2020-01-02T03:04:06Z":        1,
+		"?since=2019-12-31":                  2,
+		"?since=2020-01-02T04:04:05%2B01:00": 2,
+	} {
+		rec := f.post2("GET", "/api/itsas"+q, "")
+		if got := f.body(rec); rec.Code != 200 || len(got.Items) != n {
+			t.Errorf("%s: %d %d ITSAs, want %d: %s", q, rec.Code, len(got.Items), n, rec.Body.String())
+		}
+	}
+	for _, bad := range []string{"", "yesterday", "24", "2026-02-30", "2026-10-21T08:00:00"} {
+		if rec := f.post2("GET", "/api/itsas?since="+bad, ""); rec.Code != 400 || !strings.Contains(rec.Body.String(), "since expects an ISO time") {
+			t.Errorf("since=%q: %d %s, want a 400", bad, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // Who an ITSA request acts as (src/daemon.ts itsaActor).
 func TestItsaActor(t *testing.T) {
 	f := newFixture(t, nil)
@@ -135,7 +161,6 @@ func TestItsaNotPorted(t *testing.T) {
 	f := newFixture(t, nil)
 	f.sql("UPDATE agents SET model = 'claude-opus-5-5' WHERE id = 'achild'")
 	key := f.createItsa(`{"title":"base","participants":["child"]}`)
-	project := f.createItsa(`{"title":"epic","kind":"project"}`)
 	before := f.count("SELECT COUNT(*) FROM itsas")
 	for _, tc := range []struct {
 		name, method, path, body, token string
@@ -145,8 +170,7 @@ func TestItsaNotPorted(t *testing.T) {
 		{"a proposal", "POST", "/api/itsas", `{"title":"x","kind":"proposal"}`, sharedTok, human, "kind proposal"},
 		{"the ask of an agent creating in a human status", "POST", "/api/itsas", `{"title":"x","status":"needs_input"}`, agentTok, nil, "waits on your user"},
 		{"an agent moving to a human status", "PATCH", "/api/itsas/" + key, `{"status":"needs_review"}`, agentTok, nil, "comment first"},
-		{"closing a project", "PATCH", "/api/itsas/" + project, `{"status":"done"}`, sharedTok, human, "epic retro"},
-		{"the search route", "GET", "/api/itsas/search?q=x", "", sharedTok, nil, "/api/itsas/search is not ported"},
+		{"the queue route", "GET", "/api/itsas/queue", "", sharedTok, nil, "/api/itsas/queue is not ported"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := f.sendH(tc.method, tc.path, tc.token, tc.header, tc.body)
@@ -274,20 +298,16 @@ func TestItsaRetroGate(t *testing.T) {
 	}
 }
 
-// A peer's agent is not looked up here (501), the shared token on a peer's call is trusted as it is, and an agent's token
-// is refused the three reads TS keeps from it.
+// A peer's agent only remembered here, with no peer answering for it, is no agent (a peer's agent is looked up live,
+// itsa_peer_people_test.go), and an agent's token is refused the three reads TS keeps from it.
 func TestItsaPeerAndAgentReads(t *testing.T) {
 	f := newFixture(t, nil)
 	f.sql("INSERT INTO peer_agents (id, name, machine, updated_at) VALUES ('apeer', 'remote-one', 'elsewhere', '2026-10-01T00:00:00.000Z')")
-	if rec := f.sendH("POST", "/api/itsas", sharedTok, human, `{"title":"x","owner":"remote-one"}`); rec.Code != 501 || !strings.Contains(errorOf(t, rec), "peer machine") {
-		t.Errorf("a peer's agent as owner: %d %s", rec.Code, rec.Body.String())
+	if rec := f.sendH("POST", "/api/itsas", sharedTok, human, `{"title":"x","owner":"remote-one"}`); rec.Code != 400 || !strings.Contains(errorOf(t, rec), "no agent remote-one") {
+		t.Errorf("a remembered peer's agent no peer answers for: %d %s", rec.Code, rec.Body.String())
 	}
 	if rec := f.sendH("POST", "/api/itsas", sharedTok, human, `{"title":"x","owner":"nobody-here"}`); rec.Code != 400 {
 		t.Errorf("an unknown agent as owner: %d %s", rec.Code, rec.Body.String())
-	}
-	local := map[string]string{"X-Stam-Local": "1"}
-	if rec := f.sendH("POST", "/api/itsas", peerTok, local, `{"title":"x","by":"remote-one"}`); rec.Code != 501 || !strings.Contains(errorOf(t, rec), "peer machine") {
-		t.Errorf("a peer's call naming its own agent: %d %s", rec.Code, rec.Body.String())
 	}
 	for _, tc := range []struct{ path, what string }{
 		{"/api/itsas/queue", "read the merge queue"}, {"/api/itsas/attention", "read what waits on the human"},
@@ -353,8 +373,8 @@ func TestItsaFieldRules(t *testing.T) {
 	}
 }
 
-// A link to a followed pull request starts a watch in TS (watch.syncItsa), which is not ported: those writes answer 501 and change
-// nothing. A stage write is ported (process_run_test.go); with no process for the ITSA's kind it is plain.
+// A stage write is ported (process_run_test.go); with no process for the ITSA's kind it is plain. A link to a followed pull
+// request starts the ITSA's watch on it (watch.syncItsa, events_test.go): none of its writes is refused.
 func TestItsaStageAndWatchedLinks(t *testing.T) {
 	f := newFixture(t, nil)
 	f.sql("INSERT INTO itsa_fields (id, key, label, type, width, align, card, position, created_by, created_at, updated_at) VALUES ('fstage', 'stage', 'Stage', 'text', 'm', 'start', 'chip', 0, 'human', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z')")
@@ -369,41 +389,14 @@ func TestItsaStageAndWatchedLinks(t *testing.T) {
 	if rec := f.post2("PATCH", "/api/itsas/"+key, `{"fields":{"stage":null}}`); rec.Code != 200 {
 		t.Errorf("clearing the stage: %d %s", rec.Code, rec.Body.String())
 	}
-
 	f.sql("DELETE FROM itsa_fields")
-	pr := "https://github.com/some-org/some-repo/pull/12"
-	for _, u := range []string{pr, "https://github.com/some-org/some-repo/issues/3?x=1", "http://linear.app/team/issue/ABC-12"} {
-		if rec := f.post2("POST", "/api/itsas/"+key+"/links", `{"url":"`+u+`"}`); rec.Code != 501 || !strings.Contains(errorOf(t, rec), "watch.syncItsa") {
-			t.Errorf("adding %s: %d %s", u, rec.Code, rec.Body.String())
-		}
-	}
-	if rec := f.post2("POST", "/api/itsas", `{"title":"linked","links":[{"url":"`+pr+`"}]}`); rec.Code != 501 || !strings.Contains(errorOf(t, rec), "watch.syncItsa") {
-		t.Errorf("a create with a followed link: %d %s", rec.Code, rec.Body.String())
-	}
-	for _, u := range []string{"https://github.com/some-org/some-repo", "https://github.com/some-org/some-repo/pull/x", "https://example.com/pull/1"} {
+	for _, u := range []string{"https://github.com/some-org/some-repo/pull/12", "https://github.com/some-org/some-repo/issues/3?x=1", "http://linear.app/team/issue/ABC-12", "https://github.com/some-org/some-repo", "https://example.com/pull/1"} {
 		if rec := f.post2("POST", "/api/itsas/"+key+"/links", `{"url":"`+u+`"}`); rec.Code != 200 {
 			t.Errorf("adding %s: %d %s", u, rec.Code, rec.Body.String())
 		}
 	}
-	if n := f.count("SELECT COUNT(*) FROM itsa_links WHERE url LIKE '%/pull/12%' OR url LIKE '%issues%' OR url LIKE '%linear%'"); n != 0 {
-		t.Errorf("a refused link was written: %d", n)
-	}
-	// A followed link that predates this daemon: removing it, or closing or reopening the ITSA, changes its watch.
-	f.sql("INSERT INTO itsa_links (itsa_id, n, system, external_id, url) SELECT id, 90, 'github', '12', ? FROM itsas WHERE key = ?", pr, key)
-	if rec := f.post2("DELETE", "/api/itsas/"+key+"/links/90", ""); rec.Code != 501 || !strings.Contains(errorOf(t, rec), "watch.syncItsa") {
-		t.Errorf("removing a followed link: %d %s", rec.Code, rec.Body.String())
-	}
-	if rec := f.post2("PATCH", "/api/itsas/"+key, `{"status":"canceled"}`); rec.Code != 501 || !strings.Contains(errorOf(t, rec), "watch.syncItsa") {
-		t.Errorf("closing an ITSA with a followed link: %d %s", rec.Code, rec.Body.String())
-	}
-	if rec := f.post2("PATCH", "/api/itsas/"+key, `{"status":"in_progress","title":"moved"}`); rec.Code != 200 {
-		t.Errorf("a move between open statuses: %d %s", rec.Code, rec.Body.String())
-	}
-	if n := f.count("SELECT COUNT(*) FROM itsa_links WHERE n = 90"); n != 1 {
-		t.Error("the followed link is gone")
-	}
-	if n := f.count("SELECT COUNT(*) FROM itsas WHERE key = ? AND status = 'in_progress'", key); n != 1 {
-		t.Error("the refused close changed the status")
+	if n := f.count("SELECT COUNT(*) FROM event_subscriptions WHERE created_by = 'stam'"); n != 3 {
+		t.Errorf("%d link subscriptions, want one for each followed subject", n)
 	}
 }
 

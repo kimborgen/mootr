@@ -41,6 +41,28 @@ describe('entries follow the column\'s filter kinds', () => {
     expect(cellActions({ id: 'x' }, row(), cx(), base, [])).toEqual([])
     expect(labels(cellActions(col('cost'), row(), cx(), base, []))).toEqual(['Sort by this column, ascending', 'Sort by this column, descending'])
   })
+  it('a link cell offers Has and Has not and a sort by its name, never Filter or Exclude; a status cell keeps them (S-3608)', () => {
+    const link = (system: string, url: string) => ({ n: 1, system, url, label: 'x' })
+    // A GitHub cell holding a commit or a repo (no PR state, no watch state loaded): it shows text, so no (Blank) filter value.
+    const commit = row({ links: [link('github', 'https://github.com/example/repo/commit/abc123')] })
+    const repo = row({ links: [link('github', 'https://github.com/example/repo')] })
+    const branch = row({ links: [link('branch', 'stam/x')] })
+    const linear = row({ links: [link('linear', 'https://linear.app/example/issue/S-1')] })
+    const cells: [string, ReturnType<typeof row>][] = [['github', commit], ['github', repo], ['branch', branch], ['linear', linear]]
+    for (const [id, r] of cells) {
+      const ls = labels(cellActions(col(id), r, cx(), base, opts('open')))
+      expect(ls.filter((l) => l === 'Filter to this value' || l === 'Exclude this value')).toEqual([])
+      expect(ls.slice(0, 2)).toEqual(['Has', 'Has not'])
+      expect(ls).toContain('Sort by this column, ascending')
+    }
+    expect(labels(cellActions(col('status'), row(), cx(), base, opts('in_review')))).toContain('Filter to this value')
+  })
+  it('a GitHub cell with a PR state offers that state, not a blank one', () => {
+    const pr = row({ links: [{ n: 1, system: 'github', url: 'https://github.com/example/repo/pull/5', label: 'PR 5' }] })
+    const watch = { 'github:example/repo#5': { state: 'open' } }
+    const es = cellActions(col('github'), pr, cx({ watch }), base, opts('open'))
+    expect(acts(es).filter((e) => e.label === 'Filter to this value').map((e) => e.hint)).toEqual(['open'])
+  })
 })
 
 describe('what an entry does', () => {

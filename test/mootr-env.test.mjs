@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { envVar, setEnvVar, entryValue, withMootrTwins } from '../src/env.ts';
+import { envVar, setEnvVar, entryValue, withMootrTwins, twinDefaults } from '../src/env.ts';
 
 const ROOT = join(import.meta.dirname, '..');
 const dirs = [];
@@ -38,10 +38,10 @@ test('both set and differing: MOOTR_ wins, the conflict is logged once, and no v
   assert.ok(!logged[0].includes('secret'), 'no value in the log');
 });
 
-test('a writer sets STAM_ only, or removes both names', () => {
+test('a writer sets both names to one value, or removes both', () => {
   const env = { MOOTR_HOME: 'stale' };
   setEnvVar('HOME', '/x', env);
-  assert.deepEqual(env, { STAM_HOME: '/x' }, 'no MOOTR_ name is written');
+  assert.deepEqual(env, { MOOTR_HOME: '/x', STAM_HOME: '/x' }, 'the stale MOOTR_ twin is replaced');
   setEnvVar('HOME', undefined, env);
   assert.equal('MOOTR_HOME' in env || 'STAM_HOME' in env, false);
 });
@@ -77,7 +77,7 @@ test('the data dir default is unchanged: ~/.local/share/stam, with no new env', 
   assert.equal(resolvedHome(withStam), join(withStam, '.local', 'share', 'stam'));
 });
 
-test('an existing mootr data dir is used only when the stam one does not exist', () => {
+test('an existing mootr data dir is used unless a real stam one exists: a stray mootr never takes over (S-3347)', () => {
   const onlyMootr = scratchHome('mootr');
   assert.equal(resolvedHome(onlyMootr), join(onlyMootr, '.local', 'share', 'mootr'));
   const both = scratchHome('mootr', 'stam');
@@ -89,4 +89,12 @@ test('MOOTR_HOME and STAM_HOME override the default, MOOTR_HOME first', () => {
   assert.equal(resolvedHome(home, { MOOTR_HOME: '/srv/m' }), '/srv/m');
   assert.equal(resolvedHome(home, { STAM_HOME: '/srv/s' }), '/srv/s');
   assert.equal(resolvedHome(home, { MOOTR_HOME: '/srv/m', STAM_HOME: '/srv/s' }), '/srv/m');
+});
+
+test('twinDefaults: the last layer that sets either name wins over the default, and both names carry it (S-3345)', () => {
+  const d = { STAM_TEST_SLOTS: '1', STAM_TEST_SLOT_DIR: '/d' };
+  assert.deepEqual(twinDefaults(d), { STAM_TEST_SLOTS: '1', MOOTR_TEST_SLOTS: '1', STAM_TEST_SLOT_DIR: '/d', MOOTR_TEST_SLOT_DIR: '/d' });
+  assert.equal(twinDefaults(d, { STAM_TEST_SLOTS: '4' }).MOOTR_TEST_SLOTS, '4');
+  assert.equal(twinDefaults(d, { STAM_TEST_SLOTS: '4' }, { STAM_TEST_SLOTS: '7' }).STAM_TEST_SLOTS, '7');
+  assert.equal(twinDefaults(d, { MOOTR_TEST_SLOTS: '4', STAM_TEST_SLOTS: '9' }).STAM_TEST_SLOTS, '4', 'MOOTR_ first inside a layer, as envVar reads');
 });

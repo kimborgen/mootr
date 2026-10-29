@@ -294,6 +294,10 @@ export const DEFAULTS = {
   // its step (S-578): reconcile marks it stopped, tells its parent, and runs a pending archive
   // at once. A launch normally takes seconds, so this is well above that.
   startingTimeoutMinutes: 10,
+  // An agent still 'starting' with a live harness this many minutes after its launch never reached a
+  // turn (S-3250): reconcile restarts it once, and errors it if the restart gets stuck too. A slow first
+  // prompt takes a few minutes at most, so this is well above that. 0 turns the check off.
+  stuckStartMinutes: 15,
   // A harness dialog that went to the agent's parent and the chief of staff (S-520) and that none
   // of them answered within this many minutes goes to the human (S-589). 0 sends it on at the next sweep.
   dialogEscalateMinutes: 10,
@@ -430,11 +434,11 @@ export const DEFAULTS = {
     defaultThreshold: 0.8,
     defaultMode: 'observe' as 'observe' | 'inform' | 'enforce',
   },
-  // Other machines' daemons: [{ "name": "storage", "url": "http://storage:7878", "token": "..." }].
+  // Other machines' daemons: [{ "name": "worker", "url": "http://peer.example.com:7878", "token": "..." }].
   // A peer may carry "start": a shell command that starts its machine when it is down; a spawn on
   // that peer runs it, waits for the peer's /api/health, then forwards the spawn (src/peers.ts).
   // "deploy" brings a peer on another release to this one: it runs with STAM_RELEASE and STAM_PEER.
-  peers: [] as { name: string; url: string; token: string; peerToken?: string; start?: string; deploy?: string }[],
+  peers: [] as { name: string; url: string; token: string; peerToken?: string; leaseToken?: string; start?: string; deploy?: string }[],
   // External-event sources (src/sources/github.ts, linear.ts). githubSeconds and linearSeconds
   // are the pollers' intervals, in seconds; 0 disables one. Tests lower them.
   watch: {
@@ -796,11 +800,13 @@ export function primaryRepoName(itsa: { repos: Record<string, string>; prOpen: {
   return itsa.prOpen.repo || Object.keys(itsa.repos)[0] || '';
 }
 // The remote names a checkout's PR branches live on besides origin: the setting `itsa.prOpen.storage` when it
-// names one; else `storage` when a peer of that name is configured (an install that runs a storage machine).
+// names one; else the first remote (sorted, not origin) named like a configured peer (an install that runs a storage machine
+// has a peer and a remote of the same name); else '' (a single-machine install, which takes the local path).
 export function storageRemoteFallback(remotes: string[]): string {
   const named = settings().itsa.prOpen.storage;
   if (named) return named;
-  return remotes.includes('storage') && settings().peers.some((p) => p.name === 'storage') ? 'storage' : '';
+  const peers = settings().peers;
+  return remotes.filter((r) => r && r !== 'origin' && peers.some((p) => p.name === r)).sort()[0] ?? '';
 }
 // A configured repo's real path, so a symlink can't point a name elsewhere later.
 function canonicalPath(p: string): string {
@@ -1252,6 +1258,7 @@ function readSettings(): { value: Settings; cacheable: boolean } {
     developerCap: Number.isInteger(user.developerCap) && user.developerCap >= 0 ? user.developerCap : DEFAULTS.developerCap,
     staleWorkingMinutes: typeof user.staleWorkingMinutes === 'number' && user.staleWorkingMinutes > 0 ? user.staleWorkingMinutes : DEFAULTS.staleWorkingMinutes,
     startingTimeoutMinutes: typeof user.startingTimeoutMinutes === 'number' && user.startingTimeoutMinutes > 0 ? user.startingTimeoutMinutes : DEFAULTS.startingTimeoutMinutes,
+    stuckStartMinutes: typeof user.stuckStartMinutes === 'number' && user.stuckStartMinutes >= 0 ? user.stuckStartMinutes : DEFAULTS.stuckStartMinutes,
     dialogEscalateMinutes: typeof user.dialogEscalateMinutes === 'number' && user.dialogEscalateMinutes >= 0 ? user.dialogEscalateMinutes : DEFAULTS.dialogEscalateMinutes,
     archive: {
       finalRoundMinutes: typeof user.archive?.finalRoundMinutes === 'number' && user.archive.finalRoundMinutes >= 0 ? user.archive.finalRoundMinutes : DEFAULTS.archive.finalRoundMinutes,

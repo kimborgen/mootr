@@ -14,10 +14,32 @@ export class Forbidden extends Error {
 // caller), the executive assistant, the chief of staff, the root itself, or any ancestor of
 // the root (a manager of a tree inside its own tree). Anyone else is refused.
 // The assistant and the chief of staff match allocations.canSet, which delegates here.
-export function mayManageTree(by: string, root: db.Agent): boolean {
+//
+// `remote` is a manager on another machine, as that machine's daemon vouched for it (a forwarded call): it
+// is not in this database, so only what the forward says counts: the chief of staff or the assistant (boss),
+// or an ancestor of the root, walked through the parents this daemon knows (its own agents', and the remembered
+// parents of its peers' agents), so a grandparent counts when the chain is known.
+export interface RemoteManager {
+  agent: string;
+  boss: boolean;
+}
+function ancestorsKnown(root: db.Agent): Set<string> {
+  const seen = new Set<string>();
+  const stack = db.parentsOf(root);
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const p = db.getAgent(id);
+    stack.push(...(p ? db.parentsOf(p) : db.peerParentsOf(id)));
+  }
+  return seen;
+}
+
+export function mayManageTree(by: string, root: db.Agent, remote?: RemoteManager): boolean {
   if (by === 'human' || by === 'stam') return true;
   const a = db.getAgent(by);
-  if (!a) return false;
+  if (!a) return !!remote && remote.agent === by && (remote.boss || ancestorsKnown(root).has(by));
   if (a.kind === 'assistant') return true;
   if (by === root.id) return true;
   if (chiefOfStaff()?.id === by) return true;
@@ -35,8 +57,8 @@ export function mayManageTree(by: string, root: db.Agent): boolean {
 }
 
 // Throws a Forbidden, naming both, when `by` may not manage `root`'s tree.
-export function assertMayManageTree(by: string, root: db.Agent): void {
-  if (!mayManageTree(by, root)) {
+export function assertMayManageTree(by: string, root: db.Agent, remote?: RemoteManager): void {
+  if (!mayManageTree(by, root, remote)) {
     const who = by === 'human' ? 'the human' : db.getAgent(by)?.name ?? by;
     throw new Forbidden(`${who} may not manage cost for ${root.name}'s tree: only the human, the chief of staff, or a manager of a tree inside its own tree may`);
   }

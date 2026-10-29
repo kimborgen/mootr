@@ -6,10 +6,12 @@
 // A model is named `provider:model`. With no provider named, or a prefix that is no registered
 // provider (OpenRouter ids such as `meta-llama/llama-3:free` contain colons), the default
 // provider, `openrouter`, takes the whole string, so settings written before the layer keep working.
+import * as db from '../db.ts';
 import { settings } from '../settings.ts';
 import * as secrets from '../secrets.ts';
 import { bedrock, parseBedrockConfig } from './bedrock.ts';
 import { adapterFor, parseProviderConfig } from './openai.ts';
+import { priceCall } from './pricing.ts';
 import { openrouter } from './openrouter.ts';
 import type { CompleteRequest, CompleteResult, KeyCheck, LlmAdapter } from './types.ts';
 
@@ -76,9 +78,21 @@ export function hasKey(ref: string): boolean {
   return !!adapter.apiKey() || !!adapter.keyless;
 }
 
-export function complete(req: CompleteRequest): Promise<CompleteResult> {
+// Models whose fallback price was logged since this process started: once per model, not per call.
+const unpricedLogged = new Set<string>();
+
+// A result with no cost from a provider that reports none is priced from its tokens (src/llm/pricing.ts), so a
+// call through OpenAI, Azure or Bedrock never books $0. `priced` says where the price came from.
+export async function complete(req: CompleteRequest): Promise<CompleteResult> {
   const { adapter, model } = resolve(req.model);
-  return adapter.complete({ ...req, model });
+  const r = await adapter.complete({ ...req, model });
+  if (r.costUsd !== undefined || adapter.id === DEFAULT_PROVIDER) return r;
+  const { costUsd, priced } = priceCall(adapter.id, model, r.usage.inputTokens, r.usage.outputTokens, adapter.unmetered);
+  if (priced === 'fallback' && !unpricedLogged.has(`${adapter.id}:${model}`)) {
+    unpricedLogged.add(`${adapter.id}:${model}`);
+    db.addEvent('stam', 'llm:unpriced', { provider: adapter.id, model, cost_usd: costUsd, tokens_in: r.usage.inputTokens, tokens_out: r.usage.outputTokens });
+  }
+  return { ...r, costUsd, priced };
 }
 
 export class KeyTestError extends Error {

@@ -111,7 +111,7 @@ func TestMailToolsMatchTS(t *testing.T) {
 	batches(t, ts.calls)
 	batches(t, g.calls)
 	sameCalls(t, ts.calls, g.calls)
-	for _, want := range []string{"Attachments:", "[stam] slow down", "Not addressed to you: none, zz", "No unread mail.", "No mail of yours in thread empty."} {
+	for _, want := range []string{"Attachments:", "[stam] slow down", "Not addressed to you: none, zz", "No unread mail.", "No mail of yours in thread empty.", "thread_id is required"} {
 		found := false
 		for _, l := range g.byID {
 			found = found || strings.Contains(l, want)
@@ -120,4 +120,71 @@ func TestMailToolsMatchTS(t *testing.T) {
 			t.Errorf("no answer holds %q", want)
 		}
 	}
+}
+
+// A read_thread with a missing, blank or non-string thread_id is refused before the decision-step check: both servers
+// answer an isError result and make no request to the daemon (S-4120).
+func TestReadThreadInvalidIDMakesNoRequest(t *testing.T) {
+	for _, args := range []string{`{}`, `{"thread_id":""}`, `{"thread_id":"   "}`, `{"thread_id":42}`} {
+		t.Run(args, func(t *testing.T) {
+			ts, g := both(t, map[string]string{"STAM_AGENT_ID": "a1"}, []string{call(1, "read_thread", args)}, 1, 0, "")
+			for name, r := range map[string]result{"ts": ts, "go": g} {
+				ans := r.byID["1"]
+				if !strings.Contains(ans, "Error: thread_id is required") || !strings.Contains(ans, `"isError":true`) {
+					t.Errorf("%s answered %s", name, ans)
+				}
+				if len(r.calls) != 0 {
+					t.Errorf("%s asked the daemon: %v", name, r.calls)
+				}
+			}
+		})
+	}
+}
+
+// mail_attach, withdraw_ask and defer_thread ask the daemon what src/mcp.ts asks and say what it says, a refusal too.
+func TestThreadToolsMatchTS(t *testing.T) {
+	lines := []string{
+		call(1, "mail_attach", `{"mail_id":"m7","itsas":["S-1","S-2"],"agents":["worker"]}`),
+		call(2, "mail_attach", `{"mail_id":"m7"}`),
+		call(3, "withdraw_ask", `{"mail_id":"m7","note":"answered in the terminal"}`),
+		call(4, "withdraw_ask", `{"mail_id":"m8","note":"moot"}`),
+		call(5, "defer_thread", `{"thread_id":"t7"}`),
+		call(6, "defer_thread", `{"thread_id":"t7","undo":true}`),
+		call(7, "defer_thread", `{"thread_id":"t7","undo":false,"self":"a1"}`),
+	}
+	ts, g := both(t, map[string]string{"STAM_AGENT_ID": "a1"}, lines, 7, 0, "")
+	for id, want := range ts.byID {
+		if g.byID[id] != want {
+			t.Errorf("id %s differs\n ts: %s\n go: %s", id, want, g.byID[id])
+		}
+	}
+	if len(g.byID) != len(ts.byID) || len(ts.byID) != 7 {
+		t.Errorf("go answered %d calls, ts %d, want 7", len(g.byID), len(ts.byID))
+	}
+	sameCalls(t, ts.calls, g.calls)
+}
+
+// search_mail and search ask the daemon what src/mcp.ts asks and say what it says: by meaning and by keyword, one kind or
+// both, a limit, `with`, and no match.
+func TestSearchToolsMatchTS(t *testing.T) {
+	lines := []string{
+		call(1, "search_mail", `{"query":"keeps redirecting"}`),
+		call(2, "search_mail", `{"query":"kw","with":"human","limit":5}`),
+		call(3, "search_mail", `{"query":"none"}`),
+		call(4, "search", `{"query":"keeps redirecting"}`),
+		call(5, "search", `{"query":"kw","limit":2}`),
+		call(6, "search", `{"query":"keeps redirecting","kinds":["itsa"]}`),
+		call(7, "search", `{"query":"none","kinds":["mail"],"limit":"3"}`),
+		call(8, "search", `{"query":"a b&c","limit":99}`),
+	}
+	ts, g := both(t, map[string]string{"STAM_AGENT_ID": "a1"}, lines, 8, 0, "")
+	for id, want := range ts.byID {
+		if g.byID[id] != want {
+			t.Errorf("id %s differs\n ts: %s\n go: %s", id, want, g.byID[id])
+		}
+	}
+	if len(g.byID) != len(ts.byID) || len(ts.byID) != 8 {
+		t.Errorf("go answered %d calls, ts %d, want 8", len(g.byID), len(ts.byID))
+	}
+	sameCalls(t, ts.calls, g.calls)
 }

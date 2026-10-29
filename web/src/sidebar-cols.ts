@@ -39,7 +39,7 @@ export function liveCols(cols: string[], fields: Pick<Field, 'id'>[] | null): st
 
 // What a row shows for each picked column: the badge, or null for a dash.
 export function rowValues(it: Itsa | undefined, cols: string[], fields: Field[]): (Badge | null)[] {
-  const badges = it ? cardBadges(it, cols, fields, true) : []
+  const badges = it ? cardBadges(it, cols, fields) : []
   return cols.map((id) => badges.find((b) => b.id === id) ?? null)
 }
 

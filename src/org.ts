@@ -14,6 +14,7 @@ import { queueNotice, tellAnywhere, sendMail, HUMAN } from './mail.ts';
 import { requestWaitedOn, settledNamed } from './waits.ts';
 import { itsaAskSettled } from './itsa-human.ts';
 import { envVar } from './env.ts';
+import { nowMs } from './clock.ts';
 
 export interface Visibility {
   // Whom the agent may mail: everyone, its tree (ancestors, descendants, and siblings
@@ -25,13 +26,27 @@ export interface Visibility {
 }
 
 const OPEN: Visibility = { reach: 'all', siblings: true, registry: true };
+const CLOSED: Visibility = { reach: 'parent', siblings: false, registry: false };
 
+// A NULL column or a missing field keeps the open default. A column that isn't a JSON object
+// fails closed, and so does each field with a wrong type or value (S-4003): a bad column must
+// never widen what an agent may reach or see. go/internal/db/agents.go VisibilityOf matches it.
 export function visibilityOf(a: db.Agent): Visibility {
+  if (a.visibility === null || a.visibility === undefined) return OPEN;
+  let raw: unknown;
   try {
-    return { ...OPEN, ...(a.visibility ? JSON.parse(a.visibility) : {}) };
+    raw = JSON.parse(a.visibility);
   } catch {
-    return OPEN;
+    return CLOSED;
   }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return CLOSED;
+  const o = raw as Record<string, unknown>;
+  const field = <T>(k: keyof Visibility, ok: (x: unknown) => boolean): T => (!Object.hasOwn(o, k) ? OPEN[k] : ok(o[k]) ? o[k] : CLOSED[k]) as T;
+  return {
+    reach: field('reach', (x) => x === 'all' || x === 'tree' || x === 'parent'),
+    siblings: field('siblings', (x) => typeof x === 'boolean'),
+    registry: field('registry', (x) => typeof x === 'boolean'),
+  };
 }
 
 export function chiefOfStaff(): db.Agent | undefined {
@@ -221,14 +236,15 @@ export function orgRest(a: db.Agent): string {
 // answer is still its parent: the notice waits for it (`deliver`). Only a parent every
 // machine confirms gone (forgotten) leaves the agent to the fallback.
 function trouble(a: db.Agent, template: string, subject: string, detail: string): void {
+  const clock = noticeClock(a);
   const fallback = () => {
     const cos = chiefOfStaff();
     const id = cos && cos.id !== a.id ? cos.id : HUMAN;
-    const text = render(template, { agent: a.name, relation: 'an agent without a parent', detail });
+    const text = `${render(template, { agent: a.name, relation: 'an agent without a parent', detail })}\n${clock}`;
     if (id === HUMAN) sendMail({ from: a.id, to: [HUMAN], subject, body: text, from_stam: true }).catch(() => {});
     else queueNotice(id, text);
   };
-  const text = render(template, { agent: a.name, relation: 'your child', detail });
+  const text = `${render(template, { agent: a.name, relation: 'your child', detail })}\n${clock}`;
   const parents = db.parentsOf(a);
   const here = parents.filter((p) => db.getAgent(p));
   const away = parents.filter((p) => !db.getAgent(p));
@@ -447,6 +463,31 @@ function lastMessage(a: db.Agent): string {
   return (a.last_message ?? '(not reported)').replace(/\s+/g, ' ').slice(0, 600);
 }
 
+// A span as a short age: 14s, 14m, 2h 5m, 3d 4h.
+function span(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+// A stored ISO time as ms; one that doesn't parse counts as `at`, so its span is 0 (as in the Go daemon).
+const since = (iso: string, at: number): number => {
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? at : t;
+};
+
+// The line a child notice ends with (S-3468): the daemon's now to the minute and the child's age since its spawn. A
+// tree-idle notice (`idle`) also says how long the child has been idle, from its stored idle_since, when that is set.
+// All of it comes from stored rows, so it is right after a restart.
+export function noticeClock(a: db.Agent, at = nowMs(), idle = false): string {
+  const line = `now ${new Date(at).toISOString().slice(0, 16)}Z · child age ${span(at - since(a.created_at, at))}`;
+  return idle && a.idle_since ? `${line} · idle ${span(at - since(a.idle_since, at))}` : line;
+}
+
 // Whether an idle agent finished a turn its parents haven't heard about yet. idle_since
 // marks that turn; idle_notified holds the value a tree-idle notice was sent for, so a
 // restart neither loses nor repeats one. An unresolved permission request keeps it busy,
@@ -471,7 +512,7 @@ function announceTreeIdleOf(ids: Iterable<string>): void {
   for (const id of ids) {
     const a = db.getAgent(id);
     if (!a || !needsTreeIdleNotice(a) || !subtreeIdle(id)) continue;
-    const text = render('child-turn-finished', { child: a.name, last: lastMessage(a) });
+    const text = `${render('child-turn-finished', { child: a.name, last: lastMessage(a) })}\n${noticeClock(a, nowMs(), true)}`;
     const want = (parent: db.Agent) => childNoticesOf(parent) === 'tree-idle';
     const parents = db.parentsOf(a);
     const away = parents.filter((p) => !db.getAgent(p));
@@ -525,7 +566,8 @@ export function watchActivity(): void {
       // A turn that ended with open waits ends in 'waiting', but it is still a finished turn.
       // A parent set to "turn" hears now; "tree-idle" waits for the whole subtree below.
       const last = lastMessage(after);
-      for (const p of db.parentsOf(after)) tell(p, render('child-turn-finished', { child: after.name, last }), (parent) => childNoticesOf(parent) === 'turn');
+      const text = `${render('child-turn-finished', { child: after.name, last })}\n${noticeClock(after)}`;
+      for (const p of db.parentsOf(after)) tell(p, text, (parent) => childNoticesOf(parent) === 'turn');
     }
     // Going idle or errored can be the last descendant a pending ancestor waited on. A
     // waiting agent goes idle when its last wait clears, so its parents hear then, once.

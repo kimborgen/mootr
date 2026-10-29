@@ -141,5 +141,19 @@ for (const viewport of [1000, 360]) for (const width of [300, 360]) for (const c
   const name = `synthetic row, ${viewport} px page, ${width} px tree, depth ${depth}, ${chip ? 'with' : 'without'} ITSA chip`
   if (bad) { failures.push(name); console.log('FAIL', name, 'own cost cut off', JSON.stringify(bad)) } else console.log('ok  ', name)
 }
+// The meta clips its items at its own edge (S-4066), so the Open ask link's keyboard focus ring must be inset and lie inside
+// the meta's box. Focus comes from the keyboard, as a user's Tab does, so :focus-visible is set.
+await sp.setViewportSize({ width: 1000, height: 800 })
+await sp.setContent(`<style>${css}</style><div class="tree" style="width:300px"><div class="node" style="padding-left:8px"><span class="chev"></span><span class="name">root-long-agent-name</span><span class="meta"><button class="open-ask" type="button"><svg class="i" viewBox="0 0 24 24"></svg>Open ask</button><span class="cost"><span class="cost-own">$1.23</span></span></span><span class="hover-actions"><button class="icon-btn">…</button></span></div></div>`)
+await sp.evaluate(() => document.fonts.ready)
+await sp.keyboard.press('Tab')
+const ring = await sp.evaluate(() => {
+  const b = document.querySelector('.open-ask'); const m = document.querySelector('.meta')
+  const r = b.getBoundingClientRect(); const mr = m.getBoundingClientRect()
+  return { focused: b.matches(':focus-visible'), shadow: getComputedStyle(b).boxShadow, inside: r.left >= mr.left - 0.5 && r.right <= mr.right + 0.5 && r.top >= mr.top - 0.5 && r.bottom <= mr.bottom + 0.5 }
+})
+const ringName = 'focused Open ask ring is inset and inside the meta'
+if (ring.focused && ring.shadow.includes('inset') && ring.inside) console.log('ok  ', ringName)
+else { failures.push(ringName); console.log('FAIL', ringName, JSON.stringify(ring)) }
 await browser.close()
 process.exit(failures.length ? 1 : 0)

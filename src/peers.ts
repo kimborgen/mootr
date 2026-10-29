@@ -10,7 +10,7 @@ import { settings } from './settings.ts';
 import { MACHINE, RELEASE, STAM_HOME } from './config.ts';
 import * as db from './db.ts';
 import { timed } from './stall.ts';
-import { envVar } from './env.ts';
+import { envVar, withTwins } from './env.ts';
 
 export interface Peer {
   name: string;
@@ -18,6 +18,8 @@ export interface Peer {
   token: string;
   // The token this peer's daemon accepts from daemons (its STAM_HOME/peer-token, S-545); `token` is the fallback.
   peerToken?: string;
+  // The lease token that peer's daemon accepts (its STAM_HOME/mcp-lease-token, S-3176), for its MCP lease route.
+  leaseToken?: string;
   // A shell command that starts the machine when it is down, such as a script that boots it.
   start?: string;
   // A shell command that deploys a release to the machine (S-236); it gets STAM_RELEASE and STAM_PEER.
@@ -60,6 +62,8 @@ export function peerByName(name: string): Peer | undefined {
 const PROBE_MS = Number(envVar('PEER_PROBE_MS')) || 30_000;
 const CHECK_MS = Number(envVar('PEER_CHECK_MS')) || 2000;
 const down = new Map<string, number>();
+// The wait for a peer's answer to a per-agent lookup (peerHits and its retry).
+const LOOKUP_MS = Number(envVar('PEER_LOOKUP_MS')) || 4000;
 const checking = new Map<string, Promise<boolean>>();
 
 const peerFetch = (p: Peer, method: string, path: string, body: unknown, timeoutMs: number, human = false, via?: Via) =>
@@ -91,20 +95,164 @@ function checkUp(p: Peer): Promise<boolean> {
   return c;
 }
 
+// The error peerCall throws for a peer that is down: nothing was sent to it (S-3596).
+export class PeerUnreachable extends Error {}
+// The error peerCall throws for a peer that answered, but with a body that isn't JSON (S-3472): it is reachable.
+export class PeerBadReply extends Error {}
+
+// Node's fetch reports ECONNREFUSED on its cause; a refused connection never reached the peer's request (S-3596).
+// A getter that throws reads as not refused, so the error goes on to redactError.
+function refusedBeforeSend(e: unknown): boolean {
+  try {
+    const code = (e as { cause?: { code?: unknown }; code?: unknown } | undefined)?.cause?.code ?? (e as { code?: unknown } | undefined)?.code;
+    return code === 'ECONNREFUSED';
+  } catch {
+    return false;
+  }
+}
+
+// The tokens a call to the peer could expose (S-3994): the peer's own, which it got as the bearer or holds, and this
+// daemon's shared, peer and lease tokens, read when needed so a rotation counts at once.
+function callSecrets(p: Peer): string[] {
+  const own = (file: string) => {
+    try {
+      return readFileSync(join(STAM_HOME, file), 'utf8').trim();
+    } catch {
+      return '';
+    }
+  };
+  // Every non-empty token: config accepts one of any length, so none is too short to guard.
+  return [p.token, p.peerToken, p.leaseToken, own('token'), own('peer-token'), own('mcp-lease-token')].filter((t): t is string => !!t);
+}
+
+// Text a peer or a proxy wrote, with every token the call could expose replaced by [redacted].
+export function redactPeerText(p: Peer, text: string): string {
+  for (const t of callSecrets(p)) text = text.split(t).join('[redacted]');
+  return text;
+}
+
+function redactDeep(p: Peer, v: unknown): unknown {
+  if (typeof v === 'string') return redactPeerText(p, v);
+  if (Array.isArray(v)) return v.map((x) => redactDeep(p, x));
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [redactPeerText(p, k), redactDeep(p, x)]));
+  return v;
+}
+
+// A peer's answer, parsed. One that isn't a success is redacted, every string and key at any depth, before any caller
+// logs its error, mails it or answers with it (S-3994); a success is left as the peer sent it. A body that isn't JSON
+// is a fixed error, as in the Go daemon: a SyntaxError quotes the body's start, which may hold a token.
+function peerReply(p: Peer, res: Response, text: string): { status: number; data: any } {
+  let data: unknown = {};
+  if (text) {
+    try {
+      // A peer's whole reply is parsed on the loop; labelled for the stall watch (src/stall.ts).
+      data = timed(`peer parse ${p.name}`, () => JSON.parse(text));
+    } catch {
+      throw new PeerBadReply(`${p.name} answered something that is not JSON`);
+    }
+  }
+  return { status: res.status, data: res.ok ? data : redactDeep(p, data) };
+}
+
 export async function peerCall(p: Peer, method: string, path: string, body?: unknown, timeoutMs = 8000, human = false, via?: Via): Promise<{ status: number; data: any }> {
   // A down peer is probed first, so a slow real call after it comes back still gets its full timeout.
-  if (down.has(p.name) && !(await checkUp(p))) throw new Error(`${p.name} is unreachable`);
+  if (down.has(p.name) && !(await checkUp(p))) throw new PeerUnreachable(`${p.name} is unreachable`);
   let res;
   try {
     res = await peerFetch(p, method, path, body, timeoutMs, human, via);
   } catch (e) {
     down.set(p.name, Date.now() + PROBE_MS);
-    throw e;
+    // A connection refused before anything was sent: the peer got nothing, so it is unreachable (S-3596).
+    if (refusedBeforeSend(e)) throw new PeerUnreachable(`${p.name} is unreachable`);
+    throw redactError(p, e);
   }
   down.delete(p.name);
-  const text = await res.text();
-  // A peer's whole reply is parsed on the loop; labelled for the stall watch (src/stall.ts).
-  return { status: res.status, data: text ? timed(`peer parse ${p.name}`, () => JSON.parse(text)) : {} };
+  return peerReply(p, res, await res.text());
+}
+
+// A fetch error with every token the call could expose kept out (S-3994), always rebuilt, never the original: its name
+// when it is a plain word, its message redacted, and at most its cause's error code. The cause itself and every other
+// property stay behind (an invalid URL's cause quotes the URL in `input`). Anything that throws while it is read (a
+// getter, a Proxy) gives a fixed error, and nothing more is read from it. A timeout stays a TimeoutError with its message.
+function redactError(p: Peer, e: unknown): Error {
+  try {
+    const err = e as { name?: unknown; message?: unknown; cause?: { code?: unknown } };
+    const name = err.name;
+    const message = redactPeerText(p, String(err.message));
+    const code = err.cause?.code;
+    const plain = (v: unknown, re: RegExp): v is string => typeof v === 'string' && re.test(v) && redactPeerText(p, v) === v;
+    const r = new Error(message, plain(code, /^[A-Z0-9_]+$/) ? { cause: { code } } : undefined);
+    r.name = plain(name, /^[A-Za-z]+$/) ? name : 'Error';
+    return r;
+  } catch {
+    return new Error(`${p.name} request failed`);
+  }
+}
+
+// The bounds on a refusal body peerRaw and peerStream buffer to redact, read at each call (S-3994).
+// A value that isn't a positive number is the default.
+const positive = (v: string | undefined, fallback: number) => (Number(v) > 0 ? Number(v) : fallback);
+const refusalMax = () => positive(envVar('PEER_REFUSAL_MAX_BYTES'), 64 * 1024);
+const refusalMs = () => positive(envVar('PEER_REFUSAL_MS'), 4000);
+
+// A body read whole within max bytes and ms, or undefined when it is longer, slower, or fails to read; the stream is
+// cancelled either way.
+async function readBounded(res: Response, max: number, ms: number): Promise<Buffer | undefined> {
+  const reader = res.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<'late'>((r) => (timer = setTimeout(() => r('late'), ms)));
+  try {
+    for (;;) {
+      const next = await Promise.race([reader.read().catch(() => 'failed' as const), late]);
+      if (next === 'late' || next === 'failed') return undefined;
+      if (next.done) return Buffer.concat(chunks);
+      size += next.value.byteLength;
+      if (size > max) return undefined;
+      chunks.push(next.value);
+    }
+  } finally {
+    clearTimeout(timer);
+    reader.cancel().catch(() => {});
+  }
+}
+
+// A refusal's body redacted: a JSON one through its decoded strings and keys (so an escaped token is found), any other
+// as text. JSON that parses but can't be redacted and written again (nested too deep for the walk) is undefined, the
+// fixed refusal: text redaction would miss an escaped token in it.
+function redactBody(p: Peer, text: string): string | undefined {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return redactPeerText(p, text);
+  }
+  try {
+    return JSON.stringify(redactDeep(p, data));
+  } catch {
+    return undefined;
+  }
+}
+
+// A refusal (a non-2xx answer) that peerRaw or peerStream relays, buffered and redacted as peerReply does a parsed one, so
+// a relayed refusal that echoes a token reaches no caller with it (S-3994). Its length is dropped, since the text changed
+// size. A body over the cap, not read whole in time, or failing to read is a fixed refusal with its status: a cut body
+// could still hold a token's start. It never throws, so a slow refusal doesn't mark a live peer down. A success's bytes
+// (a file, a diff, the event stream) are left as they come.
+async function redactRefusal(p: Peer, res: Response): Promise<Response> {
+  if (res.ok) return res;
+  const headers = new Headers(res.headers);
+  headers.delete('content-length');
+  if (res.status === 204 || res.status === 304) return new Response(null, { status: res.status, statusText: res.statusText, headers });
+  const body = await readBounded(res, refusalMax(), refusalMs());
+  let text = body && redactBody(p, body.toString('utf8'));
+  if (text === undefined) {
+    text = JSON.stringify({ error: `${p.name} refused with ${res.status}; its answer was too long or too slow to show safely` });
+    headers.set('content-type', 'application/json');
+  }
+  return new Response(text, { status: res.status, statusText: res.statusText, headers });
 }
 
 // A GET whose reply is streamed on, such as a file's bytes (S-1525): the peer's response, or undefined when
@@ -114,16 +262,18 @@ export async function peerRaw(p: Peer, path: string, headers: Record<string, str
   // The time limit covers the connection and the headers only, not the body that follows.
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), CHECK_MS * 2);
+  let res: Response;
   try {
-    const res = await fetch(p.url.replace(/\/$/, '') + path, { headers: { authorization: `Bearer ${p.peerToken || p.token}`, 'x-stam-local': '1', 'accept-encoding': 'identity', ...(human ? { 'x-stam-human': '1' } : {}), ...headers }, signal: abort.signal });
+    res = await fetch(p.url.replace(/\/$/, '') + path, { headers: { authorization: `Bearer ${p.peerToken || p.token}`, 'x-stam-local': '1', 'accept-encoding': 'identity', ...(human ? { 'x-stam-human': '1' } : {}), ...headers }, signal: abort.signal });
     down.delete(p.name);
-    return res;
   } catch {
     down.set(p.name, Date.now() + PROBE_MS);
     return undefined;
   } finally {
     clearTimeout(timer);
   }
+  // The peer answered: a refusal's body has its own bounds, and reading it never marks the peer down.
+  return redactRefusal(p, res);
 }
 
 // A fire-and-forget note to a peer, such as the settings home's change push (S-390): it never marks
@@ -135,9 +285,13 @@ export function peerNotify(p: Peer, method: string, path: string, body: unknown,
 // A background poll, such as the paid-spend refresh (S-395): it never marks the peer down or up, so
 // a peer that is still starting when the poll runs isn't hidden from lists for a probe interval.
 export async function peerPoll(p: Peer, path: string, timeoutMs: number): Promise<{ status: number; data: any }> {
-  const res = await peerFetch(p, 'GET', path, undefined, timeoutMs);
-  const text = await res.text();
-  return { status: res.status, data: text ? JSON.parse(text) : {} };
+  let res;
+  try {
+    res = await peerFetch(p, 'GET', path, undefined, timeoutMs);
+  } catch (e) {
+    throw redactError(p, e);
+  }
+  return peerReply(p, res, await res.text());
 }
 
 // Lists skip a down peer at once, and start the background probe once its retry time has passed.
@@ -288,7 +442,7 @@ async function deployPeer(p: Peer, release: string): Promise<void> {
   const deadline = Date.now() + Number(envVar('PEER_DEPLOY_TIMEOUT_MS') ?? 600_000);
   const fail = (why: string, tail: string[] = []) => new Error(`${p.name} didn't deploy ${release}: ${why}${tail.length ? `\n${tail.join('\n')}` : ''}`);
   console.log(`peer:deploy ${p.name}: running ${p.deploy} for ${release}`);
-  const { code, tail } = await runPeerCommand(p.deploy!, { ...process.env, ...{ STAM_RELEASE: release, STAM_PEER: p.name } }, deadline);
+  const { code, tail } = await runPeerCommand(p.deploy!, { ...process.env, ...withTwins({ STAM_RELEASE: release, STAM_PEER: p.name }) }, deadline);
   if (code === 'late') throw fail('its deploy command ran past the deadline', tail);
   if (code !== 0) {
     console.log(`peer:deploy ${p.name}: deploy command exited ${code}`);
@@ -306,7 +460,13 @@ async function deployPeer(p: Peer, release: string): Promise<void> {
 export async function peerStream(p: Peer, path: string, res: ServerResponse, via?: Via): Promise<void> {
   const abort = new AbortController();
   res.on('close', () => abort.abort());
-  const up = await fetch(p.url.replace(/\/$/, '') + path, { headers: { authorization: `Bearer ${p.peerToken || p.token}`, 'x-stam-local': '1', ...viaHeaders(via) }, signal: abort.signal });
+  let fetched: Response;
+  try {
+    fetched = await fetch(p.url.replace(/\/$/, '') + path, { headers: { authorization: `Bearer ${p.peerToken || p.token}`, 'x-stam-local': '1', ...viaHeaders(via) }, signal: abort.signal });
+  } catch (e) {
+    throw redactError(p, e);
+  }
+  const up = await redactRefusal(p, fetched);
   res.writeHead(up.status, { 'content-type': up.headers.get('content-type') ?? 'application/json', 'cache-control': 'no-cache', 'x-accel-buffering': 'no' });
   // Reads from the peer only as fast as the browser takes it.
   const drained = () => new Promise<void>((r) => (res.once('drain', r), res.once('close', r)));
@@ -324,6 +484,45 @@ export async function peerStream(p: Peer, path: string, res: ServerResponse, via
 export async function findAgentPeer(ref: string): Promise<{ peer: Peer; agent: db.Agent } | undefined> {
   const r = await locateAgent(ref);
   return typeof r === 'object' ? r : undefined;
+}
+
+// One more ask for an agent no peer returned (S-2927, S-3232). Right after this daemon restarts, the single
+// per-agent lookup of peerHits can miss though the peer knows the agent: the peer was busy and the ask timed
+// out, which also marks the peer down. The miss read as "no agent". So a miss is asked again once, through
+// the same cheap route, to each peer that was up when the call began (a peer this call's own timeout just
+// marked down included, since peerCall probes it first; a peer already down before the call gets no second
+// probe). Callers asking for the same id of the same peer during a retry, or within RETRY_COOLDOWN_MS of
+// its end, share it, so a burst after a restart costs one retry per peer and id. Only a 200 naming an agent
+// of another machine counts; a peer that can't answer, or an older one, adds nothing.
+const RETRY_COOLDOWN_MS = Number(envVar('PEER_LOOKUP_RETRY_MS')) || 2000;
+const retries = new Map<string, { at: number; run: Promise<db.Agent | undefined> }>();
+
+function retryLookup(p: Peer, ref: string): Promise<db.Agent | undefined> {
+  const key = `${p.name}\0${ref}`;
+  const now = Date.now();
+  for (const [k, r] of retries) if (r.at && now - r.at >= RETRY_COOLDOWN_MS) retries.delete(k);
+  const have = retries.get(key);
+  if (have) return have.run;
+  const entry = { at: 0, run: undefined as unknown as Promise<db.Agent | undefined> };
+  entry.run = peerCall(p, 'GET', `/api/agents/${encodeURIComponent(ref)}`, undefined, LOOKUP_MS)
+    .then((r) => (r.status === 200 && typeof r.data?.id === 'string' && r.data.machine !== MACHINE ? (r.data as db.Agent) : undefined))
+    .catch(() => undefined)
+    .finally(() => {
+      entry.at = Date.now();
+    });
+  retries.set(key, entry);
+  return entry.run;
+}
+
+// findAgentPeer, and when no peer answered with the agent, one retry of each peer that was up before the
+// call. An id no peer returns is still undefined: nothing is accepted on trust.
+export async function findAgentPeerFresh(ref: string): Promise<{ peer: Peer; agent: db.Agent } | undefined> {
+  const wasDown = new Set(peers().filter((p) => down.has(p.name)).map((p) => p.name));
+  const first = await findAgentPeer(ref);
+  if (first) return first;
+  const hits = (await Promise.all(peers().filter((p) => !wasDown.has(p.name)).map(async (peer) => ({ peer, agent: await retryLookup(peer, ref) })))).filter((h): h is { peer: Peer; agent: db.Agent } => !!h.agent);
+  for (const h of hits) db.rememberPeerAgent(h.agent);
+  return pickAgent(ref, hits);
 }
 
 // An agent a name means: `peer` is undefined when it is on this daemon.
@@ -368,7 +567,7 @@ export async function peerHits(ref: string): Promise<{ hits: { peer: Peer; agent
   const results = await Promise.all(
     peers().map(async (p) => {
       try {
-        const r = await peerCall(p, 'GET', `/api/agents/${encodeURIComponent(ref)}`, undefined, 4000);
+        const r = await peerCall(p, 'GET', `/api/agents/${encodeURIComponent(ref)}`, undefined, LOOKUP_MS);
         return r.status === 200 ? { peer: p, agent: r.data as db.Agent } : r.status === 404 ? 'absent' : 'unreachable';
       } catch {
         return 'unreachable';

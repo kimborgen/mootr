@@ -75,6 +75,7 @@ export const stories: Story[] = [{
   code: ['web/src/work/card-items.tsx#cardItemsFor'],
   rules: [
     'A form draws nothing for an empty value: no text, no badge, and no placeholder on the card.',
+    'A form can be told the card is the phone\'s Glance (`touch`): a link kind then draws the table\'s link chip as an icon alone, so a branch is only named, a PR tap opens its diff and a long-press names the link in the cell menu.',
   ],
   states: [
     { name: 'Nothing to show', render: () => <Row items={[...forms('issue', 'inline', empty), ...forms('agent', 'chip', empty)]} /> },

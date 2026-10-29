@@ -60,6 +60,7 @@ const common = [
   'Mail components are apparatus, not cards: a hairline, quiet ink and tabular figures, never a tinted fill or a shadow (' + ds('In stam') + ').',
   'Every block is plain Markdown or a fenced block, so the mail still reads as text in an agent terminal (' + MAIL + ').',
   'A view that draws a mail outside the thread panel (the ITSA thread, S-1508) gives `Rendered` a `resolve` step, so the mail\'s embedded and compared attachments fill in there too.',
+  'A mail\'s own HTML keeps no `<style>`, `style`, `class`, `id` or `popover`: only what a component writes keeps them, so no mail can hide or cover the text an ask asks to approve (S-2998).',
 ]
 const block = (name: string, what: string, when: string, code: string[], rules: string[], states: StoryState[]): Story =>
   ({ name, group: 'Mail blocks', what, when, code: code.map((c) => (c.includes('#') ? c : `${SRC}#${c}`)), rules: [...rules, ...common], fit: 'actual', states })

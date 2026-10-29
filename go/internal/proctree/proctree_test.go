@@ -261,13 +261,17 @@ func TestInfrastructureIsRoot(t *testing.T) {
 func TestPaneWalkStopsAtOtherAgent(t *testing.T) {
 	dir := tempDir(t)
 	pane := start(t, "", dir, nil, `sleep 300 & STAM_AGENT_ID=someone-else sh -c 'sleep 300 & wait' & wait`)
-	kids := children(t, pane, 2)
+	// A child shows the shell's environment until its exec sets STAM_AGENT_ID, so wait for the other agent's marker.
+	var kids []int
 	var other, own int
-	for _, k := range kids {
-		if v, _ := envValue(k, "STAM_AGENT_ID"); v == "someone-else" {
-			other = k
-		} else {
-			own = k
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end) && (other == 0 || own == 0); time.Sleep(20 * time.Millisecond) {
+		kids, other, own = children(t, pane, 2), 0, 0
+		for _, k := range kids {
+			if v, _ := envValue(k, "STAM_AGENT_ID"); v == "someone-else" {
+				other = k
+			} else {
+				own = k
+			}
 		}
 	}
 	if other == 0 || own == 0 {
@@ -283,6 +287,58 @@ func TestPaneWalkStopsAtOtherAgent(t *testing.T) {
 	for _, p := range append([]int{other}, otherKids...) {
 		if _, ok := got[p]; ok {
 			t.Errorf("pid %d is another agent's, yet was found: %v", p, got)
+		}
+	}
+}
+
+// Exited: gone, reused or a zombie is an exit; a stat that can't be read or parsed is an error, never an exit.
+func TestExited(t *testing.T) {
+	root := tempDir(t)
+	write := func(pid, text string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, pid), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, pid, "stat"), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("50", "50 (opencode) S 7 50 50 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 1000 1000 100\n")
+	write("51", "51 (opencode) Z 7 51 51 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 1000 1000 100\n")
+	write("52", "garbage\n")
+	// A stat that is a folder can't be read: an error other than not-found.
+	if err := os.MkdirAll(filepath.Join(root, "53", "stat"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := procDir
+	procDir = root
+	defer func() { procDir = old }()
+	for _, c := range []struct {
+		pid     int
+		start   string
+		exited  bool
+		failing bool
+	}{
+		{50, "1000", false, false},
+		{50, "999", true, false},
+		{51, "1000", true, false},
+		{49, "1000", true, false},
+		{52, "1000", false, true},
+		{53, "1000", false, true},
+	} {
+		got, err := Exited(c.pid, c.start)
+		if got != c.exited || (err != nil) != c.failing {
+			t.Errorf("Exited(%d, %s) = %v, %v; want %v, error %v", c.pid, c.start, got, err, c.exited, c.failing)
+		}
+	}
+	for _, c := range []struct {
+		pid           int
+		start         string
+		gone, failing bool
+	}{{50, "1000", false, false}, {51, "", true, false}, {49, "", true, false}, {52, "", false, true}, {53, "", false, true}} {
+		start, gone, err := StartOf(c.pid)
+		if start != c.start || gone != c.gone || (err != nil) != c.failing {
+			t.Errorf("StartOf(%d) = %q, %v, %v; want %q, %v, error %v", c.pid, start, gone, err, c.start, c.gone, c.failing)
 		}
 	}
 }

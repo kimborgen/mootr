@@ -18,7 +18,8 @@ export type MenuItem =
 
 // A popover is a menu's surface holding content instead of items: a sheet on a phone too.
 // `above`: y is the trigger's top, and the popover opens upward from it, capped to the room there.
-interface MenuState { x: number; y: number; items: MenuItem[]; body?: ReactNode; label?: string; above?: boolean; trigger: Element | null; restore: Element | null }
+// `focus`: a popover takes the focus when it opens, unless it was opened by a pointer passing over (the machines strip, S-3182).
+interface MenuState { x: number; y: number; items: MenuItem[]; body?: ReactNode; label?: string; above?: boolean; focus: boolean; trigger: Element | null; restore: Element | null }
 let menu: MenuState | null = null
 let notice: { text: string; err: boolean; n: number } | null = null
 let standing: ReactNode = null
@@ -30,14 +31,16 @@ const useUi = () => useSyncExternalStore((fn) => { ls.add(fn); return () => { ls
 // `restore` is where focus goes back to on Escape when it isn't the trigger or the focused element.
 export function showMenu(x: number, y: number, items: MenuItem[], trigger?: Element | null, restore?: Element | null) {
   if (menu && trigger && menu.trigger === trigger) return hideMenu()
-  menu = { x, y, items, trigger: trigger ?? null, restore: restore ?? trigger ?? document.activeElement }
+  menu = { x, y, items, focus: true, trigger: trigger ?? null, restore: restore ?? trigger ?? document.activeElement }
   bump()
 }
-export function showPopover(x: number, y: number, label: string, body: ReactNode, trigger?: Element | null, above = false) {
+export function showPopover(x: number, y: number, label: string, body: ReactNode, trigger?: Element | null, above = false, focus = true) {
   if (menu && trigger && menu.trigger === trigger) return hideMenu()
-  menu = { x, y, items: [], body, label, above, trigger: trigger ?? null, restore: trigger ?? document.activeElement }
+  menu = { x, y, items: [], body, label, above, focus, trigger: trigger ?? null, restore: trigger ?? document.activeElement }
   bump()
 }
+// The element that opened the open menu, or null.
+export const menuTrigger = () => menu?.trigger ?? null
 export function hideMenu(restore = false) {
   if (!menu) return
   const back = menu.restore
@@ -90,7 +93,7 @@ function Menu({ m }: { m: MenuState }) {
     el.style.left = Math.max(12, Math.min(m.x, innerWidth - r.width - 12)) + 'px'
     el.style.top = Math.max(12, m.above ? Math.min(m.y - r.height, innerHeight - r.height - 12) : Math.min(m.y, innerHeight - r.height - 12)) + 'px'
     const first = el.querySelector<HTMLButtonElement>('button[aria-checked=true]:not(:disabled)') ?? el.querySelector<HTMLButtonElement>('button:not(:disabled)')
-    if (m.body) el.focus()
+    if (m.body) { if (m.focus) el.focus() }
     else first?.focus()
   }, [m])
   useEffect(() => {

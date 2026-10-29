@@ -48,8 +48,10 @@ type Options struct {
 
 // DB is an open stam.db: one writer connection and a pool of readers. It is safe for concurrent use.
 type DB struct {
-	path    string
-	writer  *sqlitex.Pool
+	path   string
+	writer *sqlitex.Pool
+	// wlock queues the callers of Write in order, and counts the ones waiting (WaitingWrites).
+	wlock   writeLock
 	readers *sqlitex.Pool
 	closed  atomic.Bool
 
@@ -65,6 +67,9 @@ type DB struct {
 	// written again.
 	peersMu   sync.Mutex
 	peersSeen map[string]string
+	// counting and calls are CountCalls' count of Read and Write calls (testhooks.go).
+	counting atomic.Bool
+	calls    atomic.Int64
 }
 
 // AgentObserver hears an agent whose lifecycle or activity changed, once the write commits (src/db.ts updateAgent's
@@ -97,6 +102,9 @@ var required = map[string][]string{
 	"events": eventColumns,
 	// S-3015: when a participant left an ITSA. The TS daemon adds it when it opens the file.
 	"itsa_participants": {"itsa_id", "agent_id", "left_at"},
+	// S-3233: a field's kinds (S-3180). The TS daemon adds it when it opens the file, so one last opened by a TS daemon older than bbcb08f9
+	// lacks it, and every ITSA read would fail.
+	"itsa_fields": {"kinds"},
 }
 
 // Open opens the stam.db at path, which must exist: a missing file is an error, never a new database.
@@ -218,6 +226,7 @@ func (d *DB) Read(ctx context.Context, fn func(conn *sqlite.Conn) error) error {
 	if d.closed.Load() {
 		return ErrClosed
 	}
+	d.count()
 	conn, err := d.readers.Take(ctx)
 	if err != nil {
 		return err
@@ -233,15 +242,23 @@ func (d *DB) Write(ctx context.Context, fn func(conn *sqlite.Conn) error) (err e
 	if d.closed.Load() {
 		return ErrClosed
 	}
+	d.count()
+	if err := d.wlock.lock(ctx); err != nil {
+		return err
+	}
 	conn, err := d.writer.Take(ctx)
 	if err != nil {
+		d.wlock.unlock()
 		return err
 	}
 	// The connection goes back even when fn panics, so a panic never leaves every later Write waiting for it; the
 	// changes are taken first, while the connection is still this write's.
 	var changed []agentChange
 	err = func() (err error) {
-		defer d.writer.Put(conn)
+		defer func() {
+			d.writer.Put(conn)
+			d.wlock.unlock()
+		}()
 		d.changed, d.activityChanges = nil, nil
 		// The activity observer hears a committed write's changes before the writer connection goes back, so writes
 		// reach it in commit order; it only queues them (ActivityObserver).

@@ -46,6 +46,7 @@ R=$(agent "{\"name\":\"dev2\",\"type\":\"developer\",\"cwd\":\"$REPO\"}")
 printf %s "$R" | grep -q '"queued":true' || fail "not queued: $R"
 printf %s "$R" | grep -q '"place":1' || fail "no place: $R"
 printf %s "$R" | grep -q 'dev1' || fail "holder not named: $R"
+printf %s "$R" | grep -q '"holder_info":\[{"name":"dev1","age_ms":[0-9]*,' || fail "holder_info has no age for dev1: $R"
 [ "$(worktrees)" = 2 ] || fail "the queued spawn left a worktree ($(worktrees))"
 human GET /api/agents | grep -q '"name":"dev2"' && fail "the queued spawn left a registry row"
 R=$(agent "{\"name\":\"dev4\",\"type\":\"developer\",\"urgent\":\"red-main\",\"cwd\":\"$REPO\"}")
@@ -57,7 +58,8 @@ R=$(agent "{\"name\":\"dev6\",\"type\":\"developer\",\"urgent\":\"incident\",\"c
 [ "$(worktrees)" = 2 ] || fail "the refused incident spawn left a worktree ($(worktrees))"
 
 echo "-- 3. a reviewer is not capped"
-R=$(agent "{\"name\":\"rev1\",\"type\":\"reviewer\",\"cwd\":\"$REPO\"}")
+# On Claude Code (the fake one here), whatever harness the reviewer type defaults to: the cap reads the type, not the harness.
+R=$(agent "{\"name\":\"rev1\",\"type\":\"reviewer\",\"harness\":\"claude\",\"cwd\":\"$REPO\"}")
 [ "$(printf %s "$R" | tail -1)" = 200 ] || fail "reviewer capped: $R"
 
 echo "-- 4. the human spawns past the cap"

@@ -28,6 +28,9 @@ type liveRunner struct {
 	scripts sync.WaitGroup
 	// spawn starts a script and waits for it; nil runs it detached with node (a test sets it).
 	spawn func(script string, args []string, checkout string) (process.ScriptResult, error)
+	// scriptStart, when set, runs first in each script run's goroutine, with the run claimed and before its checks: a test
+	// holds a run there to order it (S-4143).
+	scriptStart func()
 	// inFlight counts the process spawns in flight per machine ("" for this one) and spawnAgent starts one (nil: not ported). Both
 	// belong to the agent runner (process_agent.go); mu guards inFlight.
 	inFlight   map[string]int
@@ -119,7 +122,29 @@ func logRun(line string) { slog.Info(line) }
 func (s *Server) runScript(ctx context.Context, id string, p *process.Def, a process.EntryAction) {
 	ctx = context.WithoutCancel(ctx)
 	key := id + "#" + a.Script
+	// The claim is taken at entry, as TS takes it before its first await: an entry while a run is in flight is ignored
+	// however late its goroutine would have started (S-4143). The checks read files, so they run in the worker, off the
+	// caller, with the claim held; a refused entry releases it.
+	s.runner.mu.Lock()
+	if s.runner.running[key] {
+		s.runner.mu.Unlock()
+		logRun(fmt.Sprintf("process-run: %s: %s is already running; this entry is ignored", id, a.Script))
+		return
+	}
+	if s.runner.running == nil {
+		s.runner.running = map[string]bool{}
+	}
+	s.runner.running[key] = true
+	s.runner.mu.Unlock()
 	s.goScript(func() {
+		defer func() {
+			s.runner.mu.Lock()
+			delete(s.runner.running, key)
+			s.runner.mu.Unlock()
+		}()
+		if s.runner.scriptStart != nil {
+			s.runner.scriptStart()
+		}
 		checkout := s.deployCheckout()
 		full := process.ScriptPath(checkout, a.Script)
 		switch {
@@ -133,22 +158,6 @@ func (s *Server) runScript(ctx context.Context, id string, p *process.Def, a pro
 			logRun(fmt.Sprintf("process-run: %s: %s skipped: the ITSA has no pull request link", id, a.Script))
 			return
 		}
-		s.runner.mu.Lock()
-		if s.runner.running[key] {
-			s.runner.mu.Unlock()
-			logRun(fmt.Sprintf("process-run: %s: %s is already running; this entry is ignored", id, a.Script))
-			return
-		}
-		if s.runner.running == nil {
-			s.runner.running = map[string]bool{}
-		}
-		s.runner.running[key] = true
-		s.runner.mu.Unlock()
-		defer func() {
-			s.runner.mu.Lock()
-			delete(s.runner.running, key)
-			s.runner.mu.Unlock()
-		}()
 
 		r, err := s.spawnScript(full, a.Args, checkout)
 		if err != nil {
@@ -194,7 +203,7 @@ func (s *Server) runScript(ctx context.Context, id string, p *process.Def, a pro
 			what = a.Script + " refused PR " + strings.Join(a.Args, " ") + ": stage not moved"
 			lead = fmt.Sprintf("The process %s ran `%s` and it exited %s. The stage could not be moved back to `code` (%s); it is unchanged.", p.ID, cmd, exitText(r), notMoved)
 		}
-		if !s.sendFromStam(ctx, []string{x.Text("owner")}, what, lead+"\n\n```\n"+process.Tail(r.Output, 20)+"\n```") {
+		if !s.sendFromSystem(ctx, "process", []string{x.Text("owner")}, what, lead+"\n\n```\n"+process.Tail(r.Output, 20)+"\n```") {
 			logRun(fmt.Sprintf("process-run: %s: mailing the owner failed", id))
 		}
 	})

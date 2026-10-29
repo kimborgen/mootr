@@ -7,6 +7,7 @@
 // harness, runs at nice 10 above the test's own, and leaves no backup or copy behind.
 // Run with `node --test test/deploy-canary.test.mjs`.
 import { test, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -36,7 +37,9 @@ after(() => rmSync(work, { recursive: true, force: true }));
 // that names the same counter, and answers requests FROM to TO of that shared count 300 ms late, without blocking its
 // loop: a burst of machine load that lands on whichever daemons are being probed then. `drift` is good on its first run
 // and stalls like 'stall' on every run after (the load rose after the first baseline); `fade` is good on its first run
-// and exits at once on every run after (S-2151).
+// and exits at once on every run after (S-2151). `later` answers /api/health 300 ms late, without blocking its loop, when
+// it is the second of its pair to be probed under load (S-4047): whatever going second costs, the same code on both
+// sides.
 const FAKE_DAEMON = `import { createServer } from 'node:http';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -55,6 +58,17 @@ if (mode === 'drift' || mode === 'fade') {
   mode = count === 0 ? 'good' : mode === 'drift' ? 'stall' : 'dead';
 }
 if (mode === 'dead') process.exit(1);
+// later: the start loop stops at the first health that answers, so a daemon's second /api/health is the first probe
+// under load, and the canary probes the pair in turn: the first to claim the pair's file in the run folder went first.
+let healths = 0;
+let second = false;
+const { openSync, closeSync } = await import('node:fs');
+const { basename, dirname } = await import('node:path');
+const claim = () => {
+  try {
+    closeSync(openSync(join(dirname(process.env.STAM_HOME), basename(process.env.STAM_HOME).includes('rerun') ? 'probed-rerun' : 'probed'), 'wx'));
+  } catch { second = true; }
+};
 let overload;
 try { overload = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'overload'), 'utf8')); } catch {}
 const overloaded = () => {
@@ -80,7 +94,12 @@ createServer((req, res) => {
   req.on('end', () => {
     const send = (code, data) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
     if (req.headers.authorization !== 'Bearer tok') return send(401, {});
-    if (req.url === '/api/health') return send(200, { ok: true, release: process.env.STAM_RELEASE_ID, stalls: stalls.slice(-20) });
+    if (req.url === '/api/health') {
+      const health = () => send(200, { ok: true, release: process.env.STAM_RELEASE_ID, stalls: stalls.slice(-20) });
+      // Every mode claims, so a later release learns its place beside any other.
+      if (++healths === 2) claim();
+      return mode === 'later' && second ? setTimeout(health, 300) : health();
+    }
     if (req.url === '/api/health/db') return overloaded() ? setTimeout(() => send(200, { ok: true }), 300) : send(200, { ok: true });
     if (req.method === 'POST' && /^\\/api\\/(hook|statusline)\\/claude\\//.test(req.url)) {
       posts++;
@@ -186,6 +205,33 @@ test('a release slow against both the first and the fresh baseline fails, judged
   assert.match(r.reasons.join('\n'), /the first run failed too: event-loop stalls/);
 });
 
+// bc397f6031 (#1259, S-4047): a release that changed no daemon code failed twice on health probes alone, 8 and 12 of
+// 28 slow against 1 of 29, both times copied, started and first probed after the baseline. Here going second costs
+// 300 ms on every health probe, the same on both sides: the rerun puts the new release first, so it passes.
+test('bc397f6031: a cost of going second lands on each side once, so the same code passes on its rerun (S-4047)', async () => {
+  const { c } = setup('later', { baseline: fakeRelease('later-base', 'later'), next: fakeRelease('later-a', 'later'), env: { STAM_DEPLOY_SLOW_S: '0.2' } });
+  const lines = [];
+  const r = await canary(c, 'abcdef1234', (l) => lines.push(l));
+  assert.equal(r.verdict, 'pass', JSON.stringify(r.reasons));
+  assert.match(r.first.join('\n'), /health probes over 0.2 s \(baseline 0\)/, 'the first run, the new release second, failed');
+  assert.equal(r.next.name, 'rerun');
+  assert.equal(r.next.health.slow, 0, `the rerun, started first: ${JSON.stringify(r.next.health)}`);
+  assert.ok(r.base.health.slow > 0, `the baseline rerun, started second, paid the cost: ${JSON.stringify(r.base.health)}`);
+  assert.ok(empty(c.tmp));
+});
+
+// The swap doesn't hide a real regression: a release that stalls on every activity change fails started second and
+// started first, against a baseline that pays the cost of going second in the rerun.
+test('a release that stalls fails on its rerun too, started first beside a baseline that pays for going second (S-4047)', async () => {
+  const { c } = setup('later-stall', { baseline: fakeRelease('later-base-b', 'later'), next: fakeRelease('stall-later', 'stall'), env: { STAM_DEPLOY_SLOW_S: '0.2' } });
+  const r = await canary(c, 'abcdef1234', quiet);
+  assert.equal(r.verdict, 'fail', JSON.stringify(r.reasons));
+  assert.equal(r.next.name, 'rerun');
+  assert.ok(r.base.health.slow > 0, `the baseline rerun went second: ${JSON.stringify(r.base.health)}`);
+  assert.match(r.reasons.join('\n'), /event-loop stalls under load added up to \d+ ms/);
+  assert.match(r.reasons.join('\n'), /the first run failed too: /);
+});
+
 test('a fresh baseline that never answers is an error, never a pass (S-2151)', async () => {
   const { c } = setup('fresh-dead', { baseline: fakeRelease('fade-base', 'fade'), next: fakeRelease('fade-a', 'stall') });
   const r = await canary(c, 'abcdef1234', quiet);
@@ -246,6 +292,57 @@ test('real regressions still fail the judge: rebuild stalls, a slow release, all
   // The margin is env-overridable, absolute and relative.
   assert.match(judge(canaryConfig({ STAM_CANARY_SLOW_FRACTION: '0', STAM_CANARY_SLOW_MARGIN: '0' }), run(), run({ dbSlow: 1 })).join(), /1 of 30 db probes/);
   assert.deepEqual(judge(canaryConfig({ STAM_CANARY_STALL_FACTOR: '100' }), base, run({ stallMs: 674 * 40 })), []);
+});
+
+// f528e4f81 canary, Oct 28 20:31Z (S-4047 part 2): a saturated machine slowed and failed both releases alike, and the
+// judge held the new one on its failures alone and on the baseline's half-of-samples cap. Judged against the baseline's
+// share, both logs pass.
+const probes = (n, { failed = 0, slow = 0 } = {}) => ({ n, failed, slow, maxS: 0 });
+const saturated = ({ health, db = probes(15, { failed: 1, slow: 3 }), stallMs = 0 }) => ({
+  started: true,
+  health,
+  db,
+  stalls: { count: 0, totalMs: stallMs, maxMs: 0, labels: {} },
+  load: { ok: 500, failed: 0 },
+});
+
+test('f528e4f81 canary, run 1: a saturated baseline with the same failures and slow probes passes (S-4047)', () => {
+  const c = canaryConfig({});
+  const base = saturated({ health: probes(15, { failed: 1, slow: 9 }), stallMs: 4000 });
+  const next = saturated({ health: probes(15, { failed: 1, slow: 9 }), db: probes(15, { failed: 1, slow: 3 }), stallMs: 4000 });
+  assert.deepEqual(judge(c, base, next), []);
+});
+
+test('f528e4f81 canary, rerun: 9 of 13 slow against 9 of 12 on a saturated baseline passes (S-4047)', () => {
+  const c = canaryConfig({});
+  const base = saturated({ health: probes(12, { slow: 9 }) });
+  const next = saturated({ health: probes(13, { slow: 9 }) });
+  assert.deepEqual(judge(c, base, next), []);
+});
+
+test('a stalling release still fails against a saturated baseline: every probe slow, or the stalls over the limit (S-4047)', () => {
+  const c = canaryConfig({});
+  const base = saturated({ health: probes(15, { slow: 9 }), stallMs: 4000 });
+  assert.match(judge(c, base, saturated({ health: probes(15, { slow: 15 }), stallMs: 4000 })).join(), /15 of 15 health probes over 0.1 s \(baseline 9\)/);
+  assert.match(judge(c, base, saturated({ health: probes(15, { slow: 9 }), stallMs: 4000 * 3 })).join(), /event-loop stalls under load added up to 12000 ms/);
+});
+
+test('a release failing every probe fails even when the saturated baseline fails some (S-4047)', () => {
+  const c = canaryConfig({});
+  const base = saturated({ health: probes(15, { failed: 3, slow: 9 }) });
+  assert.match(judge(c, base, saturated({ health: probes(15, { failed: 15 }) })).join(), /all 15 health probes failed/);
+  // Failures under the baseline's share pass, and a clean baseline still fails any probe that failed (S-1862).
+  assert.deepEqual(judge(c, base, saturated({ health: probes(15, { failed: 3, slow: 9 }) })), []);
+  assert.match(judge(c, saturated({ health: probes(15) }), saturated({ health: probes(15, { failed: 1 }) })).join(), /1 of 15 health probes failed/);
+});
+
+test('unreadable or empty probe stats fail closed (S-4047)', () => {
+  const c = canaryConfig({});
+  const ok = saturated({ health: probes(15, { slow: 9 }) });
+  assert.match(judge(c, ok, saturated({ health: probes(0) })).join(), /health probes can't be read/);
+  assert.match(judge(c, ok, saturated({ health: { n: 15, failed: 'x', slow: 0, maxS: 0 } })).join(), /health probes can't be read/);
+  assert.match(judge(c, saturated({ health: probes(0) }), ok).join(), /health probes can't be read/);
+  assert.match(judge(c, ok, saturated({ health: probes(15), db: null })).join(), /db probes can't be read/);
 });
 
 // The bound against the watcher's canary timeout lives in deploy-watch-unit, next to the watcher it reads (S-1862).
@@ -452,7 +549,7 @@ test("a build killed mid-check takes its check daemon's tmux server and home wit
     assert.notEqual(spawnSync('tmux', ['-L', socket, 'has-session'], { stdio: 'ignore' }).status, 0, 'the check tmux server is gone');
     assert.equal(existsSync(checkHome), false, 'the check home is gone');
   } finally {
-    spawnSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' });
+    killTmuxServer(socket);
     rmSync(checkHome, { recursive: true, force: true });
   }
 });

@@ -50,4 +50,5 @@ d.prepare("INSERT INTO permission_requests (id, agent_id, action, reason, detail
 d.prepare("INSERT INTO permission_requests (id, agent_id, action, reason, details, status, audience, created_at) VALUES (?, ?, 'a', 'r', 'd', 'pending', ?, ?)").run('p2', 'achild', 'delegate', now);
 d.prepare("INSERT INTO permission_requests (id, agent_id, action, reason, details, status, audience, created_at) VALUES (?, ?, 'a', 'r', 'd', 'approved', ?, ?)").run('p3', 'achild', 'human', now);
 d.prepare('INSERT INTO agent_views (agent_id, view, updated_at) VALUES (?, ?, ?)').run('aboss', 'terminal', now);
+d.prepare('INSERT INTO blockers (agent_id, kind, account, reason, since, clear) VALUES (?, ?, ?, ?, ?, ?)').run('agone', 'window', 'claude-max', 'five_hour at 100%', now, JSON.stringify({ windows: { five_hour: { pct: 100, resets_at: 1800000000 } } }));
 d.close();

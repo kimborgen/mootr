@@ -30,6 +30,14 @@ const check = (name, ok, detail) => {
 const health = ajv.compile({ $ref: pointer('components', 'schemas', 'Health') });
 check('the Health schema rejects a body missing fields', !health({ ok: true }), 'accepted {ok:true}');
 
+// The open ask an agent row carries (S-3982): the mail and kind, never the text. The list rarely has an open ask, so the
+// shape is checked here on its own: a set one passes, a kind outside the labels or an extra field fails.
+const askDetail = ajv.compile({ $ref: pointer('components', 'schemas', 'Agent', 'properties', 'open_ask_detail') });
+check('open_ask_detail takes a mail and a kind, and nothing else',
+  askDetail({ mail: 'm1', kind: 'Permission' }) && askDetail({ mail: null, kind: 'ITSA' }) && askDetail(null)
+    && !askDetail({ mail: 'm1', kind: 'Nope' }) && !askDetail({ mail: 'm1', kind: 'Permission', text: 'x' }),
+  'the shape is not what src/asks.ts askDetail returns');
+
 const call = async (path, headers) => {
   const res = await fetch(url + path, { headers });
   const text = await res.text();

@@ -5,7 +5,7 @@
 // hide drops out of the sum with its row.
 import { CATEGORIES, CATEGORY_LABEL } from '../itsa/itsa'
 import { costShort } from '../format'
-import { fieldColId, type Field } from '../itsa/fields'
+import { fieldApplies, fieldColId, type Field } from '../itsa/fields'
 import type { CostMode, ItsaCategory } from '../types'
 import type { WorkGroup } from './model'
 import { activityOf, costOf, fmtDuration, issueCost } from './links'
@@ -46,7 +46,7 @@ export function workTotals(groups: WorkGroup[], extras: Pick<WorkExtras, 'costs'
     if (ic && v == null) costPartial = true
     workingS += activityOf(extras.activity, r.it.key)?.own.working_s ?? 0
     for (const f of numberFields) {
-      const v = r.it.fields?.[f.key]
+      const v = fieldApplies(f, r.it.kind) ? r.it.fields?.[f.key] : undefined
       if (v === undefined || v === null || v === '' || Number.isNaN(Number(v))) continue
       const id = fieldColId(f)
       numbers[id] = (numbers[id] ?? 0) + Number(v)

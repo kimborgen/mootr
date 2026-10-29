@@ -69,6 +69,14 @@ the trim; S-1280's trim dropped one and the rule read as its opposite (S-1307).
 | `blocks/type-reviewer-opus/20-reviewer-opus-checks.md` | trace both directions of the mixed old/new period | S-1878, S-1920, S-1921, S-1865, S-1935 | S-2077 | 2026-10-19 |
 | `blocks/type-reviewer-opus/20-reviewer-opus-checks.md` | Read files at the reviewed sha | S-1954 | S-2077 | 2026-10-19 |
 | `blocks/type-reviewer-opus/20-reviewer-opus-checks.md` | `git diff MAINTIP HEAD --stat` | S-1733 | S-2077 | 2026-10-19 |
+| `blocks/type-manager/31-manager-briefs.md` | A flake brief asks for a deterministic seam | S-3139, S-3111 | S-3240 | 2026-10-21 |
+| `blocks/type-manager/31-manager-briefs.md` | fixtures built by the production writer | S-2704, S-3136 | S-3240 | 2026-10-21 |
+| `blocks/type-manager/32-manager-review-briefs.md` | A re-review brief names the previously reviewed head | S-3134, S-3165, S-3116 | S-3240 | 2026-10-21 |
+| `blocks/type-developer/40-developer-before-report.md` | Run the unit file directly with `node --test` first | S-3157, S-3207, S-3210, S-3146, S-3158, S-3265 | S-3240 | 2026-10-21 |
+| `templates/ring-turn.md` | Treat the topic's stated assumptions as invariants | S-3221, S-3213, S-3214, S-3222 | S-3240 | 2026-10-21 |
+| `blocks/type-manager/32-manager-review-briefs.md` | links the proposal file or ITSA | S-3221, S-3213, S-3214, S-3222 | S-3240 | 2026-10-21 |
+| `registry/defaults.json` | fetch it directly first | S-2722, S-3554 | S-3240 | 2026-10-21 |
+| `blocks/type-reviewer-opus/20-reviewer-opus-checks.md` | `git range-diff OLDBASE..OLDHEAD origin/main..NEWHEAD` | S-1789 | S-3240 | 2026-10-21 |
 
 S-1391 measured (S-1405, S-1447): the predicted effect held for new calls, which went through `src/tree.ts`, and
 missed the existing copies. The grep gate covered only the `db.childrenOf(` call, so attribution, activity-summary,

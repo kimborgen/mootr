@@ -22,9 +22,16 @@ export interface McpServer {
   headers?: Record<string, string>
   auth?: McpAuth
   enabled?: boolean
+  // Off by default; a home shares the login with its peers only when this is on (S-3176).
+  shareWithPeers?: boolean
+  // The cap on a peer's lease, read-only here (S-3176).
+  leaseMaxSeconds?: number
 }
 export type Servers = Record<string, McpServer>
-interface McpStatus { name: string; type: string; logged_in: boolean; expires_at: number | null }
+// A peer's row from the home is leased_from the home; a peer's own grant from before the lease is local_grant (S-3177).
+interface McpStatus { name: string; type: string; logged_in: boolean; expires_at: number | null; leased_from?: string; local_grant?: boolean }
+// On a peer, `home` names the settings home and whether it answered; null on the home itself (S-3178).
+interface McpStatusPage { servers: McpStatus[]; home: { name: string; reachable: boolean; error?: string } | null }
 interface TestResult { ok: boolean; tools: string[]; error?: string }
 interface Preview { servers: Servers; notes: string[] }
 interface ImportedServer {
@@ -110,6 +117,8 @@ function kindOf(s: McpServer): string {
 
 export function McpSettings({ servers, onChange }: { servers: Servers; onChange: (next: Servers) => void }) {
   const [status, setStatus] = useState<Record<string, McpStatus>>({})
+  const [grants, setGrants] = useState<Record<string, boolean>>({})
+  const [home, setHome] = useState<McpStatusPage['home']>(null)
   const [results, setResults] = useState<Record<string, TestResult | 'running'>>({})
   const [editing, setEditing] = useState<string | null>(null)
   const [text, setText] = useState('')
@@ -127,8 +136,11 @@ export function McpSettings({ servers, onChange }: { servers: Servers; onChange:
   const [regAdd, setRegAdd] = useState<RegistryEntry | null>(null)
   const names = Object.keys(servers)
 
-  const loadStatus = () => api<{ servers: McpStatus[] }>('GET', '/api/mcp/status').then((r) => {
-    setStatus(Object.fromEntries((r.servers ?? []).map((s) => [s.name, s])))
+  const loadStatus = () => api<McpStatusPage>('GET', '/api/mcp/status').then((r) => {
+    const rows = r.servers ?? []
+    setStatus(Object.fromEntries(rows.filter((s) => !s.local_grant).map((s) => [s.name, s])))
+    setGrants(Object.fromEntries(rows.filter((s) => s.local_grant).map((s) => [s.name, true])))
+    setHome(r.home ?? null)
   }).catch(() => {})
   useEffect(() => {
     void loadStatus()
@@ -296,7 +308,7 @@ export function McpSettings({ servers, onChange }: { servers: Servers; onChange:
   }
 
   if (editing !== null) {
-    return <McpForm key={editing} name={editing} server={servers[editing] ?? {}} servers={servers} onDone={() => setEditing(null)} onSave={(next, renamedFrom) => {
+    return <McpForm key={editing} name={editing} server={servers[editing] ?? {}} servers={servers} peer={home !== null} onDone={() => setEditing(null)} onSave={(next, renamedFrom) => {
       const out: Servers = { ...servers }
       if (renamedFrom && renamedFrom !== next.name) delete out[renamedFrom]
       out[next.name] = next.server
@@ -372,12 +384,15 @@ export function McpSettings({ servers, onChange }: { servers: Servers; onChange:
           </div>
         </div>
       ) : null}
+      {home && !home.reachable && home.error ? <p className="muted">{home.error}</p> : null}
       <div className="set-card mcp-list">
         {names.length ? names.map((name) => {
           const s = servers[name]
           const st = status[name]
           const loggedIn = Boolean(st?.logged_in)
           const res = results[name]
+          // On a peer the login is the home's: its line says where it is, and the peer holds no login button (S-3178).
+          const peerLine = home && s.auth?.type === 'oauth' ? (!home.reachable ? `${home.name} unreachable` : !st?.leased_from ? `Not shared by ${home.name}` : `${loggedIn ? 'Logged in' : 'Not logged in'} on ${home.name}`) : null
           return (
             <div className={`mcp-row${s.enabled === false ? ' off' : ''}`} key={name} data-server={name}>
               <div className="mcp-info">
@@ -386,7 +401,8 @@ export function McpSettings({ servers, onChange }: { servers: Servers; onChange:
                 {(s.auth || hasSecrets(s)) ? (
                   <div className="mcp-meta">
                     {s.auth ? <span className={`chip mcp-auth${s.auth.type === 'gh' ? ' gh' : ''}`}>{AUTH_LABEL[s.auth.type]}</span> : null}
-                    {s.auth ? <span className={loggedIn ? 'tag-on' : 'muted'}>{loggedIn ? 'logged in' : 'not logged in'}</span> : null}
+                    {peerLine ? <span className={loggedIn ? 'tag-on' : 'muted'}>{peerLine}</span> : null}
+                    {s.auth && (!home || s.auth.type === 'gh') ? <span className={loggedIn ? 'tag-on' : 'muted'}>{loggedIn ? 'logged in' : 'not logged in'}</span> : null}
                     {Object.keys(s.env ?? {}).length ? <span className="muted">env {Object.keys(s.env!).join(', ')}</span> : null}
                     {Object.keys(s.headers ?? {}).length ? <span className="muted">headers {Object.keys(s.headers!).join(', ')}</span> : null}
                   </div>
@@ -397,8 +413,9 @@ export function McpSettings({ servers, onChange }: { servers: Servers; onChange:
               </div>
               <label className="check mcp-on"><input type="checkbox" checked={s.enabled !== false} onChange={(e) => setEnabled(name, e.target.checked)} />On</label>
               <div className="mcp-actions">
-                {s.auth?.type === 'oauth' ? <button type="button" className="btn" onClick={() => void login(name)}><Icon name="external-link" size="xs" />Log in</button> : null}
-                {s.auth?.type === 'oauth' && loggedIn ? <button type="button" className="btn" onClick={() => void logout(name)}>Log out</button> : null}
+                {s.auth?.type === 'oauth' && !home ? <button type="button" className="btn" onClick={() => void login(name)}><Icon name="external-link" size="xs" />Log in</button> : null}
+                {s.auth?.type === 'oauth' && !home && loggedIn ? <button type="button" className="btn" onClick={() => void logout(name)}>Log out</button> : null}
+                {home && grants[name] ? <button type="button" className="btn" onClick={() => void logout(name)}>Remove local login</button> : null}
                 <button type="button" className="btn" disabled={res === 'running'} onClick={() => void test(name)}><Icon name="play" size="xs" />Test</button>
                 <button type="button" className="btn" onClick={() => setEditing(name)}><Icon name="pencil" size="xs" />Edit</button>
                 <button type="button" className="btn danger" onClick={() => remove(name)}><Icon name="trash-2" size="xs" />Remove</button>
@@ -491,7 +508,8 @@ function RegistryAdd({ entry, servers, onAdd, onCancel }: { entry: RegistryEntry
 // Slack's MCP server (mcp.slack.com) only works with a Slack app's client ID and secret (docs/slack.md).
 const isSlackUrl = (url?: string): boolean => /^https:\/\/mcp\.slack\.com(?:[/:?#]|$)/i.test((url ?? '').trim());
 
-export function McpForm({ name, server, servers, onDone, onSave }: { name: string; server: McpServer; servers: Servers; onDone: (changed: boolean) => void; onSave: (next: { name: string; server: McpServer }, renamedFrom?: string) => void }) {
+// `peer` is set on a peer: its home holds the login and refuses a save that shares it, so the Share box is not shown (S-3178).
+export function McpForm({ name, server, servers, peer = false, onDone, onSave }: { name: string; server: McpServer; servers: Servers; peer?: boolean; onDone: (changed: boolean) => void; onSave: (next: { name: string; server: McpServer }, renamedFrom?: string) => void }) {
   const isNew = name === ''
   const [m, setM] = useState(name)
   const [s, setS] = useState<McpServer>({ args: [], env: {}, headers: {}, ...server })
@@ -530,6 +548,8 @@ export function McpForm({ name, server, servers, onDone, onSave }: { name: strin
             {s.auth?.type === 'oauth' ? <>
               <Row label="Client ID" help="Empty: mootr registers itself, when the server supports it."><input type="text" className="wide" value={s.auth.client_id ?? ''} placeholder="Optional" spellCheck={false} onChange={(e) => set({ auth: { ...s.auth, type: 'oauth', client_id: e.target.value || undefined } })} /></Row>
               <Row label="Client secret" help={secretRef ? `Stored as ${secretRef}. Type a new value to replace it.` : 'Saved in the secret store, not in settings.'}><input type="password" aria-label="Client secret" value={typeof s.auth.client_secret === 'string' ? s.auth.client_secret : ''} placeholder={secretRef ? `Stored as ${secretRef}` : 'Optional'} autoComplete="off" onChange={(e) => set({ auth: { ...s.auth, type: 'oauth', client_secret: e.target.value || (secretRef ? { secret: secretRef } : undefined) } })} /></Row>
+              {peer ? null : <Row label="Share with peers" help="Off: peers get no login for this server. On: each peer leases a short-lived token from this home, and the login stays here."><label className="check"><input type="checkbox" checked={s.shareWithPeers === true} onChange={(e) => set({ shareWithPeers: e.target.checked })} />On</label></Row>}
+              {s.leaseMaxSeconds ? <Row label="Lease cap" help="The longest a peer's token may live, set in settings. Read only here."><span className="muted">{s.leaseMaxSeconds} s</span></Row> : null}
             </> : null}
           </>
           : <>

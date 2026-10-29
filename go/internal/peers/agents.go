@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"stam/internal/config"
 	"stam/internal/db"
@@ -114,6 +115,12 @@ func agentOf(v jsfmt.Value) Agent {
 // one. Only another machine's agent is remembered (S-577): a peer that relayed the lookup back to us can return our own
 // agent, which must not be stored as a twin of itself.
 func (c *Client) Hits(ctx context.Context, d Store, ref string) (hits []Hit, unreachable bool) {
+	hits, silent := c.hits(ctx, d, ref)
+	return hits, len(silent) > 0
+}
+
+// hits is Hits with the names of the peers that did not answer.
+func (c *Client) hits(ctx context.Context, d Store, ref string) (hits []Hit, silent []string) {
 	peers := c.Peers()
 	type result struct {
 		hit    *Hit
@@ -135,12 +142,12 @@ func (c *Client) Hits(ctx context.Context, d Store, ref string) (hits []Hit, unr
 		}()
 	}
 	wg.Wait()
-	for _, r := range results {
+	for i, r := range results {
 		switch {
 		case r.hit != nil:
 			hits = append(hits, *r.hit)
 		case !r.absent:
-			unreachable = true
+			silent = append(silent, peers[i].Name)
 		}
 	}
 	for _, h := range hits {
@@ -148,7 +155,7 @@ func (c *Client) Hits(ctx context.Context, d Store, ref string) (hits []Hit, unr
 			_ = d.RememberPeerAgent(ctx, seen(h.Agent))
 		}
 	}
-	return hits, unreachable
+	return hits, silent
 }
 
 // seen is what a peer's reply tells rememberPeerAgent: a listing carries every parent, a spawn's reply only parent_id.
@@ -189,18 +196,25 @@ const (
 // Locate is locateAgent: which peer owns an agent, by id or name, telling an agent no peer has from one that may sit on a
 // peer that did not answer. An ambiguous name is an *AmbiguousError.
 func (c *Client) Locate(ctx context.Context, d Store, ref string) (*Hit, Located, error) {
-	hits, unreachable := c.Hits(ctx, d, ref)
+	found, located, _, err := c.LocateSilent(ctx, d, ref)
+	return found, located, err
+}
+
+// LocateSilent is Locate with the names of the peers that did not answer, so a caller falling back on what it remembers
+// of an agent trusts that memory only for a machine that could not say otherwise.
+func (c *Client) LocateSilent(ctx context.Context, d Store, ref string) (*Hit, Located, []string, error) {
+	hits, silent := c.hits(ctx, d, ref)
 	found, err := Pick(ref, hits)
 	if err != nil {
-		return nil, Absent, err
+		return nil, Absent, silent, err
 	}
 	switch {
 	case found != nil:
-		return found, Found, nil
-	case unreachable:
-		return nil, Unreachable, nil
+		return found, Found, silent, nil
+	case len(silent) > 0:
+		return nil, Unreachable, silent, nil
 	}
-	return nil, Absent, nil
+	return nil, Absent, silent, nil
 }
 
 // MachineOf is peerMachineOf: the other machine whose daemon knows an agent named ref, for a set-parent that names an agent
@@ -240,6 +254,16 @@ func numberOf(v jsfmt.Value) float64 {
 	return f
 }
 
+// Remember is the agent list's memory of the peers' agents it lists (S-235), so mail to one can wait while its peer is
+// down. An agent of this machine (a peer that listed it back) is not remembered.
+func (c *Client) Remember(ctx context.Context, d Store, rows []jsfmt.Value) {
+	for _, r := range rows {
+		if a := agentOf(r); a.ID != "" && a.Machine != c.machine {
+			_ = d.RememberPeerAgent(ctx, seen(a))
+		}
+	}
+}
+
 // RememberSpawned is spawnOnPeer's memory of a new agent (S-235): the agent a peer's spawn reply describes is remembered
 // here, unless it is on this machine (a peer that relayed the spawn back). A ring spawned on a peer has no machine of its
 // own: its members and moderator are the agents to remember, on that peer.
@@ -262,4 +286,93 @@ func (c *Client) RememberSpawned(ctx context.Context, d Store, p config.Peer, da
 			_ = d.RememberPeerAgent(ctx, db.PeerAgentSeen{ID: a.Text("id"), Name: a.Text("name"), Machine: p.Name})
 		}
 	}
+}
+
+// retry is one shared second ask of a peer for an agent (retryLookup).
+type retry struct {
+	done  chan struct{}
+	agent *Agent
+	at    time.Time
+}
+
+// LocateFresh is findAgentPeerFresh (S-2927, S-3232): one ask of each peer, and when none answered with the agent, one more ask of
+// each peer that was up when the call began, since right after a restart the first ask can time out on a busy peer that
+// knows the agent. Callers asking a peer for the same ref during a retry, or within STAM_PEER_LOOKUP_RETRY_MS (2000) of
+// its end, share it. Only a 200 naming another machine's agent counts, and it is remembered. An ambiguous name is an
+// *AmbiguousError; nil is no agent.
+func (c *Client) LocateFresh(ctx context.Context, d Store, ref string) (*Hit, error) {
+	wasDown := map[string]bool{}
+	for _, p := range c.Peers() {
+		if c.isDown(p.Name) {
+			wasDown[p.Name] = true
+		}
+	}
+	// A peer that relayed the lookup back to us can answer with our own agent: that is no peer's.
+	first, _ := c.Hits(ctx, d, ref)
+	others := first[:0]
+	for _, h := range first {
+		if h.Agent.Machine != c.machine {
+			others = append(others, h)
+		}
+	}
+	found, err := Pick(ref, others)
+	if err != nil || found != nil {
+		return found, err
+	}
+	var hits []Hit
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, p := range c.Peers() {
+		if wasDown[p.Name] {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if a := c.retryLookup(ctx, p, ref); a != nil {
+				mu.Lock()
+				hits = append(hits, Hit{Peer: &p, Agent: *a})
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	for _, h := range hits {
+		_ = d.RememberPeerAgent(ctx, seen(h.Agent))
+	}
+	return Pick(ref, hits)
+}
+
+func (c *Client) retryLookup(ctx context.Context, p config.Peer, ref string) *Agent {
+	key := p.Name + "\x00" + ref
+	cooldown := c.millis("STAM_PEER_LOOKUP_RETRY_MS", 2*time.Second)
+	c.mu.Lock()
+	now := time.Now()
+	for k, r := range c.retries {
+		if !r.at.IsZero() && now.Sub(r.at) >= cooldown {
+			delete(c.retries, k)
+		}
+	}
+	r, ok := c.retries[key]
+	if !ok {
+		r = &retry{done: make(chan struct{})}
+		c.retries[key] = r
+	}
+	c.mu.Unlock()
+	if ok {
+		<-r.done
+		return r.agent
+	}
+	res, err := c.Call(ctx, p, http.MethodGet, "/api/agents/"+EncodeURIComponent(ref), nil, c.millis("STAM_PEER_LOOKUP_MS", FanOutTimeout), false, nil)
+	if err == nil && res.Status == 200 {
+		if id, has := res.Data.Get("id"); has && id.Kind == jsfmt.String && res.Data.Text("machine") != c.machine {
+			a := agentOf(res.Data)
+			r.agent = &a
+		}
+	}
+	c.mu.Lock()
+	r.at = time.Now()
+	c.mu.Unlock()
+	close(r.done)
+	return r.agent
 }

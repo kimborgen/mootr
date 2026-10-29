@@ -67,7 +67,8 @@ api PATCH "/api/itsas/$P" "{\"by\":\"$REL\",\"status\":\"ready_to_merge\"}" >/de
 api PATCH "/api/itsas/$P" '{"status":"needs_approval"}' human >/dev/null
 
 echo "-- approve: the steward moves it on; release closes it; the items close"
-api POST "/api/itsas/$P/act" '{"action":"approve","text":""}' human >/dev/null || fail "approve failed"
+REV=$(api GET "/api/itsas/$P" | jget "d['rev']")
+api POST "/api/itsas/$P/act" "{\"action\":\"approve\",\"text\":\"\",\"if_rev\":\"$REV\"}" human >/dev/null || fail "approve failed"
 for i in $(seq 100); do [ "$(api GET "/api/itsas/$P" | jget "d['status']")" = ready_to_merge ] && break; sleep 0.1; done
 [ "$(api GET "/api/itsas/$P" | jget "d['status']")" = ready_to_merge ] || fail "the steward didn't apply $P after Approve"
 api PATCH "/api/itsas/$P" "{\"status\":\"done\",\"by\":\"$REL\"}" >/dev/null || fail "release couldn't close $P"

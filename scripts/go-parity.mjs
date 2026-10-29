@@ -19,7 +19,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { envVar } from '../src/env.ts';
+import { envVar, withTwins } from '../src/env.ts';
 import { isMain } from './main-guard.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -127,6 +127,11 @@ function lastSha(path) {
   return r.stdout.trim() || null;
 }
 
+// The machine the parity runs on (Go never runs on the ITSA home): STAM_GO_PARITY_HOST, else `storage`.
+export function goHost(env = process.env) {
+  return envVar('GO_PARITY_HOST', env) || 'storage';
+}
+
 function main(argv) {
   let file = PARITY_FILE;
   let init = false;
@@ -138,8 +143,8 @@ function main(argv) {
   }
   const all = freeTests(readFileSync(join(ROOT, 'test/run.sh'), 'utf8'));
   for (const n of names) if (!all.includes(n)) { console.error(`go-parity: ${n} is not a FREE test`); process.exit(2); }
-  if (!init && !envVar('GO_PARITY_ANYHOST') && hostname() !== 'storage') {
-    console.error(`go-parity: runs on storage only (this is ${hostname()}); Go never runs on the ITSA home`);
+  if (!init && !envVar('GO_PARITY_ANYHOST') && hostname() !== goHost()) {
+    console.error(`go-parity: runs on ${goHost()} only (this is ${hostname()}); Go never runs on the ITSA home`);
     process.exit(2);
   }
   let doc = null;
@@ -147,7 +152,7 @@ function main(argv) {
   const toRun = init ? [] : names.length ? names : all;
   const results = {};
   const run = (n) => {
-    const r = spawnSync('sh', ['test/run.sh', n], { cwd: ROOT, encoding: 'utf8', env: { ...process.env, ...{ STAM_DAEMON: 'go' } }, maxBuffer: 1 << 26 });
+    const r = spawnSync('sh', ['test/run.sh', n], { cwd: ROOT, encoding: 'utf8', env: { ...process.env, ...withTwins({ STAM_DAEMON: 'go' }) }, maxBuffer: 1 << 26 });
     return { code: r.status, output: `${r.stdout}${r.stderr}` };
   };
   for (const n of toRun) {

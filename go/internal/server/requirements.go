@@ -114,12 +114,8 @@ func (s *Server) showRequirement(r *http.Request, _ auth.Resolved) (any, error) 
 
 // reqWrite reads a write's body and the actor it acts as: its JSON object for the store, and `by` (itsaActor).
 func (s *Server) reqWrite(r *http.Request, c auth.Resolved) (*jsjson.Object, string, error) {
-	ctx := context.WithoutCancel(r.Context())
 	body, err := jsonBody(r)
 	if err != nil {
-		return nil, "", err
-	}
-	if err := s.resolveItsaActors(ctx, c, &body); err != nil {
 		return nil, "", err
 	}
 	human := s.isHuman(r, c)

@@ -273,7 +273,12 @@ await api('POST', '/api/itsas/' + review.id + '/post', { by: 'kid', body: 'The I
 await humanStatus(review.id, 'needs_review', 'kid');
 // Its own review, for the phone check's Approve from a mail: the attention checks send Request changes on the one above.
 const approve = await itsa({ parent: web.id, title: 'Approve from the mail', status: 'in_progress', owner: 'kid' });
-await humanStatus(approve.id, 'needs_review', 'kid');
+// Its owner's comment, which the ask repeats, carries what would hide or cover the ask's snapshot (S-2998): raised inline math,
+// CSS, an animated svg and raw MathML (the math leads its line, a white rule lifted over the lines above it). The mail drops or clips each, and draws the snapshot above the rest.
+await api('POST', '/api/itsas/' + approve.id + '/post', { by: 'kid', body: '\\(\\smash{\\raisebox{8em}{$\\color{white}\\rule{20em}{12em}$}}\\) Need your call on this one.\n\n<style>details{display:none!important}</style>\n\n<div style="position:fixed;inset:0;z-index:2147483647;background:white">Nothing to review here.</div>\n\n'
+  + '<svg width="300" height="300"><rect width="300" height="300" fill="white"/><animateTransform attributeName="transform" type="translate" values="0 -250;0 -250" dur="1ms" fill="freeze"/></svg>\n\n'
+  + '<math><mpadded voffset="250px" height="0" depth="0"><mspace width="300px" height="300px" mathbackground="white"/></mpadded></math>' });
+await api('PATCH', '/api/itsas/' + approve.id, { status: 'needs_review', by: 'kid' });
 await itsa({ parent: web.id, title: 'Phone pickers as sheets', status: 'todo' });
 await itsa({ parent: root.id, title: 'Board on the desktop', kind: 'issue', status: 'todo' });
 await itsa({ parent: root.id, title: 'Board on the phone', kind: 'issue', status: 'backlog' });

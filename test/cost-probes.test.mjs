@@ -8,6 +8,7 @@
 // against a throwaway STAM_HOME; no daemon, no network, no models:
 // `node --test test/cost-probes.test.mjs`.
 import { test, before, after, beforeEach } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -47,15 +48,19 @@ before(async () => {
   rules = await import('../src/rules.ts');
   const { adapters } = await import('../src/adapters/index.ts');
   claude = adapters.claude;
-  for (const h of ['claude', 'codex', 'fake'])
+  for (const h of ['claude', 'codex', 'fake']) {
     (adapters[h] ??= { name: h }).pushPrompt = async (a, text) => {
       prompts.set(a.id, [...(prompts.get(a.id) ?? []), text]);
       return true;
     };
+    // A provider-down pause interrupts a busy turn (S-3631). Claude's own interrupt polls the
+    // pane for 5 s when no tmux session exists, which stalled every pause in these tests.
+    adapters[h].interrupt = async () => false;
+  }
 });
 after(() => {
   probes.reset();
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
 });
 
 let n = 0;

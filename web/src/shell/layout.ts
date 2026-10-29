@@ -9,6 +9,7 @@
 // sizes and whether they're open stay per browser.
 import { useSyncExternalStore } from 'react'
 import { token } from '../api'
+import { PAGE } from '../page'
 import { defaultWorld, emptyLayout, isEmptyLayout, validLayout, type Layout, type LayoutOp } from '../../../src/layout-ops.ts'
 import { LayoutSync, parseEvents, Refused } from './layout-sync'
 
@@ -259,7 +260,7 @@ async function follow() {
   let first = true
   for (let wait = 500; ; wait = Math.min(wait * 2, 10_000)) {
     try {
-      const r = await fetch('/api/layout/stream', { headers: { authorization: 'Bearer ' + token, 'x-stam-human': '1' } })
+      const r = await fetch('/api/layout/stream', { headers: { authorization: 'Bearer ' + token, 'x-stam-human': '1', 'x-stam-page': PAGE } })
       if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`)
       const reader = r.body.pipeThrough(new TextDecoderStream()).getReader()
       let buf = ''

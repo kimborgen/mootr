@@ -16,14 +16,14 @@ vi.mock('../api', () => ({
 }))
 import { defaultLayout, loadStore, loadWork, moveBy, saveAs, saveStore, setShown } from '../work/views'
 import { fieldColId, workColumnIds, type Field } from '../itsa/fields'
-import { columnRows, dropOn, fieldOrder, formOf, keyFrom, moveItem, payloadOf, writeLayout } from './work-columns'
+import { appliesTo, columnRows, dropOn, fieldOrder, formOf, keyFrom, moveItem, payloadOf, shownIn, writeLayout } from './work-columns'
 
 // The registry's shape since S-363: `work` is the one locked column, first.
 const BUILTIN = ['work', 'status', 'agents', 'cost']
 const LABELS = { work: 'Work', status: 'Status', agents: 'Agents', cost: 'Cost' }
 const field = (id: string, key: string, position: number, extra: Partial<Field> = {}): Field => ({
   id, key, label: key[0].toUpperCase() + key.slice(1), type: 'text', options: null, description: null, hint: null,
-  width: 'm', align: 'start', card: 'meta', position, ...extra,
+  width: 'm', align: 'start', card: 'meta', kinds: null, position, ...extra,
 })
 const STAGE = field('f1', 'stage', 0, { type: 'choice', options: [{ value: 'dev', label: 'Dev', tone: 'accent' }] })
 const DUE = field('f2', 'due', 1, { type: 'date' })
@@ -114,7 +114,7 @@ describe('payloadOf', () => {
     const f = { ...formOf(), label: ' Stage ', type: 'choice' as const, description: 'Where the work is', hint: ' ',
       options: [{ value: '', label: 'In review', tone: 'warn' as const }, { value: 'done', label: '', tone: null }] }
     expect(payloadOf(f, ['stage'])).toEqual({
-      key: 'stage-2', label: 'Stage', type: 'choice', description: 'Where the work is', hint: null, width: 'm', align: 'start', card: 'meta',
+      key: 'stage-2', label: 'Stage', type: 'choice', description: 'Where the work is', hint: null, width: 'm', align: 'start', kinds: null, card: 'meta',
       options: [{ value: 'in-review', label: 'In review', tone: 'warn' }, { value: 'done', label: 'done', tone: null }],
     })
   })
@@ -130,6 +130,18 @@ describe('payloadOf', () => {
   it('keeps the current key on Edit when Key is emptied; derives only for a new field', () => {
     expect(payloadOf({ ...formOf(STAGE), label: 'Phase', key: '' }, [], 'stage').key).toBe('stage')
     expect(payloadOf({ ...formOf(), label: 'Phase', key: '' }, []).key).toBe('phase')
+  })
+  it('sends the kinds picked, and null for every kind', () => {
+    expect(payloadOf({ ...formOf(), label: 'Stage', kinds: ['issue', 'project'] }, [])).toMatchObject({ kinds: ['issue', 'project'] })
+    expect(payloadOf({ ...formOf(), label: 'Stage', kinds: [] }, [])).toMatchObject({ kinds: null })
+  })
+  it('sends the phone card slot the form picks', () => {
+    expect(payloadOf({ ...formOf(), label: 'Stage', card: 'chip' }, [])).toMatchObject({ card: 'chip' })
+    expect(formOf(field('f3', 'due', 2, { card: 'chip' })).card).toBe('chip')
+  })
+  it('reads a field\'s kinds into the form, and every kind when it has none', () => {
+    expect(formOf(field('f3', 'due', 2, { kinds: ['issue'] })).kinds).toEqual(['issue'])
+    expect(formOf(DUE).kinds).toEqual([])
   })
   it('round-trips a field through the form', () => {
     const p = payloadOf(formOf(STAGE), [])
@@ -225,5 +237,25 @@ describe('writeLayout', () => {
     expect(stored().seen).toContain('f3')
     expect(widths()['field:f3']).toBe(150)
     vi.useRealTimers()
+  })
+})
+
+describe('shownIn and appliesTo', () => {
+  const issue = (slots: Record<string, string[]>) => ({ slots, seen: [] }) as unknown as Parameters<typeof shownIn>[2]
+  const due = field('f2', 'due', 1)
+  it('names the Table and the issue card slot a field shows in', () => {
+    expect(shownIn(due, ['work', 'field:f2'], issue({ TOP: [], META: [], BADGES: ['field:f2'], FOOT: [] }))).toBe('Table · Card: badges')
+  })
+  it('names only the Table, or only the card slot, when it is in one', () => {
+    expect(shownIn(due, ['work', 'field:f2'], issue({ TOP: [], META: [], BADGES: [], FOOT: [] }))).toBe('Table')
+    expect(shownIn(due, ['work'], issue({ TOP: [], META: ['field:f2'], BADGES: [], FOOT: [] }))).toBe('Card: meta')
+  })
+  it('says Hidden when the field is in neither', () => {
+    expect(shownIn(due, ['work'], issue({ TOP: [], META: [], BADGES: [], FOOT: [] }))).toBe('Hidden')
+  })
+  it('says All kinds for a field with no kinds, and lists the kinds it has', () => {
+    expect(appliesTo({ kinds: null })).toBe('All kinds')
+    expect(appliesTo({ kinds: [] })).toBe('All kinds')
+    expect(appliesTo({ kinds: ['issue', 'project'] })).toBe('issue, project')
   })
 })

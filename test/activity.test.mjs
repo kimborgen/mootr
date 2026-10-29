@@ -187,6 +187,14 @@ test('tool and model wait rules', () => {
   assert.equal(activity.modelWait(6 * 60_000), 'model.stall');
 });
 
+test('a cost unpause notice is throttle.cost, in both the Mootr and the older Stam wording', () => {
+  const ctx = { children: new Set(), release: new Set(), throttles: [], timers: [] };
+  const gap = (text) => activity.gapWait({ start: 0, end: 60_000, trigger: { source: 'notice', text } }, ctx);
+  const cost = { wait: 'throttle.cost', name: 'unpause' };
+  assert.deepEqual(gap('[stam] You are no longer paused. Mootr paused you for cost: a budget (cap). That has cleared: the budget. Restart anything you stopped that your work needs, and continue.'), cost);
+  assert.deepEqual(gap('[stam] You are no longer paused. Stam paused you for cost: a budget (cap). That has cleared: the budget. Restart anything you stopped that your work needs, and continue.'), cost);
+});
+
 // ---- Inline transcripts for the edge cases ----
 
 const T = (hms) => `2026-10-11T${hms}.000Z`;

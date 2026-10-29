@@ -30,7 +30,7 @@ const peer = createServer((req, res) => {
   });
 });
 await new Promise((r) => peer.listen(0, '127.0.0.1', r));
-writeFileSync(join(home, 'settings.json'), JSON.stringify({ chiefOfStaff: 'cos', peers: [{ name: 'far', url: `http://127.0.0.1:${peer.address().port}`, token: 't' }] }));
+writeFileSync(join(home, 'settings.json'), JSON.stringify({ chiefOfStaff: 'cos', peers: [{ name: 'far', url: `http://127.0.0.1:${peer.address().port}`, token: 'test-peer-token' }] }));
 
 let db, mail;
 const agent = (id, name, parent_id, type = null) => {

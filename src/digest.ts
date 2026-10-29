@@ -143,7 +143,13 @@ export function needs(since: string | null): Need[] {
   const asks = new Set(attention.map((x) => x.ask_thread_id).filter(Boolean));
   const perms = pendingPerms();
   const permThread = (id: string) => db.permissionMail(id)?.thread_id;
-  const pendingThreads = new Set(perms.map((p) => permThread(p.id)).filter(Boolean));
+  // Only a thread a request started is its row: an ask placed in another thread (S-3827) leaves that thread's decisions
+  // their own rows (web/src/store.ts ownPermThread).
+  const ownThread = (id: string) => {
+    const m = db.permissionMail(id);
+    return m && (m.thread_id ?? m.id) === m.id ? m.id : undefined;
+  };
+  const pendingThreads = new Set(perms.map((p) => ownThread(p.id)).filter(Boolean));
   // A decision mail is its thread's row; the latest one stands for a thread with several.
   const decided = new Map<string, db.DecisionRow>();
   for (const d of db.decisionMails()) {

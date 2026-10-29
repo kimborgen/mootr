@@ -10,9 +10,10 @@ import * as cacheCold from './cache-cold.ts';
 import { settings, humanMailAllows } from './settings.ts';
 import { accountFor, isOpenRouter, SYSTEM_ACCOUNT } from './accounts.ts';
 import { accountReadings, STALE_MS } from './readings.ts';
+import { codexView } from './codex-usage-view.ts';
 import { timed } from './stall.ts';
 import { render } from './templates.ts';
-import { sendMail, HUMAN } from './mail.ts';
+import { sendFromSystemMail, HUMAN } from './mail.ts';
 import * as blockers from './blockers.ts';
 import * as costNotices from './cost-notices.ts';
 import * as budgets from './budgets.ts';
@@ -168,7 +169,8 @@ function recordSample(a: db.Agent, account: string, delta: Record<Counter, numbe
     .run(a.id, account, a.harness, a.model ?? '', bucketOf(now), delta.cost, delta.tin, delta.tout, delta.tcr, delta.tcw);
 }
 
-// Keeps usage_samples and window_readings to the last SAMPLE_RETENTION_MS, at most once an hour.
+// Keeps usage_samples and window_readings to the last SAMPLE_RETENTION_MS, and comms_events to the last
+// COMMS_EVENT_RETENTION_MS, at most once an hour.
 export function pruneSamples(now: number): void {
   if (now - lastPrune < PRUNE_MS) return;
   lastPrune = now;
@@ -176,6 +178,7 @@ export function pruneSamples(now: number): void {
   const d = db.open();
   d.prepare('DELETE FROM usage_samples WHERE bucket < ?').run(since);
   d.prepare('DELETE FROM window_readings WHERE at < ?').run(since);
+  d.prepare('DELETE FROM comms_events WHERE created_at < ?').run(new Date(now - db.COMMS_EVENT_RETENTION_MS).toISOString());
 }
 
 const SUBSCRIPTION_SAME_MS = 10_000;
@@ -309,13 +312,11 @@ function checkDailySpend(): void {
   mailHuman(`Daily spend passed $${threshold}`, render('daily-spend-warning', { spent: spent.toFixed(2), threshold, top }));
 }
 
-// Mail to the human needs a sender; the first running agent stands in, as stam itself has no
-// mailbox. A warning is 'important': under the default humanMail.when 'necessary' the
+// Mail to the human, from the `system:cost` sender. A warning is 'important': under the default humanMail.when 'necessary' the
 // responsible manager handles it and the human is not mailed (docs/cost-policy.md, step 11).
 function mailHuman(subject: string, body: string, level: 'necessary' | 'important' | 'everything' = 'important'): void {
   if (!humanMailAllows(level)) return;
-  const sender = db.listAgents().find((a) => a.lifecycle === 'active');
-  if (sender) sendMail({ from: sender.id, to: [HUMAN], subject: `[stam] ${subject}`, body, from_stam: true }).catch(() => {});
+  sendFromSystemMail('cost', [HUMAN], `[stam] ${subject}`, body).catch(() => {});
 }
 
 export interface UsageSample {
@@ -508,11 +509,14 @@ export function summary(days = 14, tree?: string, keep: Set<string> | null = nul
     kept ? [`${where ? where + ' AND' : ' WHERE'} agent_id IN (SELECT value FROM json_each(?))`, [...params, JSON.stringify([...kept])]] : [where, params];
   const agentSql = kept ? ' AND agent_id IN (SELECT value FROM json_each(?))' : '';
   const agentArg: string[] = kept ? [JSON.stringify([...kept])] : [];
-  const subs = (d.prepare('SELECT name, data, updated_at FROM subscriptions').all() as { name: string; data: string; updated_at: string }[]).map((s) => ({
-    name: s.name,
-    windows: JSON.parse(s.data),
-    updated_at: s.updated_at,
-  }));
+  const subs = (d.prepare('SELECT name, data, updated_at FROM subscriptions').all() as { name: string; data: string; updated_at: string }[]).map((s) => {
+    const windows = JSON.parse(s.data);
+    // Codex's main entry: the newest reading across machines, a window past its reset shown as
+    // reset with the reading's age, never as its old percentage (S-1361).
+    if (s.name !== 'codex') return { name: s.name, windows, updated_at: s.updated_at };
+    const v = codexView(windows, s.updated_at, now);
+    return { name: s.name, windows: { ...v.live, ...v.reset }, updated_at: v.updated_at ?? s.updated_at, age_ms: v.age_ms };
+  });
   // Per-agent tokens and cost for two more scopes beside the period's rows below: today and
   // the agent's whole life. Keyed by agent id, absent when the agent has no rows in that
   // scope, so a missing counter can read as missing rather than 0 (see totalsFor).
@@ -651,13 +655,14 @@ function agentTypeCounts(since: string): { type: string; count: number }[] {
 
 // Stam's decide spend per purpose and day (decide.ts), one row per (purpose, day), from the
 // `decide` events in one query. The usage row for stam on openrouter keeps only the last
-// purpose, so the By model view reads the split from here.
+// purpose, so the By model view reads the split from here. Another provider's calls (S-3228) have their
+// own usage row, shown by it, so only OpenRouter's are counted here.
 interface DecideDayRow { purpose: string; day: string; n: number; cost_usd: number; tokens_in: number; tokens_out: number }
 export const DECIDE_DAY_SQL = `SELECT COALESCE(json_extract(data, '$.purpose'), '') AS purpose, substr(ts, 1, 10) AS day, COUNT(*) AS n,
     SUM(COALESCE(json_extract(data, '$.cost'), 0)) AS cost_usd,
     SUM(COALESCE(json_extract(data, '$.tokens_in'), 0)) AS tokens_in,
     SUM(COALESCE(json_extract(data, '$.tokens_out'), 0)) AS tokens_out
-  FROM events WHERE agent_id = 'stam' AND type = 'decide' GROUP BY purpose, day`;
+  FROM events WHERE agent_id = 'stam' AND type = 'decide' AND COALESCE(json_extract(data, '$.provider'), 'openrouter') = 'openrouter' GROUP BY purpose, day`;
 function decideDayRows(): DecideDayRow[] {
   return db.open().prepare(DECIDE_DAY_SQL).all() as unknown as DecideDayRow[];
 }

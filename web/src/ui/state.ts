@@ -33,6 +33,9 @@ export interface UiState {
   viewer: { src: string; alt: string } | null
   // The agents whose conversation view shows in rapid-fire mode (S-1004), as this device last picked.
   rapid?: Record<string, boolean>
+  // The phone Agents list's select mode (S-3282). Never persisted: it starts off on every load. The browser history
+  // records it as an overlay, so Back leaves it.
+  agentSelect?: boolean
 }
 const KEY = 'stam/ui'
 let ui: UiState = { collapsed: {}, itsaOpen: {}, stoppedOpen: false, filter: '', treeFocus: null, topOpen: false, topTarget: null, searchOpen: false, suggestOpen: false, viewer: null }

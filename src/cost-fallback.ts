@@ -45,7 +45,7 @@ import { isReviewerType, defaultReviewer } from './agent-types.ts';
 import { freeFallback } from './reviewer-chain.ts';
 import { settings, humanMailAllows, type CostAction, type CostAccount } from './settings.ts';
 import { render } from './templates.ts';
-import { sendFromStam, HUMAN } from './mail.ts';
+import { sendFromSystem, HUMAN } from './mail.ts';
 import { chiefOfStaff } from './org.ts';
 import { registry } from './registry.ts';
 import { resolveTarget, accountFor } from './accounts.ts';
@@ -322,7 +322,7 @@ export async function relaunchReviewerAtSpawn(agentId: string, now: number = Dat
   relaunched.add(a.id);
   const account = accountFor(a) ?? '';
   const told = (why: string) => {
-    if (a.parent_id) void sendFromStam([a.parent_id], `Reviewer ${a.name} died on a usage limit at spawn`, `${a.name} hit a usage limit right after it started, and stam couldn't relaunch it: ${why}. Spawn the review again once the account clears or a reviewer fallback type is set (review.fallback on its type).`).catch(() => {});
+    if (a.parent_id) void sendFromSystem('cost', [a.parent_id], `Reviewer ${a.name} died on a usage limit at spawn`, `${a.name} hit a usage limit right after it started, and stam couldn't relaunch it: ${why}. Spawn the review again once the account clears or a reviewer fallback type is set (review.fallback on its type).`).catch(() => {});
     db.addEvent(a.id, 'reviewer:relaunch', { ok: false, why });
     return `not relaunched: ${why}`;
   };
@@ -370,7 +370,7 @@ function tell(a: db.Agent, r: FallbackRow, f: FallbackAction, result: string): s
   }
   if (!humanMailAllows('necessary')) return '';
   const why = chiefOfStaff()?.id === a.id ? 'The chief of staff is the blocked agent' : 'The chief of staff is unavailable or blocked';
-  void sendFromStam([HUMAN], subject, `${body}\n\n${why}, so this reaches you instead.`).catch(() => {});
+  void sendFromSystem('cost', [HUMAN], subject, `${body}\n\n${why}, so this reaches you instead.`).catch(() => {});
   return HUMAN;
 }
 

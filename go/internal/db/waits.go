@@ -259,7 +259,28 @@ func (d *DB) FireWait(ctx context.Context, w Wait, next *string, event string, d
 // ReplaceHookWaits makes the agent's hook waits of one kind exactly want, keyed by target: a kept wait keeps its since
 // (src/adapters/hook-waits.ts replaceHookWaits), in one transaction.
 func (d *DB) ReplaceHookWaits(ctx context.Context, agentID, kind string, want []HookWait) error {
-	return wrap("replace hook waits", d.Write(ctx, func(conn *sqlite.Conn) error {
+	_, err := d.ReplaceHookWaitsWhile(ctx, agentID, kind, want)
+	return err
+}
+
+// ReplaceHookWaitsWhile is ReplaceHookWaits, only while the agent's activity is one of activities (any when none are
+// given), read in the same transaction: it reports whether it wrote.
+func (d *DB) ReplaceHookWaitsWhile(ctx context.Context, agentID, kind string, want []HookWait, activities ...string) (wrote bool, err error) {
+	err = d.Write(ctx, func(conn *sqlite.Conn) error {
+		if len(activities) > 0 {
+			a, err := agentOn(conn, agentID)
+			if err != nil {
+				return err
+			}
+			ok := false
+			for _, x := range activities {
+				ok = ok || string(a.Activity) == x
+			}
+			if !ok {
+				return nil
+			}
+		}
+		wrote = true
 		have, err := queryWaits(conn, "WHERE agent_id = ? AND source = 'hook' AND kind = ? ORDER BY since, rowid", agentID, kind)
 		if err != nil {
 			return err
@@ -287,7 +308,32 @@ func (d *DB) ReplaceHookWaits(ctx context.Context, agentID, kind string, want []
 			}
 		}
 		return nil
-	}))
+	})
+	return wrote, wrap("replace hook waits", err)
+}
+
+// ClearHookWaitWhile clears the agent's hook wait of one kind on one target, only while the agent's activity is
+// activity, read in the same transaction (an OpenCode job's grace, src/adapters/opencode.ts jobEnded); the agent's
+// state then follows its waits. It reports whether a wait was cleared.
+func (d *DB) ClearHookWaitWhile(ctx context.Context, agentID, kind, target, activity string) (cleared bool, err error) {
+	err = d.Write(ctx, func(conn *sqlite.Conn) error {
+		a, err := agentOn(conn, agentID)
+		if err != nil || string(a.Activity) != activity {
+			return err
+		}
+		ws, err := queryWaits(conn, "WHERE agent_id = ? AND source = 'hook' AND kind = ? AND target = ?", agentID, kind, target)
+		if err != nil {
+			return err
+		}
+		for _, w := range ws {
+			if _, err := d.clearWait(conn, w.ID); err != nil {
+				return err
+			}
+			cleared = true
+		}
+		return nil
+	})
+	return cleared, wrap("clear hook wait", err)
 }
 
 // ClearHookWaits clears every hook wait of the agent (src/adapters/hook-waits.ts clearHookWaits).
@@ -370,14 +416,17 @@ func (d *DB) AgentRequests(ctx context.Context, agentID string) ([]RequestState,
 	return out, wrap("agent requests", err)
 }
 
-// RequestOfThread is the permission request a thread's oldest request mail carries, "" for none (src/db.ts
-// requestOfThread).
-func (d *DB) RequestOfThread(ctx context.Context, threadID string) (string, error) {
+// RequestOfThread is the permission request of the mail named (mailID), else of the thread's oldest request mail that
+// isn't placed in it (S-3827), "" for none (src/db.ts requestOfThread).
+func (d *DB) RequestOfThread(ctx context.Context, threadID, mailID string) (string, error) {
 	out := ""
-	err := d.read(ctx, "SELECT permission_id FROM mail WHERE (id = ? OR thread_id = ?) AND permission_id IS NOT NULL ORDER BY created_at LIMIT 1",
-		func(c *cols) { out = c.text() }, threadID, threadID)
+	err := d.read(ctx, "SELECT m.permission_id FROM mail m WHERE m.permission_id IS NOT NULL AND (m.id = ? OR ((m.id = ? OR m.thread_id = ?) AND NOT "+placedAsk+")) ORDER BY m.id = ? DESC, m.created_at LIMIT 1",
+		func(c *cols) { out = c.text() }, mailID, threadID, threadID, mailID)
 	return out, wrap("request of thread", err)
 }
+
+// placedAsk is src/db.ts PLACED_ASK: an ask placed in a thread it didn't start (S-3827).
+const placedAsk = "COALESCE((m.permission_id IS NOT NULL OR m.kind IN ('ask-link', 'ask-reply', 'ask-note')) AND m.thread_id IS NOT NULL AND m.thread_id != m.id, 0)"
 
 // insertEvent is AddEvent inside a write.
 func insertEvent(conn *sqlite.Conn, agentID, typ string, data any) error {

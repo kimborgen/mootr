@@ -53,6 +53,21 @@ const PAGE2 = `<!doctype html><meta name=viewport content="width=360">
 <div role=dialog style="position:fixed;top:360px;left:0;width:160px;height:60px;background:#eee">not modal</div>
 `;
 
+// A third page for the scroller-edge tolerance (S-3461): two clipping scrollers, each with a fixed bar
+// over its bottom edge. S1's button straddles the edge: its bottom sample lands 1 px inside it, under the
+// bar. S2's button has its cover 5 px inside the edge, so `edge` must not hide it.
+const PAGE3 = `<!doctype html><meta name=viewport content="width=360">
+<style>
+  body { margin: 0; font: 16px sans-serif; } button { width: 120px; height: 44px; margin: 0; }
+  .sc { position: absolute; left: 0; width: 160px; height: 100px; overflow-y: auto; } .sc .gap { height: 58px; }
+  header.bar { position: fixed; left: 0; width: 160px; height: 40px; background: #ddd; }
+</style>
+<div class=sc id=S1 style="top:0"><div class=gap></div><button>Straddle bottom</button></div>
+<header class=bar style="top:98px">bar</header>
+<div class=sc id=S2 style="top:300px"><div class=gap style="height:54px"></div><button>Cover inside</button></div>
+<header class=bar style="top:390px">bar</header>
+`;
+
 const { chromium } = findPlaywright();
 const browser = await chromium.launch(chromiumLaunchOptions());
 const page = await (await browser.newContext({ viewport: { width: 360, height: 640 } })).newPage();
@@ -63,6 +78,9 @@ const sampled = await page.evaluate(sampleTargets, { selector: 'button', exclude
 await page.setContent(PAGE2);
 await page.evaluate(() => { document.getElementById('E').scrollTop = 9999; });
 const sampled2 = await page.evaluate(sampleTargets, { selector: 'button', exclude: null, overlays: OVERLAYS, inset: 3 });
+await page.setContent(PAGE3);
+const sampledEdge = await page.evaluate(sampleTargets, { selector: 'button', exclude: null, overlays: OVERLAYS, inset: 3, edge: 1.5 });
+const sampledNoEdge = await page.evaluate(sampleTargets, { selector: 'button', exclude: null, overlays: OVERLAYS, inset: 3, edge: 0 });
 await browser.close();
 
 let failed = 0;
@@ -102,4 +120,10 @@ check(end && end.samples.some((s) => s.pinned && !s.scrollsUnder) && fresh(end).
 check(start && start.samples.some((s) => s.pinned && s.scrollsUnder) && !fresh(start).length, 'the same bar over a button that can still scroll clear (scrollTop 0) is exempt', JSON.stringify(start));
 check(top && top.samples.some((s) => s.pinned && !s.scrollsUnder) && fresh(top).length > 0, 'a fixed top bar over a scroller at scrollTop 0 fails', JSON.stringify(top));
 check(nm && fresh(nm).length > 0 && !nm.samples.some((s) => s.overlay), 'a role=dialog without aria-modal covering a target fails', JSON.stringify(nm));
+const straddle = sampledEdge.find((c) => c.t.includes('[Straddle bottom'));
+const straddleNoEdge = sampledNoEdge.find((c) => c.t.includes('[Straddle bottom'));
+const coverIn = sampledEdge.find((c) => c.t.includes('[Cover inside'));
+check(straddle && straddle.samples.some((s) => s.clipped) && !fresh(straddle).length, 'with edge 1.5, a button straddling a clipping scroller\'s bottom edge under a fixed bar is skipped', JSON.stringify(straddle));
+check(straddleNoEdge && fresh(straddleNoEdge).length > 0, 'with edge 0, the same straddle still reports the cover', JSON.stringify(straddleNoEdge));
+check(coverIn && fresh(coverIn).length > 0, 'with edge 1.5, a cover 5 px inside the scroller still fails', JSON.stringify(coverIn));
 process.exit(failed ? 1 : 0);

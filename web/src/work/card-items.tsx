@@ -20,7 +20,8 @@ export type CardWhere = 'issue' | 'agent'
 
 // What a form reads: the issue (`it`) on an issue card, and on an agent card the ITSA it owns; `agent`
 // is set on an agent card only. Either can be null, and a form then draws nothing for it.
-export interface CardCtx { it: Itsa | null; agent: Agent | null; cx: CellContext }
+// `touch`: the card is the phone's Glance, read-only, where its values answer a long-press (a link is then the table's chip).
+export interface CardCtx { it: Itsa | null; agent: Agent | null; cx: CellContext; touch?: boolean }
 export type CardForm = (c: CardCtx) => ReactNode
 
 // Where an item may go, whether it is locked in place (the key and title, an agent's name), and its two forms.
@@ -66,6 +67,26 @@ export const CARD_ONLY: CardItem[] = [
     id: 'owner', label: 'Owner', where: ['issue'],
     inline: ({ it }) => (it?.owner ? <span title={`Owner: ${personName(it.owner)}`}><PersonGlyph id={it.owner} /></span> : null),
     chip: ({ it }) => (it?.owner ? badge(personName(it.owner), 'Owner') : null),
+  },
+  {
+    // A layout's `links` stands for every link kind (IssueCard expands it when it draws the card), so this entry only names it
+    // for the editor: a hidden `links` can be placed again.
+    id: 'links', label: 'Links', where: ['issue'],
+    inline: () => null,
+    chip: () => null,
+  },
+  {
+    // The agent card's nested issue card: the card draws it from the issue layout, so this entry only names it for the
+    // editor, where it is switched on and off (the agent layout's ISSUE slot).
+    id: 'issue', label: 'Issue', where: ['agent'],
+    inline: () => null,
+    chip: () => null,
+  },
+  {
+    // The agent's mark (its harness glyph): the card draws it in HEAD, locked, so this entry only names it for the editor.
+    id: 'mark', label: 'Mark', where: ['agent'], locked: true,
+    inline: () => null,
+    chip: () => null,
   },
   {
     id: 'harness', label: 'Harness', where: ['agent'],

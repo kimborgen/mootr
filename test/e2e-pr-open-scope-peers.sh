@@ -9,6 +9,8 @@
 #     human doesn't open the push either; a branch no agent owns passes through a participating ITSA
 #   - a home agent can't push a peer agent's branch (the home asks main), and an agent's own token
 #     can't send the scope header itself
+#   - the worktree's head travels with the call (S-3486): a peer agent whose worktree head isn't the one the home fetches from storage is
+#     refused through main and the home, for pr_open and predict; so is a home agent whose storage copy is stale
 #   - the shared token pushes any branch
 set -e
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
@@ -19,13 +21,17 @@ git_() { git -c user.name=test -c user.email=test@example.com "$@"; }
 git_ init -q --bare -b main "$G/origin.git"; git_ init -q --bare -b main "$G/storage.git"
 git_ init -q -b main "$G/seed"; echo one >"$G/seed/a.txt"; git_ -C "$G/seed" add .; git_ -C "$G/seed" commit -q -m main
 git_ -C "$G/seed" push -q "$G/origin.git" main
-for b in home-own peer-own peer-child peer-other oc-own free; do git_ -C "$G/seed" push -q "$G/storage.git" "main:refs/heads/stam/$b"; done
+for b in home-own peer-own peer-child peer-other oc-own free peer-wt home-wt; do git_ -C "$G/seed" push -q "$G/storage.git" "main:refs/heads/stam/$b"; done
 git_ clone -q "$G/origin.git" "$G/work"; git_ -C "$G/work" remote add storage "$G/storage.git"
 cat >"$G/bin/gh" <<'GH'
 #!/bin/sh
 case "$1 $2" in "pr list") echo '[]' ;; "pr create") echo https://github.com/example/stam/pull/7 ;; esac
 GH
 chmod +x "$G/bin/gh"
+# The fixture branches carry no shipped tree for pr_open's leak scan (S-3383, which these tests don't cover): a stub that reports clean,
+# honoured in a test home only. The scan's own refusals are tested in pr-open-unit.
+printf "console.log('leak scan: clean');\n" >"$G/leak-clean.mjs"
+export STAM_PR_OPEN_LEAK="$G/leak-clean.mjs"
 python3 - "$TEST_TMP" "$G" <<'PY'
 import json, re, sys
 tmp, g = sys.argv[1:3]
@@ -101,6 +107,30 @@ echo "-- a home agent can't push a peer agent's branch, and its own token can't 
 no "$HOME_URL" tok-hh stam/peer-own
 ok "$HOME_URL" tok-hh stam/home-own
 [ "$(curl -s -o "$TEST_TMP/body" -w '%{http_code}' -X POST -H 'authorization: Bearer tok-hh' -H 'x-stam-branch-scope: tree' -H 'content-type: application/json' "$HOME_URL/api/pr/open" -d '{"branch":"stam/peer-own","title":"t","body":"ITSA: S-1\nGates: tsc\nDeploy: normal\n"}')" = 403 ] || fail "the scope header from an agent token passed"
+echo "-- the worktree head travels with the call (S-3486): storage holds an old head of the branch, the worktree a newer one"
+git_ init -q --bare -b main "$G/decoy.git"
+git_ clone -q "$G/origin.git" "$G/wtrepo"; git_ -C "$G/wtrepo" remote set-url origin "$G/decoy.git"
+for b in peer-wt home-wt; do
+  git_ -C "$G/wtrepo" worktree add -q -b "stam/$b" "$G/$b-dir" origin/main 2>/dev/null || git_ -C "$G/wtrepo" worktree add -q -b "stam/$b" "$G/$b-dir" main
+  echo "$b new" >"$G/$b-dir/n.txt"; git_ -C "$G/$b-dir" add .; git_ -C "$G/$b-dir" commit -q -m "new head $b"
+done
+regwt() {
+  _id=$(api "$1" POST /api/register "{\"name\":\"$2\",\"role\":\"developer\",\"harness\":\"claude\",\"cwd\":\"$G/$3-dir\"}" | jget "d['id']")
+  tapi "$1" POST /api/test/agent "{\"agent\":\"$_id\",\"token\":\"tok-$2\",\"workspace\":$(python3 -c 'import json,sys; print(json.dumps(json.dumps({"worktree": {"branch": "stam/" + sys.argv[1], "path": sys.argv[2]}})))' "$3" "$G/$3-dir")}" >/dev/null
+}
+regwt main pw peer-wt; regwt home hw home-wt
+headrefused() {
+  [ "$1" != 200 ] || fail "$2 passed with a stale head on storage"
+  grep -q "worktree's HEAD is $(git_ -C "$G/$3-dir" rev-parse HEAD | cut -c1-8)" "$TEST_TMP/body" || fail "$2: the refusal didn't name the worktree head: $(cat "$TEST_TMP/body")"
+  grep -q "is at $(git_ -C "$G/storage.git" rev-parse "refs/heads/stam/$3" | cut -c1-8)" "$TEST_TMP/body" || fail "$2: the refusal didn't name the fetched head: $(cat "$TEST_TMP/body")"
+}
+predict() { curl -s -o "$TEST_TMP/body" -w '%{http_code}' -X POST -H "authorization: Bearer $2" -H 'content-type: application/json' "$1/api/pr/predict" -d "{\"branch\":\"$3\"}"; }
+# A peer agent: its worktree's origin is a decoy, so its push never reaches storage, and the home fetches the old head.
+headrefused "$(push "$MAIN_URL" tok-pw stam/peer-wt)" "pr_open from a peer agent" peer-wt
+headrefused "$(predict "$MAIN_URL" tok-pw stam/peer-wt)" "predict from a peer agent" peer-wt
+# A home agent: nothing is pushed on the home, but its worktree head is still compared with storage's copy.
+headrefused "$(push "$HOME_URL" tok-hw stam/home-wt)" "pr_open from a home agent" home-wt
+headrefused "$(predict "$HOME_URL" tok-hw stam/home-wt)" "predict from a home agent" home-wt
 echo "-- the shared token pushes any branch"
 [ "$(curl -s -o "$TEST_TMP/body" -w '%{http_code}' -X POST -H "authorization: Bearer $HOME_TOKEN" -H 'x-stam-human: 1' -H 'content-type: application/json' "$HOME_URL/api/pr/open" -d '{"branch":"stam/peer-other","title":"t","body":"ITSA: S-1\nGates: tsc\nDeploy: normal\n"}')" = 200 ] || fail "the shared token was refused: $(cat "$TEST_TMP/body")"
 echo "-- the scope route answers only a peer"

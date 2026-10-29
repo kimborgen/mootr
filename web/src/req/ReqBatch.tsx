@@ -19,10 +19,13 @@ export interface BatchItem {
   dropped: boolean
 }
 
-interface BatchView { itsa: string; items: BatchItem[] }
+// `rev`: the revision of the ITSA read with these items (S-2998).
+interface BatchView { itsa: string; rev?: string; items: BatchItem[] }
 
-// `onBatch` says whether this ask is a batch with drafts to list, so the ITSA hides its body (the same list).
-export function ReqBatch({ it, onBatch }: { it: Pick<Itsa, 'id' | 'kind' | 'closed_at' | 'updated_at'>; onBatch?: (batch: boolean) => void }) {
+// `onBatch` says whether this ask is a batch with drafts to list, so the ITSA hides its body (the same
+// list), and the revision of the ITSA the listed items were read with: Approve sends that one, and
+// waits while it lags the ITSA's own (S-2998).
+export function ReqBatch({ it, onBatch }: { it: Pick<Itsa, 'id' | 'kind' | 'closed_at' | 'updated_at'>; onBatch?: (batch: boolean, rev?: string) => void }) {
   const { enabled } = useReq()
   const [items, setItems] = useState<BatchItem[] | null>(null)
   const [picking, setPicking] = useState<string | null>(null)
@@ -34,7 +37,7 @@ export function ReqBatch({ it, onBatch }: { it: Pick<Itsa, 'id' | 'kind' | 'clos
     if (!batch) { onBatch?.(false); return }
     let live = true
     api<BatchView>('GET', `/api/requirements/asks/${it.id}`)
-      .then((r) => { if (live) { setItems(r.items); onBatch?.(r.items.length > 0) } })
+      .then((r) => { if (live) { setItems(r.items); onBatch?.(r.items.length > 0, r.rev) } })
       .catch(() => { if (live) { setItems([]); onBatch?.(false) } }) // a single-draft ask has no batch: nothing to list
     return () => { live = false }
   }, [batch, it.id, it.updated_at])
@@ -47,6 +50,7 @@ export function ReqBatch({ it, onBatch }: { it: Pick<Itsa, 'id' | 'kind' | 'clos
     try {
       const r = await api<BatchView>('POST', `/api/requirements/asks/${it.id}/drop`, { key: x.key, obsolete, if_rev: x.rev })
       setItems(r.items)
+      onBatch?.(r.items.length > 0, r.rev)
       setPicking(null)
       void refreshReq()
     } catch (e) { setError((e as Error).message) }

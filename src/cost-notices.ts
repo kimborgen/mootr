@@ -14,7 +14,7 @@ import { randomBytes } from 'node:crypto';
 import * as db from './db.ts';
 import { settings, humanMailAllows, SYSTEM_ACCOUNT } from './settings.ts';
 import { render } from './templates.ts';
-import { queueNotice, sendFromStam, sendFromStamMail, HUMAN } from './mail.ts';
+import { queueNotice, sendFromSystem, sendFromSystemMail, HUMAN } from './mail.ts';
 import { accountFor } from './accounts.ts';
 import { windowShares, treeShare } from './attribution.ts';
 import { chiefOfStaff } from './org.ts';
@@ -212,7 +212,7 @@ function settleHumanCopy(mailId: string, by: string, eventId: string): void {
 // `onSent` gets the id of the mail when it goes to the human.
 export function deliver(manager: string, subject: string, body: string, onSent?: (mailId: string) => void): void {
   if (manager === HUMAN) {
-    void sendFromStamMail([HUMAN], subject, body)
+    void sendFromSystemMail('cost', [HUMAN], subject, body)
       .then((m) => {
         if (m && onSent) onSent(m.id);
       })
@@ -221,7 +221,7 @@ export function deliver(manager: string, subject: string, body: string, onSent?:
   }
   const a = db.getAgent(manager);
   if (a && a.lifecycle === 'active' && a.activity === 'working') queueNotice(manager, body);
-  else void sendFromStam([manager], subject, body).catch(() => {});
+  else void sendFromSystem('cost', [manager], subject, body).catch(() => {});
 }
 
 // A subscription window crossed a warn percentage. Called from usage.reportSubscription.

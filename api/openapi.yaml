@@ -17,6 +17,8 @@ paths:
     $ref: ./paths/health.yaml
   /api/agents:
     $ref: ./paths/agents.yaml
+  /api/mail-titles:
+    $ref: ./paths/mail-titles.yaml
 components:
   securitySchemes:
     bearer:
@@ -48,6 +50,8 @@ components:
       $ref: ./schemas/AgentResting.yaml
     AgentWait:
       $ref: ./schemas/AgentWait.yaml
+    MailTitlesShown:
+      $ref: ./schemas/MailTitlesShown.yaml
   responses:
     Error:
       description: The error envelope.

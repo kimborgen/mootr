@@ -1,1 +1,1 @@
-[stam] stam restarted while it was compacting your conversation; it finished the compaction and resumed you. Carry on with what you were doing, or wait for mail if you were idle. Don't mail anyone just to say you are back.
+[stam] mootr restarted while it was compacting your conversation; it finished the compaction and resumed you. Carry on with what you were doing, or wait for mail if you were idle. Don't mail anyone just to say you are back.

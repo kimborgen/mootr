@@ -133,6 +133,9 @@ func TestForgetAgent(t *testing.T) {
 		execSQL(t, conn, "INSERT INTO agent_views (agent_id, view, updated_at) VALUES (?, '{}', 's')", id)
 		execSQL(t, conn, "INSERT INTO workspace_grants (workspace, grantee_id, access, granted_by, granted_at) VALUES ('/p', ?, 'read', 'x', 's')", id)
 		execSQL(t, conn, "INSERT INTO permission_requests (id, agent_id, action, reason, details, created_at, dialog) VALUES (?, ?, 'a', 'r', '{}', 's', 1)", "p-"+id, id)
+		// A settings ask with a plain client secret (S-3869): withdrawn with its agent, it keeps no plaintext.
+		execSQL(t, conn, "INSERT INTO permission_requests (id, agent_id, action, reason, details, created_at, kind, payload) VALUES (?, ?, 'a', 'r', 'd', 's', 'settings', ?)",
+			"ps-"+id, id, `{"change":{"kind":"patch","patch":{"mcpServers":{"t":{"auth":{"client_secret":"PLAIN-`+id+`"}}}},"fill":false},"baseHash":"h"}`)
 	}
 	if ok, err := d.HasPendingDialog(ctx, "afgt7"); err != nil || !ok {
 		t.Fatalf("HasPendingDialog = %v, %v", ok, err)
@@ -152,8 +155,14 @@ func TestForgetAgent(t *testing.T) {
 			t.Errorf("%s has %d rows of the other agent, want 1", table, n)
 		}
 	}
-	if n := count(t, conn, "SELECT COUNT(*) FROM permission_requests WHERE agent_id = 'afgt7' AND status = 'withdrawn' AND decided_at IS NOT NULL"); n != 1 {
-		t.Errorf("the forgotten agent's request isn't withdrawn")
+	if n := count(t, conn, "SELECT COUNT(*) FROM permission_requests WHERE agent_id = 'afgt7' AND status = 'withdrawn' AND decided_at IS NOT NULL"); n != 2 {
+		t.Errorf("the forgotten agent's requests aren't withdrawn")
+	}
+	if n := count(t, conn, "SELECT COUNT(*) FROM permission_requests WHERE payload LIKE '%PLAIN-afgt7%'"); n != 0 {
+		t.Errorf("the forgotten agent's settings ask keeps its secret")
+	}
+	if n := count(t, conn, "SELECT COUNT(*) FROM permission_requests WHERE payload LIKE '%PLAIN-akp8x%'"); n != 1 {
+		t.Errorf("the other agent's pending settings ask lost its payload")
 	}
 	if ok, _ := d.HasPendingDialog(ctx, "akp8x"); !ok {
 		t.Errorf("the other agent's dialog went")

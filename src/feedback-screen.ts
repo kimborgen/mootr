@@ -138,7 +138,7 @@ async function sectionOf(api: Api, details: string): Promise<string> {
   if (!types.length) return '';
   let agents: { id: string; name: string }[];
   try {
-    agents = await api('GET', '/api/agents');
+    agents = await api('GET', '/api/agents?state=all');
   } catch (e) {
     return `Screen not attached: the agent list couldn't be read (${why(e)}).`;
   }

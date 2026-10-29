@@ -36,6 +36,45 @@ describe('IssueCard', () => {
     expect(html).not.toContain('bc-status')
   })
 
+  it('without a menu action (the phone Glance) it draws no ⋯ button and no move hint, and wraps items in cells when asked', () => {
+    const html = renderToStaticMarkup(<IssueCard itsa={itsa} layout={defaultCardLayout('issue')} size="board" state={state({ cells: true })} actions={{ onOpen: () => {}, onKeyDown: () => {} }} />)
+    expect(html).not.toContain('bc-menu')
+    expect(html).not.toContain('Shift and arrows')
+    expect(html).toContain('<span class="ic-cell" data-cell="status">')
+    expect(draw(defaultCardLayout('issue'))).not.toContain('ic-cell')
+  })
+
+  it('nested: its first row is the status, key and title, with no box or menu of its own', () => {
+    const html = draw(defaultCardLayout('issue'), state(), 'nested')
+    expect(html).toContain('class="ic-nested"')
+    expect(html).toContain('class="ic-row ic-head"')
+    expect(html).toContain('S-911')
+    expect(html).toContain('Replace the index files')
+    expect(html).not.toContain('bcard')
+    expect(html).not.toContain('bc-menu')
+    // META is the board's; the nested card draws only the rows the layout gives BADGES and FOOT.
+    expect(html).not.toContain('bc-meta')
+    expect(html).not.toContain('ic-badges')
+    expect(html).not.toContain('ic-foot')
+  })
+
+  it('nested: draws the layout\'s BADGES and FOOT rows, and leaves the owner out', () => {
+    const layout: CardLayout = { slots: { TOP: [], META: [], BADGES: ['status', 'owner'], FOOT: ['updated'] }, titleLines: 3, seen: [] }
+    const html = draw(layout, state(), 'nested')
+    expect(html).toContain('class="ic-row ic-badges"')
+    expect(html).toContain('class="badge')
+    expect(html).toContain('class="ic-row ic-foot"')
+    expect(html).not.toContain('title="Owner')
+  })
+
+  it('nested: leaves out the BADGES items the agent card draws, so a field in both layouts draws once', () => {
+    const layout: CardLayout = { slots: { TOP: [], META: [], BADGES: ['status'], FOOT: [] }, titleLines: 3, seen: [] }
+    const html = draw(layout, state(), 'nested')
+    expect(html).toContain('class="ic-row ic-badges"')
+    const skipped = renderToStaticMarkup(<IssueCard itsa={itsa} layout={layout} size="nested" state={state()} actions={actions} nested={{ skip: ['status'] }} />)
+    expect(skipped).not.toContain('class="ic-row ic-badges"')
+  })
+
   it('clamps the title to the layout lines', () => {
     expect(draw({ ...defaultCardLayout('issue'), titleLines: 1 })).toContain('-webkit-line-clamp:1')
   })
@@ -68,9 +107,5 @@ describe('IssueCard', () => {
     expect(top.indexOf('class="spacer"')).toBeLessThan(top.indexOf('hdot'))
     const meta = html.slice(html.indexOf('bc-meta'))
     expect(meta.indexOf('class="spacer"')).toBeLessThan(meta.indexOf('Owner:'))
-  })
-
-  it('draws nothing for the nested size until the system view lands', () => {
-    expect(draw(defaultCardLayout('issue'), state(), 'nested')).toBe('')
   })
 })

@@ -11,10 +11,9 @@
 // recorded like a decide call, so the Usage page shows openrouter/mail-title.
 import * as db from './db.ts';
 import { settings, onSettingsChange } from './settings.ts';
-import { apiKey } from './credits.ts';
 import { recordSpend } from './decide.ts';
-import { complete } from './llm/index.ts';
-import { systemHeld } from './budgets.ts';
+import { complete, hasKey, parseModelRef } from './llm/index.ts';
+import { askBlocked, spendTo } from './tiny-spend.ts';
 import { configHash } from './config-hash.ts';
 import { peerByName, peerCall } from './peers.ts';
 
@@ -134,12 +133,11 @@ function flushSkipped(): void {
 }
 
 async function title(job: Job, signal: AbortSignal): Promise<void> {
-  const key = apiKey();
   const m = current();
-  if (!key || !m) return;
+  if (!m || !hasKey(m)) return;
   const prompt = titlePrompt(job.summary);
   const cfg = configHash(m, prompt);
-  const held = systemHeld();
+  const held = askBlocked(m);
   if (held) return void db.addEvent('stam', 'mail-title:skipped', { id: job.id, reason: held });
   let data;
   try {
@@ -159,7 +157,8 @@ async function title(job: Job, signal: AbortSignal): Promise<void> {
     db.addEvent('stam', signal.aborted ? 'mail-title:canceled' : 'mail-title:error', { id: job.id, error: e instanceof Error ? e.message : String(e) });
     return;
   }
-  recordSpend(PURPOSE, data.model, data.costUsd ?? 0, data.usage.inputTokens, data.usage.outputTokens);
+  const to = spendTo(parseModelRef(m).provider);
+  recordSpend(PURPOSE, to ? `${to.provider}:${data.model}` : data.model, data.costUsd ?? 0, data.usage.inputTokens, data.usage.outputTokens, to);
   const content = data.text;
   const { title: t, summary: s } = job.summary ? parseBoth(content) : { title: cleanTitle(content), summary: null };
   // An answer with neither field is a failure for this config. One with either is current for it: a summary
@@ -179,7 +178,7 @@ export interface MailTitlesShown { enabled: boolean; pending: string[] }
 export function mailTitlesShown(ids: string[]): MailTitlesShown {
   const m = current();
   if (!m) return { enabled: false, pending: [] };
-  const canAsk = !!apiKey() && !systemHeld();
+  const canAsk = askBlocked(m) === null;
   const pending: string[] = [];
   let queued = false;
   for (const id of ids.slice(0, SHOWN_MAX)) {

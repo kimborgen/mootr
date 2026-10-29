@@ -267,3 +267,37 @@ test('a key with an internal newline is refused before any call, and no error or
   assert.ok(!JSON.stringify(events('tool-name:error')).includes('secret-part'));
   assert.equal(db.getToolName('claude', 'leak_probe'), undefined);
 });
+
+test('a model of another provider is asked through src/llm and its spend is booked to that provider (S-3228)', async () => {
+  process.env.TOOLNAMES_TEST_KEY = 'sk-secret-provider-key';
+  settings.patchSettings({ providers: { myoai: { kind: 'openai-compatible', baseUrl: process.env.STAM_OPENROUTER_URL, apiKey: { env: 'TOOLNAMES_TEST_KEY' } } } });
+  setModel('myoai:tiny-model');
+  const row = (account) => db.open().prepare('SELECT harness, model, tokens_in FROM usage WHERE agent_id = ? AND account = ?').get('stam', account);
+  const orBefore = row('openrouter-system')?.tokens_in ?? 0;
+  const before = calls();
+  const got = await tn.toolNames('claude', ['other_provider_tool'], 5000);
+  assert.equal(calls(), before + 1);
+  assert.equal(got.enabled, true);
+  assert.ok(got.labels.other_provider_tool);
+  assert.equal(row('openrouter-system')?.tokens_in ?? 0, orBefore);
+  const mine = row('myoai-system');
+  assert.equal(mine.harness, 'myoai');
+  assert.equal(mine.model, 'tool-name');
+  const ev = events('decide').filter((e) => e.provider === 'myoai');
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].account, 'myoai-system');
+  // Usage counts the call once, under its provider, not again as an OpenRouter decide event.
+  const usage = await import('../src/usage.ts');
+  const rows = usage.summary(14).by_model.filter((r) => r.model === 'tool-name');
+  assert.equal(rows.filter((r) => r.harness === 'myoai').length, 1);
+  assert.equal(rows.find((r) => r.harness === 'openrouter').tokens_in, orBefore);
+  // The key appears in no event and no usage row.
+  const dump = JSON.stringify([db.open().prepare('SELECT data FROM events').all(), db.open().prepare('SELECT * FROM usage').all()]);
+  assert.ok(!dump.includes('sk-secret-provider-key'));
+  // No key for that provider: disabled, nothing asked.
+  delete process.env.TOOLNAMES_TEST_KEY;
+  const none = await tn.toolNames('claude', ['another_unkeyed_tool'], 200);
+  assert.deepEqual(none, { enabled: false, labels: {}, pending: [] });
+  assert.equal(calls(), before + 1);
+  setModel(MODEL);
+});

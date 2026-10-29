@@ -10,6 +10,7 @@ import (
 	"unicode/utf16"
 
 	"stam/internal/client"
+	"stam/internal/fieldsline"
 	"stam/internal/jsfmt"
 )
 
@@ -138,23 +139,35 @@ func (s *Server) apiJSON(ctx context.Context, method, path string, body any) (js
 }
 
 // namesOf is src/mcp.ts namesOf: owner and participant ids as names, as the calling agent sees the registry; an id that
-// doesn't resolve stays an id. No ids to resolve, no request.
+// doesn't resolve stays an id. No ids to resolve, no request. It asks for only those ids, in any state (S-3816): the
+// list's default is live agents only, and TS sends the ids in first-seen order, comma-joined.
 func (s *Server) namesOf(ctx context.Context, self string, ids []jsfmt.Value) map[string]string {
 	out := map[string]string{}
-	want, any := map[string]bool{}, false
+	want := map[string]bool{}
+	type seenKey struct {
+		kind jsfmt.Kind
+		s    string
+	}
+	seen, order := map[seenKey]bool{}, []string{}
 	for _, id := range ids {
 		if !id.Truthy() || (id.Kind == jsfmt.String && id.Str == "human") {
 			continue
 		}
-		any = true
+		if k := (seenKey{id.Kind, jsString(id)}); !seen[k] {
+			seen[k] = true
+			order = append(order, k.s)
+		}
 		if id.Kind == jsfmt.String {
 			want[id.Str] = true
 		}
 	}
-	if !any {
+	if len(order) == 0 {
 		return out
 	}
-	list, err := s.apiJSON(ctx, "GET", "/api/agents?as="+uriComponent(self), nil)
+	var q params
+	q.set("as", self)
+	q.set("ids", strings.Join(order, ","))
+	list, err := s.apiJSON(ctx, "GET", "/api/agents?"+q.String(), nil)
 	if err != nil || list.Kind != jsfmt.Array {
 		return out
 	}
@@ -180,24 +193,6 @@ func nameOf(id jsfmt.Value, ok bool, m map[string]string) string {
 		}
 	}
 	return str(id, true)
-}
-
-// fieldsLine is src/mcp.ts fieldsLine: `key=value` pairs, with a value that is an object as JSON.
-func fieldsLine(f jsfmt.Value, ok bool) string {
-	if !ok || f.Kind != jsfmt.Object {
-		return ""
-	}
-	var parts []string
-	seen := map[string]bool{}
-	for _, k := range f.Keys {
-		if seen[k] {
-			continue
-		}
-		seen[k] = true
-		v, _ := f.Get(k)
-		parts = append(parts, k+"="+str(v, true))
-	}
-	return strings.Join(parts, " ")
 }
 
 func rollupText(r jsfmt.Value) string {
@@ -311,6 +306,16 @@ func itsaGet(ctx context.Context, s *Server, a jsfmt.Value) (string, error) {
 		lines = append(lines, member(x, "body"))
 	}
 	lines = append(lines, "owner: "+nameOf(owner, hasOwner, m))
+	// The open ask it waits on: its mail, then its kind, never the ask's text (S-3982).
+	if d, ok := x.Get("open_ask_detail"); ok && d.Kind == jsfmt.Object {
+		var parts []string
+		for _, k := range []string{"mail", "kind"} {
+			if truthyMember(d, k) {
+				parts = append(parts, member(d, k))
+			}
+		}
+		lines = append(lines, "open ask: "+strings.Join(parts, " · "))
+	}
 	if chain, ok := x.Get("parent_chain"); ok && len(chain.Items) > 0 {
 		var ps []string
 		for _, p := range chain.Items {
@@ -318,8 +323,8 @@ func itsaGet(ctx context.Context, s *Server, a jsfmt.Value) (string, error) {
 		}
 		lines = append(lines, "parents: "+strings.Join(ps, " > "))
 	}
-	if f, ok := x.Get("fields"); fieldsLine(f, ok) != "" {
-		lines = append(lines, "fields: "+fieldsLine(f, ok))
+	if f, ok := x.Get("fields"); fieldsline.Line(f, ok) != "" {
+		lines = append(lines, "fields: "+fieldsline.Line(f, ok))
 	}
 	if len(parts.Items) > 0 {
 		var ns []string
@@ -462,7 +467,7 @@ func itsaList(ctx context.Context, s *Server, a jsfmt.Value) (string, error) {
 		o, ok := x.Get("owner")
 		f, fok := x.Get("fields")
 		extra := ""
-		if fl := fieldsLine(f, fok); fl != "" {
+		if fl := fieldsline.Line(f, fok); fl != "" {
 			extra = " {" + fl + "}"
 		}
 		lines[i] = fmt.Sprintf("%s [%s] %s %s%s", member(x, "key"), member(x, "status"), nameOf(o, ok, m), member(x, "title"), extra)
@@ -502,6 +507,10 @@ func itsaSet(ctx context.Context, s *Server, a jsfmt.Value) (string, error) {
 		c := changes.Items[i]
 		from, fok := c.Get("from")
 		to, tok := c.Get("to")
+		if f == "fields" {
+			changed = append(changed, fieldsline.Change(c))
+			continue
+		}
 		changed = append(changed, fmt.Sprintf("%s: %s -> %s", f, showValue(from, fok, m), showValue(to, tok, m)))
 	}
 	out := member(itsa, "key") + ": "
@@ -570,7 +579,7 @@ func itsaFields(ctx context.Context, s *Server, a jsfmt.Value) (string, error) {
 	}
 	body := jsfmt.Value{Kind: jsfmt.Object}
 	body.Set("by", jsfmt.StringValue(me))
-	for _, k := range []string{"key", "label", "type", "options", "description", "hint", "width", "align", "card"} {
+	for _, k := range []string{"key", "label", "type", "options", "description", "hint", "width", "align", "card", "kinds"} {
 		if v, ok := a.Get(k); ok {
 			body.Set(k, v)
 		}
@@ -642,6 +651,13 @@ func itsaFields(ctx context.Context, s *Server, a jsfmt.Value) (string, error) {
 				vals = append(vals, member(op, "value"))
 			}
 			row += " (" + strings.Join(vals, " | ") + ")"
+		}
+		if k, ok := f.Get("kinds"); ok && k.Truthy() {
+			var kinds []string
+			for _, x := range k.Items {
+				kinds = append(kinds, jsString(x))
+			}
+			row += " · kinds: " + strings.Join(kinds, ", ")
 		}
 		if truthyMember(f, "description") {
 			row += " — " + member(f, "description")

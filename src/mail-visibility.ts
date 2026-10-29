@@ -77,6 +77,51 @@ export function itsaRefusal(me: string, itsaId: string, verb: string): string {
   return `${name(me)} can't ${verb} ${x.key}: ${may}${who.length ? ` (${who.join(', ')})` : ''}. ${how}`;
 }
 
+// An ask placed in its home thread (S-3827, ask-home.ts), its link line in the ITSA thread, a reply to one between the
+// human and the asker (ASK_REPLY), or stam's note on it to the human (ASK_NOTE: it expired, its input didn't match): a
+// mail that joined a thread it didn't start. Its home was picked for the human; the thread's other readers didn't see
+// the ask before, and its replies and notes speak of the ask.
+export function isPlacedAsk(x: { id: string; thread_id?: string | null; permission_id?: string | null; kind?: string | null }): boolean {
+  return (!!x.permission_id || x.kind === ASK_LINK || x.kind === ASK_REPLY || x.kind === ASK_NOTE) && !!x.thread_id && x.thread_id !== x.id;
+}
+export const ASK_LINK = 'ask-link';
+export const ASK_REPLY = 'ask-reply';
+export const ASK_NOTE = 'ask-note';
+
+// Whether a mailbox sees a placed ask: exactly those who saw it when every ask started a thread of its own, by the
+// mail's holders (its sender and recipients): a holder, one above a holder (a parent acts for its children), one
+// below a holder (who read the thread with the human its parent took part in, sharedThreads), or one that took over a
+// holder's work. Never by the thread: reading the home thread whole doesn't show it. The caller lets the chief of
+// staff and the assistant see any mail.
+export function seesPlacedAsk(box: string, holders: string[]): boolean {
+  const me = db.getAgent(box);
+  const above = me ? ancestors(me) : new Set<string>();
+  return holders.some((h) => {
+    if (h === box || above.has(h)) return true;
+    const a = db.getAgent(h);
+    return !!a && (ancestors(a).has(box) || db.forwardTarget(h) === box);
+  });
+}
+
+const holdersOf = (y: db.ThreadMail) => [y.from_id, ...y.recipients.map((r) => r.id)];
+
+// The mail of one thread a mailbox reads whole, without the placed asks it doesn't see (S-3827).
+export function withoutHiddenAsks<T extends db.ThreadMail>(box: string, mails: T[]): T[] {
+  if (box === HUMAN) return mails;
+  return mails.filter((y) => !isPlacedAsk(y) || seesPlacedAsk(box, holdersOf(y)));
+}
+
+// A thread as a mailbox's list shows it (GET /api/agents/:box/threads): without the placed asks it doesn't see, and,
+// when the box is in the thread only by its own placed ask, only the mail it may read (S-3827): the ask makes it part
+// of the thread for the list, never a reader of the thread's other mail.
+export function listedThread<T extends { thread_id: string; mails: db.ThreadMail[] }>(box: string, t: T): T {
+  if (box === HUMAN) return t;
+  const mails = withoutHiddenAsks(box, t.mails);
+  if (mails.some((y) => !isPlacedAsk(y) && holdersOf(y).includes(box))) return { ...t, mails };
+  const r = threadReader(box, t.thread_id);
+  return { ...t, mails: r === true ? mails : mails.filter(r) };
+}
+
 // Whether a mailbox may read a whole thread, not only its own part: a thread with the human that one
 // of its ancestors took part in (mail-search.ts), or the own thread of an ITSA whose threads it may read
 // (S-448). An ITSA's thread is read whole only by those it belongs to, as `reader`, the agent asking,
@@ -96,6 +141,7 @@ export function mayReadWholeThread(box: string, threadId: string, reader = box):
 export function mayReadMail(box: string, x: db.Mail, reader = box): boolean {
   const held = db.threadMail(x.thread_id ?? x.id).find((y) => y.id === x.id);
   const holders = held ? [held.from_id, ...held.recipients.map((r) => r.id)] : [];
+  if (isPlacedAsk(x)) return box === HUMAN || seesPlacedAsk(box, holders);
   const under = (h: string) => !!db.getAgent(h) && ancestors(db.getAgent(h)!).has(box);
   if (holders.some((h) => h === box || under(h) || (!!db.getAgent(h) && db.forwardTarget(h) === box))) return true;
   if (x.itsa_id) {
@@ -109,14 +155,19 @@ export function mayReadMail(box: string, x: db.Mail, reader = box): boolean {
 // What a mailbox may read in one thread, decided with one load of the thread: `true` when it may read the whole thread,
 // else a test for a mail of it, by the same rules as mayReadMail. For many mails of one thread.
 export function threadReader(box: string, threadId: string, reader = box): true | ((x: db.Mail) => boolean) {
-  if (mayReadWholeThread(box, threadId, reader)) return true;
-  const holders = new Map(db.threadMail(threadId).map((y) => [y.id, [y.from_id, ...y.recipients.map((r) => r.id)]]));
+  const mails = db.threadMail(threadId);
+  const holders = new Map(mails.map((y) => [y.id, holdersOf(y)]));
+  // A thread with a placed ask isn't read whole by all of its readers: the ask goes by its holders (S-3827).
+  const placed = (x: db.Mail) => isPlacedAsk(x) && box !== HUMAN;
+  const seesAsk = (x: db.Mail) => seesPlacedAsk(box, holders.get(x.id) ?? []);
+  if (mayReadWholeThread(box, threadId, reader)) return mails.some(placed) ? (x) => !placed(x) || seesAsk(x) : true;
   const sees = new Map<string, boolean>();
   const seesHolder = (h: string) => {
     if (!sees.has(h)) sees.set(h, h === box || (!!db.getAgent(h) && (ancestors(db.getAgent(h)!).has(box) || db.forwardTarget(h) === box)));
     return sees.get(h)!;
   };
   return (x) => {
+    if (placed(x)) return seesAsk(x);
     if ((holders.get(x.id) ?? []).some(seesHolder)) return true;
     if (!x.itsa_id) return false;
     try {
@@ -146,5 +197,6 @@ export function grantCitedThreads(text: string, spawner: string | undefined, age
 
 function readsAll(box: string, threadId: string): boolean {
   const r = threadReader(box, threadId);
-  return r === true || db.threadMail(threadId).every((y) => r(y));
+  // A placed ask the box doesn't see stays sealed in a granted thread too (S-3827), so it doesn't hold the grant back.
+  return r === true || db.threadMail(threadId).every((y) => isPlacedAsk(y) || r(y));
 }

@@ -13,9 +13,12 @@ import { MACHINE } from './config.ts';
 import * as db from './db.ts';
 import { releaseReviewer } from './itsa-owners.ts';
 import { prOpenConfig, type PrOpenConfig } from './pr-open.ts';
-import { peerByName, peerCall, type Via } from './peers.ts';
+import { approveRefusal } from './ring.ts';
+import { unconfirmedVerdict } from './pr-review-message.ts';
+import { PeerUnreachable, peerByName, peerCall, type Via } from './peers.ts';
 import { settings } from './settings.ts';
 import { testOnlyEnv } from './test-env.ts';
+import { envVar, withTwins } from './env.ts';
 
 const run = promisify(execFile);
 
@@ -122,8 +125,11 @@ export async function reviewPrHere(input: ReviewInput, via?: Via, cfg: PrOpenCon
     throw new ReviewError(501, `this build has no verdict script (${script}), so pr_review can't post PR #${v.pr}. Nothing was posted. Post the verdict by hand: \`gh pr comment ${v.pr} --repo ${cfg.github} --body ${body}\`, and set the stam/review status on the head: \`gh api repos/${cfg.github}/statuses/${v.head} -f state=${state} -f context=stam/review\`.`);
   }
   let branch = '';
+  let shown = '';
   try {
-    branch = String(JSON.parse((await run(cfg.gh, ['pr', 'view', v.pr, '--json', 'headRefName'], { cwd: cfg.repo, timeout: 60_000 })).stdout).headRefName ?? '');
+    const pr = JSON.parse((await run(cfg.gh, ['pr', 'view', v.pr, '--json', 'headRefName,headRefOid'], { cwd: cfg.repo, timeout: 60_000 })).stdout);
+    branch = String(pr.headRefName ?? '');
+    shown = String(pr.headRefOid ?? '');
   } catch {
     /* fails closed below */
   }
@@ -133,18 +139,36 @@ export async function reviewPrHere(input: ReviewInput, via?: Via, cfg: PrOpenCon
     const { stdout } = await run(process.execPath, [script, v.pr, v.verdict, v.summary, '--head', v.head], {
       cwd: cfg.repo,
       // The gh binary is settings.itsa.prOpen.gh, as pr_open runs it (the script's gate reads STAM_GH).
-      env: { ...process.env, ...{ STAM_AGENT_ID: via.agent, STAM_GH: cfg.gh } },
+      env: { ...process.env, ...withTwins({ STAM_AGENT_ID: via.agent, STAM_GH: cfg.gh }) },
       timeout: 120_000,
     });
-    // S-3015: an approve ends the reviewer's review, so it leaves the ITSAs linked to this PR's branch. A request_changes
-    // keeps it in them. Its own catch: the posted verdict stands either way.
-    if (v.verdict === 'approve' && via.reviewRole === 'reviewer' && !via.boss) await releaseReviewer(via.agent, via.agent, branch).catch((e) => console.error(`pr_review: couldn't take ${via.agent} out of its ITSAs: ${e.message}`));
+    // S-3015: an approve ends the reviewer's review, so it leaves the ITSAs linked to this PR (its branch, or its github link,
+    // S-3508). A request_changes keeps it in them. Its own catch: the posted verdict stands either way.
+    if (v.verdict === 'approve' && via.reviewRole === 'reviewer' && !via.boss) await releaseReviewer(via.agent, via.agent, { branch, repo: cfg.repoName, subject: `github:${cfg.github}#${Number(v.pr)}` }).catch((e) => console.error(`pr_review: couldn't take ${via.agent} out of its ITSAs: ${e.message}`));
     return { pr: Number(v.pr), verdict: v.verdict, head: v.head, line: stdout.trim() };
   } catch (e: any) {
     // pr-review.mjs exits 3 for a moved head, 2 for a bad argument, 1 for a gh failure (its stderr says why).
     const status = e.code === 3 ? 409 : e.code === 2 ? 400 : 502;
     const why = String(e.stderr || e.message || '').trim().split('\n').pop() ?? '';
+    // S-3385: a refused head that is already the tip of the PR's branch on origin is GitHub's PR head lagging the push. Only the message
+    // changes: the refusal stands, and an ls-remote that fails keeps the message it had.
+    const tip = status === 409 ? await originTipOf(cfg, branch, v.head) : '';
+    if (tip) throw new ReviewError(409, `origin is at ${tip}, GitHub's PR head shows ${shown || 'nothing'}. ${HEAD_LAGS}`);
     throw new ReviewError(status, why || 'pr-review.mjs failed');
+  }
+}
+
+// What a 409 says when the refused head is on origin already: GitHub's PR head is behind the push, so a re-push changes nothing (S-3385).
+const HEAD_LAGS = "GitHub's PR head lags the push; wait for the synchronize notice, don't re-push.";
+
+// origin's branch tip, when it is `head` (a full sha or a prefix of one); '' otherwise, and on any ls-remote error or timeout (S-3385).
+async function originTipOf(cfg: PrOpenConfig, branch: string, head: string): Promise<string> {
+  try {
+    const { stdout } = await run('git', ['ls-remote', '--heads', cfg.origin, `refs/heads/${branch}`], { cwd: cfg.repo, timeout: 30_000 });
+    const tip = stdout.split('\t')[0] ?? '';
+    return /^[0-9a-f]{40}$/.test(tip) && tip.startsWith(head) ? tip : '';
+  } catch {
+    return '';
   }
 }
 
@@ -152,13 +176,38 @@ export async function reviewPrHere(input: ReviewInput, via?: Via, cfg: PrOpenCon
 // the peer link, with the reviewer's identity forwarded (as openPrRouted does).
 export async function reviewPrRouted(input: ReviewInput, via?: Via): Promise<ReviewPosted> {
   const home = settings().itsa.home ?? MACHINE;
+  // S-3874: an approve from a ring's creator or moderator needs that ring to have ended in an agreed approve for this head. Fails closed.
+  if (via && String(input?.verdict) === 'approve') {
+    const v = checkInput(input);
+    let why: string | null;
+    try {
+      why = approveRefusal(via.agent, v.pr, v.head);
+    } catch (e: any) {
+      why = `can't read the rings on PR ${v.pr} (${e.message}), so can't tell whether a ring allows this approve`;
+    }
+    if (why) throw new ReviewError(409, `${why} (S-3874)`);
+  }
   // A call from this daemon's own agent: its role and branches come from this database, never from the caller.
   // The local facts win over anything the request carried; a peer's agent isn't in this database, so its forwarded facts stand.
   if (via) via = { ...via, ...reviewFacts(via.agent) };
   if (home === MACHINE) return reviewPrHere(input, via);
   const peer = peerByName(home);
   if (!peer) throw new ReviewError(502, `ITSA home '${home}' is not a configured peer`);
-  const r = await peerCall(peer, 'POST', '/api/pr/review', input, 180_000, false, via);
+  let r;
+  try {
+    r = await peerCall(peer, 'POST', '/api/pr/review', input, forwardMs(), false, via);
+  } catch (e) {
+    // A home that is down, or refused the connection, was never sent the request, so there is no verdict to be unsure of (S-3596).
+    if (e instanceof PeerUnreachable) throw new ReviewError(503, `ITSA home ${home} is unreachable, so the verdict was not posted; retry when it is up`);
+    // The forward timed out or its connection dropped: the home may have posted the verdict already, and this side can't tell (S-2631).
+    throw new ReviewError(502, unconfirmedVerdict(input.pr, `the forward to ITSA home ${home} timed out or lost its connection`));
+  }
   if (r.status !== 200) throw new ReviewError(r.status, r.data?.error ?? `${home}: HTTP ${r.status}`);
   return r.data;
 }
+
+// How long the forward to the ITSA home waits (S-2631), 180 seconds unless STAM_REVIEW_PEER_MS sets it (as peers.ts reads its own).
+function forwardMs(): number {
+  return Number(envVar('REVIEW_PEER_MS')) || 180_000;
+}
+

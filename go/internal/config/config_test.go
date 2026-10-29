@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -104,9 +105,9 @@ func TestLoadRefuses(t *testing.T) {
 
 func TestTestHome(t *testing.T) {
 	h := home(t)
-	env := map[string]string{"STAM_HOME": h, "STAM_TEST_COST_HOOKS": "1", "STAM_TMUX_SOCKET": "stam-test-1", "STAM_TEST_HUMAN_KEY": "k"}
+	env := map[string]string{"STAM_HOME": h, "STAM_TEST_COST_HOOKS": "1", "STAM_TMUX_SOCKET": "stam-test-1", "STAM_TEST_HUMAN_KEY": "k", "STAM_TEST_INPUT_BARRIER": "/b"}
 	c, _ := Load(envOf(env))
-	if c.TestHome || c.TestHooks || c.TestHumanKey != "" {
+	if c.TestHome || c.TestHooks || c.TestHumanKey != "" || c.TestInputBarrier != "" {
 		t.Fatalf("no marker: %+v", c)
 	}
 	write(t, filepath.Join(h, TestHomeMarker), "", 0o600)
@@ -116,7 +117,7 @@ func TestTestHome(t *testing.T) {
 	}
 	write(t, filepath.Join(filepath.Dir(h), "owner"), "x", 0o600)
 	c, _ = Load(envOf(env))
-	if !c.TestHome || !c.TestHooks || c.TestHumanKey.Reveal() != "k" {
+	if !c.TestHome || !c.TestHooks || c.TestHumanKey.Reveal() != "k" || c.TestInputBarrier != "/b" {
 		t.Fatalf("test home: %+v", c)
 	}
 	env["STAM_TMUX_SOCKET"] = "stam"
@@ -141,18 +142,29 @@ func TestParseSettings(t *testing.T) {
 	preset, home := "standard", "~"
 	defaults := func(s Settings) Settings {
 		s.ChildNotices = "tree-idle"
-		s.PermissionModes = PermissionModes{Harness: map[string]string{"claude": "auto", "codex": "auto", "opencode": "auto"}, Types: map[string]string{}}
+		s.PermissionModes = PermissionModes{Harness: map[string]string{"claude": "auto", "codex": "auto", "opencode": "auto"}, Types: map[string]string{}, HarnessKeys: []string{"claude", "codex", "opencode"}}
+		s.Tiny = TinySettings{MailCheck: true, ToolSummary: ToolSummarySettings{Model: "google/gemma-3-4b-it"}, ToolNames: ToolNamesSettings{Enabled: true, Model: "google/gemma-3-4b-it"}, Classify: ClassifySettings{MaxUsdPerDay: 0.2, Concurrency: 2}}
 		s.SpawnDefaults = SpawnDefaults{Preset: &preset, Cwd: &home}
 		s.StartingTimeoutMinutes = 10
+		s.StuckStartMinutes = 15
 		s.MailGate = true
 		s.DecisionsModel = "microsoft/microsoft-decision-1"
 		s.Requirements = RequirementsSettings{Approval: "human", KeyPrefix: "R", DemoteMinFlags: 5, DefaultThreshold: 0.8, DefaultMode: "observe", DailyCapUsd: 1}
 		s.StaleWorkingMinutes, s.FinalRoundMinutes, s.RetroReminders = 10, 3, true
+		s.RetroLessons = RetroLessons{Enabled: true, K: 4}
 		s.DialogEscalateMinutes = 10
+		s.DeveloperCap = 6
+		s.Banners = []Banner{{Harness: "claude", Match: `Teach auto mode about your environment\?`, Keys: []string{"Escape"}}}
 		s.Context = ContextSettings{WarnTokens: 300_000, InstructTokens: 400_000, EnforceTokens: 500_000}
 		s.IdleCompaction = IdleCompactionSettings{Enabled: true, IdleMinutes: 50, GrowthTokens: 50_000, MinTokens: 100_000}
 		s.ExitRecovery = ExitRecoverySettings{PercentOfWindow: 85, WindowTokens: 350_000, RepeatMinutes: 5}
 		s.Process = ProcessSettings{Run: "dry-run", MaxSpawnsPerHour: 3}
+		s.CostOnError, s.CostFallbackMinutes, s.CostSoftStopMinutes = &CostAction{Action: "soft-stop", Else: "wait"}, 15, 10
+		s.OpenRouterWarnUSD, s.OpenRouterSystemReserveUSD = 2, 1
+		s.SubscriptionWarnPercent = []float64{80, 95}
+		s.ResourceWarn = parseResourceWarn(nil)
+		s.CostShape = parseCostShape(nil, nil)
+		s.Diff = DiffSettings{Classes: DiffClassDefaults, FetchSeconds: 60, RefreshSeconds: 20, MaxPrRefs: 100}
 		return s
 	}
 	want := defaults(Settings{Home: "m1", Auth: AuthSettings{SharedTokenClaims: true}, Itsa: itsaDefaults("m1", true), CostMode: "api", HumanMail: hm})
@@ -219,6 +231,12 @@ func TestParseSettings(t *testing.T) {
 	}
 	if s, _ := ParseSettings([]byte(`{"startingTimeoutMinutes":-1}`), "m1"); s.StartingTimeoutMinutes != 10 {
 		t.Fatalf("a non-positive startingTimeoutMinutes keeps the default: %v", s.StartingTimeoutMinutes)
+	}
+	if s, _ := ParseSettings([]byte(`{"stuckStartMinutes":0}`), "m1"); s.StuckStartMinutes != 0 {
+		t.Fatalf("stuckStartMinutes 0 turns the check off: %v", s.StuckStartMinutes)
+	}
+	if s, _ := ParseSettings([]byte(`{"stuckStartMinutes":-1}`), "m1"); s.StuckStartMinutes != 15 {
+		t.Fatalf("a negative stuckStartMinutes keeps the default: %v", s.StuckStartMinutes)
 	}
 	if s.SpawnDefaults.Preset != nil || s.SpawnDefaults.Cwd == nil || *s.SpawnDefaults.Cwd != "/w" {
 		t.Fatalf("spawnDefaults: %+v", s.SpawnDefaults)
@@ -332,6 +350,17 @@ func TestParseLifecycleSettings(t *testing.T) {
 	if s.ExitRecovery != (ExitRecoverySettings{PercentOfWindow: 85, WindowTokens: 350_000, RepeatMinutes: 0}) {
 		t.Errorf("exit recovery = %+v", s.ExitRecovery)
 	}
+	// Banners: a list replaces the default, keeping the entries with a string harness and match, and their string keys.
+	b, _ := ParseSettings([]byte(`{"banners":[{"harness":"codex","match":"Update\\?","keys":["Escape",5,"Enter"]},{"harness":"claude"},{"match":"x"},7]}`), "m1")
+	if !reflect.DeepEqual(b.Banners, []Banner{{Harness: "codex", Match: `Update\?`, Keys: []string{"Escape", "Enter"}}}) {
+		t.Errorf("banners %+v", b.Banners)
+	}
+	if b, _ := ParseSettings([]byte(`{"banners":[]}`), "m1"); len(b.Banners) != 0 {
+		t.Errorf("an empty list %+v", b.Banners)
+	}
+	if b, _ := ParseSettings([]byte(`{"banners":{}}`), "m1"); len(b.Banners) != 1 {
+		t.Errorf("not a list %+v", b.Banners)
+	}
 	s, _ = ParseSettings([]byte(`{"staleWorkingMinutes":0.5,"archive":{"finalRoundMinutes":-2},"retro":{"reminders":{"enabled":0}}}`), "m1")
 	if s.StaleWorkingMinutes != 0.5 || s.FinalRoundMinutes != 3 || !s.RetroReminders {
 		t.Errorf("stale %v, final round %v, reminders %v", s.StaleWorkingMinutes, s.FinalRoundMinutes, s.RetroReminders)
@@ -399,6 +428,40 @@ func TestCostAccounts(t *testing.T) {
 	}
 }
 
+// TestCostActions: an account's action fields, as a name or an object (else wait unless named); cost.onError, soft-stop
+// unless the file names it, null included; cost.instructions; cost.fallbackMinutes, 15 unless a number; and
+// cost.softStopMinutes, 10 unless a number.
+func TestCostActions(t *testing.T) {
+	s, err := ParseSettings([]byte(`{"cost":{"accounts":{"a":{"match":{"harness":"claude"},"onError":"continue",
+		"onSubExhausted":{"action":"take-over","to":["b",3],"else":"hard-stop"},"onCreditsOut":{"action":"wait"},"onBillingUnknown":{"to":["b"]}},
+		"b":{"match":{"harness":"codex"}}},"onError":{"action":"wait"},"instructions":" save money ","fallbackMinutes":0.5,"softStopMinutes":0.25}}`), "m")
+	if err != nil || s.CostProblem != "" {
+		t.Fatal(err, s.CostProblem)
+	}
+	want := map[string]CostAction{
+		"onError":        {Action: "continue", Else: "wait"},
+		"onSubExhausted": {Action: "take-over", To: []string{"b"}, Else: "hard-stop"},
+		"onCreditsOut":   {Action: "wait", Else: "wait"},
+	}
+	if got := s.CostAccounts["a"].Actions; !reflect.DeepEqual(got, want) {
+		t.Errorf("actions %+v", got)
+	}
+	if s.CostAccounts["b"].Actions != nil {
+		t.Errorf("b actions %+v", s.CostAccounts["b"].Actions)
+	}
+	if !reflect.DeepEqual(s.CostOnError, &CostAction{Action: "wait", Else: "wait"}) || s.CostInstructions != " save money " || s.CostFallbackMinutes != 0.5 ||
+		s.CostSoftStopMinutes != 0.25 {
+		t.Errorf("onError %+v, instructions %q, minutes %v, soft stop %v", s.CostOnError, s.CostInstructions, s.CostFallbackMinutes, s.CostSoftStopMinutes)
+	}
+	if s, _ := ParseSettings([]byte(`{"cost":{"onError":null,"fallbackMinutes":"5","softStopMinutes":"5","instructions":3}}`), "m"); s.CostOnError != nil ||
+		s.CostFallbackMinutes != 15 || s.CostSoftStopMinutes != 10 || s.CostInstructions != "" {
+		t.Errorf("null onError %+v, minutes %v, soft stop %v, instructions %q", s.CostOnError, s.CostFallbackMinutes, s.CostSoftStopMinutes, s.CostInstructions)
+	}
+	if s, _ := ParseSettings([]byte(`{"cost":{"accounts":{}}}`), "m"); s.CostOnError == nil || s.CostOnError.Action != "soft-stop" {
+		t.Errorf("default onError %+v", s.CostOnError)
+	}
+}
+
 func deref(s *string) string {
 	if s == nil {
 		return "<nil>"
@@ -435,21 +498,95 @@ func TestCostProblemLogged(t *testing.T) {
 	}
 }
 
-// settings.decisions.model, the configured providers' ids and whether the system account has a budget (src/decide.ts reads them).
+// settings.decisions.model and the configured providers' ids (src/decide.ts reads them).
 func TestDecisionSettings(t *testing.T) {
 	s, err := ParseSettings(nil, "m")
-	if err != nil || s.DecisionsModel != "microsoft/microsoft-decision-1" || len(s.ProviderIDs) != 0 || s.SystemBudget {
+	if err != nil || s.DecisionsModel != "microsoft/microsoft-decision-1" || len(s.ProviderIDs) != 0 || len(s.ProviderNames) != 0 {
 		t.Fatalf("defaults: %+v %v", s, err)
 	}
-	s, err = ParseSettings([]byte(`{"decisions":{"model":"myazure:gpt-4o"},"providers":{"zeta":{"kind":"openai-compatible","baseUrl":"https://z.example/v1"},"myazure":{"kind":"azure","endpoint":"https://a.example","apiVersion":"2024-02-01"},"br":{"kind":"bedrock","region":"us-east-1"},"brbad":{"kind":"bedrock","region":"US East"},"brpath":{"kind":"bedrock","region":"eu-west-1","endpoint":"https://b.example/path"},"brhttp":{"kind":"bedrock","region":"eu-west-1","endpoint":"http://b.example"},"empty":{},"nokind":{"baseUrl":"https://x"},"nourl":{"kind":"openai-compatible","baseUrl":"  "},"noversion":{"kind":"azure","endpoint":"https://a.example"},"str":"x"},"cost":{"accounts":{"openrouter-system":{"budget":{"usd":1,"per":"day"}}}}}`), "m")
-	if err != nil || s.DecisionsModel != "myazure:gpt-4o" || strings.Join(s.ProviderIDs, ",") != "br,myazure,zeta" || !s.SystemBudget {
+	s, err = ParseSettings([]byte(`{"decisions":{"model":"myazure:gpt-4o"},"providers":{"zeta":{"kind":"openai-compatible","baseUrl":"https://z.example/v1"},"myazure":{"kind":"azure","endpoint":"https://a.example","apiVersion":"2024-02-01"},"br":{"kind":"bedrock","region":"us-east-1"},"brbad":{"kind":"bedrock","region":"US East"},"brpath":{"kind":"bedrock","region":"eu-west-1","endpoint":"https://b.example/path"},"brhttp":{"kind":"bedrock","region":"eu-west-1","endpoint":"http://b.example"},"empty":{},"nokind":{"baseUrl":"https://x"},"nourl":{"kind":"openai-compatible","baseUrl":"  "},"noversion":{"kind":"azure","endpoint":"https://a.example"},"str":"x"}}`), "m")
+	if err != nil || s.DecisionsModel != "myazure:gpt-4o" || strings.Join(s.ProviderIDs, ",") != "br,myazure,zeta" {
 		t.Errorf("set: %+v %v", s, err)
 	}
-	// A budget of null, accounts or providers of the wrong type, and a model that is not a string, are as unset.
-	for _, raw := range []string{`{"cost":{"accounts":{"openrouter-system":{"budget":null}}}}`, `{"cost":{"accounts":[1]},"providers":[1],"decisions":{"model":5}}`, `{"cost":{"accounts":{"openrouter-system":3}}}`} {
-		if s, err = ParseSettings([]byte(raw), "m"); err != nil || s.SystemBudget || len(s.ProviderIDs) != 0 || s.DecisionsModel != "microsoft/microsoft-decision-1" {
-			t.Errorf("%s: %+v %v", raw, s, err)
+	// Every key counts as a provider an account may be billed by, parsed or not.
+	if got := strings.Join(s.ProviderNames, ","); got != "br,brbad,brhttp,brpath,empty,myazure,nokind,nourl,noversion,str,zeta" {
+		t.Errorf("names %s", got)
+	}
+	// Providers of the wrong type, and a model that is not a string, are as unset.
+	if s, err = ParseSettings([]byte(`{"providers":[1],"decisions":{"model":5}}`), "m"); err != nil || len(s.ProviderIDs) != 0 || len(s.ProviderNames) != 0 || s.DecisionsModel != "microsoft/microsoft-decision-1" {
+		t.Errorf("%+v %v", s, err)
+	}
+}
+
+// TestBudgetSettings: an account's budget and cost.global.budget (src/settings.ts CostBudget), unchecked as in TS.
+func TestBudgetSettings(t *testing.T) {
+	s, err := ParseSettings([]byte(`{"cost":{"global":{"budget":{"usd":4,"per":"week","raiseSteps":[1,"x",3]},"onExhausted":"soft-stop"},"accounts":{"or":{"match":{"harness":"opencode"},"budget":{"usd":10,"per":"cap"}},"cx":{"match":{"harness":"codex"},"budget":null},"odd":{"match":{"harness":"claude"},"budget":{"usd":"ten","per":5}},"num":{"match":{"harness":"stam"},"budget":3}}}}`), "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := s.GlobalBudget; g == nil || g.USD != 4 || g.Per != "week" || fmt.Sprint(g.RaiseSteps) != "[1 3]" || s.GlobalOnExhausted != "soft-stop" {
+		t.Errorf("global %+v", g)
+	}
+	if b := s.CostAccounts["or"].Budget; b == nil || b.USD != 10 || b.Per != "cap" || b.RaiseSteps != nil {
+		t.Errorf("or %+v", b)
+	}
+	if s.CostAccounts["cx"].Budget != nil || s.CostAccounts["num"].Budget != nil {
+		t.Error("a null budget, or one that isn't an object, is none")
+	}
+	if b := s.CostAccounts["odd"].Budget; b == nil || !math.IsNaN(b.USD) || b.Per != "" {
+		t.Errorf("odd %+v", b)
+	}
+	if s, _ = ParseSettings(nil, "m"); s.GlobalBudget != nil {
+		t.Error("no global budget by default")
+	}
+}
+
+// cost.openrouterWarnUsd and cost.openrouterSystemReserveUsd: TS's defaults when missing; a named warning that is null or
+// not a number is never, and a reserve that isn't a number is the default.
+func TestCreditSettings(t *testing.T) {
+	cases := []struct {
+		cost          string
+		warn, reserve float64
+	}{
+		{``, 2, 1},
+		{`"openrouterWarnUsd":5,"openrouterSystemReserveUsd":0.5`, 5, 0.5},
+		{`"openrouterWarnUsd":null,"openrouterSystemReserveUsd":null`, 0, 1},
+		{`"openrouterWarnUsd":"3","openrouterSystemReserveUsd":"2"`, 0, 1},
+		{`"openrouterWarnUsd":0,"openrouterSystemReserveUsd":0`, 0, 0},
+	}
+	for _, c := range cases {
+		s, err := ParseSettings([]byte(`{"cost":{`+c.cost+`}}`), "m")
+		if err != nil || s.OpenRouterWarnUSD != c.warn || s.OpenRouterSystemReserveUSD != c.reserve {
+			t.Errorf("%s: warn %v reserve %v %v", c.cost, s.OpenRouterWarnUSD, s.OpenRouterSystemReserveUSD, err)
 		}
+	}
+	if s, _ := ParseSettings(nil, "m"); s.OpenRouterWarnUSD != 2 || s.OpenRouterSystemReserveUSD != 1 {
+		t.Errorf("no file: %v %v", s.OpenRouterWarnUSD, s.OpenRouterSystemReserveUSD)
+	}
+}
+
+// cost.subscriptionWarnPercent and cost.dailyWarnUsd: src/settings.ts's defaults, a named key replacing them, and values
+// of the wrong kind warning at none.
+func TestWarnSettings(t *testing.T) {
+	cases := []struct {
+		cost    string
+		percent []float64
+		daily   float64
+	}{
+		{``, []float64{80, 95}, 0},
+		{`"subscriptionWarnPercent":[50],"dailyWarnUsd":20`, []float64{50}, 20},
+		{`"subscriptionWarnPercent":[],"dailyWarnUsd":null`, nil, 0},
+		{`"subscriptionWarnPercent":null,"dailyWarnUsd":"5"`, nil, 0},
+		{`"subscriptionWarnPercent":[70,"90",99.5]`, []float64{70, 99.5}, 0},
+	}
+	for _, c := range cases {
+		s, err := ParseSettings([]byte(`{"cost":{`+c.cost+`}}`), "m")
+		if err != nil || !reflect.DeepEqual(s.SubscriptionWarnPercent, c.percent) || s.DailyWarnUSD != c.daily {
+			t.Errorf("%s: percent %v daily %v %v", c.cost, s.SubscriptionWarnPercent, s.DailyWarnUSD, err)
+		}
+	}
+	if s, _ := ParseSettings(nil, "m"); !reflect.DeepEqual(s.SubscriptionWarnPercent, []float64{80, 95}) || s.DailyWarnUSD != 0 {
+		t.Errorf("no file: %v %v", s.SubscriptionWarnPercent, s.DailyWarnUSD)
 	}
 }
 
@@ -467,5 +604,73 @@ func TestRequirementsSettings(t *testing.T) {
 	s, _ = ParseSettings([]byte(`{"requirements":{"demoteMinFlags":2.5}}`), "m")
 	if s.Requirements.DemoteMinFlags != 5 {
 		t.Errorf("a fraction: %+v", s.Requirements)
+	}
+}
+
+// settings.retro.lessons as src/settings.ts reads it: on unless false; k an integer clamped to 1-8, else 4.
+func TestRetroLessons(t *testing.T) {
+	for _, c := range []struct {
+		raw  string
+		want RetroLessons
+	}{
+		{`{}`, RetroLessons{true, 4}},
+		{`{"retro":{"lessons":{"enabled":false,"k":2}}}`, RetroLessons{false, 2}},
+		{`{"retro":{"lessons":{"enabled":0,"k":20}}}`, RetroLessons{true, 8}},
+		{`{"retro":{"lessons":{"k":0}}}`, RetroLessons{true, 1}},
+		{`{"retro":{"lessons":{"k":-3}}}`, RetroLessons{true, 1}},
+		{`{"retro":{"lessons":{"k":2.5}}}`, RetroLessons{true, 4}},
+		{`{"retro":{"lessons":{"k":"3"}}}`, RetroLessons{true, 4}},
+		{`{"retro":{"lessons":null}}`, RetroLessons{true, 4}},
+	} {
+		s, err := ParseSettings([]byte(c.raw), "m1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.RetroLessons != c.want {
+			t.Errorf("%s: %+v, want %+v", c.raw, s.RetroLessons, c.want)
+		}
+	}
+}
+
+// TestParseDeveloperCap: developerCap is a whole number from 0, else 6 (src/settings.ts); itsa.prOpen.storage names the
+// storage remote.
+func TestParseDeveloperCap(t *testing.T) {
+	for in, want := range map[string]int{`{}`: 6, `{"developerCap":0}`: 0, `{"developerCap":2}`: 2, `{"developerCap":-1}`: 6, `{"developerCap":1.5}`: 6, `{"developerCap":"3"}`: 6} {
+		s, err := ParseSettings([]byte(in), "m1")
+		if err != nil || s.DeveloperCap != want {
+			t.Errorf("%s: %d %v, want %d", in, s.DeveloperCap, err, want)
+		}
+	}
+	s, err := ParseSettings([]byte(`{"itsa":{"prOpen":{"storage":"storage"}}}`), "m1")
+	if err != nil || s.Itsa.PrOpenStorage != "storage" {
+		t.Errorf("prOpen.storage: %q %v", s.Itsa.PrOpenStorage, err)
+	}
+}
+
+// settings.diff as src/settings.ts reads it: a class given as an array takes its non-blank strings, anything else keeps
+// the default; the numbers are Number()s, a null refreshSeconds is 0 and a missing one the default.
+func TestDiffSettings(t *testing.T) {
+	for text, want := range map[string]DiffSettings{
+		`{}`: {Classes: DiffClassDefaults, FetchSeconds: 60, RefreshSeconds: 20, MaxPrRefs: 100},
+		`{"diff":{"classes":{"tests":["t/", " ", 3, "*.t"],"docs":"x","other":["y"]},"fetchSeconds":"5","refreshSeconds":null,"maxPrRefs":2.7}}`: {
+			Classes:      map[string][]string{"tests": {"t/", "*.t"}, "lockfiles": DiffClassDefaults["lockfiles"], "generated": DiffClassDefaults["generated"], "docs": DiffClassDefaults["docs"]},
+			FetchSeconds: 5, RefreshSeconds: 0, MaxPrRefs: 2},
+		`{"diff":{"fetchSeconds":0,"refreshSeconds":-1,"maxPrRefs":0.5}}`: {Classes: DiffClassDefaults, FetchSeconds: 60, RefreshSeconds: 20, MaxPrRefs: 100},
+		`{"diff":{"classes":{"docs":[]},"refreshSeconds":"0"}}`: {Classes: map[string][]string{"tests": DiffClassDefaults["tests"], "lockfiles": DiffClassDefaults["lockfiles"], "generated": DiffClassDefaults["generated"], "docs": {}},
+			FetchSeconds: 60, RefreshSeconds: 0, MaxPrRefs: 100},
+		// A wrong type costs only that key's defaults, never the whole settings file.
+		`{"diff":{"classes":[],"fetchSeconds":7}}`: {Classes: DiffClassDefaults, FetchSeconds: 7, RefreshSeconds: 20, MaxPrRefs: 100},
+		`{"diff":{"classes":"x","maxPrRefs":[]}}`:  {Classes: DiffClassDefaults, FetchSeconds: 60, RefreshSeconds: 20, MaxPrRefs: 100},
+		`{"diff":[]}`:  {Classes: DiffClassDefaults, FetchSeconds: 60, RefreshSeconds: 20, MaxPrRefs: 100},
+		`{"diff":"x"}`: {Classes: DiffClassDefaults, FetchSeconds: 60, RefreshSeconds: 20, MaxPrRefs: 100},
+		`{"diff":{"classes":null,"refreshSeconds":1e300}}`: {Classes: DiffClassDefaults, FetchSeconds: 60, RefreshSeconds: 1e300, MaxPrRefs: 100},
+	} {
+		s, err := ParseSettings([]byte(text), "m1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(s.Diff, want) {
+			t.Errorf("%s: %+v, want %+v", text, s.Diff, want)
+		}
 	}
 }

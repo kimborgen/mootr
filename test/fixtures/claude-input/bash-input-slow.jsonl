@@ -1,0 +1,4 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-21T06:24:49.139Z","content":"x"}
+{"type":"file-history-snapshot","messageId":"m1","isSnapshotUpdate":false}
+{"type":"user","timestamp":"2026-10-21T06:24:46.779Z","message":{"role":"user","content":"<bash-input> cd /work/web && sudo -n env \"PATH=$PATH\" npx tool install-deps 2>&1 | tail -5; df -h / | tail -1</bash-input>"}}
+{"type":"user","timestamp":"2026-10-21T06:26:06.780Z","message":{"role":"user","content":"<bash-stdout>done</bash-stdout><bash-stderr></bash-stderr>"}}

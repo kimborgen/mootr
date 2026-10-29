@@ -1,1 +1,1 @@
-[stam] You are unpaused to test your account: stam holds you and the other agents on it for {{blocker}}. Continue your work. If this turn reaches the model, stam clears the blocker for everyone; if it fails again, you are paused again until the next probe.
+[stam] You are unpaused to test your account: mootr holds you and the other agents on it for {{blocker}}. Continue your work. If this turn reaches the model, mootr clears the blocker for everyone; if it fails again, you are paused again until the next probe.

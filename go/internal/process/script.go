@@ -91,7 +91,7 @@ func RunDetached(d Detached) (ScriptResult, error) {
 	}
 	cmd := exec.Command(d.Node, append([]string{"--no-warnings", d.Script}, d.Args...)...)
 	cmd.Dir = d.Cwd
-	cmd.Env = append(env, "STAM_GATE_REPO="+d.Cwd)
+	cmd.Env = append(env, "STAM_GATE_REPO="+d.Cwd, "MOOTR_GATE_REPO="+d.Cwd)
 	cmd.Stdin = nil
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

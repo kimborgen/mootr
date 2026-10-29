@@ -1,5 +1,5 @@
 {
-  "note": "Defaults shipped with stam. Override or extend any entry in STAM_HOME/registry.json; entries there replace these by key. null means unknown.",
+  "note": "Defaults shipped with mootr. Override or extend any entry in STAM_HOME/registry.json; entries there replace these by key. null means unknown.",
   "delegation": "A missing capability is not a dead end: find an agent that has it with find_agents, or spawn one with spawn_agent, and delegate that part of the task.",
   "harnesses": {
     "claude": {
@@ -8,7 +8,7 @@
       "tools": { "bash": true, "file_edit": true, "web_search": true, "web_fetch": true, "subagents": true }
     },
     "opencode": {
-      "description": "OpenCode 2, run against stam's private OpenCode server.",
+      "description": "OpenCode 2, run against mootr's private OpenCode server.",
       "efforts": [],
       "tools": { "bash": true, "file_edit": true, "web_search": null, "web_fetch": true, "subagents": true }
     },

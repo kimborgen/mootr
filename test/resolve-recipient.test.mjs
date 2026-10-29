@@ -32,8 +32,8 @@ const fake = (agents, count) => createServer((req, res) => {
 const servers = [fake(peerAgents), fake([], () => twinCalls++)];
 for (const sv of servers) await new Promise((r) => sv.listen(0, '127.0.0.1', r));
 writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [
-  { name: 'storage', url: `http://127.0.0.1:${servers[0].address().port}`, token: 't' },
-  { name: 'twin', url: `http://127.0.0.1:${servers[1].address().port}`, token: 't' },
+  { name: 'storage', url: `http://127.0.0.1:${servers[0].address().port}`, token: 'test-peer-token' },
+  { name: 'twin', url: `http://127.0.0.1:${servers[1].address().port}`, token: 'test-peer-token' },
 ] }));
 
 const db = await import('../src/db.ts');

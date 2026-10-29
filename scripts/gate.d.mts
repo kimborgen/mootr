@@ -30,6 +30,8 @@ export function predictPr(opts: { repo: string; cache: string; base: string; hea
   rows: unknown[];
   added: { gate: string; reasons: { why: string; paths: string[] }[] }[];
   tests: string[];
+  unknownKinds: string[];
+  dropped: { gate: string; why: string; paths: string[] }[];
 }>;
 // The merge queue's helpers, which src/pr-merge.ts reads for pr_merge's status (S-2279).
 // The gate lock's path ($STAM_GATE_LOCK, else the live home's gate.lock), and the ticket queue beside it.
@@ -37,10 +39,21 @@ export function lockFile(env: Record<string, string | undefined>): string;
 export function queueDir(lock: string): string;
 // The live tickets in arrival order; stale ones are removed.
 export function tickets(queue: string, keep?: string): string[];
-export function ticketBodyOf(queue: string, name: string): { pid: number; start: string; boot: string; pr: string } | null;
+export function ticketBodyOf(queue: string, name: string): { pid: number; start: string; boot: string; pr: string; incident?: boolean } | null;
+// The ticket's merge-or-cancel claim (S-3679): claimDecision creates it exclusively and returns the word that holds it.
+export function claimDecision(queue: string, name: string, word: 'merge' | 'cancel'): 'merge' | 'cancel';
+export function readDecision(queue: string, name: string): 'merge' | 'cancel' | null;
+export function decisionFile(queue: string, name: string): string;
+// The live tickets in serving order: incident tickets first, then arrival order (S-3324).
+export function orderedTickets(queue: string, keep?: string): string[];
+// Sets or clears a ticket's incident mark (S-3324).
+export function markTicket(queue: string, name: string, incident: boolean): void;
 // A ticket's 1-based place among the live ones, and the PR of the first; null when it isn't live.
 export function queuePosition(queue: string, ticket: string): { rank: number; first: string } | null;
 // The merge train's record beside the lock (S-3067), which pr_merge status reads: the train's PRs, step and start, and its process.
 export function trainFile(lock: string): string;
 // A process's identity as a ticket records it: its start time ('' when it is gone, a zombie, or /proc is missing) and the boot id.
 export function processIdentity(pid: number): { pid: number; start: string; boot: string };
+// The instruction files, and a digest of the instruction-file changes HEAD makes against BASE (S-3833).
+export const INSTRUCTION_PATH: RegExp;
+export function instructionDigest(repo: string, base: string, head: string): string;

@@ -1,0 +1,1389 @@
+[
+ {
+  "layout": {
+   "version": 0,
+   "current": null,
+   "agentWorlds": {},
+   "worlds": {}
+  },
+  "ops": [
+   {
+    "op": "open",
+    "world": "main",
+    "key": "agent:a"
+   },
+   {
+    "op": "open",
+    "world": "main",
+    "key": "agent:b",
+    "split": "right"
+   },
+   {
+    "op": "open",
+    "world": "main",
+    "key": "agent:c",
+    "split": "down",
+    "background": true
+   },
+   {
+    "op": "open",
+    "world": "main",
+    "key": "agent:a"
+   },
+   {
+    "op": "open",
+    "world": "main",
+    "key": "agent:d",
+    "pane": "n1"
+   },
+   {
+    "op": "open",
+    "world": "main",
+    "key": "agent:e",
+    "pane": "nope"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 0,
+   "current": null,
+   "agentWorlds": {},
+   "worlds": {}
+  },
+  "ops": [
+   {
+    "op": "current",
+    "world": "a9"
+   },
+   {
+    "op": "current",
+    "world": "t:th1"
+   },
+   {
+    "op": "current",
+    "world": "w:itsa:S-1"
+   },
+   {
+    "op": "current",
+    "world": "w:config"
+   },
+   {
+    "op": "current",
+    "world": null
+   },
+   {
+    "op": "current"
+   },
+   {
+    "op": "current",
+    "world": 5
+   },
+   {
+    "op": "dropWorld",
+    "world": "a9"
+   },
+   {
+    "op": "dropWorld",
+    "world": "w:config"
+   },
+   {
+    "op": "dropWorld"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 3,
+   "current": "a1",
+   "agentWorlds": {
+    "a1": {
+     "root": {
+      "id": "s1",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "agent:a1",
+         "view:a1"
+        ],
+        "active": "agent:a1"
+       },
+       {
+        "id": "p2",
+        "tabs": [
+         "usage"
+        ],
+        "active": "usage"
+       }
+      ],
+      "sizes": [
+       1,
+       1
+      ]
+     },
+     "focused": "p1"
+    }
+   },
+   "worlds": {
+    "w2": {
+     "root": {
+      "id": "q1",
+      "tabs": [
+       "config"
+      ],
+      "active": "config"
+     },
+     "focused": "q1",
+     "tree": "row"
+    }
+   }
+  },
+  "ops": [
+   {
+    "op": "close",
+    "world": "main",
+    "key": "view:a1"
+   },
+   {
+    "op": "close",
+    "world": "main",
+    "key": "usage"
+   },
+   {
+    "op": "close",
+    "world": "main",
+    "key": "agent:a1"
+   },
+   {
+    "op": "close",
+    "world": "main",
+    "key": "nope"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 3,
+   "current": "a1",
+   "agentWorlds": {
+    "a1": {
+     "root": {
+      "id": "s1",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "agent:a1",
+         "view:a1"
+        ],
+        "active": "agent:a1"
+       },
+       {
+        "id": "p2",
+        "tabs": [
+         "usage"
+        ],
+        "active": "usage"
+       }
+      ],
+      "sizes": [
+       1,
+       1
+      ]
+     },
+     "focused": "p1"
+    }
+   },
+   "worlds": {
+    "w2": {
+     "root": {
+      "id": "q1",
+      "tabs": [
+       "config"
+      ],
+      "active": "config"
+     },
+     "focused": "q1",
+     "tree": "row"
+    }
+   }
+  },
+  "ops": [
+   {
+    "op": "swap",
+    "world": "main",
+    "key": "agent:a1",
+    "with": "view:a1"
+   },
+   {
+    "op": "swap",
+    "world": "main",
+    "key": "view:a1",
+    "with": "usage"
+   },
+   {
+    "op": "swap",
+    "world": "main",
+    "key": "usage",
+    "with": "usage"
+   },
+   {
+    "op": "swap",
+    "world": "main",
+    "key": "usage",
+    "with": ""
+   },
+   {
+    "op": "swap",
+    "world": "main",
+    "key": "usage"
+   },
+   {
+    "op": "swap",
+    "world": "main",
+    "key": "nope",
+    "with": "x"
+   },
+   {
+    "op": "swap",
+    "world": "main",
+    "key": "usage",
+    "with": "fresh"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 3,
+   "current": "a1",
+   "agentWorlds": {
+    "a1": {
+     "root": {
+      "id": "s1",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "agent:a1",
+         "view:a1"
+        ],
+        "active": "agent:a1"
+       },
+       {
+        "id": "p2",
+        "tabs": [
+         "usage"
+        ],
+        "active": "usage"
+       }
+      ],
+      "sizes": [
+       1,
+       1
+      ]
+     },
+     "focused": "p1"
+    }
+   },
+   "worlds": {
+    "w2": {
+     "root": {
+      "id": "q1",
+      "tabs": [
+       "config"
+      ],
+      "active": "config"
+     },
+     "focused": "q1",
+     "tree": "row"
+    }
+   }
+  },
+  "ops": [
+   {
+    "op": "move",
+    "world": "main",
+    "key": "usage",
+    "to": "p1"
+   },
+   {
+    "op": "move",
+    "world": "main",
+    "key": "agent:a1",
+    "to": "p1",
+    "side": "left"
+   },
+   {
+    "op": "move",
+    "world": "main",
+    "key": "view:a1",
+    "to": "p1",
+    "before": "usage"
+   },
+   {
+    "op": "move",
+    "world": "main",
+    "key": "usage",
+    "to": "p1",
+    "before": "usage"
+   },
+   {
+    "op": "move",
+    "world": "main",
+    "key": "usage",
+    "to": "zz"
+   },
+   {
+    "op": "move",
+    "world": "main",
+    "key": "usage",
+    "to": "p1",
+    "side": "up"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 7,
+   "current": null,
+   "agentWorlds": {
+    "_home": {
+     "root": {
+      "id": "s1",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "a"
+        ],
+        "active": "a"
+       },
+       {
+        "id": "s2",
+        "split": "col",
+        "children": [
+         {
+          "id": "p2",
+          "tabs": [
+           "b"
+          ],
+          "active": "b"
+         },
+         {
+          "id": "s3",
+          "split": "row",
+          "children": [
+           {
+            "id": "p3",
+            "tabs": [
+             "c"
+            ],
+            "active": "c"
+           },
+           {
+            "id": "p4",
+            "tabs": [
+             "d"
+            ],
+            "active": "d"
+           }
+          ],
+          "sizes": [
+           2,
+           1
+          ]
+         }
+        ],
+        "sizes": [
+         1,
+         3
+        ]
+       }
+      ],
+      "sizes": [
+       1,
+       1
+      ]
+     },
+     "focused": "p3"
+    }
+   },
+   "worlds": {}
+  },
+  "ops": [
+   {
+    "op": "close",
+    "world": "main",
+    "key": "c"
+   },
+   {
+    "op": "close",
+    "world": "main",
+    "key": "b"
+   },
+   {
+    "op": "close",
+    "world": "main",
+    "key": "d"
+   },
+   {
+    "op": "close",
+    "world": "main",
+    "key": "a"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 7,
+   "current": null,
+   "agentWorlds": {
+    "_home": {
+     "root": {
+      "id": "s1",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "a"
+        ],
+        "active": "a"
+       },
+       {
+        "id": "s2",
+        "split": "col",
+        "children": [
+         {
+          "id": "p2",
+          "tabs": [
+           "b"
+          ],
+          "active": "b"
+         },
+         {
+          "id": "s3",
+          "split": "row",
+          "children": [
+           {
+            "id": "p3",
+            "tabs": [
+             "c"
+            ],
+            "active": "c"
+           },
+           {
+            "id": "p4",
+            "tabs": [
+             "d"
+            ],
+            "active": "d"
+           }
+          ],
+          "sizes": [
+           2,
+           1
+          ]
+         }
+        ],
+        "sizes": [
+         1,
+         3
+        ]
+       }
+      ],
+      "sizes": [
+       1,
+       1
+      ]
+     },
+     "focused": "p3"
+    }
+   },
+   "worlds": {}
+  },
+  "ops": [
+   {
+    "op": "closePane",
+    "world": "main",
+    "pane": "p2"
+   },
+   {
+    "op": "closePane",
+    "world": "main",
+    "pane": "p1"
+   },
+   {
+    "op": "closePane",
+    "world": "main",
+    "pane": "p3"
+   },
+   {
+    "op": "closePane",
+    "world": "main",
+    "pane": "p4"
+   },
+   {
+    "op": "closePane",
+    "world": "main",
+    "pane": "zz"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 7,
+   "current": null,
+   "agentWorlds": {
+    "_home": {
+     "root": {
+      "id": "s1",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "a"
+        ],
+        "active": "a"
+       },
+       {
+        "id": "s2",
+        "split": "col",
+        "children": [
+         {
+          "id": "p2",
+          "tabs": [
+           "b"
+          ],
+          "active": "b"
+         },
+         {
+          "id": "s3",
+          "split": "row",
+          "children": [
+           {
+            "id": "p3",
+            "tabs": [
+             "c"
+            ],
+            "active": "c"
+           },
+           {
+            "id": "p4",
+            "tabs": [
+             "d"
+            ],
+            "active": "d"
+           }
+          ],
+          "sizes": [
+           2,
+           1
+          ]
+         }
+        ],
+        "sizes": [
+         1,
+         3
+        ]
+       }
+      ],
+      "sizes": [
+       1,
+       1
+      ]
+     },
+     "focused": "p3"
+    }
+   },
+   "worlds": {}
+  },
+  "ops": [
+   {
+    "op": "split",
+    "world": "main",
+    "pane": "p3",
+    "side": "right"
+   },
+   {
+    "op": "split",
+    "world": "main",
+    "pane": "p1",
+    "side": "down"
+   },
+   {
+    "op": "split",
+    "world": "main",
+    "pane": "p2",
+    "side": "bogus"
+   },
+   {
+    "op": "split",
+    "world": "main",
+    "pane": "p2"
+   },
+   {
+    "op": "split",
+    "world": "main",
+    "pane": "nope",
+    "side": "left"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 3,
+   "current": "a1",
+   "agentWorlds": {
+    "a1": {
+     "root": {
+      "id": "s1",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "agent:a1",
+         "view:a1"
+        ],
+        "active": "agent:a1"
+       },
+       {
+        "id": "p2",
+        "tabs": [
+         "usage"
+        ],
+        "active": "usage"
+       }
+      ],
+      "sizes": [
+       1,
+       1
+      ]
+     },
+     "focused": "p1"
+    }
+   },
+   "worlds": {
+    "w2": {
+     "root": {
+      "id": "q1",
+      "tabs": [
+       "config"
+      ],
+      "active": "config"
+     },
+     "focused": "q1",
+     "tree": "row"
+    }
+   }
+  },
+  "ops": [
+   {
+    "op": "split",
+    "world": "main",
+    "pane": "p1",
+    "side": "right"
+   },
+   {
+    "op": "split",
+    "world": "main",
+    "pane": "p1",
+    "side": "up"
+   },
+   {
+    "op": "split",
+    "world": "w2",
+    "pane": "q1",
+    "side": "left",
+    "ids": [
+     "i1",
+     "i2"
+    ]
+   },
+   {
+    "op": "open",
+    "world": "w2",
+    "key": "k",
+    "split": "down",
+    "ids": [
+     "only"
+    ]
+   },
+   {
+    "op": "open",
+    "world": "w2",
+    "key": "k2",
+    "ids": "bad"
+   },
+   {
+    "op": "open",
+    "world": "w2",
+    "key": "k3",
+    "ids": [
+     "bad id!"
+    ]
+   },
+   {
+    "op": "open",
+    "world": "w2",
+    "key": "k4",
+    "ids": [
+     3
+    ]
+   },
+   {
+    "op": "open",
+    "world": "w2",
+    "key": "k5",
+    "split": "left",
+    "ids": null
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 3,
+   "current": "a1",
+   "agentWorlds": {
+    "a1": {
+     "root": {
+      "id": "s1",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "agent:a1",
+         "view:a1"
+        ],
+        "active": "agent:a1"
+       },
+       {
+        "id": "p2",
+        "tabs": [
+         "usage"
+        ],
+        "active": "usage"
+       }
+      ],
+      "sizes": [
+       1,
+       1
+      ]
+     },
+     "focused": "p1"
+    }
+   },
+   "worlds": {
+    "w2": {
+     "root": {
+      "id": "q1",
+      "tabs": [
+       "config"
+      ],
+      "active": "config"
+     },
+     "focused": "q1",
+     "tree": "row"
+    }
+   }
+  },
+  "ops": [
+   {
+    "op": "activate",
+    "world": "main",
+    "pane": "p1",
+    "key": "view:a1"
+   },
+   {
+    "op": "activate",
+    "world": "main",
+    "pane": "p1",
+    "key": "usage"
+   },
+   {
+    "op": "activate",
+    "world": "main",
+    "pane": "zz",
+    "key": "usage"
+   },
+   {
+    "op": "focus",
+    "world": "main",
+    "pane": "p2"
+   },
+   {
+    "op": "focus",
+    "world": "main",
+    "pane": "zz"
+   },
+   {
+    "op": "focus",
+    "world": "main",
+    "pane": 5
+   },
+   {
+    "op": "tabBar",
+    "world": "main",
+    "pane": "p1",
+    "on": true
+   },
+   {
+    "op": "tabBar",
+    "world": "main",
+    "pane": "p1",
+    "on": false
+   },
+   {
+    "op": "tabBar",
+    "world": "main",
+    "pane": "p1"
+   },
+   {
+    "op": "tabBar",
+    "world": "main",
+    "pane": "p1",
+    "on": true
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 3,
+   "current": "a1",
+   "agentWorlds": {
+    "a1": {
+     "root": {
+      "id": "s1",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "agent:a1",
+         "view:a1"
+        ],
+        "active": "agent:a1"
+       },
+       {
+        "id": "p2",
+        "tabs": [
+         "usage"
+        ],
+        "active": "usage"
+       }
+      ],
+      "sizes": [
+       1,
+       1
+      ]
+     },
+     "focused": "p1"
+    }
+   },
+   "worlds": {
+    "w2": {
+     "root": {
+      "id": "q1",
+      "tabs": [
+       "config"
+      ],
+      "active": "config"
+     },
+     "focused": "q1",
+     "tree": "row"
+    }
+   }
+  },
+  "ops": [
+   {
+    "op": "resize",
+    "world": "main",
+    "split": "s1",
+    "sizes": [
+     3,
+     1
+    ]
+   },
+   {
+    "op": "resize",
+    "world": "main",
+    "split": "s1",
+    "sizes": [
+     3
+    ]
+   },
+   {
+    "op": "resize",
+    "world": "main",
+    "split": "s1",
+    "sizes": "x"
+   },
+   {
+    "op": "resize",
+    "world": "main",
+    "split": "nope",
+    "sizes": [
+     1,
+     1
+    ]
+   },
+   {
+    "op": "resize",
+    "world": "main",
+    "split": "s1",
+    "sizes": [
+     0,
+     -1
+    ]
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 3,
+   "current": "a1",
+   "agentWorlds": {
+    "a1": {
+     "root": {
+      "id": "s1",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "agent:a1",
+         "view:a1"
+        ],
+        "active": "agent:a1"
+       },
+       {
+        "id": "p2",
+        "tabs": [
+         "usage"
+        ],
+        "active": "usage"
+       }
+      ],
+      "sizes": [
+       1,
+       1
+      ]
+     },
+     "focused": "p1"
+    }
+   },
+   "worlds": {
+    "w2": {
+     "root": {
+      "id": "q1",
+      "tabs": [
+       "config"
+      ],
+      "active": "config"
+     },
+     "focused": "q1",
+     "tree": "row"
+    }
+   }
+  },
+  "ops": [
+   {
+    "op": "setRoot",
+    "world": "main",
+    "root": {
+     "id": "r",
+     "split": "col",
+     "children": [
+      {
+       "id": "x",
+       "tabs": [
+        "a"
+       ],
+       "active": "a"
+      },
+      {
+       "id": "y",
+       "tabs": [
+        "b",
+        "c"
+       ],
+       "active": "c"
+      }
+     ],
+     "sizes": [
+      1,
+      1
+     ]
+    },
+    "focusKey": "c"
+   },
+   {
+    "op": "setRoot",
+    "world": "main",
+    "root": {
+     "id": "z",
+     "tabs": [
+      "q"
+     ],
+     "active": "q",
+     "extra": 1
+    },
+    "meta": {
+     "tree": "col",
+     "saved": {
+      "id": "old",
+      "tabs": [
+       "a"
+      ],
+      "active": "a"
+     },
+     "mainPane": "z",
+     "treeSig": "sig"
+    }
+   },
+   {
+    "op": "setRoot",
+    "world": "main",
+    "root": {
+     "id": "z2",
+     "tabs": [
+      "q"
+     ],
+     "active": "q"
+    },
+    "meta": {
+     "mainPane": "z2"
+    }
+   },
+   {
+    "op": "setRoot",
+    "world": "main",
+    "root": {
+     "id": "e",
+     "split": "row",
+     "children": [],
+     "sizes": []
+    }
+   },
+   {
+    "op": "setRoot",
+    "world": "main"
+   },
+   {
+    "op": "setRoot",
+    "world": "main",
+    "root": null
+   },
+   {
+    "op": "setRoot",
+    "world": "w2",
+    "root": {
+     "id": "w",
+     "tabs": [
+      "config"
+     ],
+     "active": "config"
+    },
+    "focusKey": "nope",
+    "meta": 0
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 3,
+   "current": "a1",
+   "agentWorlds": {
+    "a1": {
+     "root": {
+      "id": "s1",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "agent:a1",
+         "view:a1"
+        ],
+        "active": "agent:a1"
+       },
+       {
+        "id": "p2",
+        "tabs": [
+         "usage"
+        ],
+        "active": "usage"
+       }
+      ],
+      "sizes": [
+       1,
+       1
+      ]
+     },
+     "focused": "p1"
+    }
+   },
+   "worlds": {
+    "w2": {
+     "root": {
+      "id": "q1",
+      "tabs": [
+       "config"
+      ],
+      "active": "config"
+     },
+     "focused": "q1",
+     "tree": "row"
+    }
+   }
+  },
+  "ops": [
+   {
+    "op": "nope",
+    "world": "main"
+   },
+   {
+    "world": "main"
+   },
+   {
+    "op": "open"
+   },
+   {
+    "op": "open",
+    "world": 5,
+    "key": "x"
+   },
+   {
+    "op": "open",
+    "world": "main"
+   },
+   {
+    "op": "close",
+    "world": "main"
+   },
+   {
+    "op": "activate",
+    "world": "main",
+    "pane": "p1"
+   },
+   {
+    "op": "move",
+    "world": "main",
+    "key": "usage"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 1,
+   "current": null,
+   "agentWorlds": {
+    "x": {
+     "root": {
+      "id": "s",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "image:dead.1",
+         "agent:x"
+        ],
+        "active": "image:dead.1"
+       },
+       {
+        "id": "p2",
+        "tabs": [
+         "image:live.2"
+        ],
+        "active": "image:live.2"
+       },
+       {
+        "id": "p3",
+        "tabs": [
+         "image:gone.3"
+        ],
+        "active": "image:gone.3"
+       }
+      ],
+      "sizes": [
+       1,
+       1,
+       1
+      ]
+     },
+     "focused": "p3"
+    }
+   },
+   "worlds": {
+    "w": {
+     "root": {
+      "id": "q",
+      "tabs": [
+       "image:dead.9"
+      ],
+      "active": "image:dead.9"
+     },
+     "focused": "q"
+    }
+   }
+  },
+  "ops": [
+   {
+    "op": "open",
+    "world": "x",
+    "key": "image:live.5",
+    "pane": "p3"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 2,
+   "current": "a",
+   "agentWorlds": {
+    "a": {
+     "root": {
+      "id": "s",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "a"
+        ],
+        "active": "a"
+       },
+       {
+        "id": "t",
+        "split": "row",
+        "children": [
+         {
+          "id": "p2",
+          "tabs": [
+           "b"
+          ],
+          "active": "b"
+         },
+         {
+          "id": "p3",
+          "tabs": [
+           "c"
+          ],
+          "active": "c"
+         }
+        ],
+        "sizes": [
+         1,
+         3
+        ]
+       }
+      ],
+      "sizes": [
+       2,
+       2
+      ]
+     },
+     "focused": "p2"
+    }
+   },
+   "worlds": {}
+  },
+  "ops": [
+   {
+    "op": "close",
+    "world": "a",
+    "key": "a"
+   },
+   {
+    "op": "open",
+    "world": "a",
+    "key": "z",
+    "pane": "p3",
+    "split": "right"
+   },
+   {
+    "op": "move",
+    "world": "a",
+    "key": "z",
+    "to": "p2",
+    "side": "left"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 0,
+   "current": null,
+   "agentWorlds": {
+    "bad": {
+     "root": {
+      "id": "s",
+      "split": "row",
+      "children": [
+       {
+        "id": "p1",
+        "tabs": [
+         "a"
+        ],
+        "active": "a"
+       }
+      ],
+      "sizes": [
+       "x"
+      ]
+     },
+     "focused": "p1"
+    }
+   },
+   "worlds": {}
+  },
+  "ops": [
+   {
+    "op": "open",
+    "world": "bad",
+    "key": "b",
+    "split": "right"
+   }
+  ]
+ },
+ {
+  "layout": {
+   "version": 0,
+   "current": null,
+   "agentWorlds": {},
+   "worlds": {
+    "main": {
+     "root": {
+      "id": "m",
+      "tabs": [
+       "x"
+      ],
+      "active": "x"
+     },
+     "focused": "m"
+    }
+   }
+  },
+  "ops": [
+   {
+    "op": "open",
+    "world": "main",
+    "key": "y"
+   },
+   {
+    "op": "open",
+    "world": "_home",
+    "key": "z"
+   }
+  ]
+ }
+]

@@ -51,7 +51,7 @@ test('every file, under the daemon home and the default home, is denied by each 
       const p = `${h}/${f}`;
       for (const tool of ['Read', 'Edit', 'Write']) assert.ok(claude.includes(`${tool}(/${p})`), `claude ${tool} ${p}`);
       for (const action of ['read', 'edit']) assert.ok(session.some((r) => r.action === action && r.resource === p && r.effect === 'deny'), `opencode ${action} ${p}`);
-      assert.equal(sandbox[p], 'none', `codex ${p}`);
+      assert.equal(sandbox[codex.sandboxPath(p)], 'none', `codex ${p}`);
     }
   }
   for (const pattern of secrets.secretCommandPatterns()) {

@@ -52,6 +52,8 @@ type Agent struct {
 	Type                  *string                    `json:"type"`
 	PausedBy              *string                    `json:"paused_by"`
 	ForwardedTo           *string                    `json:"forwarded_to"`
+	LaunchedAt            *string                    `json:"launched_at"`
+	ResumedAt             *string                    `json:"resumed_at"`
 	// TokenHash is the sha256 of the agent's launch token (src/agent-token.ts). The api never sends it (S-2519), so it
 	// renders as redacted in JSON, fmt and slog.
 	TokenHash *Secret `json:"-"`
@@ -65,7 +67,8 @@ var agentColumns = []string{
 	"lifecycle", "activity", "activity_detail", "context_tokens", "context_window", "workspace", "personal_workspace",
 	"standing", "pending_action", "idle_since", "idle_notified", "context_level", "tokens_after_compaction",
 	"capabilities", "permission_mode", "permission_source", "visibility", "child_notices", "last_message",
-	"first_prompt", "usage_last", "kind", "type", "paused_by", "forwarded_to", "token_hash", "created_at", "updated_at",
+	"first_prompt", "usage_last", "kind", "type", "paused_by", "forwarded_to", "launched_at", "resumed_at", "token_hash",
+	"created_at", "updated_at",
 }
 
 var selectAgents = "SELECT " + strings.Join(agentColumns, ", ") + " FROM agents"
@@ -116,6 +119,8 @@ func scanAgent(stmt *sqlite.Stmt) Agent {
 	a.Type = c.nullText()
 	a.PausedBy = c.nullText()
 	a.ForwardedTo = c.nullText()
+	a.LaunchedAt = c.nullText()
+	a.ResumedAt = c.nullText()
 	if s := c.nullText(); s != nil {
 		v := Secret(*s)
 		a.TokenHash = &v
@@ -172,6 +177,12 @@ func (d *DB) GetAgent(ctx context.Context, ref string) (Agent, error) {
 // AgentByTokenHash is the agent whose launch token hashes to hash (src/db.ts agentByTokenHash).
 func (d *DB) AgentByTokenHash(ctx context.Context, hash string) (Agent, error) {
 	return d.oneAgent(ctx, "WHERE token_hash = ?", hash)
+}
+
+// AgentBySession is the agent whose harness session is sid (src/db.ts getAgentBySession): an OpenCode event names its
+// session, not its agent.
+func (d *DB) AgentBySession(ctx context.Context, sid string) (Agent, error) {
+	return d.oneAgent(ctx, "WHERE session_id = ?", sid)
 }
 
 // ListAgents is every agent, oldest first.
@@ -259,16 +270,37 @@ type Visibility struct {
 	Registry bool   `json:"registry"`
 }
 
-// VisibilityOf decodes the visibility column over the open default, as src/org.ts visibilityOf does: a missing field
-// or a column that fails to parse keeps the default.
+// VisibilityOf decodes the visibility column as src/org.ts visibilityOf does (S-4003). A NULL column or a missing field
+// keeps the open default. A column that isn't a JSON object fails closed, and so does each field with a wrong type or
+// value: a bad column must never widen what an agent may reach or see.
 func (a Agent) VisibilityOf() Visibility {
-	v := Visibility{Reach: "all", Siblings: true, Registry: true}
-	if a.Visibility != nil {
-		open := v
-		if err := json.Unmarshal([]byte(*a.Visibility), &v); err != nil {
-			return open
-		}
+	open := Visibility{Reach: "all", Siblings: true, Registry: true}
+	if a.Visibility == nil {
+		return open
 	}
+	closed := Visibility{Reach: "parent", Siblings: false, Registry: false}
+	var o map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(*a.Visibility), &o); err != nil || o == nil {
+		return closed
+	}
+	v := open
+	if raw, ok := o["reach"]; ok {
+		var s string
+		if json.Unmarshal(raw, &s) != nil || (s != "all" && s != "tree" && s != "parent") {
+			s = closed.Reach
+		}
+		v.Reach = s
+	}
+	flag := func(k string, def bool) bool {
+		raw, ok := o[k]
+		if !ok {
+			return def
+		}
+		// Only the literal true opens it: false, null (which decodes into a bool without an error) and any other value close it.
+		return string(raw) == "true"
+	}
+	v.Siblings = flag("siblings", open.Siblings)
+	v.Registry = flag("registry", open.Registry)
 	return v
 }
 

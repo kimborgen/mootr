@@ -16,13 +16,13 @@ export const PUBLIC_AGENT_COLUMNS = [
   'workspace', 'personal_workspace', 'standing', 'pending_action', 'idle_since', 'idle_notified',
   'context_level', 'tokens_after_compaction', 'capabilities', 'permission_mode', 'permission_source',
   'visibility', 'child_notices', 'last_message', 'first_prompt', 'usage_last', 'kind', 'type',
-  'paused_by', 'forwarded_to', 'created_at', 'updated_at',
+  'paused_by', 'forwarded_to', 'launched_at', 'resumed_at', 'created_at', 'updated_at',
 ] as const;
 
 // Fields a route adds to a row before it goes out (list, detail, spawn replies, peer rows).
 export const PUBLIC_AGENT_EXTRAS = [
   'parents', 'unread', 'cost_usd', 'cost', 'cost_raw', 'pending_requests', 'chief_of_staff', 'blockers',
-  'waits', 'resting', 'in_itsa', 'view', 'load', 'default_view', 'warning', 'pending', 'busy', 'busy_at',
+  'waits', 'open_ask', 'open_ask_detail', 'resting', 'in_itsa', 'view', 'load', 'default_view', 'warning', 'pending', 'busy', 'busy_at',
   // POST /api/register with token: true returns the new agent's own launch token to that agent, once.
   'token',
 ] as const;
@@ -40,6 +40,35 @@ export function publicAgent<T extends object>(a: T): Omit<T, 'token_hash'> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(a)) if (ALLOWED.has(k)) out[k] = v;
   return out as Omit<T, 'token_hash'>;
+}
+
+// The columns a row of the agent list (GET /api/agents) sends as null (S-3808). first_prompt is the whole spawn brief,
+// several KB and never shortened, so over every archived agent it was most of a 22 MB list that the web polls every
+// 2 s and each MCP ITSA reply reads; no reader of the list uses it. The detail route and spawn replies keep it.
+export const LIST_NULLED = ['first_prompt'] as const;
+const NULLED = new Set<string>(LIST_NULLED);
+
+// publicAgent for a row of the agent list: the same keys, with LIST_NULLED sent as null.
+export function listedAgent<T extends object>(a: T): Omit<T, 'token_hash'> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(a)) if (ALLOWED.has(k)) out[k] = NULLED.has(k) ? null : v;
+  return out as Omit<T, 'token_hash'>;
+}
+
+// The lifecycle groups GET /api/agents can list (S-3816): live is active or paused, stopped is shut down.
+export const LIST_STATES = ['live', 'stopped', 'archived', 'all'] as const;
+const GROUP: Record<string, string> = { active: 'live', paused: 'live', shut_down: 'stopped', archived: 'archived' };
+
+// Which agents a GET /api/agents lists, from its `state` and `ids` (S-3816). `state` is a comma list of LIST_STATES;
+// without it (or empty) the list is live agents only, since ~99% of the registry is archived and every open tab polls the list.
+// `ids` (ids or names, comma-separated) adds those agents in any state, and alone lists only them, for a caller that
+// resolves names. Null for a state it doesn't know.
+export function listFilter(state: string | null, ids: string | null): ((a: { id: string; name: string; lifecycle: string }) => boolean) | null {
+  const want = new Set((ids ?? '').split(',').map((s) => s.trim()).filter(Boolean));
+  const groups = new Set((state || (ids === null ? 'live' : '')).split(',').map((s) => s.trim()).filter(Boolean));
+  if ([...groups].some((g) => !(LIST_STATES as readonly string[]).includes(g))) return null;
+  const all = groups.has('all');
+  return (a) => all || groups.has(GROUP[a.lifecycle] ?? '') || want.has(a.id) || want.has(a.name);
 }
 
 // Replaces every agent row anywhere in a reply with its public shape; other objects pass through.

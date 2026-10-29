@@ -49,6 +49,13 @@ cleanup_socks() {
   [ -n "$XSOCK" ] && tmux -L "$XSOCK" kill-server 2>/dev/null || true
   [ -n "$YSOCK" ] && tmux -L "$YSOCK" kill-server 2>/dev/null || true
   rm -rf "$XDIR" "$YDIR"
+  # The file goes only once the server is down: kill-server worked, or tmux says no server runs.
+  for s in "$ORPHAN" "$YOUNG" "$HSOCK" "$XSOCK" "$YSOCK"; do
+    [ -n "$s" ] || continue
+    if tmux -L "$s" kill-server 2>/dev/null || timeout 5 tmux -L "$s" ls 2>&1 | grep -q "no server running"; then
+      rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$s"
+    fi
+  done
   for d in "$ODIR" "$KDIR"; do
     [ -f "$d/child" ] && kill "$(cat "$d/child")" 2>/dev/null
     [ -n "$KSHELL" ] && [ "$d" = "$KDIR" ] && kill "$KSHELL" 2>/dev/null
@@ -65,9 +72,9 @@ tmux -L "$YOUNG" new-session -d -s young 'sleep 300'
 
 echo "== a test shell under each owner: the archived owner's is swept, the active owner's is kept"
 for d in "$ODIR" "$KDIR"; do mkdir -p "$d/home"; done
-sh -c 'env STAM_HOME="$1/home" sleep 300 & echo $! >"$1/child"; wait' sh "$ODIR" &
+sh -c 'env STAM_HOME="$1/home" MOOTR_HOME="$1/home" sleep 300 & echo $! >"$1/child"; wait' sh "$ODIR" &
 OSHELL=$!
-sh -c 'env STAM_HOME="$1/home" sleep 300 & echo $! >"$1/child"; wait' sh "$KDIR" &
+sh -c 'env STAM_HOME="$1/home" MOOTR_HOME="$1/home" sleep 300 & echo $! >"$1/child"; wait' sh "$KDIR" &
 KSHELL=$!
 for _i in $(seq 1 40); do [ -s "$ODIR/child" ] && [ -s "$KDIR/child" ] && break; sleep 0.1; done
 OCHILD=$(cat "$ODIR/child")

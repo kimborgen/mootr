@@ -39,7 +39,7 @@ test('ignored on the live home even with the gate', () => {
 test('the service unit keeps STAM_TEST_COST_HOOKS in a test home only (S-2596)', () => {
   const e = { STAM_PORT: '1', STAM_TEST_COST_HOOKS: '1' };
   const keys = ['STAM_PORT'];
-  assert.equal(serviceEnv(keys, e, mk('unit-ok'), false), 'Environment=STAM_PORT=1\nEnvironment=STAM_TEST_COST_HOOKS=1\n');
-  assert.equal(serviceEnv(keys, e, mk('unit-live'), true), 'Environment=STAM_PORT=1\n');
-  assert.equal(serviceEnv(keys, e, mk('unit-nomarker', { marker: false }), false), 'Environment=STAM_PORT=1\n');
+  assert.equal(serviceEnv(keys, e, mk('unit-ok'), false), 'Environment=STAM_PORT=1\nEnvironment=MOOTR_PORT=1\nEnvironment=STAM_TEST_COST_HOOKS=1\nEnvironment=MOOTR_TEST_COST_HOOKS=1\n');
+  assert.equal(serviceEnv(keys, e, mk('unit-live'), true), 'Environment=STAM_PORT=1\nEnvironment=MOOTR_PORT=1\n');
+  assert.equal(serviceEnv(keys, e, mk('unit-nomarker', { marker: false }), false), 'Environment=STAM_PORT=1\nEnvironment=MOOTR_PORT=1\n');
 });

@@ -6,6 +6,7 @@
 // serves fixed readings, with times passed in: no daemon, no models, no sleeps:
 // `node --test test/peer-readings.test.mjs`.
 import { test, before, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { rmSync, writeFileSync } from 'node:fs';
@@ -38,7 +39,7 @@ before(async () => {
   writeFileSync(
     join(home, 'settings.json'),
     JSON.stringify({
-      peers: [{ name: 'peer1', url: `http://127.0.0.1:${stub.address().port}`, token: 't' }],
+      peers: [{ name: 'peer1', url: `http://127.0.0.1:${stub.address().port}`, token: 'test-peer-token' }],
       cost: {
         subscriptionWarnPercent: [],
         accounts: { 'claude-max': { match: { harness: 'claude' }, paid: false } },
@@ -59,7 +60,7 @@ before(async () => {
 });
 after(() => {
   stub.close();
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 

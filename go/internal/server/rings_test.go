@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -114,6 +115,9 @@ func TestRingRounds(t *testing.T) {
 		t.Errorf("%d ending mails", f.endedMails())
 	}
 	body := f.text("SELECT body FROM mail WHERE subject = 'Ring r1 ended'")
+	if from := f.text("SELECT from_id FROM mail WHERE subject = 'Ring r1 ended'"); from != "system:ring" {
+		t.Errorf("from %s", from)
+	}
 	if !strings.Contains(body, "ended after round 2: all members agreed.") || !strings.Contains(body, "Final submissions:\n\n### boss\nr2 boss\n\n### child\nr2 child") {
 		t.Errorf("the mail: %q", body)
 	}
@@ -362,7 +366,8 @@ func TestRingPromptOpenSeats(t *testing.T) {
 	}
 }
 
-// What cannot be done here answers before anything is written: spawning members or the moderator, a ring with no creator, a bad ring.
+// What cannot be done here answers before anything is written: a ring with no creator, a bad ring. (Spawning members and a
+// moderator: rings_spawn_test.go.)
 func TestRingRefusals(t *testing.T) {
 	f := ringFixture(t)
 	for _, tc := range []struct {
@@ -370,8 +375,6 @@ func TestRingRefusals(t *testing.T) {
 		code       int
 		msg        string
 	}{
-		{"spawned members", `{"name":"x","topic":"t","members":["aboss"],"spawn":[{"type":"developer"}]}`, 501, "spawns its members"},
-		{"a spawned moderator", `{"name":"x","topic":"t","members":["aboss","achild"],"moderator":{"type":"reviewer"}}`, 501, "spawns its moderator"},
 		{"one member", `{"name":"x","topic":"t","members":["aboss"]}`, 400, "a ring needs at least two members"},
 		{"no such member", `{"name":"x","topic":"t","members":["aboss","nobody"]}`, 400, "no agent nobody"},
 		{"a bad format", `{"name":"x","topic":"t","format":"round","members":["aboss","achild"]}`, 400, "format must be rounds, fire, or debate"},
@@ -403,5 +406,108 @@ func TestRingRefusals(t *testing.T) {
 	}
 	if n := f.count("SELECT COUNT(*) FROM rings WHERE name = 'y'"); n != 0 {
 		t.Errorf("a ring was made without a lifecycle")
+	}
+}
+
+// ringTwoPRs is ring r8dc834's topic shape (S-4182, S-4199): the PR under review and its base PR. It is still a PR review, so its
+// verdicts are kept and must match.
+const ringTwoPRs = "Review PR #1300 (owner/repo), head 467ed631. Its base PR #1299 has merged, so diff against origin/main."
+
+// Ring r8dc834: request_changes in prose plus approve, both agreeing, ended "all members agreed". It ends as split.
+func TestRingSplitOnTopicWithBasePR(t *testing.T) {
+	f := ringFixture(t)
+	id := f.newRing(`{"name":"asks","format":"rounds","topic":"` + ringTwoPRs + `","members":["aboss","achild"],"max_rounds":1}`)
+	if n := f.turnNotices("aboss"); len(n) != 1 || !strings.Contains(n[0], "Give your verdict on the PR") {
+		t.Errorf("the turn asks for a verdict: %q", n)
+	}
+	f.submit("asks", "aboss", "Request changes at head 467ed631. P1: peer rows pass through unchanged.", `,"agree":true`)
+	f.submit("asks", "achild", "No blocking findings.", `,"verdict":"approve","agree":true`)
+	if got := f.ringStatus(id); got != "done|1|0" {
+		t.Fatalf("status %q", got)
+	}
+	body := f.text("SELECT body FROM mail WHERE subject = 'Ring asks ended'")
+	// Submissions in the same millisecond have no set order, so the split names each verdict in either order.
+	if strings.Contains(body, "all members agreed") || !strings.Contains(body, "ended after round 1: split (") || !strings.Contains(body, "boss: request_changes") || !strings.Contains(body, "child: approve") {
+		t.Errorf("the mail: %q", body)
+	}
+}
+
+// Every verdict combination for a 2- and 3-member PR ring (test/ring-split.test.mjs): only identical recognised verdicts with every
+// member agreeing end the ring early; a split, a missing or unreadable verdict, a member that never submitted or one that doesn't
+// agree keeps it running.
+func TestRingAgreementTable(t *testing.T) {
+	type kind struct{ extra, is string }
+	kinds := map[string]*kind{
+		"approve":         {`,"verdict":"approve"`, "approve"},
+		"request_changes": {`,"verdict":"request_changes"`, "request_changes"},
+		"prose_changes":   {"", "request_changes"},
+		"line_approve":    {"", "approve"},
+		"prose_approve":   {"", ""},
+		"none":            {"", ""},
+		"skip":            nil,
+	}
+	texts := map[string]string{"approve": "Fine.", "request_changes": "Missing test.", "prose_changes": "Request changes at head abc: no test.",
+		"line_approve": `Clean change.\nVerdict: approve`, "prose_approve": "Looks good, I approve.", "none": "Seems fine."}
+	type seat struct {
+		k     string
+		agree bool
+	}
+	all := []string{"approve", "request_changes", "prose_changes", "line_approve", "prose_approve", "none", "skip"}
+	seats := func(ks []string) (out []seat) {
+		for _, k := range ks {
+			out = append(out, seat{k, false})
+			if kinds[k] != nil {
+				out = append(out, seat{k, true})
+			}
+		}
+		return out
+	}
+	var product func(opts []seat, n int) [][]seat
+	product = func(opts []seat, n int) [][]seat {
+		if n == 0 {
+			return [][]seat{nil}
+		}
+		var out [][]seat
+		for _, rest := range product(opts, n-1) {
+			for _, o := range opts {
+				out = append(out, append([]seat{o}, rest...))
+			}
+		}
+		return out
+	}
+	members := []string{"aboss", "achild", "acodex"}
+	for _, c := range []struct {
+		size  int
+		topic string
+		kinds []string
+	}{{2, "review PR 603", all}, {2, ringTwoPRs, all}, {3, ringTwoPRs, []string{"approve", "request_changes", "prose_changes", "none", "skip"}}} {
+		f := ringFixture(t)
+		combos := product(seats(c.kinds), c.size)
+		for i, combo := range combos {
+			name := "t" + strconv.Itoa(i)
+			id := f.newRing(`{"name":"` + name + `","format":"rounds","topic":"` + c.topic + `","members":["` + strings.Join(members[:c.size], `","`) + `"],"max_rounds":2}`)
+			complete, agreed := true, true
+			for j, s := range combo {
+				k := kinds[s.k]
+				if k == nil {
+					complete = false
+					continue
+				}
+				f.submit(name, members[j], texts[s.k], k.extra+`,"agree":`+strconv.FormatBool(s.agree))
+				agreed = agreed && s.agree && k.is != "" && kinds[combo[0].k] != nil && k.is == kinds[combo[0].k].is
+			}
+			want := "running|1|0"
+			if complete && agreed {
+				want = "done|1|0"
+			} else if complete {
+				want = "running|2|0"
+			}
+			if got := f.ringStatus(id); got != want {
+				t.Errorf("%d members on %q, %v: %q, want %q", c.size, c.topic, combo, got, want)
+			}
+		}
+		if min := map[int]int{2: 169, 3: 729}[c.size]; len(combos) < min {
+			t.Errorf("%d combinations, want %d", len(combos), min)
+		}
 	}
 }

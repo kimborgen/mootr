@@ -5,6 +5,7 @@
 //   {"fn": "render", "name": "...", "vars": {...}, "type": "..."}
 //   {"fn": "humanMail", "model": "..." | null, "type": "..."}
 //   {"fn": "instructions", "harness": "claude", "cwd": "..."}
+//   {"fn": "composer", "type": "...", "harness": "..."}: src/inventory.ts composerCatalog, as JSON text
 //
 //   node go/internal/templates/testdata/ts-render.mjs DIR FAKEHOME < requests.json
 import { readFileSync, writeSync } from 'node:fs';
@@ -32,6 +33,7 @@ for (const r of JSON.parse(readFileSync(0, 'utf8'))) {
     if (r.fn === 'render') out.push({ text: templates.render(r.name, r.vars ?? {}, r.type ?? undefined) });
     else if (r.fn === 'humanMail') out.push({ text: templates.humanMailPrompt(r.model, r.type ?? undefined) });
     else if (r.fn === 'instructions') out.push({ text: instructions.instructionsPrompt(r.harness, r.cwd) });
+    else if (r.fn === 'composer') out.push({ text: JSON.stringify((await import('../../../../src/inventory.ts')).composerCatalog(r.type || undefined, r.harness || undefined)) });
     else throw new Error(`unknown fn ${r.fn}`);
   } catch (e) {
     out.push({ error: String(e instanceof Error ? e.message : e) });

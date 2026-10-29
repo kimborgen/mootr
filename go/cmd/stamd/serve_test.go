@@ -38,7 +38,7 @@ func TestServeListenerFails(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- serve(context.Background(), endLife, sse.New(sse.Keepalive), []*http.Server{stream, failing}, listen)
+		done <- serve(context.Background(), endLife, sse.New(sse.Keepalive), []*http.Server{stream, failing}, listen, func(context.Context) error { return nil })
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
@@ -61,5 +61,44 @@ func TestServeListenerFails(t *testing.T) {
 	}
 	if lifeCtx.Err() == nil {
 		t.Error("the lifecycle still runs")
+	}
+}
+
+// TestServeDrainsTerminals: Shutdown doesn't wait for a hijacked connection (a terminal socket), so serve waits for
+// drain, after the lifecycle ended (which ends the sockets) and after Shutdown, and returns only once it has.
+func TestServeDrainsTerminals(t *testing.T) {
+	lifeCtx, endLife := context.WithCancel(context.Background())
+	t.Cleanup(endLife)
+	ctx, stop := context.WithCancel(context.Background())
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{}
+	inDrain, release := make(chan error, 1), make(chan struct{})
+	drain := func(shutdown context.Context) error {
+		inDrain <- lifeCtx.Err()
+		<-release
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, endLife, sse.New(sse.Keepalive), []*http.Server{srv}, func(s *http.Server) error { return s.Serve(ln) }, drain) }()
+	stop()
+	select {
+	case err := <-inDrain:
+		if err == nil {
+			t.Fatal("drain ran before the lifecycle ended")
+		}
+	case err := <-done:
+		t.Fatalf("serve returned without the drain: %v", err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("serve returned before the drain did: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

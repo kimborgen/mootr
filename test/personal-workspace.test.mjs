@@ -5,6 +5,7 @@
 // a throwaway STAM_HOME with no daemon and no model:
 // `node --test test/personal-workspace.test.mjs`.
 import { test, before, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -34,7 +35,7 @@ before(async () => {
   };
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
 });
 
 test('a workspace name is lowercase letters, digits and dashes; true means the agent name', () => {

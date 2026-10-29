@@ -6,7 +6,9 @@ import { refreshReq } from '../req/store'
 import { ds, reply, type Story } from '../stories/types'
 import type { ItsaActivityReport } from '../work/links'
 import { resetDiffRepos } from '../diff/diffRepos'
-import { CostLine, ItsaView } from './ItsaView'
+import { CostLine, Events, FieldsBlock, ItsaView } from './ItsaView'
+import type { Field } from '../itsa/fields'
+import { AGENTS } from '../stories/fixtures'
 
 const ago = (min: number) => new Date(Date.now() - min * 60000).toISOString()
 const pane = (id: string) => <div style={{ height: 760, overflow: 'auto' }}><ItsaView id={id} viewKey={'itsa:' + id} /></div>
@@ -91,13 +93,21 @@ const refresh = () => { void refreshReq() }
 const batch: World = { all: TREE, id: 'fx-i-950', view: { kind: 'requirement-approval', summary: 'Two drafts and a dropped one, asked together.', body: 'R-8, R-9 and R-10, drafted from the retry-policy review.' } }
 const waiter: World = { all: TREE, id: 'fx-i-913', view: { summary: 'Does the ß fold to ss when the query is upper-cased?', thread_id: 'fx-t-ask' }, thread: [{ type: 'mail', ts: ago(35), mail: T_ASK.mails[1] }] }
 const asking = { attention: [{ ...attention(TREE.find((x) => x.id === 'fx-i-913')!, 35), ask_thread_id: 'fx-t-ask' }, ASK_ITSA], humanThreads: [T_ASK] }
+// The same ITSA with its status at needs_approval, as the approval asks.
+const APPROVAL = TREE.map((x) => (x.id === 'fx-i-913' ? { ...x, status: 'needs_approval' } : x))
+
+const FX_FIELDS: Field[] = [
+  { id: 'fx-f1', key: 'stage', label: 'Stage', type: 'choice', options: [{ value: 'code', label: 'Code', tone: 'accent' }], description: null, hint: null, width: 'm', align: 'start', card: 'chip', position: 0 },
+  { id: 'fx-f3', key: 'epic', label: 'Epic only', type: 'text', options: null, description: null, hint: null, width: 'm', align: 'start', card: 'meta', position: 2, kinds: ['epic'] },
+  { id: 'fx-f2', key: 'note', label: 'Note', type: 'text', options: null, description: null, hint: null, width: 'l', align: 'start', card: 'meta', position: 1 },
+]
 
 export const stories: Story[] = [{
   name: 'ITSA view',
   group: 'ITSA and work',
   what: 'One ITSA\'s own page: the chain of parents as a breadcrumb; the header (key, title, status, owner, kind, health, cost); a "Waiting on you" box with the action buttons when it is in a human status; the summary and body; the owner\'s latest update; the children with a roll-up; the requirements linked to it; links; participants; time and cost; mail about it; and its thread, or its activity until a thread exists. A comment box posts to the participants and, if you staged an action, applies it: on a desktop it is the bottom world\'s prompt input (this view publishes it through `bottom-slot.ts`), on a phone a box at the foot of the page.',
   when: 'The `w:itsa:ID` world (view key `itsa:ID`): a click on an ITSA anywhere (a row, card, key in mail, breadcrumb, Work row). On a desktop opened from a mail it takes the thread\'s right split; on a phone it is a pushed view and Back returns to the thread.',
-  code: ['web/src/views/ItsaView.tsx#ItsaView', 'web/src/views/ItsaView.tsx#itsaTitles', 'web/src/views/ItsaView.tsx#ThreadItems', 'web/src/mail/MailTools.tsx#MailTools'],
+  code: ['web/src/views/ItsaView.tsx#ItsaView', 'web/src/views/ItsaView.tsx#itsaTitles', 'web/src/views/ItsaView.tsx#ThreadItems', 'web/src/views/ItsaView.tsx#FieldsBlock', 'web/src/views/ItsaView.tsx#Events', 'web/src/mail/MailTools.tsx#MailTools'],
   rules: [
     'The thread opens at its latest message (S-1500): the page scrolls once to the end of the thread when it first loads, as a mail thread does.',
     'The thread is conversation turns (S-1508): every mail in full as a card with its sender and recipients (`ConvMailCard`), mail between agents too, so tables scroll sideways and the other mail components render as in mail. Status changes stay one-line events between the cards, and stam system mail a notice line. Decisions show but can\'t be answered here; a card has no Open thread button. Attachments, the superseded line and the verdict mark show in the card; a mail with a permission is the mail view\'s own card, with the chip above it.',
@@ -107,6 +117,8 @@ export const stories: Story[] = [{
     'A status or owner change shows at once with "saving…" and `aria-busy`, and rolls back with the reason if refused.',
     'Waiting on you is a hairline box, not a filled one: a warning-toned label with the user icon, what it holds up, and the buttons; staging a button shows a hint saying where it goes and what text it needs (' + ds('State vocabulary') + ').',
     'Health is a dot and a word (On track, At risk, Off track) in the success, warning or error tone, from the owner\'s latest update.',
+    'Fields (S-3834): one row per Work column (ITSA field) in the Work page\'s order and labels, a label then its value drawn by the Work cell\'s own renderer. An empty value is an empty row, never left out; a field limited to other kinds shows a muted "Not used on issues" (the kind) instead of a value, so it doesn\'t look settable but empty. On a phone each row is `--size-hit-touch` tall, and a long label wraps in its column. The rows are a two-column grid that wraps long values, so a phone has no sideways scroll.',
+    'Activity (S-3834): a field change reads by the fields\' labels, like the other events: "set Stage to Code", "set Stage, Link" for several, "cleared Stage" for an empty value. A key with no field definition reads as the key.',
     'Children: open ones first, then closed (muted); each has its glyph, key, roll-up bar, status words, and owner. An empty list says how to add one. A child being added shows as "adding" until the daemon has it.',
     'Rows are at least `--size-row-table` (28 px) tall and `--size-hit-touch` on a phone, where the child row wraps to two lines (' + ds('Density') + ').',
     'Links: a PR link, and a branch link of an ITSA with one PR in the same repo, get a "View diff" button (S-1533) that opens `diff:REPO#N` in a pane. It shows only for a repo the diff API serves, so another repo\'s PR has the link alone, never a dead button. The row keeps its height (`--size-row-table`, `--size-hit-touch` on a phone, where the button is a full touch target), so it does not move when the served repos arrive.',
@@ -114,10 +126,18 @@ export const stories: Story[] = [{
   ],
   states: [
     { name: 'Active, with everything', ...world(FULL) , render: () => pane('fx-i-911') },
+    { name: 'Fields, set and empty', render: () => <><FieldsBlock it={{ kind: 'issue', fields: { stage: 'code', note: 'A long note that wraps on a phone without a sideways scroll' } }} fields={FX_FIELDS} /><FieldsBlock it={{ kind: 'issue', fields: {} }} fields={FX_FIELDS} /></> },
+    { name: 'Activity with field changes', render: () => <Events fields={FX_FIELDS} events={[
+      { id: 1, ts: ago(30), actor: null, type: 'fields', data: JSON.stringify({ from: { stage: null }, to: { stage: 'code' } }) },
+      { id: 2, ts: ago(20), actor: null, type: 'fields', data: JSON.stringify({ from: {}, to: { stage: 'code', note: 'x' } }) },
+      { id: 3, ts: ago(10), actor: null, type: 'fields', data: JSON.stringify({ from: { stage: 'code' }, to: { stage: null } }) },
+    ]} /> },
     { name: 'Thread with mail from you, to you, and between agents', ...world({ ...FULL, thread: THREAD_WIDE }), render: () => pane('fx-i-911') },
     { name: 'Thread with a permission mail to you', ...world({ ...FULL, thread: THREAD_PERM }), render: () => pane('fx-i-911') },
     { name: 'Thread with the tool calls before each agent mail', ...world({ ...FULL, thread: THREAD_WIDE }, TOOL_ROUTES), render: () => pane('fx-i-911') },
     { name: 'Waiting on you', ...world(waiter, {}, asking), render: () => pane('fx-i-913') },
+    { name: 'Waiting on you, needs approval', ...world({ ...waiter, all: APPROVAL }, {}, { ...asking, attention: [{ ...attention(APPROVAL.find((x) => x.id === 'fx-i-913')!, 35), ask_thread_id: 'fx-t-ask' }, ASK_ITSA] }), render: () => pane('fx-i-913') },
+    { name: 'Waiting on you, owner holds a permission ask', ...world(waiter, {}, { ...asking, agents: AGENTS.map((a) => (a.id === 'fx-dev' ? { ...a, open_ask: 'request:fx-perm' } : a)), asks: [{ key: 'request:fx-perm', kind: 'request', state: 'open', outcome: null, what: 'Permission request', agent_id: 'fx-dev', agent_name: 'fixture-dev', machine: 'fixture-box-one', thread_id: 'fx-t-ask', itsa_id: null, since: ago(35), settled_at: null }] }), render: () => pane('fx-i-913') },
     { name: 'With linked requirements', ...world(FULL, reqOn), setup: refresh, render: () => pane('fx-i-911') },
     { name: 'A batch approval of requirement drafts', ...world(batch, { ...reqOn, 'GET /api/requirements/asks/fx-i-950': { itsa: 'fx-i-950', items: BATCH_ITEMS } }), setup: refresh, render: () => pane('fx-i-950') },
     { name: 'Backlog', ...world(SIMPLE(ONE('backlog'), 'fx-i-990')), render: () => pane('fx-i-990') },

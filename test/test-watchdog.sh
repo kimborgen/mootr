@@ -12,7 +12,7 @@ OS=$3
 stt() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
 # isdaemon PID: PID's environment names this home, so a pid the kernel reused for another process never matches, and a
 # daemon restarted by the test (a new pid in daemon.pid) still does.
-isdaemon() { tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null | grep -qx "STAM_HOME=$STAM_HOME"; }
+isdaemon() { tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null | grep -qx -e "STAM_HOME=$STAM_HOME" -e "MOOTR_HOME=$STAM_HOME"; }
 # sig SIG PID: signals PID only while it is this home's daemon.
 sig() { isdaemon "$2" && kill -s "$1" "$2" 2>/dev/null; }
 case "$O" in '' | *[!0-9]*) exit 2 ;; esac
@@ -36,6 +36,10 @@ for env in "$T"/*/test.env; do
     done
     [ -n "$dpid" ] && sig TERM "$dpid"
     tmux -L "$STAM_TMUX_SOCKET" kill-server 2>/dev/null
+    # The file goes only once the server is down: kill-server worked, or tmux says no server runs.
+    if tmux -L "$STAM_TMUX_SOCKET" kill-server 2>/dev/null || timeout 5 tmux -L "$STAM_TMUX_SOCKET" ls 2>&1 | grep -q "no server running"; then
+      rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$STAM_TMUX_SOCKET"
+    fi
     for p in $panes; do kill -s TERM -- "-$p" 2>/dev/null; done
     for _i in 1 2 3 4 5 6 7 8 9 10; do
       alive=
@@ -46,7 +50,6 @@ for env in "$T"/*/test.env; do
     done
     for p in $panes; do kill -s KILL -- "-$p" 2>/dev/null; done
     [ -n "$dpid" ] && sig KILL "$dpid"
-    rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$STAM_TMUX_SOCKET"
   )
 done
 # Anything still naming the folder (a stub, a Codex app-server), then the folder.

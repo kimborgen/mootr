@@ -1,0 +1,478 @@
+{
+  "home": null,
+  "context": {
+    "warnTokens": 300000,
+    "instructTokens": 400000,
+    "enforceTokens": 500000
+  },
+  "idleCompaction": {
+    "enabled": true,
+    "idleMinutes": 50,
+    "growthTokens": 50000,
+    "minTokens": 100000
+  },
+  "standing": {
+    "idleHours": 4,
+    "growth": {
+      "enabled": true,
+      "openItsas": 8,
+      "leadHours": 48,
+      "contextPct": 80
+    }
+  },
+  "rest": {
+    "enabled": true,
+    "afterMinutes": 20,
+    "graceMinutes": 2,
+    "types": {
+      "cos": false,
+      "assistant": false
+    }
+  },
+  "exitRecovery": {
+    "percentOfWindow": 85,
+    "windowTokens": 350000,
+    "repeatMinutes": 5
+  },
+  "harness": {
+    "claude": {},
+    "codex": {}
+  },
+  "banners": [
+    {
+      "harness": "claude",
+      "match": "Teach auto mode about your environment\\?",
+      "keys": [
+        "Escape"
+      ]
+    }
+  ],
+  "cost": {
+    "subscriptionWarnPercent": [
+      80,
+      95
+    ],
+    "dailyWarnUsd": null,
+    "openrouterWarnUsd": 2,
+    "openrouterSystemReserveUsd": 1,
+    "global": null,
+    "accounts": {},
+    "onError": "soft-stop",
+    "instructions": "",
+    "fallbackMinutes": 15,
+    "softStopMinutes": 10,
+    "display": {
+      "mode": "api",
+      "prices": {}
+    }
+  },
+  "mcpServers": {},
+  "providers": {},
+  "decisions": {
+    "model": "microsoft/microsoft-decision-1",
+    "mailCheck": true,
+    "mailGate": true,
+    "suggestRescore": false
+  },
+  "mail": {
+    "titles": {
+      "model": ""
+    }
+  },
+  "instructions": {
+    "summaries": {
+      "model": ""
+    }
+  },
+  "tiny": {
+    "toolSummary": {
+      "enabled": false,
+      "model": "google/gemma-3-4b-it",
+      "instructions": ""
+    },
+    "toolNames": {
+      "enabled": true,
+      "model": "google/gemma-3-4b-it"
+    },
+    "mailTitles": {
+      "titleInstructions": "",
+      "summaryInstructions": ""
+    },
+    "blockSummaries": {
+      "instructions": ""
+    }
+  },
+  "activity": {
+    "classify": {
+      "enabled": false,
+      "maxUsdPerDay": 0.2,
+      "concurrency": 2
+    }
+  },
+  "digest": {
+    "awayMinutes": 120
+  },
+  "spawnDefaults": {
+    "preset": "standard",
+    "cwd": "~"
+  },
+  "humanMail": {
+    "when": "necessary",
+    "models": {
+      "claude-haiku-5-5": false
+    }
+  },
+  "assistant": {
+    "harness": "claude",
+    "model": "claude-sonnet-5-5",
+    "effort": "medium",
+    "cwd": "",
+    "autostart": true
+  },
+  "assistantDefault": "assistant",
+  "childNotices": "tree-idle",
+  "developerCap": 6,
+  "permissionModes": {
+    "harness": {
+      "claude": "auto",
+      "codex": "auto",
+      "opencode": "auto"
+    },
+    "types": {}
+  },
+  "agentView": {
+    "default": "conversation"
+  },
+  "staleWorkingMinutes": 10,
+  "startingTimeoutMinutes": 10,
+  "stuckStartMinutes": 15,
+  "dialogEscalateMinutes": 10,
+  "archive": {
+    "finalRoundMinutes": 3,
+    "idleShutdownHours": 12,
+    "archiveWhenQueued": true,
+    "queuedShutdownMinutes": 10
+  },
+  "promptDefaultMode": "mail",
+  "mailOpens": "inbox",
+  "search": {
+    "embedder": "local",
+    "turnDays": 7
+  },
+  "resourceWarn": {
+    "enabled": true,
+    "loadPerCore": 2,
+    "ramAvailableGb": 2,
+    "swapPct": 80,
+    "diskPct": 85,
+    "repeatMinutes": 30,
+    "recipients": [],
+    "lastWarned": {
+      "cpu": null,
+      "ram": null,
+      "swap": null,
+      "disk": null
+    }
+  },
+  "chiefOfStaff": null,
+  "treeCheck": {
+    "enabled": false,
+    "everyHours": 4
+  },
+  "process": {
+    "run": "dry-run",
+    "maxSpawnsPerHour": 3
+  },
+  "itsa": {
+    "home": null,
+    "keyPrefix": "S",
+    "repos": {},
+    "mainBranch": "main",
+    "prOpen": {
+      "repo": "",
+      "storage": "",
+      "origin": "origin",
+      "gh": "gh",
+      "github": ""
+    },
+    "repoConfig": {},
+    "required": true,
+    "ownerNotices": "on",
+    "statuses": [
+      {
+        "name": "idea",
+        "category": "backlog",
+        "human": false
+      },
+      {
+        "name": "backlog",
+        "category": "backlog",
+        "human": false
+      },
+      {
+        "name": "icebox",
+        "category": "backlog",
+        "human": false
+      },
+      {
+        "name": "todo",
+        "category": "ready",
+        "human": false
+      },
+      {
+        "name": "ready",
+        "category": "ready",
+        "human": false
+      },
+      {
+        "name": "scheduled",
+        "category": "ready",
+        "human": false
+      },
+      {
+        "name": "planning",
+        "category": "active",
+        "human": false
+      },
+      {
+        "name": "in_progress",
+        "category": "active",
+        "human": false
+      },
+      {
+        "name": "delegated",
+        "category": "active",
+        "human": false
+      },
+      {
+        "name": "waiting",
+        "category": "active",
+        "human": false
+      },
+      {
+        "name": "blocked",
+        "category": "active",
+        "human": false
+      },
+      {
+        "name": "needs_input",
+        "category": "active",
+        "human": true
+      },
+      {
+        "name": "needs_approval",
+        "category": "active",
+        "human": true
+      },
+      {
+        "name": "in_review",
+        "category": "review",
+        "human": false
+      },
+      {
+        "name": "testing",
+        "category": "review",
+        "human": false
+      },
+      {
+        "name": "needs_review",
+        "category": "review",
+        "human": true
+      },
+      {
+        "name": "needs_test",
+        "category": "review",
+        "human": true
+      },
+      {
+        "name": "ready_to_merge",
+        "category": "review",
+        "human": false
+      },
+      {
+        "name": "merging",
+        "category": "review",
+        "human": false
+      },
+      {
+        "name": "deploying",
+        "category": "review",
+        "human": false
+      },
+      {
+        "name": "done",
+        "category": "closed",
+        "human": false
+      },
+      {
+        "name": "canceled",
+        "category": "closed",
+        "human": false
+      },
+      {
+        "name": "duplicate",
+        "category": "closed",
+        "human": false
+      },
+      {
+        "name": "wont_do",
+        "category": "closed",
+        "human": false
+      }
+    ],
+    "actions": {
+      "needs_input": [
+        {
+          "id": "answer",
+          "label": "Answer",
+          "to": "in_progress",
+          "text": "required"
+        }
+      ],
+      "needs_approval": [
+        {
+          "id": "approve",
+          "label": "Approve",
+          "to": "in_progress",
+          "text": "optional"
+        },
+        {
+          "id": "changes",
+          "label": "Request changes",
+          "to": "in_progress",
+          "text": "required"
+        }
+      ],
+      "needs_review": [
+        {
+          "id": "approve",
+          "label": "Approve",
+          "to": "ready_to_merge",
+          "text": "optional"
+        },
+        {
+          "id": "changes",
+          "label": "Request changes",
+          "to": "in_progress",
+          "text": "required"
+        }
+      ],
+      "needs_test": [
+        {
+          "id": "approve",
+          "label": "Approve",
+          "to": "done",
+          "text": "optional"
+        },
+        {
+          "id": "changes",
+          "label": "Request changes",
+          "to": "in_progress",
+          "text": "required"
+        }
+      ]
+    }
+  },
+  "requirements": {
+    "enabled": false,
+    "approval": "human",
+    "keyPrefix": "R",
+    "dailyCapUsd": 1,
+    "demoteMinFlags": 5,
+    "defaultThreshold": 0.8,
+    "defaultMode": "observe"
+  },
+  "peers": [],
+  "watch": {
+    "githubSeconds": 60,
+    "linearSeconds": 60,
+    "linearTools": {
+      "issue": "get_issue",
+      "comments": "list_comments",
+      "teamIssues": "list_issues"
+    }
+  },
+  "auth": {
+    "sharedTokenClaims": true,
+    "humanStrict": false,
+    "localHuman": true
+  },
+  "debug": {
+    "stallMs": 100
+  },
+  "files": {
+    "roots": null
+  },
+  "diff": {
+    "classes": {
+      "tests": [
+        "test/",
+        "tests/",
+        "__tests__/",
+        "fixtures/",
+        "__snapshots__/",
+        "*.test.*",
+        "*.spec.*",
+        "*.snap"
+      ],
+      "lockfiles": [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "npm-shrinkwrap.json",
+        "bun.lock",
+        "bun.lockb",
+        "Cargo.lock",
+        "poetry.lock",
+        "Pipfile.lock",
+        "uv.lock",
+        "go.sum",
+        "Gemfile.lock",
+        "composer.lock"
+      ],
+      "generated": [
+        "dist/",
+        "build/",
+        "vendor/",
+        "node_modules/",
+        "*.min.*",
+        "*.map"
+      ],
+      "docs": [
+        "docs/",
+        "*.md"
+      ]
+    },
+    "fetchSeconds": 60,
+    "refreshSeconds": 20,
+    "maxPrRefs": 100
+  },
+  "retro": {
+    "digest": {
+      "enabled": true,
+      "day": "daily",
+      "hour": 9
+    },
+    "lastDigest": null,
+    "epic": {
+      "minReporters": 3,
+      "maxWindowShare": 50
+    },
+    "steward": {
+      "enabled": true
+    },
+    "reminders": {
+      "enabled": true
+    },
+    "lessons": {
+      "enabled": true,
+      "k": 4
+    },
+    "early": {
+      "enabled": true,
+      "newItems": 10,
+      "plusOnes": 3,
+      "minHours": 3
+    }
+  }
+}

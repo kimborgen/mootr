@@ -25,6 +25,8 @@ if (config.LIVE_HOME) {
 }
 const db = await import('../../../../src/db.ts');
 const itsa = await import('../../../../src/itsa.ts');
+const human = await import('../../../../src/itsa-human.ts');
+const asks = await import('../../../../src/asks.ts');
 
 const base = { machine: 'test-machine', harness: 'claude', model: 'claude-opus-5-5', effort: null, cwd: home, session_id: null };
 db.createAgent({ ...base, id: 'aboss', name: 'boss', role: 'manager', parent_id: null });
@@ -43,7 +45,7 @@ const steps = JSON.parse(readFileSync(new URL('./itsa-steps.json', import.meta.u
 const ids = [];
 const sub = (v) => (typeof v === 'string' ? v.replace(/^#(\d+)$/, (_, n) => ids[Number(n)] ?? v) : Array.isArray(v) ? v.map(sub) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, sub(x)])) : v);
 // src/daemon.ts itsaRoute: a missing ITSA, link or field is 404, a status that moved 409, the rest 400.
-const statusOf = (msg) => (/^no ITSA |^no link |^no field /.test(msg) ? 404 : /^status changed/.test(msg) ? 409 : 400);
+const statusOf = (msg) => (/^no ITSA |^no link |^no field /.test(msg) ? 404 : /^status changed|^the text changed/.test(msg) ? 409 : 400);
 const results = [];
 for (const [i, step] of steps.entries()) {
   await new Promise((r) => setTimeout(r, 3));
@@ -59,7 +61,11 @@ for (const [i, step] of steps.entries()) {
     else if (step.op === 'editfield') out = await itsa.updateField(step.ref, step.patch, step.by ?? 'human');
     else if (step.op === 'rmfield') out = await itsa.removeField(step.ref, step.by ?? 'human');
     else if (step.op === 'order') out = await itsa.reorderFields(step.order, step.by ?? 'human');
-    else if (step.op === 'get') out = itsa.get(sub(step.ref));
+    else if (step.op === 'get') {
+      // The daemon's GET /api/itsas/:ref (src/daemon.ts itsaWithAsk) adds the open ask the ITSA holds (S-4021).
+      const v = itsa.get(sub(step.ref));
+      out = { ...v, open_ask_detail: asks.askDetail(asks.openAskLinks('test-machine', human.waitingIds()).itsas.get(v.id)) };
+    }
     else if (step.op === 'sql') out = { ran: d.prepare(step.sql).run().changes };
     else out = await itsa.list(sub(step.query));
     ids.push(step.op === 'create' ? out.id : null);

@@ -154,7 +154,10 @@ export function MailCard({ thread: t, selected, side, onTap, className, style, r
   const itsa = about ? d.itsas.find((x) => x.id === about) : undefined
   // ITSA keys link from the live ITSAs and their statuses, which load apart from mail: the body's HTML
   // follows them, and the title, cheap, is made on every render, as the thread panel's is.
-  const html = useMemo(() => mb.renderMail(text), [text, d.itsas, d.itsaStatuses])
+  // A card that shows the body from its first non-blank character keeps the recorded range, moved by what was trimmed; a summary or a sent card gets none, and a cut fails the range's own check.
+  const lead = (m.body ?? '').length - (m.body ?? '').trimStart().length
+  const shown = m.shown && !sent && !m.summary?.trim() ? { at: m.shown.at - lead, len: m.shown.len } : null
+  const html = useMemo(() => mb.renderMail(text, shown), [text, shown?.at, shown?.len, d.itsas, d.itsaStatuses])
   // What kind of card it is (the Swipe view's classifier); a mail you sent has none. A kind's structure
   // shows only for the mail's own summary; anything off its contract renders as Markdown, as before.
   const kind: CardKind | null = sent ? null : cardKind({ waiting: perm || decision || !!ask, verdictKind: m.verdict?.kind })

@@ -34,13 +34,30 @@ export async function declare(agentId: string, body: any): Promise<db.Wait> {
 
   if (on === 'event') {
     const filter = sanitizeFilter(body?.filter);
-    const detail = note || `an external event (${describeFilter(filter)})`;
-    const data: Record<string, unknown> = { on, filter };
-    if (timeout != null) data.timeout_minutes = timeout;
-    if (expect != null) data.expect_at = minutesFromNow(expect);
-    const w = db.addWait({ agent_id: agentId, kind: 'event', source: 'declared', detail, until, data: JSON.stringify(data) });
-    db.addEvent(agentId, 'wait:declared', { id: w.id, kind: 'event', filter, timeout_minutes: timeout });
-    return w;
+    // Without a selector the wait clears on any event, so a re-declared one piled up (S-2317).
+    if (!hasSelector(filter)) throw new Error("wait_for on 'event' needs a filter: pass source, subjects, types or actors, so the wait clears on the events you mean");
+    // The check and the insert are one transaction with no await between them, so two identical
+    // declares can't both insert. The rows are the db's, so a restart keeps the dedupe.
+    return db.transaction(() => {
+      const same = db.listWaits(agentId).find((x) => x.kind === 'event' && x.source === 'declared' && sameFilter(x.data, filter));
+      if (same) {
+        // The same wait again: keep it, take the later `since` of the two filters, and take the new timeout or
+        // expectation if one is given.
+        const stored = parseData(same.data);
+        const refreshed: Record<string, unknown> = { ...stored, filter: laterSince(stored.filter, filter) };
+        if (timeout != null) refreshed.timeout_minutes = timeout;
+        if (expect != null) refreshed.expect_at = minutesFromNow(expect);
+        db.setWaitTiming(same.id, timeout == null ? same.until : until, JSON.stringify(refreshed));
+        return db.getWait(same.id)!;
+      }
+      const detail = note || `an external event (${describeFilter(filter)})`;
+      const data: Record<string, unknown> = { on, filter };
+      if (timeout != null) data.timeout_minutes = timeout;
+      if (expect != null) data.expect_at = minutesFromNow(expect);
+      const w = db.addWait({ agent_id: agentId, kind: 'event', source: 'declared', detail, until, data: JSON.stringify(data) });
+      db.addEvent(agentId, 'wait:declared', { id: w.id, kind: 'event', filter, timeout_minutes: timeout });
+      return w;
+    });
   }
 
   let target: string | null = null;
@@ -122,7 +139,7 @@ export function requestWaitedOn(agentId: string, note: string, thread: string | 
   const byName = open.find((r) => ids.has(r.id));
   if (byName) return byName;
   if (thread) {
-    const id = db.requestOfThread(db.getMail(thread)?.thread_id ?? thread);
+    const id = db.requestOfThread(db.getMail(thread)?.thread_id ?? thread, thread);
     return open.find((r) => r.id === id);
   }
   return open[0];
@@ -151,6 +168,34 @@ async function peerTarget(ref: string): Promise<{ id: string; name: string; life
   const known = db.findPeerAgent(ref);
   if (!known || !peerByName(known.machine)) return undefined;
   return { ...known, lifecycle: db.peerAgentLifecycle(known.id) };
+}
+
+// Whether a filter names what to match: a source, subjects, types or actors (not only exclusions).
+function hasSelector(f: EventFilter): boolean {
+  return Boolean(f.source || f.subjects?.length || f.types?.length || f.actors?.length);
+}
+
+// The filter as a dedupe key: its lists sorted (their order doesn't change what matches), and `since` left out,
+// since it moves on each wake.
+function dedupeKey(f: EventFilter): string {
+  const key: Record<string, unknown> = { ...f };
+  delete key.since;
+  for (const k of ['subjects', 'types', 'actors', 'exclude_actors'] as const) if (f[k]) key[k] = [...f[k]].sort();
+  return JSON.stringify(key);
+}
+
+// Whether a stored event wait's filter (its data) is this one, by dedupeKey.
+function sameFilter(raw: string | null, filter: EventFilter): boolean {
+  const stored: EventFilter | undefined = parseData(raw).filter;
+  return !!stored && dedupeKey(stored) === dedupeKey(filter);
+}
+
+// The stored filter after a re-declare: the later `since` of the two, so a `since` that moves each wake keeps
+// the newest. A `since` only on the new filter is taken; one only on the stored filter is kept.
+function laterSince(stored: EventFilter, next: EventFilter): EventFilter {
+  if (!next.since) return stored;
+  if (stored.since && Date.parse(stored.since) >= Date.parse(next.since)) return stored;
+  return { ...stored, since: next.since };
 }
 
 // A filter as one readable phrase, for an event wait without a note.
@@ -246,7 +291,7 @@ export function wake(agentId: string, body: any, tag?: string): db.Wait {
 export function done(agentId: string, id: unknown): boolean {
   const w = id ? db.getWait(String(id)) : undefined;
   if (!w || w.agent_id !== agentId || (w.source !== 'declared' && w.source !== 'stam')) return false;
-  return db.clearWait(w.id);
+  return db.clearWait(w.id, 'done');
 }
 
 // --- The scheduler -----------------------------------------------------------------------
@@ -261,7 +306,7 @@ export async function tick(now = new Date()): Promise<number> {
     const data = parseData(w.data);
     if (w.source === 'declared') {
       const minutes = data.timeout_minutes ?? Math.round((Date.parse(w.until!) - Date.parse(w.since)) / 60_000);
-      db.clearWait(w.id);
+      db.clearWait(w.id, 'timeout');
       queueNotice(w.agent_id, render('wait-timeout', { what: w.detail ?? `${w.kind} reply`, minutes }));
       db.addEvent(w.agent_id, 'wait:timeout', { id: w.id, kind: w.kind, target: w.target });
     } else {

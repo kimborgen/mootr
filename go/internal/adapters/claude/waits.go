@@ -72,16 +72,15 @@ func stopWaits(p *jsjson.Object, now time.Time) (jobs, timers []db.HookWait) {
 				continue
 			}
 			recurring := jsjson.Truthy(get(c, "recurring"))
-			w := db.HookWait{Target: JSString(get(c, "id")), Detail: "timer " + tmpl(c, "schedule")}
-			if recurring {
-				w.Detail = "cron " + tmpl(c, "schedule")
-			} else {
-				schedule := ""
-				if s := get(c, "schedule"); s != nil {
-					schedule = JSString(s)
-				}
+			schedule := ""
+			if s := get(c, "schedule"); s != nil {
+				schedule = JSString(s)
+			}
+			w := db.HookWait{Target: JSString(get(c, "id"))}
+			if !recurring {
 				w.Until = NextCronFire(schedule, now)
 			}
+			w.Detail = harnessTimerDetail(recurring, schedule, w.Until, now)
 			data := jsjson.NewObject()
 			if s, ok := c.Get("schedule"); ok {
 				data.Set("schedule", s)
@@ -100,7 +99,25 @@ func stopWaits(p *jsjson.Object, now time.Time) (jobs, timers []db.HookWait) {
 
 var digits = regexp.MustCompile(`^\d+$`)
 
-// NextCronFire is src/adapters/claude.ts nextCronFire: the next time a one-shot cron with a fixed minute and hour fires
+// harnessTimerDetail is src/adapters/claude-timer.ts harnessTimerDetail (S-3391): a recurring cron keeps its cron, a
+// one-off shows its UTC fire time (with the date when it is a day or more away), and either says it is the harness's
+// own timer. schedule is the TS String of c.schedule, with a missing or null one as empty.
+func harnessTimerDetail(recurring bool, schedule string, until *string, now time.Time) string {
+	if recurring {
+		return "harness cron " + schedule
+	}
+	if until != nil {
+		t, _ := time.Parse("2006-01-02T15:04:05.000Z", *until)
+		day := ""
+		if t.Sub(now) >= 24*time.Hour {
+			day = t.Format("01-02") + " "
+		}
+		return "harness timer at " + day + t.Format("15:04") + "Z"
+	}
+	return "harness timer " + schedule
+}
+
+// NextCronFire is src/adapters/claude-timer.ts nextCronFire: the next time a one-shot cron with a fixed minute and hour fires
 // (Claude Code writes ScheduleWakeup and a one-shot CronCreate that way), in this machine's local time; nil for any other
 // schedule. JavaScript's setters are followed one by one, as each normalizes what it is given.
 func NextCronFire(schedule string, from time.Time) *string {

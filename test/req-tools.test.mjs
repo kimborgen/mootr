@@ -93,7 +93,7 @@ test('an agent draft raises an ask in the human attention list; Approve puts it 
   assert.equal(x.owner, 'a1');
   assert.ok(human.attention().some((a) => a.id === x.id), 'it is in the attention list');
   assert.equal(itsa.links(x.id)[0].external_id, draft.key);
-  await human.act(x.id, 'approve', '');
+  await human.act(x.id, 'approve', '', itsa.get(x.id).rev);
   await waitFor(() => req.must(draft.key).status === 'in_force');
   await waitFor(() => itsa.must(x.id).status === 'done');
   assert.ok(!human.attention().some((a) => a.id === x.id), 'the ask left the list');
@@ -132,13 +132,13 @@ test('an approval applies to the draft that was shown: a draft edited since is n
   const x = itsa.must(made.key);
   // The agent edits the draft after the ask, without refreshing it (the way the review probe does).
   await req.set(d.key, { text: 'Replacement never shown in the approval ask.' }, 'a1');
-  await human.act(x.id, 'approve', '');
+  await human.act(x.id, 'approve', '', itsa.get(x.id).rev);
   // Not approved: the draft stays a draft, and the same ITSA waits on the human again with the new text.
   await waitFor(() => itsa.must(x.id).status === 'needs_approval' && itsa.must(x.id).body.includes('Replacement never shown'));
   assert.equal(req.must(d.key).status, 'draft');
   assert.equal(db.open().prepare("SELECT COUNT(*) AS n FROM itsas WHERE kind = 'requirement-approval' AND title LIKE ?").get(`%${d.key}%`).n, 1, 'one ask, not two');
   // Approving what is now shown puts that text in force.
-  await human.act(x.id, 'approve', '');
+  await human.act(x.id, 'approve', '', itsa.get(x.id).rev);
   await waitFor(() => req.must(d.key).status === 'in_force');
   assert.equal(req.must(d.key).text, 'Replacement never shown in the approval ask.');
   await waitFor(() => itsa.must(x.id).status === 'done');
@@ -155,7 +155,84 @@ test('an edit to a draft with an open ask refreshes the ask; ifRev refuses a sta
   assert.match(now.body, /Second text\./, 'the ITSA carries the new statement');
   await assert.rejects(() => req.set(d.key, { status: 'in_force', ifRev: before }, 'human'), /changed since it was shown/);
   assert.equal(req.must(d.key).status, 'draft');
-  await human.act(x.id, 'approve', '');
+  await human.act(x.id, 'approve', '', itsa.get(x.id).rev);
   await waitFor(() => req.must(d.key).status === 'in_force');
   assert.equal(req.must(d.key).text, 'Second text.');
+});
+
+test('the restamp race (S-2998): an Approve on the text shown before an edit is refused, and the draft stays a draft', async () => {
+  const d = await req.create({ title: 'Race', text: 'Shown text.', verification: ['decision'], by: 'a1' });
+  const x = itsa.must((await approval.ask(d, 'a1')).key);
+  const shown = itsa.get(x.id).rev;
+  // The agent edits the draft and the ask is refreshed (restamped) before the human clicks Approve.
+  await req.set(d.key, { text: 'Text the human never saw.' }, 'a1');
+  await approval.refresh(d.key, 'a1');
+  await assert.rejects(human.act(x.id, 'approve', '', shown), /the text changed, review again/);
+  await assert.rejects(human.act(x.id, 'approve', ''), /the text changed, review again/, 'a missing if_rev is refused');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(req.must(d.key).status, 'draft');
+  assert.equal(itsa.must(x.id).status, 'needs_approval', 'the ask stays open');
+  await human.act(x.id, 'approve', '', itsa.get(x.id).rev);
+  await waitFor(() => req.must(d.key).status === 'in_force');
+  assert.equal(req.must(d.key).text, 'Text the human never saw.');
+});
+
+test('a refresh moves the stamp only after the new text is written (S-2998)', async () => {
+  const d = await req.create({ title: 'Order', text: 'One.', verification: ['decision'], by: 'a1' });
+  const x = itsa.must((await approval.ask(d, 'a1')).key);
+  const stamp = () => db.open().prepare('SELECT rev FROM req_approvals WHERE itsa_id = ?').get(x.id).rev;
+  const first = stamp();
+  await req.set(d.key, { text: 'Two.' }, 'a1');
+  const p = approval.refresh(d.key, 'a1');
+  // The body isn't rewritten yet, so the stamp still holds the rev the body shows.
+  assert.equal(stamp(), first);
+  assert.doesNotMatch(itsa.must(x.id).body, /Two\./);
+  await p;
+  assert.equal(stamp(), req.must(d.key).rev);
+  assert.match(itsa.must(x.id).body, /Two\./);
+});
+
+test('a thread\'s Approve names the newest mail it showed (S-2998): before the re-ask it is refused, after it the new text goes in force', async () => {
+  const d = await req.create({ title: 'Thread race', text: 'Shown in the ask.', verification: ['decision'], by: 'a1' });
+  const x = itsa.must((await approval.ask(d, 'a1')).key);
+  const thread = () => db.threadMail(itsa.must(x.id).thread_id);
+  const ask = await waitFor(() => thread().find((m) => m.kind === 'ask'));
+  await req.set(d.key, { text: 'Changed after the ask.' }, 'a1');
+  await approval.refresh(d.key, 'a1');
+  await assert.rejects(human.act(x.id, 'approve', '', undefined, ask.id), /the text changed, review again/);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(req.must(d.key).status, 'draft');
+  const reask = thread().findLast((m) => /The draft changed/.test(m.body));
+  await human.act(x.id, 'approve', '', undefined, reask.id);
+  await waitFor(() => req.must(d.key).status === 'in_force');
+  assert.equal(req.must(d.key).text, 'Changed after the ask.');
+});
+
+test('two refreshes at once: each comment records the revision of the text it shows, never the other\'s (S-2998)', async () => {
+  const d = await req.create({ title: 'Two refreshes', text: 'Text one.', verification: ['decision'], by: 'a1' });
+  const x = itsa.must((await approval.ask(d, 'a1')).key);
+  await req.set(d.key, { text: 'Text two.' }, 'a1');
+  const a = approval.refresh(d.key, 'a1');
+  await req.set(d.key, { text: 'Text three.' }, 'a1');
+  const b = approval.refresh(d.key, 'a1');
+  await Promise.all([a, b]);
+  // Every text the ITSA held, rebuilt from its body and summary events: each comment must record the revision of the one it shows.
+  const cur = itsa.must(x.id);
+  let state = { title: cur.title, summary: null, body: null };
+  const states = [];
+  for (const e of itsa.events(x.id, 1000)) {
+    const d = e.data ? JSON.parse(e.data) : {};
+    if (e.type === 'created') continue;
+    if (e.type === 'body' || e.type === 'summary') { state = { ...state, [e.type]: d.to }; states.push(state); }
+  }
+  const changed = db.threadMail(cur.thread_id).filter((m) => /The draft changed/.test(m.body));
+  assert.ok(changed.length >= 1);
+  for (const m of changed) {
+    const shows = states.filter((s) => m.body.includes(human.shownText({ key: cur.key, ...s }).text));
+    assert.ok(shows.length, `no text the ITSA held is shown in ${m.id}`);
+    assert.equal(itsa.shownRev(x.id, m.id), itsa.revOf(shows.at(-1)), `${m.id} records the revision of the text it shows`);
+    // A re-show ends with its snapshot, and the thread serves where it sits.
+    const text = human.shownText({ key: cur.key, ...shows.at(-1) }).text;
+    assert.deepEqual(m.shown, { at: m.body.length - text.length, len: text.length }, `${m.id} serves its snapshot's place`);
+  }
 });

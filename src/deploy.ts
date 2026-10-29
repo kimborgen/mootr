@@ -13,12 +13,29 @@ import { RELEASES, ROOT, STAM_HOME } from './config.ts';
 import { lockHolder, tryLock } from './release-lock.ts';
 import { api } from './client.ts';
 import { migrateUnit } from './unit.ts';
+import { defaultService } from './default-home.ts';
 import { checkRoot, sweepCheckHomes, writeOwner } from '../scripts/check-homes.mjs';
 import { GONE, NODEPS, linkLocked, linkLockedAsync, tryExclusive } from '../scripts/deps-lock.mjs';
-import { envVar, entryValue } from './env.ts';
+import { envVar, entryValue, withTwins } from './env.ts';
+import { killTmuxServer } from './tmux-socket.ts';
 
-export const SERVICE = envVar('SERVICE') ?? 'stamd';
-export const UNIT = join(homedir(), '.config', 'systemd', 'user', `${SERVICE}.service`);
+// The service name (S-2890, src/default-home.ts defaultService): a regular stamd.service wins first, then mootrd.service, else stamd. mootrd carries Alias=stamd.service.
+const UNIT_DIR = join(homedir(), '.config', 'systemd', 'user');
+// A unit dir that can't be inspected (EACCES) doesn't crash the import: SERVICE falls back to stamd for display, and
+// checkService() throws the error where the service is used, so nothing acts on a guessed name.
+let serviceError: Error | undefined;
+export const SERVICE = envVar('SERVICE') ?? (() => {
+  try {
+    return defaultService(UNIT_DIR);
+  } catch (e) {
+    serviceError = e instanceof Error ? e : new Error(String(e));
+    return 'stamd';
+  }
+})();
+export function checkService(): void {
+  if (serviceError) throw serviceError;
+}
+export const UNIT = join(UNIT_DIR, `${SERVICE}.service`);
 export const systemctl = (...args: string[]) => spawnSync('systemctl', ['--user', ...args], { stdio: 'inherit' }).status === 0;
 
 const KEEP = 5;
@@ -68,6 +85,7 @@ export type RestartDeps = {
 };
 
 const unitState = (): { pid: number; state: string } => {
+  checkService();
   const out = spawnSync('systemctl', ['--user', 'show', SERVICE, '--property=MainPID', '--property=ActiveState'], { encoding: 'utf8', timeout: 5000 }).stdout ?? '';
   const get = (key: string) => out.split('\n').find((l) => l.startsWith(`${key}=`))?.slice(key.length + 1) ?? '';
   return { pid: Number(get('MainPID')) || 0, state: get('ActiveState') };
@@ -430,7 +448,7 @@ export async function check(dir: string): Promise<void> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (!/^(STAM|MOOTR)_/.test(k) && v !== undefined) env[k] = v;
   const port = await freePort();
-  Object.assign(env, {
+  Object.assign(env, withTwins({
     STAM_HOME: home,
     STAM_PORT: String(port),
     STAM_TMUX_SOCKET: socket,
@@ -441,7 +459,7 @@ export async function check(dir: string): Promise<void> {
     STAM_CODEX_BIN: '/bin/false',
     // No model install or download into the scratch home: an npm child of it can outlive the daemon.
     STAM_EMBEDDER: 'off',
-  });
+  }));
   const log = join(home, 'check.log');
   let child: ChildProcess | undefined;
   let exited = false;
@@ -482,7 +500,7 @@ export async function check(dir: string): Promise<void> {
       for (let i = 0; i < 20 && !exited; i++) await sleep(100);
     }
     killHomeProcesses(home);
-    spawnSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' });
+    killTmuxServer(socket);
     rmSync(home, { recursive: true, force: true });
   }
 }
@@ -490,7 +508,21 @@ export async function check(dir: string): Promise<void> {
 // Release folders, without the `current` and `previous` links and unfinished builds.
 const releases = () => readdirSync(RELEASES, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('.') && meta(e.name)).map((e) => e.name);
 
-type Meta = { release: string; commit: string; subject: string; repo: string; built_at: string; deps: string[] };
+// What a release can do, for a script that must know a fix is deployed before it relies on it (scripts/mootr-move.sh
+// Step 0 checks `.release.json` capabilities). The list is the committed `capabilities.json` of the tree being built
+// (`dir`, the archived target), never a constant of the CLI that builds it: a new CLI building an older ref writes no
+// marker for a fix that ref lacks, and the fixed ref carries it whichever CLI builds it. `mootr-deploy-names` is S-3347:
+// the mootr home default, mootrd as the service, and serviceRunsReleases accepting either home spelling.
+export function releaseCapabilities(dir: string): string[] {
+  try {
+    const list = JSON.parse(readFileSync(join(dir, 'capabilities.json'), 'utf8'));
+    return Array.isArray(list) ? list.filter((c): c is string => typeof c === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+type Meta = { release: string; commit: string; subject: string; repo: string; built_at: string; deps: string[]; capabilities?: string[] };
 
 function meta(name: string): Meta | undefined {
   try {
@@ -530,6 +562,7 @@ async function build(repo: string, ref: string): Promise<string> {
       repo,
       built_at: new Date().toISOString(),
       deps: deps.filter((d): d is string => Boolean(d)),
+      capabilities: releaseCapabilities(dir),
     };
     writeFileSync(join(dir, '.release.json'), JSON.stringify(m, null, 2));
     renameSync(dir, join(RELEASES, name));
@@ -543,13 +576,23 @@ async function build(repo: string, ref: string): Promise<string> {
 // The unit runs releases/current, so a restart picks up the switch.
 // A crash-looping release can hit systemd's start limit, which would refuse the next start.
 function restart(): void {
+  checkService();
   systemctl('reset-failed', SERVICE);
   systemctl('restart', SERVICE);
 }
 
+// Whether a unit file's text starts the service from `releases/current`, under either home spelling: the stam home
+// and, after the move, the mootr home (the stam path is then a symlink to it).
+export function serviceRunsReleasesText(unit: string, releases: string): boolean {
+  const current = join(releases, 'current');
+  const other = current.includes('/share/mootr/') ? current.replace('/share/mootr/', '/share/stam/') : current.replace('/share/stam/', '/share/mootr/');
+  return unit.includes(current) || unit.includes(other);
+}
+
 function serviceRunsReleases(): boolean {
+  checkService();
   try {
-    return readFileSync(UNIT, 'utf8').includes(join(RELEASES, 'current'));
+    return serviceRunsReleasesText(readFileSync(UNIT, 'utf8'), RELEASES);
   } catch {
     return false;
   }
@@ -582,7 +625,9 @@ async function restartAndWait(release: string): Promise<'answering' | 'crashed' 
 
 // Points `current` at the target and restarts the service. If the restarted daemon doesn't
 // answer as the target in time, or crashes while starting, points `current` back and restarts again.
-async function activate(target: string): Promise<boolean> {
+export async function activate(target: string): Promise<boolean> {
+  // Before `current` and `previous` move, so a service that can't be inspected leaves both unchanged.
+  checkService();
   const before = { current: link('current'), previous: link('previous') };
   setLink('current', target);
   if (before.current && before.current !== target) setLink('previous', before.current);
@@ -748,7 +793,7 @@ export async function capPins(ids: string[]): Promise<void> {
   if (!ids.length) return;
   let agents: { id: string; harness?: string; activity?: string | null; lifecycle?: string }[];
   try {
-    agents = await api('GET', '/api/agents');
+    agents = await api('GET', `/api/agents?${new URLSearchParams({ ids: ids.join(',') })}`);
   } catch (e) {
     console.log(`the daemon didn't answer to reload pinned agents' MCP servers: ${e instanceof Error ? e.message : String(e)}`);
     return;

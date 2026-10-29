@@ -45,7 +45,8 @@ export function cellActions(col: SortFilterCol & { label?: string }, row: WorkRo
     switch (kind) {
       case 'values': {
         const vals = valuesOf(raw)
-        if (!vals) break
+        // A cell that shows text holds no blank value: a GitHub cell with a commit link has no PR state, but it is not empty (S-3608).
+        if (!vals || (vals.every((v) => v === BLANK) && col.text?.(row, cx))) break
         const label = (v: string) => options.find((o) => o.value === v)?.label ?? (v === BLANK ? blankLabel : v)
         group(vals.flatMap((v): CellAction[] => [
           { label: 'Filter to this value', hint: label(v), apply: (l) => setFilter(l, id, { kind: 'values', values: [v] }) },

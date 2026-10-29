@@ -42,7 +42,7 @@ describe('defaults', () => {
       seen: [],
     })
     expect(m.defaultCardLayout('agent')).toEqual({
-      slots: { HEAD: ['model', 'cost'], ISSUE: ['issue'], BADGES: [], FOOT: ['activity'] },
+      slots: { HEAD: ['model', 'cost'], ISSUE: ['issue'], BADGES: ['health', 'review', 'tests'], FOOT: ['activity'] },
       hairline: true,
       seen: [],
     })
@@ -164,6 +164,36 @@ describe('the seen rule', () => {
   })
 })
 
+describe('seedAgentLayout', () => {
+  it('keeps the word badges and adds each chip field after them, in the Work columns\' order', async () => {
+    const m = await load()
+    const seeded = m.seedAgentLayout([
+      { id: 'b', card: 'chip', position: 2 },
+      { id: 'a', card: 'meta', position: 1 },
+      { id: 'c', card: 'chip', position: 3 },
+    ], ['field:c', 'field:b'])
+    expect(seeded.slots.BADGES).toEqual(['health', 'review', 'tests', 'field:c', 'field:b'])
+    expect(seeded.slots.HEAD).toEqual(['model', 'cost'])
+  })
+
+  it('marks every field seen, so a chip the human moved out of BADGES is not added again', async () => {
+    const m = await load()
+    const seeded = m.seedAgentLayout([{ id: 'c', card: 'chip', position: 1 }])
+    expect(seeded.seen).toEqual(['field:c'])
+  })
+})
+
+describe('settleAgentFields', () => {
+  it('adds each new field to BADGES once, as the issue layout does, whatever its card setting', async () => {
+    const m = await load()
+    const layout = m.seedAgentLayout([])
+    const settled = m.settleAgentFields(layout, [{ id: 'n' }, { id: 'o' }])
+    expect(settled.slots.BADGES).toEqual(['health', 'review', 'tests', 'field:n', 'field:o'])
+    expect(settled.seen).toEqual(['field:n', 'field:o'])
+    expect(m.settleAgentFields(settled, [{ id: 'n' }, { id: 'o' }])).toBe(settled)
+  })
+})
+
 describe('seedIssueLayout', () => {
   it('moves each chip field into BADGES and each meta field into META, in position order', async () => {
     const m = await load()
@@ -233,5 +263,23 @@ describe('the record in settings', () => {
     await vi.runAllTimersAsync()
     expect(api.mock.calls.filter(([method]) => method === 'PATCH')).toHaveLength(0)
     expect((settings.cardLayouts as Record<string, { slots: Record<string, string[]> }>).issue.slots.BADGES).toEqual(['field:f1'])
+  })
+})
+
+describe('an agent record main wrote before the system view read it', () => {
+  it('is replaced by the seed on the first load, so the system card keeps its badges', async () => {
+    settings = { cardLayouts: { agent: { slots: { HEAD: ['model', 'cost'], ISSUE: ['issue'], BADGES: [], FOOT: ['activity'] }, hairline: true, seen: [] } } }
+    const m = await load()
+    await m.migrateCardLayouts([{ id: 'f1', card: 'chip', position: 1 }])
+    await vi.runAllTimersAsync()
+    expect((settings.cardLayouts as Record<string, { slots: Record<string, string[]>; seen: string[] }>).agent.slots.BADGES).toEqual(['health', 'review', 'tests', 'field:f1'])
+  })
+
+  it('is kept when the human chose its badges: a layout that has seen fields is not the old empty default', async () => {
+    settings = { cardLayouts: { agent: { slots: { HEAD: [], ISSUE: ['issue'], BADGES: [], FOOT: [] }, hairline: true, seen: ['field:f1'] } } }
+    const m = await load()
+    await m.migrateCardLayouts([{ id: 'f1', card: 'chip', position: 1 }])
+    await vi.runAllTimersAsync()
+    expect((settings.cardLayouts as Record<string, { slots: Record<string, string[]> }>).agent.slots.BADGES).toEqual([])
   })
 })

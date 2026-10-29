@@ -67,7 +67,9 @@ test('openai-compatible: bearer key, chat-completions URL under the base, max_to
   assert.deepEqual(req.body, { model: 'gpt-x', messages: [{ role: 'user', content: 'hello' }], max_tokens: 20 });
   assert.equal(r.model, 'google/gemma-3-4b-it-stub');
   assert.deepEqual(r.usage, { inputTokens: 30, outputTokens: 4 });
-  assert.equal(r.costUsd, undefined);
+  // The adapter reports no cost; complete prices it from its tokens (S-3245), here at the fallback for a model the registry does not price.
+  assert.equal(r.priced, 'fallback');
+  assert.ok(r.costUsd > 0);
   assert.equal(typeof r.text, 'string');
 });
 

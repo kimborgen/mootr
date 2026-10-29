@@ -6,7 +6,9 @@
 // A peer that failed is skipped by lists until a background probe reaches it again (every 30 seconds), so a stopped
 // machine slows only the request that found it down. A direct call to a down peer probes it first, with the short check.
 //
-// A peer's token never leaves this package: it is a config.Secret, and an error that would quote it says [redacted].
+// A peer's token never leaves this package: it is a config.Secret, and an error that would quote it says [redacted]. A
+// peer's answer that isn't a success has every token the call could expose redacted before any caller sees it (S-3994):
+// the peer's, and this daemon's own, since a peer or a proxy may echo the bearer it got or a token it holds.
 package peers
 
 import (
@@ -97,10 +99,14 @@ type Options struct {
 	Machine string
 	// Home and Release are STAM_HOME and the release this daemon runs (empty from a checkout): ensureCurrent compares them.
 	Home, Release string
-	// Getenv reads STAM_PEER_PROBE_MS, STAM_PEER_CHECK_MS, STAM_PEER_START_TIMEOUT_MS and STAM_PEER_DEPLOY_TIMEOUT_MS.
+	// Getenv reads STAM_PEER_PROBE_MS, STAM_PEER_CHECK_MS, STAM_PEER_START_TIMEOUT_MS, STAM_PEER_DEPLOY_TIMEOUT_MS,
+	// STAM_PEER_REFUSAL_MS and STAM_PEER_REFUSAL_MAX_BYTES.
 	Getenv func(string) string
 	// HTTP is the client for the calls; nil is a client with no timeout of its own (each call has its deadline).
 	HTTP *http.Client
+	// Own gives this daemon's own tokens (shared, peer and lease), redacted from what a peer says as its own are; nil
+	// gives none.
+	Own func() []string
 }
 
 // Client calls the peers.
@@ -110,13 +116,18 @@ type Client struct {
 	home, release string
 	getenv        func(string) string
 	http          *http.Client
+	own           func() []string
 	probe, check  time.Duration
+	// refusalMax and refusalWait bound the refusal body Raw and Stream buffer to redact (S-3994).
+	refusalMax  int
+	refusalWait time.Duration
 
 	mu       sync.Mutex
 	down     map[string]time.Time
 	checking map[string]*flight
 	starting map[string]*run
 	deploys  map[string]*run
+	retries  map[string]*retry
 }
 
 // flight is a health probe other callers wait on.
@@ -127,8 +138,8 @@ type flight struct {
 
 // New is a Client. STAM_PEER_PROBE_MS (30000) and STAM_PEER_CHECK_MS (2000) tune the down-marking, as in TS.
 func New(o Options) *Client {
-	c := &Client{settings: o.Settings, machine: o.Machine, home: o.Home, release: o.Release, getenv: o.Getenv, http: o.HTTP,
-		down: map[string]time.Time{}, checking: map[string]*flight{}, starting: map[string]*run{}, deploys: map[string]*run{}}
+	c := &Client{settings: o.Settings, machine: o.Machine, home: o.Home, release: o.Release, getenv: o.Getenv, http: o.HTTP, own: o.Own,
+		down: map[string]time.Time{}, checking: map[string]*flight{}, starting: map[string]*run{}, deploys: map[string]*run{}, retries: map[string]*retry{}}
 	if c.getenv == nil {
 		c.getenv = func(string) string { return "" }
 	}
@@ -137,6 +148,14 @@ func New(o Options) *Client {
 	}
 	c.probe = c.millis("STAM_PEER_PROBE_MS", 30*time.Second)
 	c.check = c.millis("STAM_PEER_CHECK_MS", 2*time.Second)
+	// A wait or cap that isn't positive is the default.
+	if c.refusalWait = c.millis("STAM_PEER_REFUSAL_MS", 4*time.Second); c.refusalWait <= 0 {
+		c.refusalWait = 4 * time.Second
+	}
+	c.refusalMax = RefusalMax
+	if n, err := strconv.Atoi(strings.TrimSpace(c.getenv("STAM_PEER_REFUSAL_MAX_BYTES"))); err == nil && n > 0 {
+		c.refusalMax = n
+	}
 	return c
 }
 
@@ -164,10 +183,10 @@ func (c *Client) ByName(name string) (config.Peer, bool) {
 // Machine is this daemon's machine name.
 func (c *Client) Machine() string { return c.machine }
 
-// scrub keeps a peer's token out of an error: Go's transport does not quote a header, but a peer or a proxy might echo one.
+// scrub keeps the tokens out of an error: Go's transport does not quote a header, but a peer or a proxy might echo one.
 // A connection that failed or ran out of time reads as Node's fetch says it (`fetch failed`, `The operation was aborted due
 // to timeout`), which is what a relayed request's 500 shows; the address stays out of it.
-func scrub(p config.Peer, err error) error {
+func (c *Client) scrub(p config.Peer, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -178,16 +197,81 @@ func scrub(p config.Peer, err error) error {
 		}
 		return errors.New("fetch failed")
 	}
-	msg := err.Error()
-	for _, t := range []string{p.Token.Reveal(), p.PeerToken.Reveal()} {
-		if t != "" {
-			msg = strings.ReplaceAll(msg, t, "[redacted]")
-		}
-	}
+	msg := c.redact(p, err.Error())
 	if msg == err.Error() {
 		return err
 	}
 	return errors.New(msg)
+}
+
+// Redact is msg with the peer's tokens replaced by [redacted]: for text a peer or a proxy wrote, which might echo the
+// bearer it got.
+func Redact(p config.Peer, msg string) string {
+	return redactAll(msg, p.Token.Reveal(), p.PeerToken.Reveal(), p.LeaseToken.Reveal())
+}
+
+// redactAll replaces every non-empty token: config accepts a token of any length, so none is too short to guard.
+func redactAll(msg string, secrets ...string) string {
+	for _, t := range secrets {
+		if t != "" {
+			msg = strings.ReplaceAll(msg, t, "[redacted]")
+		}
+	}
+	return msg
+}
+
+// RedactText is Redact with this daemon's own tokens too, for a peer's answer read outside Call.
+func (c *Client) RedactText(p config.Peer, msg string) string { return c.redact(p, msg) }
+
+// RedactAny is msg with every peer's tokens and this daemon's own replaced by [redacted]: for text a client sent that
+// names no peer, such as the service worker's failed direct attempt.
+func (c *Client) RedactAny(msg string) string {
+	for _, p := range c.Peers() {
+		msg = Redact(p, msg)
+	}
+	if c.own != nil {
+		msg = redactAll(msg, c.own()...)
+	}
+	return msg
+}
+
+// redact is Redact with this daemon's own tokens too.
+func (c *Client) redact(p config.Peer, msg string) string {
+	msg = Redact(p, msg)
+	if c.own != nil {
+		msg = redactAll(msg, c.own()...)
+	}
+	return msg
+}
+
+// reply is a peer's parsed answer. One that isn't a success has its text redacted, every string and key at any depth,
+// before a caller logs its error, mails it or answers with it; a success is left as the peer sent it.
+func (c *Client) reply(p config.Peer, status int, data jsfmt.Value) Reply {
+	if status < 200 || status > 299 {
+		data = c.redactValue(p, data)
+	}
+	return Reply{Status: status, Data: data}
+}
+
+func (c *Client) redactValue(p config.Peer, v jsfmt.Value) jsfmt.Value {
+	switch v.Kind {
+	case jsfmt.String:
+		v.Str = c.redact(p, v.Str)
+	case jsfmt.Array, jsfmt.Object:
+		items := make([]jsfmt.Value, len(v.Items))
+		for i, x := range v.Items {
+			items[i] = c.redactValue(p, x)
+		}
+		v.Items = items
+		if v.Keys != nil {
+			keys := make([]string, len(v.Keys))
+			for i, k := range v.Keys {
+				keys[i] = c.redact(p, k)
+			}
+			v.Keys = keys
+		}
+	}
+	return v
 }
 
 // url is the peer's base address without one trailing slash, then the path.
@@ -209,7 +293,7 @@ func (c *Client) fetch(ctx context.Context, p config.Peer, method, path string, 
 	req, err := http.NewRequestWithContext(ctx, method, url(p, path), rd)
 	if err != nil {
 		cancel()
-		return nil, nil, scrub(p, err)
+		return nil, nil, c.scrub(p, err)
 	}
 	req.Header.Set("authorization", "Bearer "+p.Bearer())
 	req.Header.Set("content-type", "application/json")
@@ -221,7 +305,7 @@ func (c *Client) fetch(ctx context.Context, p config.Peer, method, path string, 
 	res, err := c.http.Do(req)
 	if err != nil {
 		cancel()
-		return nil, nil, scrub(p, err)
+		return nil, nil, c.scrub(p, err)
 	}
 	return res, cancel, nil
 }
@@ -308,17 +392,17 @@ func (c *Client) Call(ctx context.Context, p config.Peer, method, path string, b
 	c.markUp(p.Name)
 	text, err := io.ReadAll(res.Body)
 	if err != nil {
-		return Reply{}, scrub(p, err)
+		return Reply{}, c.scrub(p, err)
 	}
-	out := Reply{Status: res.StatusCode, Data: jsfmt.Value{Kind: jsfmt.Object}}
+	data := jsfmt.Value{Kind: jsfmt.Object}
 	if len(text) > 0 {
 		v, err := jsfmt.Parse(text)
 		if err != nil {
 			return Reply{}, fmt.Errorf("%s answered something that is not JSON", p.Name)
 		}
-		out.Data = v
+		data = v
 	}
-	return out, nil
+	return c.reply(p, res.StatusCode, data), nil
 }
 
 // Raw is peerRaw: a GET whose reply is streamed on, such as a file's bytes (S-1525). It is the peer's response, or nil
@@ -362,7 +446,60 @@ func (c *Client) Raw(ctx context.Context, p config.Peer, path string, headers ma
 	}
 	c.markUp(p.Name)
 	res.Body = &cancelOnClose{res.Body, cancel}
+	c.redactRefusal(p, res)
 	return res
+}
+
+// RefusalMax is the default cap on a refusal body Raw and Stream buffer to redact (STAM_PEER_REFUSAL_MAX_BYTES).
+const RefusalMax = 64 << 10
+
+// redactRefusal buffers a refusal's body (a non-2xx answer to Raw or Stream) and redacts it, as Call does a parsed one,
+// so a relayed refusal that echoes a token reaches no caller with it (S-3994). A JSON body is parsed, its strings and keys
+// redacted, and written again, so a token escaped in it is found too; any other body is redacted as text. Its length is
+// recomputed. A body over refusalMax, one not read whole within refusalWait, or one that fails to read is a fixed
+// refusal, its status kept: a cut body could still hold the start of a token. A success's bytes (a file, a diff, the
+// event stream) are left as they come.
+func (c *Client) redactRefusal(p config.Peer, res *http.Response) {
+	if res.StatusCode >= 200 && res.StatusCode <= 299 {
+		return
+	}
+	type read struct {
+		body []byte
+		err  error
+	}
+	done := make(chan read, 1)
+	body := res.Body
+	go func() {
+		b, err := io.ReadAll(io.LimitReader(body, int64(c.refusalMax)+1))
+		done <- read{b, err}
+	}()
+	timer := time.NewTimer(c.refusalWait)
+	defer timer.Stop()
+	var out []byte
+	select {
+	case r := <-done:
+		if r.err == nil && len(r.body) <= c.refusalMax {
+			out = c.redactBody(p, r.body)
+		}
+	case <-timer.C:
+	}
+	// Closing the body ends a read still waiting, and Raw's closer cancels the request.
+	body.Close()
+	if out == nil {
+		out, _ = json.Marshal(map[string]string{"error": fmt.Sprintf("%s refused with %d; its answer was too long or too slow to show safely", p.Name, res.StatusCode)})
+		res.Header.Set("content-type", "application/json")
+	}
+	res.Body = io.NopCloser(bytes.NewReader(out))
+	res.ContentLength = int64(len(out))
+	res.Header.Set("content-length", strconv.Itoa(len(out)))
+}
+
+// redactBody is a refusal's body redacted: a JSON one through its decoded strings and keys, any other as text.
+func (c *Client) redactBody(p config.Peer, body []byte) []byte {
+	if v, err := jsfmt.Parse(body); err == nil {
+		return []byte(jsfmt.Compact(c.redactValue(p, v)))
+	}
+	return []byte(c.redact(p, string(body)))
 }
 
 type cancelOnClose struct {
@@ -398,32 +535,37 @@ func (c *Client) Poll(ctx context.Context, p config.Peer, path string, timeout t
 	defer res.Body.Close()
 	text, err := io.ReadAll(res.Body)
 	if err != nil {
-		return Reply{}, scrub(p, err)
+		return Reply{}, c.scrub(p, err)
 	}
-	out := Reply{Status: res.StatusCode, Data: jsfmt.Value{Kind: jsfmt.Object}}
+	data := jsfmt.Value{Kind: jsfmt.Object}
 	if len(text) > 0 {
-		if out.Data, err = jsfmt.Parse(text); err != nil {
+		if data, err = jsfmt.Parse(text); err != nil {
 			return Reply{}, fmt.Errorf("%s answered something that is not JSON", p.Name)
 		}
 	}
-	return out, nil
+	return c.reply(p, res.StatusCode, data), nil
 }
 
 // Stream is peerStream: it pipes a peer's event stream (a GET that stays open) to w until either side closes. It reads
 // from the peer only as fast as w takes it. The peer's daemon drops a client that lags too far, and the browser reconnects.
 func (c *Client) Stream(r *http.Request, p config.Peer, path string, w http.ResponseWriter, via *Via) error {
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url(p, path), nil)
+	// Its own cancel, so a refusal body too slow to redact stops being read.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url(p, path), nil)
 	if err != nil {
-		return scrub(p, err)
+		return c.scrub(p, err)
 	}
 	req.Header.Set("authorization", "Bearer "+p.Bearer())
 	req.Header.Set("x-stam-local", "1")
 	via.headers(req.Header)
 	up, err := c.http.Do(req)
 	if err != nil {
-		return scrub(p, err)
+		return c.scrub(p, err)
 	}
+	up.Body = &cancelOnClose{up.Body, cancel}
 	defer up.Body.Close()
+	c.redactRefusal(p, up)
 	ct := up.Header.Get("content-type")
 	if ct == "" {
 		ct = "application/json"

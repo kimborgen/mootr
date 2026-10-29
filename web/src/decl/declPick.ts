@@ -34,5 +34,7 @@ export function localDecls(tree: Tree, text: string, path: string, name: string)
   })
 }
 
-// The whole tree of an editor's document (parsing the rest, briefly, if it isn't yet).
-export const wholeTree = (state: EditorState): Tree => ensureSyntaxTree(state, state.doc.length, 500) ?? syntaxTree(state)
+// The whole tree of an editor's document (parsing the rest, briefly, if it isn't yet). `ensureSyntaxTree` gives up at
+// the timeout and then this returns the partial tree, so the result depends on machine load; pass `Infinity` to parse
+// to the end whatever the load (the tests do, S-3445). The editor keeps the 500 ms bound so a click never stalls.
+export const wholeTree = (state: EditorState, timeout = 500): Tree => ensureSyntaxTree(state, state.doc.length, timeout) ?? syntaxTree(state)

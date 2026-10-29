@@ -126,7 +126,7 @@ daemon_stop off
 (unset STAM_TEST_COST_HOOKS; daemon_up off)
 [ "$(on off hooks_status)" = 404 ] || fail "the cost test hooks answered with STAM_TEST_COST_HOOKS unset"
 daemon_stop off
-sed -i "s/STAM_TMUX_SOCKET=stam-test-/STAM_TMUX_SOCKET=other-/" "$TEST_TMP/off/test.env"
+sed -i "s/STAM_TMUX_SOCKET=stam-test-/STAM_TMUX_SOCKET=other-/;s/MOOTR_TMUX_SOCKET=stam-test-/MOOTR_TMUX_SOCKET=other-/" "$TEST_TMP/off/test.env"
 daemon_up off
 [ "$(on off hooks_status)" = 404 ] || fail "the cost test hooks answered on a daemon with a non-test tmux socket"
 daemon_stop off
@@ -178,6 +178,7 @@ hook_code() { curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST -H "authoriza
 [ "$(hook_code "$W1_TOKEN" mail '{}')" = 403 ] || fail "an agent's token reached mail"
 [ "$(hook_code "$W1_TOKEN" delivery-fail '{}')" = 403 ] || fail "an agent's token reached delivery-fail"
 [ "$(hook_code "$W1_TOKEN" kv '{"key":"x","value":"y"}')" = 403 ] || fail "an agent's token reached kv"
+[ "$(hook_code "$W1_TOKEN" switch-retries '{}')" = 403 ] || fail "an agent's token reached switch-retries"
 [ "$(hook_code "$W1_TOKEN" no-such-hook '{}')" = 403 ] || fail "an agent's token got past the prefix gate on an unknown test route"
 touch "$STAM_HOME/stall-release"
 [ "$(hook_code "$TOKEN" await '{}')" = 200 ] || fail "the shared token was refused by await"

@@ -209,7 +209,7 @@ test('an issue a retro steward created is refused; the steward files a proposal'
 
 test('a proposal created in needs_approval and approved can be applied', async () => {
   const p = await itsa.create({ title: 'asked at once', kind: 'proposal', owner: 'steward', status: 'needs_approval', by: 'a1' });
-  await human.act(p.key, 'approve', '');
+  await human.act(p.key, 'approve', '', itsa.get(p.key).rev);
   await itsa.set(p.key, { status: 'ready_to_merge' }, 'steward');
   await itsa.set(p.key, { status: 'canceled' }, 'human');
 });
@@ -240,7 +240,7 @@ test('the gate refuses applying until the human approves; Request changes does n
   await assert.rejects(itsa.set(p.key, { status: 'ready_to_merge' }, 'steward'), /hasn't approved/);
   await itsa.post(p.key, { by: 'steward', body: 'Shorter now.' });
   await itsa.set(p.key, { status: 'needs_approval' }, 'steward');
-  await human.act(p.key, 'approve', '');
+  await human.act(p.key, 'approve', '', itsa.get(p.key).rev);
   // The steward hears both answers, even the Approve without text.
   const notices = db.listEvents('a1', 200).filter((e) => e.type === 'notice:queued').map((e) => JSON.parse(e.data).text);
   assert.ok(notices.some((t) => t.startsWith(`Your user requested changes on ${p.key}`)), notices);
@@ -274,7 +274,7 @@ test('a proposal that reaches done outside Retros still closes the item it answe
   const p = await itsa.create({ title: 'proposal under item', kind: 'proposal', parent: item.id, owner: 'release', status: 'in_progress', body: `Answers: ${item.key}\n\n- One edit.`, by: 'a1' });
   await itsa.post(p.key, { by: 'release', body: 'Please approve.' });
   await itsa.set(p.key, { status: 'needs_approval' }, 'release');
-  await human.act(p.key, 'approve', '');
+  await human.act(p.key, 'approve', '', itsa.get(p.key).rev);
   await itsa.set(p.key, { status: 'done' }, 'release');
   await tick();
   assert.equal(itsa.must(item.id).status, 'done');

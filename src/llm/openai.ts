@@ -3,7 +3,7 @@
 // adapter covers OpenAI itself and every server that speaks its chat-completions API (Ollama, vLLM,
 // LiteLLM, Groq, Together, Gemini's compatible endpoint); Azure differs in its URL, its `api-key`
 // header and its `api-version`. Neither has a credit or key endpoint; a bill is not read back, so a
-// result carries no `costUsd`.
+// result carries no `costUsd` and `complete` in src/llm/index.ts prices it from its tokens (S-3245).
 import { getSecret } from '../secrets.ts';
 import { checkCredential, retryAfterMs, send, signalFor } from './http.ts';
 import { probeKey } from './key-check.ts';
@@ -99,6 +99,7 @@ export function openAiCompatible(id: string, cfg: OpenAiCompatibleConfig): LlmAd
     id,
     apiKey: key,
     keyless: !cfg.apiKey,
+    unmetered: !cfg.apiKey,
 
     async complete(req: CompleteRequest): Promise<CompleteResult> {
       const k = key();

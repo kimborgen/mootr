@@ -12,6 +12,7 @@ vi.mock('./shell/layout', () => ({
   mainWorld: () => world,
   leaves: (r: { leaves: { id: string; active: string | null; tabs: string[] }[] }) => r.leaves,
   focusedLeaf: (w: { root: { leaves: { id: string }[] }; focused: string }) => w.root.leaves.find((l) => l.id === w.focused) ?? w.root.leaves[0],
+  activeIn: () => (world.root as { leaves: { id: string; active: string | null }[] }).leaves.find((l) => l.id === world.focused)?.active ?? null,
   isPhone: () => phone,
   open: (...a: unknown[]) => open(...a),
   setFocus: (...a: unknown[]) => setFocus(...a),
@@ -22,6 +23,7 @@ import { closeImage } from './ImageViewer'
 import { bottomTarget } from './composer-target'
 import { addImageSet, foreignImage, imagePlacement, imageSet, inputMain, openStagedImage } from './image-tab'
 import { ImageTabView } from './views/ImageTabView'
+import { viewContext } from './actions'
 
 const panes = (...ids: string[]) => { world.root = { leaves: ids.map((id) => { const [i, active] = id.split('='); return { id: i, active: active ?? null, tabs: active ? [active] : [] } }) } }
 const imgs = [{ src: 'blob:1', alt: 'one.png' }, { src: 'blob:2', alt: 'two.png' }, { src: 'blob:3', alt: 'three.png' }]
@@ -157,5 +159,14 @@ describe('ImageTabView', () => {
     const id = (open.mock.calls[0][1] as string).slice(6)
     await act(async () => { root.render(<ImageTabView id={id} viewKey={'image:' + id} />) })
     expect(host.querySelector('.it-prev')).toBe(null)
+  })
+})
+
+describe('viewContext with an image tab shown', () => {
+  it('names the input\'s main tab, not the image tab', () => {
+    panes('a=config')
+    bottomTarget('config')
+    panes('a=image:' + addImageSet(imgs, 0))
+    expect(viewContext()).toBe('the settings')
   })
 })

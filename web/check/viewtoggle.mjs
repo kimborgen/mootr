@@ -37,7 +37,7 @@ check('api', !!byName('oc').view && !!byName('cx').view && !!byName('cc').view, 
 // the browser is told kid has none, and its view stream answers as the daemon does then.
 const kidId = byName('kid').id;
 const noView = async (ctx) => {
-  await ctx.route(`${origin}/api/agents`, async (r) => {
+  await ctx.route((u) => u.origin === origin && u.pathname === '/api/agents', async (r) => {
     const res = await r.fetch();
     const list = (await res.json()).map((a) => (a.id === kidId ? { ...a, view: null } : a));
     await r.fulfill({ response: res, json: list });

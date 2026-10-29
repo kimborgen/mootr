@@ -6,6 +6,10 @@ import { envVar } from './env.ts';
 // longer than the 10 s default; past it the client gave up while the daemon still delivered (S-1663).
 export const WRITE_CALL_MS = 60_000;
 
+// A cost_switch of an idle agent returns after the successor started (up to its 3-minute startup), so its
+// call waits longer than the 10 s default; past it the client gave up while the daemon went on (S-923).
+export const SWITCH_CALL_MS = 240_000;
+
 // The `client_id` of a write an agent might retry after a timeout (src/client-dedup.ts). It comes from
 // what the write says, not from the call, because the retry is a new tool call: the same sender
 // saying the same thing to the same place within 5 minutes is the same write, and its repeat gets

@@ -12,7 +12,7 @@
 // ready to try, with none of the table's controls.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { Icon } from '../Icon'
-import { fieldIdOf, workColumnIds } from '../itsa/fields'
+import { workColumnIds } from '../itsa/fields'
 import { isClosed, openItsa, statusInfo, StatusGlyph } from '../itsa/itsa'
 import { useWaiting } from '../itsa/WaitingList'
 import { isPhone, registerView, useShell } from '../shell/layout'
@@ -245,8 +245,6 @@ export function WorkView({ viewKey }: { viewKey: string }) {
   // (a resized column's extra width counts toward the fit).
   const shown = withFieldFit(layout.cols.map((id) => COL_BY_ID.get(id)).filter((c): c is WorkColumn => !!c), fields ?? [])
   const extra = layout.cols.reduce((n, id) => layout.widths[id] !== undefined ? n + layout.widths[id] - RESIZE_REF_PX : n, 0)
-  // The shown fields in the layout's order, for the phone's cards.
-  const shownFields = layout.cols.map(fieldIdOf).flatMap((id) => (id ? (fields ?? []).filter((f) => f.id === id) : []))
   const tableCols = shown.filter((c) => !c.hideBelow || pane - extra >= c.hideBelow)
   const cols = tableCols
   const cx: CellContext = { now, extras }
@@ -473,7 +471,7 @@ export function WorkView({ viewKey }: { viewKey: string }) {
   if (loading) body = <Loading className="empty-pane work-empty" size="lg" label="Reading the issues" />
   else if (itsaError && !itsas.length) body = <Stack eyebrow={<span className="badge err">Error</span>} title="Can't load the issues" body={itsaError}
     action={<button type="button" className="btn" onClick={() => refreshItsas()}>Retry</button>} />
-  else if (glanced) body = <div className="w-table"><Glance itsas={itsas} needs={needs} extras={extras} now={now} fields={shownFields} filter={glanceOf()} /></div>
+  else if (glanced) body = <div className="w-table"><Glance itsas={itsas} needs={needs} extras={extras} now={now} filter={glanceOf()} /></div>
   else body = (
     <div className="w-table" role="table" aria-label="Work" style={{ '--w-cols': cols.map(track).join(' ') } as CSSProperties}>
       <div role="rowgroup" className="w-headgroup"><div role="row" className="w-head" ref={headRef}>{cols.map((c) => {

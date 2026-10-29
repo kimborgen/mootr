@@ -152,6 +152,76 @@ func TestReplaceHookWaits(t *testing.T) {
 	}
 }
 
+// TestReplaceHookWaitsWhile: the waits are replaced only while the agent's activity is one of those asked, read in the
+// same transaction; with none asked, as ReplaceHookWaits.
+func TestReplaceHookWaitsWhile(t *testing.T) {
+	ctx := context.Background()
+	d := openTest(t, testDB(t))
+	newTestAgent(t, d, "awp1", "jobs")
+	want := []HookWait{{Target: "b1", Detail: "one"}}
+	if err := d.UpdateAgent(ctx, "awp1", Field{"activity", "working"}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := d.ReplaceHookWaitsWhile(ctx, "awp1", "job", want, "idle", "waiting"); ok || err != nil {
+		t.Errorf("a working agent: wrote %v, %v", ok, err)
+	}
+	if ws, _ := d.ListWaits(ctx, "awp1"); len(ws) != 0 {
+		t.Errorf("waits %+v", ws)
+	}
+	if err := d.UpdateAgent(ctx, "awp1", Field{"activity", "idle"}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := d.ReplaceHookWaitsWhile(ctx, "awp1", "job", want, "idle", "waiting"); !ok || err != nil {
+		t.Errorf("an idle agent: wrote %v, %v", ok, err)
+	}
+	if ws, _ := d.ListWaits(ctx, "awp1"); len(ws) != 1 {
+		t.Errorf("waits %+v", ws)
+	}
+	if a, _ := d.GetAgent(ctx, "awp1"); a.Activity != "waiting" {
+		t.Errorf("activity %s", a.Activity)
+	}
+	if ok, err := d.ReplaceHookWaitsWhile(ctx, "awp1", "job", nil); !ok || err != nil {
+		t.Errorf("none asked: wrote %v, %v", ok, err)
+	}
+}
+
+// TestClearHookWaitWhile: a hook wait of one kind and target clears only while the agent's activity is the one asked,
+// leaves other targets, kinds and sources, and the agent follows its waits.
+func TestClearHookWaitWhile(t *testing.T) {
+	ctx := context.Background()
+	d := openTest(t, testDB(t))
+	newTestAgent(t, d, "awc1", "jobs")
+	if err := d.ReplaceHookWaits(ctx, "awc1", "job", []HookWait{{Target: "b1", Detail: "one"}, {Target: "b2", Detail: "two"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.AddWait(ctx, NewWait{AgentID: "awc1", Kind: "job", Source: "declared", Target: ptr("b1")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateAgent(ctx, "awc1", Field{"activity", "working"}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := d.ClearHookWaitWhile(ctx, "awc1", "job", "b1", "waiting"); ok || err != nil {
+		t.Errorf("a working agent: cleared %v, %v", ok, err)
+	}
+	if err := d.UpdateAgent(ctx, "awc1", Field{"activity", "waiting"}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := d.ClearHookWaitWhile(ctx, "awc1", "job", "b1", "waiting"); !ok || err != nil {
+		t.Errorf("a waiting agent: cleared %v, %v", ok, err)
+	}
+	var got []string
+	ws, _ := d.ListWaits(ctx, "awc1")
+	for _, w := range ws {
+		got = append(got, w.Source+" "+deref(w.Target))
+	}
+	if g := strings.Join(got, "|"); g != "hook b2|declared b1" {
+		t.Errorf("left %s", g)
+	}
+	if a, _ := d.GetAgent(ctx, "awc1"); a.Activity != "waiting" {
+		t.Errorf("activity %s", a.Activity)
+	}
+}
+
 // TestFireWait: due waits are declared timeouts and stam's timers, not hook waits; firing moves or clears one with its
 // event, and a wait cleared or moved since it was read is left alone with no event.
 func TestFireWait(t *testing.T) {

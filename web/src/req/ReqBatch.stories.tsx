@@ -19,6 +19,7 @@ export const stories: Story[] = [{
     'A heading counts "N to approve" and, once any are dropped, ", N dropped". A dropped row is muted with its outcome ("Dropped, still a draft" or "Dropped, now obsolete"); its buttons are gone.',
     'Dropping is two steps so it is never an accident: Drop shows "Keep as draft", "Mark obsolete", and Cancel in the row.',
     'Each drop carries the revision shown; if the draft changed or was approved since, the daemon refuses and the reason shows under the list in the error tone, in place and not as a toast (' + ds('Persona rules') + ').',
+    'The list reports the ITSA revision its drafts were read with: Approve sends that one, and waits, disabled, while a reload of the list lags the ITSA (S-2998), so it never approves drafts that aren\'t on screen.',
     'A closed ask shows its drafts with no buttons. A dropped row\'s text takes `--text-muted`, and each draft\'s heading is at least `--size-hit-touch` tall (' + ds('Density') + ').',
   ],
   states: [

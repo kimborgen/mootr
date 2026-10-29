@@ -7,6 +7,7 @@
 // touched. Runs against a throwaway STAM_HOME with stubbed harness prompts; no daemon, no
 // network, no models: `node --test test/rules.test.mjs`.
 import { test, before, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -54,7 +55,7 @@ before(async () => {
     };
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -70,6 +71,14 @@ const of = (a, kind) => blockers.blockers(a).find((b) => b.kind === kind);
 const events = (a, type) => db.listEvents(a.id, 500).filter((e) => e.type === type).map((e) => JSON.parse(e.data ?? 'null'));
 const MIN = 60_000;
 const settle = () => new Promise((r) => setTimeout(r, 50));
+// Waits on state, not time: a wake's evaluation takes as long as the pause and unpause deliveries do.
+async function until(cond, what, ms = 30_000) {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    assert.ok(Date.now() < end, what);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
 // Readings at a chosen time; reportSubscription evaluates the rules itself.
 async function claude(now, five, resetsAt = Math.floor(now / 1000) + 3600) {
   usage.reportSubscription('claude', { five_hour: { used_percentage: five, resets_at: resetsAt }, seven_day: { used_percentage: 40, resets_at: resetsAt + 86400 } }, now);
@@ -442,18 +451,67 @@ test('timer: a deadline that passes while the pause notice is being delivered st
   reset();
   rules.setResetMargin(0);
   slowMs = 2500;
+  const realNow = Date.now;
+  // The clock reads 5 s short inside a timer callback only, as when a timer fires early, so the wake's
+  // own reading of the time is before the deadline it was armed for.
+  Date.now = () => (new Error().stack.includes('listOnTimeout') ? realNow() - 5000 : realNow());
   try {
     const t0 = Date.now();
     const a = agent('claude');
     const resets = Math.ceil(t0 / 1000) + 1;
     await claude(t0, 100, resets); // returns after the slow pause delivery, past the deadline
+    Date.now = realNow;
     assert.ok(Date.now() > resets * 1000, 'the deadline passed during the pause');
     // No further reading or call: the timer set before the pause does it.
-    await new Promise((r) => setTimeout(r, 300));
-    await settle();
-    assert.equal(of(a, 'window'), undefined);
+    await until(() => of(a, 'window') === undefined, 'the timer cleared the blocker');
   } finally {
+    Date.now = realNow;
     slowMs = 0;
+    rules.setResetMargin(60_000);
+  }
+});
+
+test('timer: a deadline beyond the longest timer delay is not met early by the capped wake', async () => {
+  reset();
+  rules.setResetMargin(0);
+  rules.setMaxTimer(1000);
+  try {
+    const t0 = Date.now();
+    const a = agent('claude');
+    const resets = Math.ceil(t0 / 1000) + 20;
+    await claude(t0, 100, resets); // takes seconds: capped wakes fire meanwhile
+    assert.ok(of(a, 'window'), 'blocked');
+    const t1 = Date.now();
+    await until(() => Date.now() > t1 + 2500, 'capped wakes passed');
+    assert.ok(Date.now() < resets * 1000, 'the deadline is still ahead');
+    assert.ok(of(a, 'window'), 'a capped wake does not clear a deadline still ahead');
+    await until(() => of(a, 'window') === undefined, 'the deadline wake cleared the blocker');
+  } finally {
+    rules.setMaxTimer(2 ** 31 - 1);
+    rules.setResetMargin(60_000);
+  }
+});
+
+test('timer: a capped wake that reads its time before the deadline, evaluated after it, still gets the deadline wake', async () => {
+  reset();
+  rules.setResetMargin(0);
+  rules.setMaxTimer(1000);
+  slowMs = 2500;
+  const realNow = Date.now;
+  // The capped callback reads a time short of the deadline; its evaluation waits behind the pause delivery.
+  Date.now = () => (new Error().stack.includes('listOnTimeout') ? realNow() - 5000 : realNow());
+  try {
+    const t0 = Date.now();
+    const a = agent('claude');
+    const resets = Math.ceil(t0 / 1000) + 2; // more than the cap away
+    await claude(t0, 100, resets);
+    Date.now = realNow;
+    assert.ok(Date.now() > resets * 1000, 'the deadline passed during the pause');
+    await until(() => of(a, 'window') === undefined, 'a wake after the deadline cleared the blocker');
+  } finally {
+    Date.now = realNow;
+    slowMs = 0;
+    rules.setMaxTimer(2 ** 31 - 1);
     rules.setResetMargin(60_000);
   }
 });
@@ -651,8 +709,7 @@ test('window: an evaluation before a hold ends, scheduled after the wall clock p
   await claude(t0 + 2 * MIN, 100, future);
   await claude(t0 + 3 * MIN, 3, future);
   assert.ok(of(a, 'window'), 'refused by the hold, as planned at t0+3min');
-  await settle();
-  assert.equal(of(a, 'window'), undefined, 'the elapsed hold woke it');
+  await until(() => of(a, 'window') === undefined, 'the elapsed hold woke it');
 });
 
 // The clear is on disk, so a restart keeps the hold: read back over a fresh connection, then a

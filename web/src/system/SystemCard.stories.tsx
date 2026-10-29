@@ -1,19 +1,23 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react'
 import { AnimatePresence } from 'motion/react'
 import { agent } from '../stories/fixtures'
 import { itsa, Later, SvStage, cost, worker, type SvPx } from '../stories/system'
 import { STATUSES } from '../stories/mailFixtures'
 import { ds, type Story } from '../stories/types'
 import type { Agent, Itsa } from '../types'
+import { cardItemMap } from '../itsa/IssueCard'
+import type { Field } from '../itsa/fields'
+import { defaultCardLayout, type CardLayout } from '../card-layout'
 import { shortName } from './names'
-import { activityOf, cardSig, SystemCard, type CardModel, type CardPlace, type Exit, type Far } from './SystemCard'
+import { nestedRows } from './layout'
+import { activityOf, cardSig, CardLayoutsContext, type CardLayouts, SystemCard, type CardModel, type CardPlace, type Exit, type Far } from './SystemCard'
 
 const DEV = worker('cd-dev', 'fixture-dev', 'cd-cos', { activity: 'working', activity_detail: 'Editing the tree layout', context_tokens: 310000, context_level: 1, cost: cost(2.4), unread: 2 })
 const WORK: Itsa = itsa({ id: 'ci-1', key: 'FX-12', title: 'Lay out the tree', owner: 'cd-dev', health: 'at_risk' })
 
 // A card's model from an agent (null is the human), as the view builds it, with what a state sets.
 function model(a: Agent | null, o: Partial<CardModel> = {}): CardModel {
-  return { id: a?.id ?? 'human', short: a ? shortName(a.name, 'fixture-cos') : 'You', agent: a, activity: a ? activityOf(a) : '', it: null, owns: 0, badges: [], unread: 0, ctx: 0, ctxLevel: 0, kids: 0, folded: null, hit: '', rollup: null, ...o }
+  return { id: a?.id ?? 'human', short: a ? shortName(a.name, 'fixture-cos') : 'You', agent: a, activity: a ? activityOf(a) : '', it: null, owns: 0, badges: [], unread: 0, ctx: 0, ctxLevel: 0, kids: 0, folded: null, hit: '', rollup: null, cx: { now: 0, extras: NO_EXTRAS }, cxSig: '', ...o }
 }
 const AT_RISK = [{ kind: 'word' as const, id: 'health', word: 'at risk', tone: 'warn' as const, title: 'Health: at risk' }]
 const TREE = { ...worker('cd-lead', 'fixture-lead', 'cd-cos', { role: 'manager', activity: 'working', cost: cost(1.2, 8.6), context_tokens: 120000 }) }
@@ -21,11 +25,26 @@ const TREE = { ...worker('cd-lead', 'fixture-lead', 'cd-cos', { role: 'manager',
 // The cards in a column on the stage, each at its own place, as the phone's Cards draws them.
 const place = (px: SvPx, i: number, w = px.card): CardPlace => ({ x: px.pad, y: px.pad + i * (px.cardH + px.rowGap), w })
 const heightOf = (n: number) => (px: SvPx) => px.pad * 2 + n * px.cardH + (n - 1) * px.rowGap
-function Cards({ ms, far = '', selected, enter }: { ms: CardModel[]; far?: Far; selected?: string; enter?: Record<string, CardPlace> }) {
+// The layouts a story's cards draw with: the defaults, with what a state changes. No extras are read here, so a
+// nested card draws no costs and no activity.
+const NO_EXTRAS = { costs: null, activity: null, watch: {}, fields: null, fieldsFailed: false, fieldsStart: 0 }
+interface LayoutSet { agent?: Partial<CardLayout>; issue?: Partial<CardLayout>; fields?: Field[] }
+function Layouts({ set, children }: { set: LayoutSet; children: ReactNode }) {
+  const value = useMemo<CardLayouts>(() => {
+    const agent = { ...defaultCardLayout('agent'), ...set.agent }, issue = { ...defaultCardLayout('issue'), ...set.issue }
+    return { agent, issue, items: cardItemMap(set.fields ?? []), fields: set.fields ?? [] }
+  }, [set])
+  // The issue row's height as the view sets it (SystemView), so the card's height follows its layout here too.
+  const style = { '--sv-issue-h': `calc(var(--space-4) * ${nestedRows(value.issue, value.agent)})` } as CSSProperties
+  return <CardLayoutsContext.Provider value={value}><div style={style}>{children}</div></CardLayoutsContext.Provider>
+}
+function Cards({ ms, far = '', selected, enter, set = {} }: { ms: CardModel[]; far?: Far; selected?: string; enter?: Record<string, CardPlace>; set?: LayoutSet }) {
   return (
-    <SvStage height={heightOf(ms.length)} far={!!far}>
-      {(px) => ms.map((m, i) => <SystemCard key={m.id} m={m} sig={cardSig(m)} place={place(px, i)} selected={selected === m.id} enter={enter?.[m.id] ?? null} jump={false} far={far} />)}
-    </SvStage>
+    <Layouts set={set}>
+      <SvStage height={heightOf(ms.length)} far={!!far}>
+        {(px) => ms.map((m, i) => <SystemCard key={m.id} m={m} sig={cardSig(m)} place={place(px, i)} selected={selected === m.id} enter={enter?.[m.id] ?? null} jump={false} far={far} />)}
+      </SvStage>
+    </Layouts>
   )
 }
 
@@ -79,6 +98,20 @@ export const stories: Story[] = [{
         model(worker('cd-d', 'fixture-broken', 'cd-cos', { harness: 'codex', model: 'gpt-6.1-sol', activity: 'errored', cost: cost(0.1) }), { ctx: 0.97, ctxLevel: 2 }),
         model(worker('cd-e', 'fixture-paused', 'cd-cos', { harness: 'opencode', model: 'openrouter/fixture/flash', lifecycle: 'paused', activity: null }), {}),
       ]} />,
+    },
+    { name: 'Default layouts', data: { itsaStatuses: STATUSES }, render: () => <Cards ms={[model(DEV, { it: WORK, owns: 2, badges: AT_RISK, unread: 2, ctx: 0.62, ctxLevel: 1, rollup: { done: 1, total: 4 } }), model(TREE, { it: itsa({ id: 'ci-t', key: 'FX-10', title: 'Lay out the tree', owner: 'cd-lead', parent_id: 'ci-m' }), owns: 1, kids: 2 })]} /> },
+    {
+      name: 'A field moved to BADGES', data: { itsaStatuses: STATUSES },
+      render: () => {
+        const stage: Field = { id: 'stage', key: 'stage', label: 'Stage', type: 'choice', options: [{ value: 'plan', label: 'Plan', tone: 'accent' }], description: null, hint: null, width: 'm', align: 'start', card: 'chip', position: 1 }
+        const staged = { ...WORK, fields: { stage: 'plan' } } as Itsa
+        const issue: Partial<CardLayout> = { slots: { TOP: ['parent', 'kind', 'health'], META: ['status', 'rollup', 'owner'], BADGES: ['field:stage'], FOOT: [] }, titleLines: 3, seen: ['field:stage'] }
+        return <Cards set={{ fields: [stage], issue }} ms={[model(DEV, { it: staged, owns: 1 })]} />
+      },
+    },
+    {
+      name: 'ISSUE off', data: { itsaStatuses: STATUSES },
+      render: () => <Cards set={{ agent: { slots: { HEAD: ['model', 'cost'], ISSUE: [], BADGES: ['health', 'review', 'tests'], FOOT: ['activity'] } } }} ms={[model(DEV, { it: WORK, owns: 1, badges: AT_RISK, unread: 2 })]} />,
     },
     { name: 'You, the human', data: { itsaStatuses: STATUSES }, render: () => <Cards ms={[model(null, { unread: 3, badges: [{ kind: 'word', id: 'waiting', word: '1 waiting on you', tone: 'warn', title: 'Asks, decisions, and ITSAs waiting on you' }] })]} /> },
     { name: 'A manager and its fold', data: { itsaStatuses: STATUSES }, render: () => <Cards ms={[model(TREE, { it: itsa({ id: 'ci-m', key: 'FX-9', title: 'Fixture project', owner: 'cd-lead' }), owns: 1, kids: 4, rollup: { done: 2, total: 5 } }), model(worker('cd-folded', 'fixture-folded', 'cd-cos', { role: 'manager', activity: 'working', cost: cost(0.9, 4.2) }), { folded: { n: 5, states: [{ state: 'working', n: 3 }, { state: 'idle', n: 1 }, { state: 'blocked', n: 1 }] }, unread: 4 })]} /> },

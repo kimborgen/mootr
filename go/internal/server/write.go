@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -17,7 +19,7 @@ import (
 
 // What src/daemon.ts handler does to a write before its route (S-2820): it reads the JSON body, refuses an agent's
 // body that isn't an object, resolves the identity fields (resolveActors), and tells whether the request is the
-// human's.
+// human's. resolveBody does the first three once, in ServeHTTP, for every route (S-3795).
 
 // humanName is mail.HUMAN, the human's address.
 const humanName = "human"
@@ -30,15 +32,158 @@ type write struct {
 	body  *jsjson.Object
 	human bool
 	local bool
+	// onCreated, on the daemon's own spawns (a ring's members), hears the new agent's id once its row exists, so a spawn
+	// that fails after that is discarded by the id it made, never by a name lookup.
+	onCreated func(id string)
+	// queue: a developer spawn at the cap waits in the slot queue (slotqueue.go) instead of a 409; only POST /api/agents
+	// asks for it. granted: the queue already reserved this spawn's slot, so the cap isn't checked again.
+	queue, granted bool
 }
 
-// readWrite reads and checks the body of a POST, PUT, PATCH or DELETE.
+// readWrite reads the body of a POST, PUT, PATCH or DELETE, as resolveBody left it.
 func (s *Server) readWrite(r *http.Request, c auth.Resolved) (write, error) {
 	raw, err := readBody(r)
 	if err != nil {
 		return write{}, err
 	}
-	return s.parseWrite(r, c, raw, true)
+	return s.parseWrite(r, c, raw)
+}
+
+// writeMethod is whether a request's method carries a body src/daemon.ts reads.
+func writeMethod(method string) bool {
+	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
+}
+
+// resolveBody is src/daemon.ts handler's body step, before any relay or route: it reads a write's body once, refuses
+// one that isn't JSON, and an agent's or the OpenCode server's that isn't an object, then resolves its identity fields
+// (resolveActors) and puts the resolved body back for the route to read. A peer's own call is trusted as it is unless
+// it carries an agent's token (`if (!local || caller.kind === 'agent') resolveActors`), and its body is left unread.
+//
+// Only the top level is written back: each member once, as JSON.parse keeps a repeated key (its first place, its last
+// value), with by, from and self resolved and every other value as sent, so a route reads what TS's route reads and a
+// number such as 1e400 reaches it as it was sent.
+func (s *Server) resolveBody(r *http.Request, c auth.Resolved) error {
+	// A voice clip is binary: its route reads the request itself (src/voice.ts).
+	if !writeMethod(r.Method) || r.URL.Path == "/api/voice/transcribe" {
+		return nil
+	}
+	resolve := !c.Local || c.Kind == auth.Agent
+	if !resolve && !c.IsAgent() {
+		return nil
+	}
+	raw, err := readBody(r)
+	if err != nil {
+		return err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	// A fixed message: a parse error may quote the input, which may hold a secret (S-2114).
+	if len(raw) > 0 && !json.Valid(raw) {
+		return Errorf(http.StatusBadRequest, "the request body is not valid JSON")
+	}
+	trimmed := bytes.TrimLeft(raw, " \t\r\n")
+	isObj := len(raw) == 0 || trimmed[0] == '{'
+	// A write from an agent or the OpenCode server is a JSON object: any other JSON has no identity to check.
+	if c.IsAgent() && !isObj {
+		return Errorf(http.StatusBadRequest, "the request body must be a JSON object")
+	}
+	if !isObj || !resolve {
+		return nil
+	}
+	var ms []bodyMember
+	if len(raw) > 0 {
+		if ms, err = members(raw); err != nil {
+			return Errorf(http.StatusBadRequest, "the request body is not valid JSON")
+		}
+	}
+	ids := jsjson.NewObject()
+	for _, m := range ms {
+		if actorKey(m.key) {
+			v, err := jsjson.Parse(m.val)
+			if err != nil {
+				return Errorf(http.StatusBadRequest, "the request body is not valid JSON")
+			}
+			ids.Set(m.key, v)
+		}
+	}
+	if err := s.resolveActors(r, c, ids); err != nil {
+		return err
+	}
+	var out bytes.Buffer
+	var key strings.Builder
+	put := func(k string, v []byte) {
+		if out.Len() > 0 {
+			out.WriteByte(',')
+		} else {
+			out.WriteByte('{')
+		}
+		key.Reset()
+		jsjson.Quote(&key, k)
+		out.WriteString(key.String())
+		out.WriteByte(':')
+		out.Write(v)
+	}
+	seen := map[string]bool{}
+	for _, m := range ms {
+		seen[m.key] = true
+		if actorKey(m.key) {
+			v, _ := ids.Get(m.key)
+			put(m.key, []byte(jsjson.Stringify(v, "")))
+			continue
+		}
+		put(m.key, m.val)
+	}
+	// The identity fields resolveActors added go last, as `body[k] = v` adds them.
+	for _, k := range ids.Keys() {
+		if !seen[k] {
+			v, _ := ids.Get(k)
+			put(k, []byte(jsjson.Stringify(v, "")))
+		}
+	}
+	if out.Len() == 0 {
+		out.WriteByte('{')
+	}
+	out.WriteByte('}')
+	r.Body = io.NopCloser(bytes.NewReader(out.Bytes()))
+	r.ContentLength = int64(out.Len())
+	return nil
+}
+
+// actorKey is whether a body member is an identity field resolveActors resolves.
+func actorKey(k string) bool { return k == "by" || k == "from" || k == "self" }
+
+// bodyMember is one top-level member of a JSON object, its value as sent.
+type bodyMember struct {
+	key string
+	val json.RawMessage
+}
+
+// members is a valid JSON object's top-level members as JSON.parse keeps them: a repeated key keeps its first place
+// and takes its last value.
+func members(raw []byte) ([]bodyMember, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	var out []bodyMember
+	at := map[string]int{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		k, _ := t.(string)
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, err
+		}
+		if i, ok := at[k]; ok {
+			out[i].val = v
+			continue
+		}
+		at[k] = len(out)
+		out = append(out, bodyMember{k, v})
+	}
+	return out, nil
 }
 
 // readBody reads a request's body, bounded.
@@ -51,9 +196,8 @@ func readBody(r *http.Request) ([]byte, error) {
 	return raw, err
 }
 
-// parseWrite checks a body read by readBody. resolve is false for a peer's own call, whose identity is trusted as it is
-// (src/daemon.ts: `if (!local || caller.kind === 'agent') resolveActors`).
-func (s *Server) parseWrite(r *http.Request, c auth.Resolved, raw []byte, resolve bool) (write, error) {
+// parseWrite parses a body read by readBody, whose identity fields resolveBody has resolved.
+func (s *Server) parseWrite(r *http.Request, c auth.Resolved, raw []byte) (write, error) {
 	var body jsjson.Value = jsjson.NewObject()
 	if len(raw) > 0 {
 		// A fixed message: a parse error may quote the input, which may hold a secret (S-2114).
@@ -66,11 +210,6 @@ func (s *Server) parseWrite(r *http.Request, c auth.Resolved, raw []byte, resolv
 	// A write from an agent or the OpenCode server is a JSON object: any other JSON has no identity to check.
 	if c.IsAgent() && !isObj {
 		return write{}, Errorf(http.StatusBadRequest, "the request body must be a JSON object")
-	}
-	if isObj && resolve {
-		if err := s.resolveActors(r, c, obj); err != nil {
-			return write{}, err
-		}
 	}
 	return write{body: obj, human: s.isHuman(r, c), local: c.Local}, nil
 }

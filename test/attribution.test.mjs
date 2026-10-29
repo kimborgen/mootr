@@ -236,6 +236,112 @@ test('projection > an inflated scale with flat readings projects no 100%', () =>
   db.open().exec('DELETE FROM window_readings');
 });
 
+test('projection > a reset inside the 30 minutes gives no rise, so no 100% (S-532)', () => {
+  // The seven-day window read 52%, reset to 2% at minute 8 (a new resets_at), and read 51% at
+  // minute 30. The span since the reset rises 49 points in 22 minutes, which is no real burn: the
+  // reset falls inside the 30 minutes, so the readings support no rate and the projection is null.
+  const a = agent('proj-reset');
+  reading(0, 52, RESET1, 'seven_day');
+  reading(8, 2, RESET2, 'seven_day');
+  reading(30, 51, RESET2, 'seven_day');
+  sample(a, 2, 1000);
+  sample(a, 7, 1000);
+  for (const m of [10, 20, 30]) sample(a, m, 2000);
+  const now = T0 + 35 * MIN;
+  const s = attr.windowShares('claude', 'seven_day', iso(T0), now);
+  assert.ok(s.scale != null, 'calibrated, so only the rise can stop the projection');
+  assert.equal(s.projection.reaches_100_at, null);
+  assert.equal(s.projection.percent_per_hour, 0);
+  assert.equal(s.projection.note, 'window began in the last 30 minutes');
+});
+
+test('calibrate > a bogus low reading with an unchanged reset time is no reset (S-3243)', () => {
+  // The seven-day window read 52%, 2%, then 51% under one resets_at: a window can't fall, so the
+  // 2% is dropped. Counting it a reset charged the whole 51 points to the agent.
+  const a = agent('bogus-low');
+  reading(0, 52, RESET1, 'seven_day');
+  sample(a, 2, 1000);
+  reading(8, 2, RESET1, 'seven_day');
+  sample(a, 12, 1000);
+  reading(30, 51, RESET1, 'seven_day');
+  const cal = attr.calibrate('claude', 'seven_day', T0, T0 + 35 * MIN);
+  assert.equal(cal.current.used, 51, 'the isolated 2% is dropped');
+  assert.ok(cal.intervals.every((iv) => iv.reset !== 'window' && iv.change <= 1));
+  const s = attr.windowShares('claude', 'seven_day', iso(T0), T0 + 35 * MIN);
+  assert.ok(s.change < 5, `no 51-point charge, got ${s.change}`);
+  assert.equal(s.projection.reaches_100_at, null);
+});
+
+test('calibrate > a drop past the old reset time is a reset (S-3243)', () => {
+  const a = agent('real-reset');
+  reading(0, 52, RESET1, 'seven_day');
+  sample(a, 2, 1000);
+  // Same resets_at, but the reading is after it: the window has passed its reset.
+  const at = RESET1 * 1000 + 5 * MIN - T0;
+  db.open().prepare('INSERT INTO window_readings (name, window, at, used_percentage, resets_at) VALUES (?, ?, ?, ?, ?)').run('claude', 'seven_day', iso(T0 + at), 3, RESET1);
+  const cal = attr.calibrate('claude', 'seven_day', T0, T0 + at + 10 * MIN);
+  assert.equal(cal.intervals.at(-1).reset, 'window');
+  close(cal.intervals.at(-1).change, 3, 'counted from zero');
+});
+
+test('calibrate > an isolated bogus high is dropped, and the window is not frozen (S-3243)', () => {
+  const a = agent('bogus-high');
+  reading(0, 40, RESET1, 'seven_day');
+  sample(a, 2, 1000);
+  reading(8, 95, RESET1, 'seven_day');
+  sample(a, 12, 1000);
+  reading(15, 41, RESET1, 'seven_day');
+  sample(a, 17, 1000);
+  reading(25, 43, RESET1, 'seven_day');
+  const cal = attr.calibrate('claude', 'seven_day', T0, T0 + 35 * MIN);
+  assert.equal(cal.current.used, 43, 'later readings still count after the bogus 95');
+  const s = attr.windowShares('claude', 'seven_day', iso(T0), T0 + 35 * MIN);
+  close(s.change, 3, '40 to 43');
+});
+
+test('calibrate > a lasting small drop is a correction: no change, no reset (S-3243)', () => {
+  const a = agent('correction');
+  reading(0, 52, RESET1, 'seven_day');
+  sample(a, 2, 1000);
+  reading(8, 51, RESET1, 'seven_day');
+  sample(a, 12, 1000);
+  reading(15, 51, RESET1, 'seven_day');
+  reading(20, 53, RESET1, 'seven_day');
+  const cal = attr.calibrate('claude', 'seven_day', T0, T0 + 35 * MIN);
+  assert.ok(cal.intervals.every((iv) => iv.reset !== 'window'));
+  assert.equal(cal.intervals[0].change, 0);
+  const s = attr.windowShares('claude', 'seven_day', iso(T0), T0 + 35 * MIN);
+  close(s.change, 2, 'only the rise from the new baseline');
+});
+
+test('calibrate > a fall with a null reset time is still a reset (S-3243)', () => {
+  const a = agent('null-reset');
+  reading(0, 52, null, 'seven_day');
+  sample(a, 2, 1000);
+  reading(8, 3, null, 'seven_day');
+  const cal = attr.calibrate('claude', 'seven_day', T0, T0 + 35 * MIN);
+  assert.equal(cal.intervals[0].reset, 'window');
+  close(cal.intervals[0].change, 3, 'counted from zero');
+});
+
+test('projection > calibrate and the projection judge a bogus high the same over different ranges (S-3243)', () => {
+  const a = agent('range');
+  // The bogus 95 sits 8 hours back: outside observedRate's 6-hour range, inside calibrate's.
+  reading(0, 40, RESET1, 'seven_day');
+  reading(10, 95, RESET1, 'seven_day');
+  reading(20, 41, RESET1, 'seven_day');
+  sample(a, 25, 1000);
+  reading(8 * 60 + 25, 42, RESET1, 'seven_day');
+  for (const m of [8 * 60 + 30, 8 * 60 + 40]) sample(a, m, 1000);
+  reading(8 * 60 + 45, 43, RESET1, 'seven_day');
+  const now = T0 + (8 * 60 + 50) * MIN;
+  const cal = attr.calibrate('claude', 'seven_day', T0, now);
+  assert.equal(cal.current.used, 43);
+  const p = attr.windowShares('claude', 'seven_day', iso(T0), now).projection;
+  assert.equal(p.used_percentage, 43);
+  assert.ok(p.percent_per_hour == null || p.percent_per_hour < 20, `no false burn, got ${p.percent_per_hour}`);
+});
+
 test('summary > each account carries shares, and a tree view when asked', () => {
   const a = agent('sum-a');
   reading(0, 10);

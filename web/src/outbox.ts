@@ -162,31 +162,41 @@ function attempt(send: SendFn, id: string): Promise<unknown> {
   return Promise.race([send(id), late]).finally(() => clearTimeout(timer))
 }
 
+// Bumped by resetOutbox: a pump or run that began before it belongs to the old outbox, so it stops
+// instead of sending (a retry still sleeping would otherwise fire into the new one) or touching its rows.
+let epoch = 0
+
 // Sends one target's pending rows, oldest first. A single worker per key keeps the order.
 async function pump(key: string) {
   if (busy.has(key)) return
   busy.add(key)
+  const mine = epoch
   try {
     for (;;) {
+      if (mine !== epoch) return
       const row = rows.find((r) => r.key === key && r.kind === 'pending')
       if (!row) return
       await run(row.id)
     }
-  } finally { busy.delete(key) }
+  } finally { if (mine === epoch) busy.delete(key) }
 }
 async function run(id: string) {
   const send = sends.get(id)
   const started = Date.now()
+  const mine = epoch
   for (let i = 0; ; i++) {
+    if (mine !== epoch) return
     if (!send) return fail(id, 'Not sent: the page reloaded first')
     patch(id, { attempts: (rows.find((r) => r.id === id)?.attempts ?? 0) + 1 })
     try {
       await attempt(send, id)
+      if (mine !== epoch) return
       sends.delete(id)
       failedHooks.delete(id)
       change(rows.filter((r) => r.id !== id))
       return
     } catch (e) {
+      if (mine !== epoch) return
       if (!retryable(e) || Date.now() - started >= RETRY_WINDOW_MS) return fail(id, reason(e))
       patch(id, { error: reason(e) })
       await sleep(BACKOFF_MS[Math.min(i, BACKOFF_MS.length - 1)])
@@ -225,7 +235,7 @@ async function adopt() {
 
 // Tests: a fresh outbox with the given storage (none by default).
 export function resetOutbox(p?: Persist, tab = '') {
-  rows = []; sends.clear(); failedHooks.clear(); busy.clear(); persist = p; stored = new Map(); tabId = tab; emit()
+  epoch++; rows = []; sends.clear(); failedHooks.clear(); busy.clear(); persist = p; stored = new Map(); tabId = tab; emit()
 }
 
 function idbPersist(): Persist | undefined {

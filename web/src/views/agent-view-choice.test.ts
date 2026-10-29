@@ -63,7 +63,7 @@ beforeAll(async () => {
     }
     if (init?.method === 'PUT') { puts.push({ path, body: JSON.parse(String(init.body)) }); return new Response('{}') }
     // The daemon's list: the agents as the test set them, with any default the human picked.
-    if (path === '/api/agents') return new Response(JSON.stringify(getData().agents))
+    if (path.split('?')[0] === '/api/agents') return new Response(JSON.stringify(getData().agents))
     return new Response('[]')
   }))
   shell.init({ valid: () => true, keep: () => true, keepWorld: () => true })

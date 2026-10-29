@@ -115,16 +115,41 @@ test('a seat the caller does not hold is refused, naming the open seats (S-2760)
   assert.equal(ring.status(r.id).submissions.length, 0);
 });
 
-test('a seat already filled this round is refused, and the other seat still takes its text (S-2760)', () => {
+test('a seat already filled this round is rewritten, and the other seat still takes its text (S-2955)', () => {
   const { r, pred, own } = seatRing(3);
   assert.equal(ring.submit(r.id, own.id, 'Own findings.', false, undefined, undefined, own.name), 'Submitted. Waiting for the other members.');
-  assert.throws(() => ring.submit(r.id, own.id, 'Again.', true, undefined, undefined, own.name), {
-    message: `the seat ${own.name} is already filled in round 1: your open seats in ${r.name} are ${pred.name}`,
-  });
-  assert.equal(seatRow(r, own.id).text, 'Own findings.', 'the refused text wrote nothing');
+  assert.equal(ring.submit(r.id, own.id, 'Own revised.', true, undefined, undefined, own.name), 'Submitted. Waiting for the other members.');
+  assert.equal(seatRow(r, own.id).text, 'Own revised.', 'the rewrite replaced the text');
+  assert.equal(ring.status(r.id).submissions.length, 1);
   ring.submit(r.id, own.id, 'For the predecessor.', false, undefined, undefined, pred.name);
   assert.equal(seatRow(r, pred.id).text, 'For the predecessor.', 'the text lands under the predecessor\'s name');
-  assert.equal(seatRow(r, own.id).text, 'Own findings.');
+  assert.equal(seatRow(r, own.id).text, 'Own revised.');
+});
+
+test('a rewrite does not complete or advance the round, and the round completes once (S-2955)', () => {
+  const { r, pred, own } = seatRing(5);
+  ring.submit(r.id, own.id, 'v1', false, undefined, 1, own.name);
+  ring.submit(r.id, own.id, 'v2', false, undefined, 1, own.name);
+  assert.equal(ring.status(r.id).round, 1);
+  assert.equal(ring.submit(r.id, own.id, 'pred', false, undefined, 1, pred.name), 'Submitted. The round is complete.');
+  assert.equal(ring.status(r.id).round, 2);
+  assert.throws(() => ring.submit(r.id, own.id, 'stale', false, undefined, 1, own.name), /is on round 2, not 1/);
+  assert.equal(ring.status(r.id).round, 2);
+});
+
+test('a named seat already filled in a fire ring is refused by the turn check (S-2955)', () => {
+  const [a, b] = [agent('fire-a-6'), agent('fire-b-6')];
+  const r = ring.createRing({ name: 'seat-6', format: 'fire', topic: 'review the change', members: [a.name, b.name], maxRounds: 2, createdBy: 'human' });
+  ring.submit(r.id, a.id, 'First.', false, undefined, undefined, a.name);
+  assert.throws(() => ring.submit(r.id, a.id, 'Again.', false, undefined, undefined, a.name), { message: `it is ${b.name}'s turn` });
+  assert.equal(seatRow(r, a.id).text, 'First.');
+  assert.equal(ring.status(r.id).turn, 1);
+});
+
+test('a rendered turn prompt names the seat and round (S-2955)', () => {
+  const { r, own } = seatRing(7);
+  const p = ring.turnPrompt(r, own.id);
+  assert.ok(p.includes(`seat: ${own.name}, round: 1)`), p);
 });
 
 test('one open seat and no seat: the text goes to that seat, as before (S-2760)', () => {

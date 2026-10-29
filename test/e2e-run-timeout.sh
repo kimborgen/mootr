@@ -18,7 +18,7 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 mkdir "$WORK/test"
-cp "$ROOT/test/run.sh" "$ROOT/test/tmpdir.sh" "$WORK/test/"
+cp "$ROOT/test/run.sh" "$ROOT/test/tmpdir.sh" "$ROOT/test/runtmp.sh" "$WORK/test/"
 # m1 starts a grandchild that ignores SIGTERM, records its own pid and the grandchild's, then hangs.
 cat >"$WORK/test/e2e-m1.sh" <<EOF
 #!/bin/sh

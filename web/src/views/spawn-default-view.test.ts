@@ -32,7 +32,7 @@ beforeAll(async () => {
       return new Response(JSON.stringify(l))
     }
     if (path === '/api/agents' && init?.method === 'POST') return new Response(JSON.stringify(spawned))
-    if (path === '/api/agents') return new Response(JSON.stringify(getData().agents))
+    if (path.split('?')[0] === '/api/agents') return new Response(JSON.stringify(getData().agents))
     return new Response('{}')
   }))
   shell.init({ valid: () => true, keep: () => true, keepWorld: () => true })

@@ -5,6 +5,7 @@
 // parent; a git failure refuses. Real git repos under a throwaway STAM_HOME, no daemon, no models:
 // `node --test test/archive-unpushed.test.mjs`.
 import { test, before, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync, execFileSync } from 'node:child_process';
@@ -27,7 +28,7 @@ before(async () => {
   daemon = await import('../src/daemon.ts');
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']); // also ends the sessions the tests start
+  killTmuxServer(socket); // also ends the sessions the tests start
   rmSync(home, { recursive: true, force: true });
 });
 

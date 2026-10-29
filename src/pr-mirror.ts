@@ -18,7 +18,7 @@ import { settings, storageRemoteFallback } from './settings.ts';
 import { envVar } from './env.ts';
 
 // A job's whole deadline. STAM_MIRROR_TIMEOUT_MS overrides it (tests).
-const budgetMs = (): number => Number(envVar('MIRROR_TIMEOUT_MS')) || 30_000;
+export const budgetMs = (): number => Number(envVar('MIRROR_TIMEOUT_MS')) || 30_000;
 // After the deadline's TERM, a process group gets KILL this long later.
 const KILL_GRACE_MS = 2_000;
 
@@ -34,7 +34,7 @@ export interface MirrorConfig {
 // Runs git in its own process group, so a deadline reaches the whole tree (a push's ssh too). On abort the group
 // gets TERM, then KILL after KILL_GRACE_MS, and the promise settles only on the child's `close`: nothing from this
 // command is still running when it settles.
-function runGit(cwd: string, args: string[], signal?: AbortSignal): Promise<string> {
+export function runGit(cwd: string, args: string[], signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error('gave up at the deadline'));
     const child = spawn('git', args, { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -80,8 +80,8 @@ export function checkMirror(number: number, sha: string): void {
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`head ${sha} is not a 40-character sha`);
 }
 
-// The remote the branch is fetched from and the mirror pushes to: the configured name, else `storage` when the
-// checkout has that remote and a `storage` peer is configured (settings.ts storageRemoteFallback), else '' (no storage, so no mirror).
+// The remote the branch is fetched from and the mirror pushes to: the configured name, else the remote the
+// checkout has that is named like a configured peer (settings.ts storageRemoteFallback), else '' (no storage, so no mirror).
 export async function storageRemote(cfg: MirrorConfig, signal?: AbortSignal): Promise<string> {
   return cfg.storage || storageRemoteFallback((await git(cfg, ['remote'], signal)).split('\n'));
 }
@@ -210,6 +210,22 @@ export async function mirrorsIdle(): Promise<void> {
 // pr_open's mirror: `sha` is the head the checkout holds, which pr_open has just pushed to origin.
 export function mirrorPrHead(cfg: MirrorConfig, number: number, sha: string): Promise<void> {
   return request({ cfg, number, sha, what: `PR #${number}` });
+}
+
+// pr_view's refresh (S-3751, S-3713): storage's refs/pull/N/head is brought to `head`, the head GitHub shows now, when it differs.
+// Storage is read with ls-remote; a mismatch takes the same job as a GitHub event, which fetches origin's head and pushes it.
+// Waits for that job, within its budget. Never rejects: a failure is logged and the view goes on.
+export async function refreshPrHead(cfg: MirrorConfig, number: number, head: string): Promise<void> {
+  try {
+    const signal = AbortSignal.timeout(budgetMs());
+    const storage = await storageRemote(cfg, signal);
+    if (!storage) return;
+    const ref = await runGit(cfg.repo, ['ls-remote', storage, `refs/pull/${number}/head`], signal);
+    if (ref.split(/\s/)[0] === head) return;
+    await request({ cfg, number, what: `PR #${number}` });
+  } catch (e) {
+    console.error(`pr head mirror: PR #${number} not refreshed: ${e instanceof Error ? e.message : e}`);
+  }
 }
 
 const PR_SUBJECT = /^github:([^/#\s]+\/[^/#\s]+)#(\d+)$/;

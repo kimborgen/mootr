@@ -1,0 +1,40 @@
+post:
+  operationId: mailTitlesShown
+  tags: [mail]
+  summary: The mails the human's view shows; a stale title or summary is queued to be asked again, and the answer comes at once (S-1843).
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          type: object
+          required: [ids]
+          properties:
+            ids:
+              type: array
+              description: Mail ids, the first shown first; only the first 40 are looked at.
+              items:
+                type: string
+                minLength: 1
+                maxLength: 200
+  responses:
+    '200':
+      description: Whether titles are on (a model set), and the mails still being asked, so the view asks again until they land.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MailTitlesShown'
+    '400':
+      description: ids is not a list of mail ids of at most 200 characters each.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    '403':
+      description: The caller is not the human's view (an agent's token, a peer, the OpenCode server).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    default:
+      $ref: '#/components/responses/Error'

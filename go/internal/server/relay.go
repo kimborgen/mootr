@@ -25,14 +25,13 @@ import (
 // The relay of a request about an agent on another machine to the daemon that owns it (src/daemon.ts, "A request about an
 // agent on another machine goes to the daemon that owns it", S-232 and after). It runs after the caller is known and
 // before the route table, as in TS: what the body claims is resolved and the mailbox and wait routes' mayActAs is checked
-// here first (S-238, S-242), so a request is never forwarded under an identity the caller may not take.
+// in ServeHTTP first (S-238, S-242), so a request is never forwarded under an identity the caller may not take.
 //
 // The peer trusts x-stam-local, x-stam-human and the agent headers only because the peer token sent them (peers.Client);
 // an agent's own token proves none of them (auth.Resolve refuses the headers from it).
 //
-// Not ported: the serve origin of a peer's tailnet name (peerServeOrigin), so a human-on-machine refusal carries an
-// origin only in a test daemon with STAM_TEST_HUMAN_KEY set, where it is the peer's own URL; and the ITSA-home proxy,
-// which is the next change.
+// A human-on-machine refusal carries the peer's serve origin (peerServeOrigin): HTTPS on its tailnet name, or in a test
+// daemon with STAM_TEST_HUMAN_KEY set, the peer's own URL.
 
 // agentPathRe is the paths the relay looks at: /api/agents/ID, /api/agents/ID/SUB and /api/agents/ID/view/SUB.
 var agentPathRe = regexp.MustCompile(`^/api/agents/([\w-]+)(/[\w-]+|/view/[\w-]+)?$`)
@@ -75,11 +74,10 @@ func (s *Server) relayRequest(w http.ResponseWriter, r *http.Request, c auth.Res
 		if raw, err = readBody(r); err != nil {
 			return err
 		}
-		// A peer's own call is trusted as it is; an agent's body is always resolved (a forwarded agent included).
-		if wr, err = s.parseWrite(r, c, raw, !c.Local || c.Kind == auth.Agent); err != nil {
+		if wr, err = s.parseWrite(r, c, raw); err != nil {
 			return err
 		}
-		// A route that takes over reads the body as it was sent.
+		// A route that takes over reads the body as resolveBody left it.
 		r.Body = io.NopCloser(bytes.NewReader(raw))
 	}
 	body := wr.body
@@ -91,11 +89,6 @@ func (s *Server) relayRequest(w http.ResponseWriter, r *http.Request, c auth.Res
 		return v
 	}
 	human := s.isHuman(r, c)
-	if id, ok := matchActing(r.Method, path); ok {
-		if err := s.mayActAs(ctx, c.Caller, id, false); err != nil {
-			return err
-		}
-	}
 	var here *db.Agent
 	if am != nil {
 		a, err := s.db.GetAgent(ctx, am[1])
@@ -314,18 +307,23 @@ func (s *Server) relayHuman(peer config.Peer, human, write bool, what string, ac
 	return false, nil
 }
 
-// peerServeOrigin is src/web-origins.ts peerServeOrigin without tailscale: the origin of a peer's UI, known only in a
-// test daemon with the test human key set, where it is the peer's own daemon URL.
+// peerServeOrigin is src/web-origins.ts peerServeOrigin: the origin the human's browser reaches a peer's UI at (`stam
+// web serve`), HTTPS on its full tailnet name; none when tailscale doesn't know the peer, since an http://host:port
+// address is no proof of the human. Only a test daemon, with the test key set, names the peer's own daemon URL.
 func (s *Server) peerServeOrigin(peerURL string) *string {
+	own, ok := webOrigin(peerURL)
+	if !ok {
+		return nil
+	}
+	u, _ := neturl.Parse(own)
+	if names := tailnetNames(u.Hostname(), s.tailnetNodes(context.Background())); len(names) > 0 {
+		o := "https://" + names[0]
+		return &o
+	}
 	if s.cfg.TestHumanKey == "" {
 		return nil
 	}
-	u, err := neturl.Parse(peerURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil
-	}
-	o := strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
-	return &o
+	return &own
 }
 
 // ownRefusal is src/daemon.ts ownRefusal: a peer's 409 naming a machine and origin is the peer's own refusal; only this
@@ -358,6 +356,9 @@ var (
 	itsaTokenReads = regexp.MustCompile(`^/api/itsas/(queue|attention|[\w-]+/cost)$`)
 	itsaThreadRead = regexp.MustCompile(`^/api/itsas/[\w-]+/threads?$`)
 	itsaLinkPost   = regexp.MustCompile(`^/api/itsas/[\w-]+/links$`)
+	itsaPostPath   = regexp.MustCompile(`^/api/itsas/[^/]+/post$`)
+	// itsaItemPath is an ITSA itself: a move (PATCH) of it carries the routing facts too (S-4178).
+	itsaItemPath = regexp.MustCompile(`^/api/itsas/[^/]+$`)
 	// idInPath is a request's id, for the log line of a relayed human.
 	idInPath = regexp.MustCompile(`/[0-9a-f]{6,}|/S-\d+`)
 )
@@ -410,7 +411,7 @@ func (s *Server) proxyToHome(w http.ResponseWriter, r *http.Request, c auth.Reso
 		if raw, err = readBody(r); err != nil {
 			return err
 		}
-		if wr, err = s.parseWrite(r, c, raw, true); err != nil {
+		if wr, err = s.parseWrite(r, c, raw); err != nil {
 			return err
 		}
 	}
@@ -453,13 +454,72 @@ func (s *Server) proxyToHome(w http.ResponseWriter, r *http.Request, c auth.Reso
 	if c.Kind == auth.OpenCode && named != "" {
 		via = &peers.Via{Agent: named, Boss: s.chiefOfStaffID(ctx) == named || s.isAssistant(ctx, named)}
 	}
+	// An agent here whose reach is limited may post through the home only to those it may reach, which the home can't
+	// check (reachRefusal).
+	onlyTo := false
+	if r.Method == http.MethodPost && itsaPostPath.MatchString(path) {
+		poster := ""
+		if via != nil {
+			poster = via.Agent
+		} else if by != nil {
+			poster = claude.JSString(by)
+		}
+		var to []string
+		switch v := field("to").(type) {
+		case string:
+			to = []string{v}
+		case []any:
+			for _, x := range v {
+				to = append(to, claude.JSString(x))
+			}
+		}
+		checked, err := s.reachRefusal(ctx, poster, strings.Split(strings.TrimPrefix(path, "/api/itsas/"), "/")[0], to)
+		if err != nil {
+			return err
+		}
+		if checked != nil && wr.body == nil {
+			return Errorf(http.StatusBadRequest, "a post's body must be a JSON object")
+		}
+		if checked != nil {
+			list := make([]jsjson.Value, len(checked))
+			for i, id := range checked {
+				list[i] = id
+			}
+			wr.body.Set("only_to", list)
+			onlyTo = true
+		}
+	}
 	// A branch link's owner check needs this daemon's agents: its answer rides along (S-581), which is not ported.
 	if via != nil && !via.Boss && r.Method == http.MethodPost && itsaLinkPost.MatchString(path) && field("system") == "branch" {
 		return Errorf(http.StatusNotImplemented, "linking a branch through the ITSA home needs this daemon's branch owners, which is not ported to the Go daemon yet")
 	}
+	// S-4163, S-4178: the routing facts a post or a move relayed to the home carries are this daemon's, from its authenticated
+	// agent: any the body brought is dropped, so an agent can't claim to be exempt (relayRouteOf).
+	relayedMove := (r.Method == http.MethodPost && itsaPostPath.MatchString(path)) || (r.Method == http.MethodPatch && itsaItemPath.MatchString(path))
+	if relayedMove && wr.body != nil {
+		wr.body.Delete("relay_route")
+		if via != nil {
+			facts, ok, err := s.relayRouteOf(ctx, via.Agent)
+			if err != nil {
+				return err
+			}
+			if ok {
+				routed := jsjson.NewObject("exempt", facts.exempt)
+				if facts.parent != "" {
+					routed.Set("parent", facts.parent)
+				}
+				wr.body.Set("relay_route", routed)
+			}
+		}
+	}
 	reply, err := s.peers.Call(ctx, peer, r.Method, path+search(r), forwardBody(wr.body, raw), itsaHomeTimeout, carry, via)
 	if err != nil {
 		return Errorf(http.StatusServiceUnavailable, "%s (the ITSA home) is unreachable: %s", home, err.Error())
+	}
+	// A 409 on a checked post is the home finding the ITSA's people changed since the check: refused, never sent unchecked.
+	if onlyTo && reply.Status == http.StatusConflict {
+		writeJSON(w, http.StatusForbidden, ownRefusal(reply.Status, reply.Data))
+		return nil
 	}
 	writeJSON(w, reply.Status, ownRefusal(reply.Status, reply.Data))
 	return nil

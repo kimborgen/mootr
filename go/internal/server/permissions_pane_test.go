@@ -47,7 +47,7 @@ func withPanes(f *fixture, bin string) *tmux.Client {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	life := lifecycle.New(ctx, lifecycle.Options{DB: f.db, Tmux: lifeTmux, Settings: config.NewSettingsFile(f.home, f.cfg.Machine), Machine: f.cfg.Machine,
-		Claude: claude.Env{Templates: &templates.Set{Root: f.t.TempDir(), Home: f.home}, ClaudeBin: "/bin/false"}, NetworkProbes: []string{"http://127.0.0.1:1/"},
+		Claude: claude.Env{Home: f.home, UserHome: f.t.TempDir(), Templates: &templates.Set{Root: f.t.TempDir(), Home: f.home}, ClaudeBin: "/bin/false"}, NetworkProbes: []string{"http://127.0.0.1:1/"},
 		Streams: push.New(), PushDebounce: 20 * time.Millisecond})
 	f.t.Cleanup(func() { cancel(); life.Wait() })
 	f.srv.life = life
@@ -171,13 +171,13 @@ func TestPermissionStaleDialogPane(t *testing.T) {
 	err := f.srv.DialogShown(ctx, f.agentObj("achild"), claude.Dialog{Action: "Claude Code asks to allow Bash",
 		Details: `{"tool":"Bash","input":{"command":"rm -rf build"},"session":"s-1"}`, Replaces: true})
 	var he *Error
-	if !errors.As(err, &he) || he.Status != 501 || f.status(a.ID) != "pending" {
+	if !errors.As(err, &he) || he.Status != 503 || f.status(a.ID) != "pending" {
 		t.Fatalf("the new dialog: %v, the old request %s", err, f.status(a.ID))
 	}
 	humanMail := func() int { return f.count("SELECT count(*) FROM mail_recipients WHERE agent_id = 'human'") }
 	mails := humanMail()
 
-	if code, body := f.answerAs(sharedTok, human, a.ID, `{"approve":false}`); code != 409 || !strings.Contains(body, "can't confirm") {
+	if code, body := f.answerAs(sharedTok, human, a.ID, `{"approve":false}`); code != 409 || !strings.Contains(body, "can't confirm") || !strings.Contains(body, "look at its terminal") {
 		t.Errorf("the deny: %d %s", code, body)
 	}
 	if f.status(a.ID) != "pending" || lastLine(tc, "achild") != "Enter to confirm · Esc to cancel" {
@@ -247,17 +247,22 @@ func TestPermissionUnsureDialogPane(t *testing.T) {
 		d := claude.Dialog{Action: "Claude Code asks to allow it", Details: c.details, Replaces: true}
 		must(t, f.srv.DialogShown(ctx, f.agentObj("achild"), d))
 		r, _, _ := f.db.PendingDialog(ctx, "achild")
-		if code, body := f.answerAs(parentTok, nil, r.ID, `{"by":"aboss","approve":false}`); code != 409 || !strings.Contains(body, "can't confirm") {
+		// A reviewing agent can't look at the terminal: it is told to escalate.
+		if code, body := f.answerAs(parentTok, nil, r.ID, `{"by":"aboss","approve":false}`); code != 409 || !strings.Contains(body, "can't confirm") || !strings.Contains(body, "escalate it to the human") {
 			t.Errorf("%s: the deny %d %s", c.name, code, body)
 		}
 		if f.status(r.ID) != "pending" || lastLine(tc, "achild") != last {
 			t.Errorf("%s: after the deny %s, %q", c.name, f.status(r.ID), lastLine(tc, "achild"))
 		}
+		mails := f.count("SELECT count(*) FROM mail_recipients WHERE agent_id = 'human'")
 		writeFile(t, filepath.Join(f.home, "settings.json"), `{"dialogEscalateMinutes":0}`)
 		must(t, f.srv.escalateStaleDialogs(ctx))
 		writeFile(t, filepath.Join(f.home, "settings.json"), `{}`)
 		if aud := f.count1("SELECT audience FROM permission_requests WHERE id = '" + r.ID + "'"); aud != "human" || f.status(r.ID) != "pending" {
 			t.Errorf("%s: the timer left it %s %s", c.name, f.status(r.ID), aud)
+		}
+		if got := f.count("SELECT count(*) FROM mail_recipients WHERE agent_id = 'human'"); got != mails+1 {
+			t.Errorf("%s: the timer sent the human %d mails", c.name, got-mails)
 		}
 		must(t, f.srv.DialogClosed(ctx, f.agentObj("achild")))
 		must(t, f.srv.DialogShown(ctx, f.agentObj("achild"), d))

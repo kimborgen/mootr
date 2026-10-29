@@ -21,7 +21,7 @@ func init() {
 	tools = append(tools,
 		tool{name: "list_inbox", listing: mailListings["list_inbox"], run: listInbox},
 		tool{name: "read_mail", listing: mailListings["read_mail"], run: readMail},
-		tool{name: "read_thread", listing: mailListings["read_thread"], run: readThread},
+		tool{name: "read_thread", listing: mailListings["read_thread"], run: readThread, validate: validateReadThread},
 		tool{name: "send_mail", listing: mailListings["send_mail"], run: sendMail},
 	)
 }
@@ -266,6 +266,14 @@ func readMail(ctx context.Context, s *Server, args jsfmt.Value) (string, error) 
 		head = hint + "\n\n"
 	}
 	return head + strings.Join(parts, "\n\n---\n\n") + "\n\nTo answer one, use send_mail with reply_to set to its id. read_thread shows a thread's earlier messages.", nil
+}
+
+func validateReadThread(args jsfmt.Value) error {
+	tv, _ := args.Get("thread_id")
+	if tv.Kind != jsfmt.String || strings.TrimSpace(tv.Str) == "" {
+		return errors.New("thread_id is required: any mail id in the thread, such as m1a2b3c")
+	}
+	return nil
 }
 
 func readThread(ctx context.Context, s *Server, args jsfmt.Value) (string, error) {

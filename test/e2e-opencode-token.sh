@@ -106,10 +106,10 @@ PERM_OC='{"agent":"'$OC'","action":"oc token","reason":"mine","details":"","audi
 # checkStep fails closed on a 403: the server's token as $CL is refused, so the call doesn't run.
 MCP="$(dirname "$(readlink -f "$0")")/mcp-call.mjs"
 MCP_CALL='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send_mail","arguments":{"to":["'$OC'"],"subject":"fail closed","body":"P=0.1 must not send"}}}'
-REFUSED=$(STAM_BIN="$STAM" STAM_TOKEN="$OC_TOKEN" STAM_AGENT_ID="$CL_ID" node "$MCP" "$MCP_CALL")
+REFUSED=$(STAM_BIN="$STAM" STAM_TOKEN="$OC_TOKEN" MOOTR_TOKEN="$OC_TOKEN" STAM_AGENT_ID="$CL_ID" node "$MCP" "$MCP_CALL")
 echo "$REFUSED" | grep -q '"isError":true' && echo "$REFUSED" | grep -q "Refused" || { echo "FAIL: a check refused with 403 let the call run: $REFUSED"; exit 1; }
 # The same call as the OpenCode agent's own, with its token, isn't refused: no step is set here, so it runs.
-OWN=$(STAM_BIN="$STAM" STAM_TOKEN="$OC_TOKEN" STAM_AGENT_ID="$OC_ID" node "$MCP" "$MCP_CALL")
+OWN=$(STAM_BIN="$STAM" STAM_TOKEN="$OC_TOKEN" MOOTR_TOKEN="$OC_TOKEN" STAM_AGENT_ID="$OC_ID" node "$MCP" "$MCP_CALL")
 echo "$OWN" | grep -q '"isError":true' && { echo "FAIL: the OpenCode agent's own allowed call was refused: $OWN"; exit 1; }
 
 # The shared token can't name an agent that has its own token (S-545), but reads without a claim as before.
@@ -121,9 +121,9 @@ echo "$OWN" | grep -q '"isError":true' && { echo "FAIL: the OpenCode agent's own
 daemon_stop main
 # The daemon inherits STAM_TOKEN. The CLI's own health check sends the same variable, so it reports
 # the daemon as not answering; the daemon is up, and is checked below with its token file.
-export STAM_TOKEN="e2e-env-token-$$"
+export STAM_TOKEN="e2e-env-token-$$" MOOTR_TOKEN="e2e-env-token-$$"
 on main "$STAM" daemon start >/dev/null 2>&1 || true
-unset STAM_TOKEN
+unset STAM_TOKEN MOOTR_TOKEN
 up_check() { on main "$STAM" daemon status 2>/dev/null | grep -q "machine: 'main'"; }
 wait_until up_check
 [ "$(cat "$STAM_HOME/token")" = "$SHARED" ] || { echo "FAIL: the daemon rewrote its token file"; exit 1; }

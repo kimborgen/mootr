@@ -4,6 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"slices"
 	"sort"
 	"strings"
 
@@ -47,13 +50,74 @@ type Stored struct {
 	// (DeferThread) or answers its decisions; a mail to the human brings a deferred ask back (ToHuman) and is itself a
 	// decision (DecisionMail).
 	FromHuman, DeferThread, ToHuman, DecisionMail bool
+	// CopyTo is the sender's copy of a mail that went to a peer (S-241, S-2663): the agents it was sent to there. nil for none.
+	CopyTo []string
+	// InTx, when set, runs first in the transaction that stores a new mail, with the mail's id; an error rolls the mail
+	// back. A caller whose mail must commit with another write (a delivery and its removal from a queue) makes it here.
+	InTx func(conn *sqlite.Conn, mailID string) error
 }
 
 // StoreMail writes a mail as src/mail.ts storeMail does for a mail not stored before, and returns it as the send's
 // answer: the mail row the sender gets back. Everything is one transaction.
 func (d *DB) StoreMail(ctx context.Context, m Stored) (jsfmt.Value, error) {
+	v, _, _, err := d.storeMail(ctx, m, false)
+	return v, err
+}
+
+// ErrMailIDTaken is a forwarded mail whose id this daemon keeps for a mail from someone else.
+var ErrMailIDTaken = errors.New("the mail id is taken by another sender's mail")
+
+// StoreForwarded is src/mail.ts storeMail for a peer's forwarded mail: the same mail arriving again (an outbox retry, or
+// more recipients under its original id) only adds the recipients it doesn't have yet, in the same write as the check,
+// and only they are notified. It returns the mail, the recipients this arrival added, and whether the mail was here
+// already. An id that names another sender's mail is ErrMailIDTaken.
+func (d *DB) StoreForwarded(ctx context.Context, m Stored) (jsfmt.Value, []string, bool, error) {
+	return d.storeMail(ctx, m, true)
+}
+
+func (d *DB) storeMail(ctx context.Context, m Stored, merge bool) (jsfmt.Value, []string, bool, error) {
 	created := now()
+	var added []string
+	merged := false
 	err := d.Write(ctx, func(conn *sqlite.Conn) error {
+		if merge {
+			have, err := rows(conn, "SELECT from_id FROM mail WHERE id = ?", m.ID)
+			if err != nil {
+				return err
+			}
+			if len(have) > 0 {
+				merged = true
+				if have[0].Text("from_id") != m.From {
+					return ErrMailIDTaken
+				}
+				quiet := map[string]bool{}
+				for _, q := range m.Quiet {
+					quiet[q] = true
+				}
+				for _, a := range m.To {
+					q := 0
+					if quiet[a] {
+						q = 1
+					}
+					if err := runSQL(conn, "INSERT OR IGNORE INTO mail_recipients (mail_id, agent_id, quiet) VALUES (?, ?, ?)", m.ID, a, q); err != nil {
+						return err
+					}
+					if conn.Changes() > 0 {
+						added = append(added, a)
+					}
+				}
+				m.To = added
+				if err := deferArrivals(conn, m); err != nil {
+					return err
+				}
+				return d.notifyArrivals(conn, m)
+			}
+		}
+		if m.InTx != nil {
+			if err := m.InTx(conn, m.ID); err != nil {
+				return err
+			}
+		}
 		nul := func(s string) any {
 			if s == "" {
 				return nil
@@ -66,10 +130,18 @@ func (d *DB) StoreMail(ctx context.Context, m Stored) (jsfmt.Value, error) {
 			}
 			return 0
 		}
-		if err := runSQL(conn, `INSERT INTO mail (id, from_id, from_name, subject, body, created_at, thread_id, reply_to, permission_id, auto_threaded, notice, itsa_id, kind, health, about_itsa, verdict, override, note)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+		var copyTo any
+		if m.CopyTo != nil {
+			b, err := json.Marshal(m.CopyTo)
+			if err != nil {
+				return err
+			}
+			copyTo = string(b)
+		}
+		if err := runSQL(conn, `INSERT INTO mail (id, from_id, from_name, subject, body, created_at, thread_id, reply_to, permission_id, auto_threaded, notice, itsa_id, kind, health, about_itsa, verdict, override, note, copy_to)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
 			m.ID, m.From, m.FromName, m.Subject, m.Body, created, m.ThreadID, nul(m.ReplyTo), nul(m.PermissionID), b2i(m.AutoThreaded), b2i(m.Notice || m.FromStam),
-			nul(m.ItsaID), nul(m.Kind), nul(m.Health), nul(aboutOf(m)), nul(m.Override), nul(m.Note)); err != nil {
+			nul(m.ItsaID), nul(m.Kind), nul(m.Health), nul(aboutOf(m)), nul(m.Override), nul(m.Note), copyTo); err != nil {
 			return err
 		}
 		quiet := map[string]bool{}
@@ -81,25 +153,8 @@ func (d *DB) StoreMail(ctx context.Context, m Stored) (jsfmt.Value, error) {
 				return err
 			}
 		}
-		// New mail in a thread an agent deferred brings the whole thread back; a system notice joins it deferred.
-		notice := m.Notice || m.FromStam || strings.HasPrefix(m.From, "system:")
-		for _, a := range m.To {
-			if a == "human" || a == m.From {
-				continue
-			}
-			if notice {
-				err := runSQL(conn, "INSERT OR IGNORE INTO thread_defer_mail (mailbox_id, thread_id, mail_id) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM thread_defer WHERE mailbox_id = ? AND thread_id = ?)", a, m.ThreadID, m.ID, a, m.ThreadID)
-				if err != nil {
-					return err
-				}
-			} else {
-				if err := runSQL(conn, "DELETE FROM thread_defer WHERE mailbox_id = ? AND thread_id = ?", a, m.ThreadID); err != nil {
-					return err
-				}
-				if err := runSQL(conn, "DELETE FROM thread_defer_mail WHERE mailbox_id = ? AND thread_id = ?", a, m.ThreadID); err != nil {
-					return err
-				}
-			}
+		if err := deferArrivals(conn, m); err != nil {
+			return err
 		}
 		if err := linkMail(conn, m.ID, m.ThreadID, m.LinkText, m.ItsaID, m.AboutItsa); err != nil {
 			return err
@@ -112,6 +167,18 @@ func (d *DB) StoreMail(ctx context.Context, m Stored) (jsfmt.Value, error) {
 		// A decision mail waits on the human until they reply in its thread (src/decision-mail.ts).
 		switch {
 		case m.FromHuman && m.DeferThread:
+			// One deferred event per decision a deferral leaves open; a thread already deferred records none (src/db.ts setThreadDeferred).
+			deferred, err := textColumn(conn, "SELECT 1 FROM thread_deferred WHERE thread_id = ?", m.ThreadID)
+			if err != nil {
+				return err
+			}
+			if len(deferred) == 0 {
+				open, err := textColumn(conn, "SELECT mail_id FROM decision_mails WHERE thread_id = ?", m.ThreadID)
+				if err != nil {
+					return err
+				}
+				settledDecisions(conn, open, "deferred", nil)
+			}
 			if err := runSQL(conn, "INSERT OR REPLACE INTO thread_deferred (thread_id, mail_id) VALUES (?, ?)", m.ThreadID, m.ID); err != nil {
 				return err
 			}
@@ -119,7 +186,7 @@ func (d *DB) StoreMail(ctx context.Context, m Stored) (jsfmt.Value, error) {
 			if err := runSQL(conn, "DELETE FROM thread_deferred WHERE thread_id = ?", m.ThreadID); err != nil {
 				return err
 			}
-			if err := runSQL(conn, "DELETE FROM decision_mails WHERE thread_id = ?", m.ThreadID); err != nil {
+			if err := deleteDecisions(conn, "answered", ChosenOption(m.Body), "DELETE FROM decision_mails WHERE thread_id = ?", m.ThreadID); err != nil {
 				return err
 			}
 		default:
@@ -134,26 +201,17 @@ func (d *DB) StoreMail(ctx context.Context, m Stored) (jsfmt.Value, error) {
 				}
 			}
 		}
-		// notify: the agents that got it log it, and a declared wait it answers clears.
-		for _, r := range m.To {
-			if r == "human" {
-				continue
-			}
-			ev := jsfmt.Value{Kind: jsfmt.Object}
-			ev.Set("id", jsfmt.StringValue(m.ID))
-			ev.Set("from", jsfmt.StringValue(m.From))
-			ev.Set("subject", jsfmt.StringValue(m.Subject))
-			if err := addEvent(conn, r, "mail:received", &ev); err != nil {
-				return err
-			}
-		}
-		if !m.FromStam {
-			return d.clearDeclaredWaits(conn, m)
-		}
-		return nil
+		return d.notifyArrivals(conn, m)
 	})
+	if errors.Is(err, ErrMailIDTaken) {
+		return jsfmt.Value{}, nil, true, err
+	}
 	if err != nil {
-		return jsfmt.Value{}, wrap("store mail", err)
+		return jsfmt.Value{}, nil, false, wrap("store mail", err)
+	}
+	if merged {
+		v, _, err := d.GetMail(ctx, m.ID)
+		return v, added, true, err
 	}
 	out := jsfmt.Value{Kind: jsfmt.Object}
 	out.Set("id", jsfmt.StringValue(m.ID))
@@ -202,7 +260,7 @@ func (d *DB) StoreMail(ctx context.Context, m Stored) (jsfmt.Value, error) {
 	} else {
 		out.Set("override", jsfmt.StringValue(m.Override))
 	}
-	return out, nil
+	return out, m.To, false, nil
 }
 
 // aboutOf is m.about_itsa ?? m.itsa_id (src/db.ts createMail): an ITSA's comment is about its ITSA.
@@ -237,6 +295,51 @@ func rankOf(kind string) int {
 // arrives: for an agent wait, mail from that agent to this one; for a human wait, mail from the user. A wait that names a
 // thread clears only for mail in that thread. Then the agent's waiting state follows its waits (src/db.ts syncWaits,
 // with only its live-stream observer).
+// deferArrivals is new mail in a thread an agent deferred: it brings the whole thread back, and a system notice joins it
+// deferred.
+func deferArrivals(conn *sqlite.Conn, m Stored) error {
+	notice := m.Notice || m.FromStam || strings.HasPrefix(m.From, "system:")
+	for _, a := range m.To {
+		if a == "human" || a == m.From {
+			continue
+		}
+		if notice {
+			err := runSQL(conn, "INSERT OR IGNORE INTO thread_defer_mail (mailbox_id, thread_id, mail_id) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM thread_defer WHERE mailbox_id = ? AND thread_id = ?)", a, m.ThreadID, m.ID, a, m.ThreadID)
+			if err != nil {
+				return err
+			}
+		} else {
+			if err := runSQL(conn, "DELETE FROM thread_defer WHERE mailbox_id = ? AND thread_id = ?", a, m.ThreadID); err != nil {
+				return err
+			}
+			if err := runSQL(conn, "DELETE FROM thread_defer_mail WHERE mailbox_id = ? AND thread_id = ?", a, m.ThreadID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// notifyArrivals is src/mail.ts notify: the agents that got the mail log it, and a declared wait it answers clears.
+func (d *DB) notifyArrivals(conn *sqlite.Conn, m Stored) error {
+	for _, r := range m.To {
+		if r == "human" {
+			continue
+		}
+		ev := jsfmt.Value{Kind: jsfmt.Object}
+		ev.Set("id", jsfmt.StringValue(m.ID))
+		ev.Set("from", jsfmt.StringValue(m.From))
+		ev.Set("subject", jsfmt.StringValue(m.Subject))
+		if err := addEvent(conn, r, "mail:received", &ev); err != nil {
+			return err
+		}
+	}
+	if !m.FromStam {
+		return d.clearDeclaredWaits(conn, m)
+	}
+	return nil
+}
+
 func (d *DB) clearDeclaredWaits(conn *sqlite.Conn, m Stored) error {
 	for _, r := range m.To {
 		if r == "human" {
@@ -486,4 +589,33 @@ func (d *DB) ChildrenOf(ctx context.Context, id string) ([]string, error) {
 			&sqlitex.ExecOptions{Args: []any{id, id}, ResultFunc: func(stmt *sqlite.Stmt) error { out = append(out, stmt.ColumnText(0)); return nil }})
 	})
 	return out, wrap("children", err)
+}
+
+// AddCopyRecipients is src/db.ts addCopyRecipients: the agents a sender's copy was sent to on a peer, added to any already
+// recorded (S-2663), each once.
+func (d *DB) AddCopyRecipients(ctx context.Context, id string, to []string) error {
+	return d.Write(ctx, func(conn *sqlite.Conn) error {
+		var have []string
+		rows, err := rows(conn, "SELECT copy_to FROM mail WHERE id = ?", id)
+		if err != nil {
+			return err
+		}
+		if len(rows) > 0 {
+			if v, _ := rows[0].Get("copy_to"); v.Kind == jsfmt.String {
+				if err := json.Unmarshal([]byte(v.Str), &have); err != nil {
+					return err
+				}
+			}
+		}
+		for _, x := range to {
+			if !slices.Contains(have, x) {
+				have = append(have, x)
+			}
+		}
+		b, err := json.Marshal(have)
+		if err != nil {
+			return err
+		}
+		return runSQL(conn, "UPDATE mail SET copy_to = ? WHERE id = ?", string(b), id)
+	})
 }

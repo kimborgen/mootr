@@ -44,7 +44,7 @@ const steps = JSON.parse(readFileSync(new URL('./post-steps.json', import.meta.u
 const ids = [];
 const sub = (v) => (typeof v === 'string' ? v.replace(/^#(\d+)$/, (_, n) => ids[Number(n)] ?? v) : Array.isArray(v) ? v.map(sub) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, sub(x)])) : v);
 // src/daemon.ts itsaRoute: a missing ITSA is 404, a status that moved 409, the rest 400.
-const statusOf = (msg) => (/^no ITSA |^no link |^no field /.test(msg) ? 404 : /^status changed/.test(msg) ? 409 : 400);
+const statusOf = (msg) => (/^no ITSA |^no link |^no field /.test(msg) ? 404 : /^status changed|^the text changed/.test(msg) ? 409 : 400);
 const results = [];
 for (const [i, step] of steps.entries()) {
   await new Promise((r) => setTimeout(r, 3));

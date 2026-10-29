@@ -8,7 +8,11 @@
 //                    without a price uses the model's input price)
 //   interval         two consecutive window readings a, b (the last reading in each 5-minute
 //                    bucket), covering the sample buckets after a's bucket up to b's
-//   change           Δ = b% − a%; across a window reset, Δ = b% and only buckets from the reset on
+//   change           Δ = b% − a%, at least 0 (a fall under an unchanged, unpassed reset time is a
+//                    correction: Δ = 0, no reset); across a window reset (reset time moved or
+//                    passed, or a fall with no reset time), Δ = b% and only buckets from the reset on.
+//                    A reading whose neighbours agree within 5 points and differ from it by more
+//                    is an outlier and is dropped (S-3243)
 //   scale            s, percent per weighted token, an exponential moving average of Δ / W over
 //                    intervals, weighted by time (α = 1 − e^(−dt / 2 h)); reset (re-seeded from
 //                    this interval's Δ / W) when the window resets or Δ misses s × W by > 25%
@@ -18,8 +22,9 @@
 //   agent share      Δ_i = w_i / W × E;   other = Δ − E;   Σ Δ_i + other = Δ
 //   tree share       Σ Δ_i over the agent and its descendants, each agent once
 //   projection       rate = min(s × (W over the last 30 minutes) / 30 min, R), where R is the rise
-//                    the readings show over the same 30 minutes (from the window's reading at the span's
-//                    start, to the last, within the current window); 100% at now + (100 − current%) / rate, or null
+//                    the readings show over the same 30 minutes (from the reading at the 30 minutes' start,
+//                    to the last, within the current window; none when the window started inside the 30
+//                    minutes); 100% at now + (100 − current%) / rate, or null
 //                    when the rate is 0 (no stam use, or the readings show no rise), s is unknown,
 //                    or the window resets first
 import * as db from './db.ts';
@@ -35,6 +40,8 @@ const BUCKET_MS = 5 * 60_000;
 const EMA_TAU_MS = 2 * 3_600_000;
 const MISS = 0.25;
 const BURN_MS = 30 * 60_000;
+// The most the neighbours of a reading may differ for it to be judged an outlier, in points.
+const OUTLIER = 5;
 // Calibration starts this long before the span asked for, so the scale is warm by then.
 const WARMUP_MS = 6 * 3_600_000;
 const WINDOW_MS: Record<string, number> = { five_hour: 5 * 3_600_000, seven_day: 7 * 86_400_000 };
@@ -113,9 +120,13 @@ interface Reading {
 // The last reading in each 5-minute bucket, oldest first, so every interval spans at least
 // one bucket boundary and each bucket belongs to exactly one interval.
 function readings(name: string, window: string, from: number, until: number): Reading[] {
-  const rows = db.open()
-    .prepare('SELECT at, used_percentage, resets_at FROM window_readings WHERE name = ? AND window = ? AND at >= ? AND at <= ? ORDER BY at')
-    .all(name, window, new Date(from).toISOString(), new Date(until).toISOString()) as { at: string; used_percentage: number | null; resets_at: number | null }[];
+  type Row = { at: string; used_percentage: number | null; resets_at: number | null };
+  const q = (sql: string, ...args: string[]) => db.open().prepare(sql).all(...args) as Row[];
+  const cols = 'SELECT at, used_percentage, resets_at FROM window_readings WHERE name = ? AND window = ?';
+  // The reading just before `from` is context for the outlier test on the first one, so the
+  // same reading is judged the same way whatever range asks for it.
+  const before = q(`${cols} AND at < ? AND used_percentage IS NOT NULL ORDER BY at DESC LIMIT 1`, name, window, new Date(from).toISOString());
+  const rows = [...before, ...q(`${cols} AND at >= ? AND at <= ? ORDER BY at`, name, window, new Date(from).toISOString(), new Date(until).toISOString())];
   const out: Reading[] = [];
   for (const r of rows) {
     if (r.used_percentage == null) continue;
@@ -124,7 +135,29 @@ function readings(name: string, window: string, from: number, until: number): Re
     if (last && Math.floor(last.at / BUCKET_MS) === Math.floor(reading.at / BUCKET_MS)) out[out.length - 1] = reading;
     else out.push(reading);
   }
-  return out;
+  return withoutOutliers(out).filter((r) => r.at >= from);
+}
+
+// Drops an isolated outlier (S-3243): a reading whose neighbours on both sides share its
+// resets_at, agree with each other within OUTLIER points, and sit more than OUTLIER points from
+// it, up or down. A lasting change is not one: it is a correction or a reset (see `isReset`).
+// The first and last readings have a neighbour on one side only and are kept.
+function withoutOutliers(rs: Reading[]): Reading[] {
+  return rs.filter((r, i) => {
+    const p = rs[i - 1];
+    const n = rs[i + 1];
+    if (!p || !n || r.resets_at == null || p.resets_at !== r.resets_at || n.resets_at !== r.resets_at) return true;
+    return !(Math.abs(p.used - n.used) <= OUTLIER && Math.abs(r.used - p.used) > OUTLIER && Math.abs(r.used - n.used) > OUTLIER);
+  });
+}
+
+// Whether b starts a new window after a: the reset time changed, or the percentage fell with no
+// reset time to check it against, or b is past a's reset time. A fall under an unchanged,
+// unpassed reset time is a correction, not a reset: it counts as no change.
+function isReset(a: Reading, b: Reading): boolean {
+  if (a.resets_at !== b.resets_at) return true;
+  if (b.used >= a.used) return false;
+  return a.resets_at == null || b.at >= a.resets_at * 1000;
 }
 
 // Every account's samples from `from` on, as weighted tokens per bucket, agent and model.
@@ -207,8 +240,8 @@ function calibrateWalk(account: string, window: string, from: number, now: numbe
     const b = rs[k];
     let start = floorBucket(a.at) + BUCKET_MS;
     const end = floorBucket(b.at) + BUCKET_MS;
-    const windowReset = a.resets_at !== b.resets_at || b.used < a.used;
-    let change = b.used - a.used;
+    const windowReset = isReset(a, b);
+    let change = Math.max(0, b.used - a.used);
     if (windowReset) {
       change = b.used;
       // Only tokens from the reset on count toward the new window.
@@ -336,20 +369,24 @@ export function windowShares(account: string, window: string, since?: string | n
 }
 
 // The percent per millisecond the window readings show over the last 30 minutes, within the
-// current window. Zero when they show no rise, or fewer than two readings span the period.
-function observedRate(account: string, window: string, now: number): number {
+// current window. Zero when they show no rise, or fewer than two readings span the period; null
+// when the window began inside the period, so the readings can't say.
+function observedRate(account: string, window: string, now: number): number | null {
   const name = readingName(account);
   if (!name) return 0;
   const rs = readings(name, window, now - WARMUP_MS, now);
   // The current window: from the last reset in the readings on.
   let first = rs.length - 1;
-  while (first > 0 && rs[first].used >= rs[first - 1].used && rs[first].resets_at === rs[first - 1].resets_at) first--;
+  while (first > 0 && !isReset(rs[first - 1], rs[first])) first--;
   const span = rs.slice(first);
   const last = span[span.length - 1];
   if (!last) return 0;
   const from = now - BURN_MS;
-  // The reading at the span's start: the first at or after it, else the last before it.
-  const base = span.find((r) => r.at >= from) ?? span.filter((r) => r.at < from).pop() ?? span[0];
+  // The current window must have started before the 30 minutes did: a reset or jump inside them
+  // leaves a rise from the post-reset reading that the readings can't support, so no rate (S-532).
+  if (span[0].at > from) return null;
+  // The reading at the span's start: the first at or after it, else the last (no rise then).
+  const base = span.find((r) => r.at >= from) ?? last;
   const ms = last.at - base.at;
   const rise = last.used - base.used;
   if (ms <= 0 || rise <= 0) return 0;
@@ -375,8 +412,10 @@ function project(account: string, cal: Calibration, now: number, window: string)
   if (cur.used >= 100) return { ...base, percent_per_hour: scaled * 3_600_000, reaches_100_at: new Date(cur.at).toISOString() };
   if (scaled <= 0) return { ...base, percent_per_hour: 0, note: 'no stam use in the last 30 minutes' };
   // An inflated scale must not project past what the readings show.
-  const perMs = Math.min(scaled, observedRate(account, window, now));
+  const observed = observedRate(account, window, now);
+  const perMs = Math.min(scaled, observed ?? 0);
   const out = { ...base, percent_per_hour: perMs * 3_600_000 };
+  if (observed == null) return { ...out, note: 'window began in the last 30 minutes' };
   if (perMs <= 0) return { ...out, note: 'readings show no rise in the last 30 minutes' };
   const at = now + (100 - cur.used) / perMs;
   if (resets != null && at >= resets) return { ...out, note: 'resets before reaching 100%' };

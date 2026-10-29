@@ -114,13 +114,26 @@ export function idleCompactIfDue(a: db.Agent, reason: string, avg = avgAfterComp
   // Once per idle period across daemon restarts too (S-2238): the event outlives the map.
   const last = db.lastEventAt(a.id, ['context:idle-compaction']);
   if (last && last >= a.idle_since) return false;
-  // A stored 0 dates from before onContext ignored it: no measurement.
-  const base = a.tokens_after_compaction || avg;
-  const threshold = base != null ? base + s.growthTokens : s.minTokens;
+  const threshold = compactionThreshold(a, avg);
   if (a.context_tokens <= threshold) return false;
   idleCompacted.set(a.id, a.idle_since);
   db.addEvent(a.id, 'context:idle-compaction', { tokens: a.context_tokens, threshold, reason });
   const run = isResting(a) ? compactResting(a.id, reason) : requestCompaction(a, { reason });
   run.catch((e) => db.addEvent(a.id, 'compaction-error', String(e)));
   return true;
+}
+
+// The size past which compacting costs less than re-reading the context without its cache:
+// growthTokens over the agent's size after its last compaction (else the 5-day average), else minTokens.
+function compactionThreshold(a: db.Agent, avg = avgAfterCompaction()): number {
+  const s = settings().idleCompaction;
+  // A stored 0 dates from before onContext ignored it: no measurement.
+  const base = a.tokens_after_compaction || avg;
+  return base != null ? base + s.growthTokens : s.minTokens;
+}
+
+// Whether the agent's context is over that threshold, so a cache break stam causes is worth a
+// handoff first (S-2241). Off with the idle compaction.
+export function overCompactionThreshold(a: db.Agent): boolean {
+  return settings().idleCompaction.enabled && a.context_tokens != null && a.context_tokens > compactionThreshold(a);
 }

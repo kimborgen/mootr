@@ -12,6 +12,8 @@ import { starsLayout, TALL as STARS_TALL } from './stars'
 // The orb and star-label sizes are the Stars mode's (S-539).
 export interface Px {
   card: number; cardH: number; gapX: number; gapY: number; orbitGap: number; indent: number; rowGap: number; pad: number; sheetH: number; landIn: number; slowMs: number
+  // One row of a card's nested issue (the agent card's ISSUE row, S-1438 PR 4).
+  issueRow: number
   orbMin: number; orbMax: number; orbHuman: number; starLabelW: number; starLabelH: number; starLabelGap: number; starGap: number
   // What the zoom writes on the cards (zoom.ts).
   chipMax: number; chipClear: number; stackOver: number; stackOut: number

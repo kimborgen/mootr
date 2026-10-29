@@ -27,6 +27,8 @@ import { sameLine } from './cardSummary'
 import { bodyLines, cardFrom, cardMail, cardText, KIND } from './MailCard'
 import { FILTERS, filtered, grouped, hitGroup, isAwaiting, needsIds, unreadCount, waitThread, type Group, type InboxFilter, type SearchHit } from './inbox-model'
 import { setInboxOrder } from './inbox-order'
+import { NeedsYouList } from './NeedsYouList'
+import { openAskCount } from './needsYou'
 import { swipeRow } from './swipeRow'
 import { Avatar, nameFor } from './ThreadPanel'
 
@@ -70,7 +72,7 @@ const EMPTY: Record<InboxFilter, string> = {
 // `selected` marks a row open without a pane (the stories' selected row); the page itself reads the open thread from the shell.
 export function InboxView({ selected }: { selected?: string }) {
   const d = useData()
-  const { humanThreads, humanArchived, humanDeferred, loaded, decisions, attention, itsas, delegateDialogs } = d
+  const { humanThreads, humanArchived, humanDeferred, loaded, decisions, attention, itsas, delegateDialogs, asks } = d
   useShell()
   const waiting = useWaiting()
   const deferred = useDeferred()
@@ -81,8 +83,13 @@ export function InboxView({ selected }: { selected?: string }) {
   const [query, setQueryState] = useState(phone ? kept.query : '')
   const setFilter = (f: InboxFilter) => { if (phone) kept.filter = f; setFilterState(f) }
   const setQuery = (q: string) => { if (phone) kept.query = q; setQueryState(q) }
-  // The history list (the Mail list's History, S-1456) takes the list's place; the list stays mounted under it.
-  const [history, setHistory] = useState(false)
+  // One mode at a time: the inbox list, the Needs you list (S-3953, the same entry as the mail rail's), or the history
+  // of what was shown (the Mail list's History, S-1456). The list stays mounted under the other two.
+  const [mode, setMode] = useState<'inbox' | 'needs' | 'history'>('inbox')
+  const history = mode === 'history'
+  const showNeeds = mode === 'needs'
+  const setHistory = (on: boolean) => setMode(on ? 'history' : 'inbox')
+  const setShowNeeds = (on: boolean) => setMode(on ? 'needs' : 'inbox')
   const search = useSearch(query)
   // The Away digest card (S-2822): shown while a window is set and not dismissed; its Needs line scrolls to the Needs you group below.
   const [digest, dismissDigest] = useDigest()
@@ -256,11 +263,13 @@ export function InboxView({ selected }: { selected?: string }) {
     <div className="inbox-view" id="inbox-view">
       <div className="inbox-head">
         <h2 className="inbox-title">Inbox</h2>
-        <span className="inbox-count" data-inbox-count>{parts.length ? parts.map((p, i) => <span key={i}>{i ? ' · ' : ''}{p}</span>) : `${humanThreads.length} threads`}</span>
+        {showNeeds ? null : <span className="inbox-count" data-inbox-count>{parts.length ? parts.map((p, i) => <span key={i}>{i ? ' · ' : ''}{p}</span>) : `${humanThreads.length} threads`}</span>}
         <input className="inbox-search" type="search" aria-label="Search mail" placeholder="Search mail" value={query} data-inbox-search ref={searchBox}
           onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') { setQuery(''); e.currentTarget.blur() } }} />
         {/* The Mail list's other entries (S-2054): Swipe as a mode of this page, and the history of what was shown. */}
         {phone ? <>
+          <button type="button" className="inbox-mode" data-needs-you aria-pressed={showNeeds} title="Every ask waiting on you, then the asks settled in the last day"
+            onClick={() => setShowNeeds(!showNeeds)}>Needs you ({openAskCount(asks)})</button>
           <button type="button" className="inbox-mode" data-swipe-toggle aria-pressed={currentWorld() === 'w:swipe'} title="Your inbox as cards: swipe left to archive, right to leave, up to defer"
             onClick={() => openWorld('swipe')}>Swipe</button>
           <button type="button" className="inbox-mode" data-history-toggle aria-pressed={history} title={history ? 'Back to your mail' : 'The pages, agents, threads and issues you visited'}
@@ -272,15 +281,16 @@ export function InboxView({ selected }: { selected?: string }) {
         onItsa={(key) => { const id = itsas.find((x) => x.key === key)?.id; if (id) openItsa(id) }}
         agentId={(name) => d.agents.find((a) => a.name === name || a.id === name)?.id}
         onAgent={(id) => openAgent(id)} /> : null}
-      <div className="inbox-chips" role="group" aria-label="Mail lists">
+      {showNeeds ? null : <div className="inbox-chips" role="group" aria-label="Mail lists">
         {FILTERS.map((f) => (
           <button key={f.id} type="button" className="inbox-chip" data-filter={f.id} aria-pressed={!searching && filter === f.id} title={f.tip}
             onClick={() => { setFilter(f.id); setQuery(''); if (list.current) list.current.scrollTop = 0 }}>
             {f.label}{count[f.id] ? <span className="n"> {count[f.id]}</span> : null}
           </button>))}
-      </div>
+      </div>}
       {history ? <div className="inbox-list"><HistorySide bare /></div> : null}
-      <div className="inbox-list" ref={list} hidden={history} onScroll={onScroll} data-inbox-list>
+      {showNeeds ? <div className="inbox-list"><NeedsYouList asks={asks} /></div> : null}
+      <div className="inbox-list" ref={list} hidden={history || showNeeds} onScroll={onScroll} data-inbox-list>
         {phone && inAll ? <DelegatedGroup delegated={delegateDialogs} /> : null}
         {groups.map((g) => (
           <section className="inbox-group" key={g.key} data-group={g.key} aria-label={g.label}>

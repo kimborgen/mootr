@@ -1,0 +1,12 @@
+type: object
+additionalProperties: false
+required: [enabled, pending]
+properties:
+  enabled:
+    type: boolean
+    description: A title model is set (mail.titles.model); with none, nothing is asked and pending is empty.
+  pending:
+    type: array
+    description: The mails queued or being asked.
+    items:
+      type: string

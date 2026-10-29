@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"syscall"
 
 	"stam/internal/adapters"
@@ -36,6 +35,8 @@ type Env struct {
 	Home string
 	// UserHome is $HOME: ~/.claude/settings.json (the user's statusline) and the default home the deny rules name.
 	UserHome string
+	// ConfigDir is CLAUDE_CONFIG_DIR, where Claude Code's settings live instead of UserHome/.claude when set.
+	ConfigDir string
 	// Bin is stam's own command (src/config.ts STAM_BIN: RELEASES/current/bin/stam in a release, ROOT/bin/stam in a
 	// checkout).
 	Bin string
@@ -148,7 +149,7 @@ func Launch(ctx context.Context, e Env, a db.Agent, resume bool, p Parts) (adapt
 	argv = append(argv, "--permission-mode", mode)
 	var env tmux.Env
 	if usl := userStatusLine(e.UserHome); usl != "" {
-		env = env.Set("STAM_USER_STATUSLINE", usl)
+		env = env.Set("STAM_USER_STATUSLINE", usl).Set("MOOTR_USER_STATUSLINE", usl) // both names (S-3345), as TS setEnvVar
 	}
 	return adapters.LaunchSpec{Argv: argv, Env: env}, nil
 }
@@ -198,16 +199,8 @@ func (e Env) settings(a db.Agent, p Parts) *jsjson.Object {
 // proxy, never its url or a header: the token lives in the daemon (mcp-auth.ts).
 func (e Env) mcpConfig() *jsjson.Object {
 	servers := jsjson.NewObject()
-	for _, name := range entryKeys(e.Settings.McpServers) {
-		s := entry(e.Settings.McpServers, name)
-		// extraMcpServers: `s && s.enabled !== false`.
-		if !jsjson.Truthy(s) {
-			continue
-		}
-		o, _ := s.(*jsjson.Object)
-		if en, ok := o.Get("enabled"); ok && en == false {
-			continue
-		}
+	for _, m := range adapters.McpServers(e.Settings.McpServers) {
+		name, o := m.Name, m.Server
 		get := func(k string) (jsjson.Value, bool) { return o.Get(k) }
 		auth, _ := get("auth")
 		url, _ := get("url")
@@ -238,38 +231,17 @@ func (e Env) mcpConfig() *jsjson.Object {
 	return jsjson.NewObject("mcpServers", servers)
 }
 
-// entryKeys is Object.entries' keys of settings.mcpServers: an object's in JavaScript order, an array's indices.
-func entryKeys(v jsjson.Value) []string {
-	switch x := v.(type) {
-	case *jsjson.Object:
-		return x.Keys()
-	case []jsjson.Value:
-		keys := make([]string, len(x))
-		for i := range x {
-			keys[i] = strconv.Itoa(i)
-		}
-		return keys
-	}
-	return nil
-}
-
-func entry(v jsjson.Value, key string) jsjson.Value {
-	switch x := v.(type) {
-	case *jsjson.Object:
-		val, _ := x.Get(key)
-		return val
-	case []jsjson.Value:
-		i, _ := strconv.Atoi(key)
-		return x[i]
-	}
-	return nil
-}
-
 // systemPrompt is system-prompt.md: the system-prompt template for the agent's type with every slot filled.
 func (e Env) systemPrompt(ctx context.Context, a db.Agent, p Parts) (string, error) {
-	t := e.Templates
+	return SystemPrompt(ctx, e.Templates, "claude", a, p)
+}
+
+// SystemPrompt is the system-prompt template for the agent's type with every slot filled, the instructions slot read for
+// harness and the agent's cwd. A Claude launch writes it to system-prompt.md; an OpenCode agent's plugin asks for it per
+// session (GET /api/by-session/:sid/system), so both harnesses read one render.
+func SystemPrompt(ctx context.Context, t *templates.Set, harness string, a db.Agent, p Parts) (string, error) {
 	typ := deref(a.Type)
-	instructions, err := t.InstructionsPrompt(ctx, "claude", a.Cwd)
+	instructions, err := t.InstructionsPrompt(ctx, harness, a.Cwd)
 	if err != nil {
 		return "", err
 	}
@@ -333,41 +305,19 @@ func PluginDir(home, userHome string) (string, error) {
 		return "", err
 	}
 	for _, s := range own {
-		if err := os.Symlink(s.path, filepath.Join(dir, "skills", s.name)); err != nil {
+		if err := os.Symlink(s.Path, filepath.Join(dir, "skills", s.Name)); err != nil {
 			return "", err
 		}
 	}
 	return dir, nil
 }
 
-type skill struct{ name, path string }
-
-// ownSkills is src/instructions.ts skillFolders filtered to stam's: the skill folders (holding SKILL.md) of
-// ~/.claude/skills, then of STAM_HOME/skills, where a stam skill replaces a user skill of the same name in its place
-// (as the TS Map does), keeping only stam's.
-func ownSkills(home, userHome string) []skill {
-	byName := map[string]string{}
-	var order []string
-	for _, src := range []struct{ source, dir string }{{"claude", filepath.Join(userHome, ".claude", "skills")}, {"stam", filepath.Join(home, "skills")}} {
-		entries, err := os.ReadDir(src.dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			n := e.Name()
-			if _, err := os.Stat(filepath.Join(src.dir, n, "SKILL.md")); err != nil {
-				continue
-			}
-			if _, seen := byName[n]; !seen {
-				order = append(order, n)
-			}
-			byName[n] = src.source
-		}
-	}
-	var out []skill
-	for _, n := range order {
-		if byName[n] == "stam" {
-			out = append(out, skill{n, filepath.Join(home, "skills", n)})
+// ownSkills is adapters.SkillFolders filtered to stam's.
+func ownSkills(home, userHome string) []adapters.Skill {
+	var out []adapters.Skill
+	for _, s := range adapters.SkillFolders(home, userHome) {
+		if s.Source == "stam" {
+			out = append(out, s)
 		}
 	}
 	return out

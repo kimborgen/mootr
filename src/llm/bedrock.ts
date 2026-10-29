@@ -5,7 +5,7 @@
 // (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN), then the profile's static keys in
 // ~/.aws/credentials or ~/.aws/config, then the EC2 instance role (IMDSv2). A configured `profile`
 // reads only that profile. SSO and assume-role profiles are not read. A JSON-schema request is a
-// forced tool call whose input is the answer. Bedrock reports no cost, so a result carries no `costUsd`.
+// forced tool call whose input is the answer. Bedrock reports no cost, so a result carries no `costUsd` and `complete` in src/llm/index.ts prices it from its tokens (S-3245).
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -219,6 +219,8 @@ export function bedrock(id: string, cfg: BedrockConfig): LlmAdapter {
         Object.assign(headers, sign({ method: 'POST', url, headers, body: payload, service: 'bedrock', region: cfg.region, credentials: creds }));
       }
       const res = await send(url, { method: 'POST', headers, body: payload, signal: signalFor(req), redirect: 'error' });
+      // A dead or revoked key answers 401 or 403, as does a model whose access isn't granted: fixed text that quotes nothing.
+      if (res.status === 401 || res.status === 403) throw new LlmHttpError(res.status, undefined, `key invalid or access denied (HTTP ${res.status})`);
       if (!res.ok) throw new LlmHttpError(res.status, retryAfterMs(res.headers.get('retry-after')));
       return result(await res.json(), req);
     },

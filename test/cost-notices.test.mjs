@@ -128,6 +128,8 @@ test('delivery > a working manager gets an in-turn notice, an idle one gets mail
   // The mail is written asynchronously, so poll until it lands rather than read it at once.
   for (let i = 0; i < 100 && !inboxSubjects(cost.id).some((s) => s.includes('Cost notice')); i++) await new Promise((r) => setTimeout(r, 10));
   assert.ok(inboxSubjects(cost.id).some((s) => s.includes('Cost notice')), 'an idle manager is mailed');
+  const sent = db.inbox(cost.id, false, 10).find((m) => m.subject.includes('Cost notice'));
+  assert.equal(sent.from_id, 'system:cost', 'a cost notice is from the cost system sender, not a stand-in agent');
 });
 
 test('projection > warns the managers when 100% is within 30 minutes', () => {

@@ -5,6 +5,7 @@
 // socket and a fake harness that records prompts; no daemon, no network, no models:
 // `node --test test/blockers.test.mjs`.
 import { test, before, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -25,6 +26,8 @@ let db, blockers, lifecycle;
 // (null when it launched without one).
 const prompts = new Map();
 const launches = new Map();
+const interrupts = [];
+const mode = { fails: false, throws: false };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 before(async () => {
   db = await import('../src/db.ts');
@@ -38,6 +41,14 @@ before(async () => {
       prompts.set(a.id, [...(prompts.get(a.id) ?? []), text]);
       return true;
     },
+    // Stops a turn in flight, as the real adapters do; the ids are recorded.
+    interrupt: async (a) => {
+      interrupts.push(a.id);
+      if (mode.throws) throw new Error('boom');
+      if (mode.fails) return false;
+      db.updateAgent(a.id, { activity: 'idle', activity_detail: 'interrupted' });
+      return true;
+    },
     launch: async () => ({ argv: ['sleep', '600'], env: {} }),
     afterLaunch: async (a, prompt) => {
       launches.set(a.id, [...(launches.get(a.id) ?? []), prompt ?? null]);
@@ -45,7 +56,7 @@ before(async () => {
   };
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -238,4 +249,111 @@ test('the blocker set and the pause owners survive a daemon restart', async () =
   assert.deepEqual(r.blockers.map((b) => [b.kind, b.account]), [['window', 'claude-max'], ['taken-over', '']]);
   assert.deepEqual(r.blockers[0].clear, { resets_at: '2026-10-14T00:00:00Z' });
   assert.ok(r.blocked.includes(a.name), 'the Usage summary lists it');
+});
+
+test('a cost blocker stops a turn in flight; a human pause leaves it running (S-3631)', async () => {
+  const cost = agent();
+  db.updateAgent(cost.id, { activity: 'working' });
+  await blockers.addBlocker(cost, { kind: 'window', account: 'claude-max', reason: 'five_hour at 100%' });
+  assert.equal(get(cost).lifecycle, 'paused');
+  assert.deepEqual(interrupts, [cost.id], 'the running turn was interrupted');
+  assert.equal(get(cost).activity, 'idle');
+  assert.equal(last(cost), '', 'no pause notice: it would start a turn');
+  assert.match(events(cost, 'pause:interrupt')[0].data, /"confirmed":true/);
+
+  const human = agent();
+  db.updateAgent(human.id, { activity: 'working' });
+  await lifecycle.pause(get(human), 'human');
+  assert.equal(get(human).lifecycle, 'paused');
+  assert.deepEqual(interrupts, [cost.id], 'a human pause does not interrupt');
+  assert.match(last(human), /You are being paused/);
+
+  const idle = agent();
+  await blockers.addBlocker(idle, { kind: 'window', account: 'claude-max', reason: 'x' });
+  assert.deepEqual(interrupts, [cost.id], 'an idle agent is not interrupted');
+  assert.match(last(idle), /You are being paused/);
+
+  // Clearing resumes the stopped agent with its conversation: it is told through the unpause prompt.
+  assert.equal(await blockers.clearBlocker(cost, 'window', 'claude-max', 'reset'), true);
+  assert.equal(get(cost).lifecycle, 'active');
+  assert.ok(last(cost), 'resume prompt delivered');
+});
+
+test('only provider-down blockers interrupt: budget, paid-forbidden and manual let the turn finish (S-3631)', async () => {
+  for (const kind of ['budget', 'paid-forbidden', 'manual']) {
+    const a = agent();
+    db.updateAgent(a.id, { activity: 'working' });
+    const before = interrupts.length;
+    await blockers.addBlocker(a, { kind, account: 'x', reason: kind });
+    assert.equal(get(a).lifecycle, 'paused');
+    assert.equal(interrupts.length, before, `${kind} does not interrupt`);
+    assert.equal(get(a).activity, 'working');
+    assert.match(last(a), /You are being paused/, `${kind}: the notice goes`);
+  }
+  for (const kind of ['credits-out', 'error']) {
+    const a = agent();
+    db.updateAgent(a.id, { activity: 'working' });
+    await blockers.addBlocker(a, { kind, account: 'x', reason: kind });
+    assert.equal(interrupts.at(-1), a.id, `${kind} interrupts`);
+  }
+});
+
+test('a provider-down blocker stops the turn of an agent a budget blocker already paused (S-3631)', async () => {
+  const a = agent();
+  await blockers.addBlocker(a, { kind: 'budget', account: 'x', reason: 'b' });
+  db.updateAgent(a.id, { activity: 'working' });
+  const before = interrupts.length;
+  await blockers.addBlocker(a, { kind: 'window', account: 'x', reason: 'w' });
+  assert.equal(interrupts.length, before + 1);
+  assert.equal(get(a).activity, 'idle');
+});
+
+test('an interrupt that fails or throws still sends the pause notice; a stopped turn is told on resume (S-3631)', async () => {
+  for (const m of ['fails', 'throws']) {
+    mode[m] = true;
+    try {
+      const a = agent();
+      db.updateAgent(a.id, { activity: 'working' });
+      await blockers.addBlocker(a, { kind: 'window', account: 'x', reason: m });
+      assert.equal(get(a).lifecycle, 'paused');
+      assert.match(last(a), /You are being paused/, `${m}: the notice goes`);
+      assert.equal(events(a, 'pause:interrupt').length, 1);
+      if (m === 'throws') assert.equal(events(a, 'pause:interrupt-error').length, 1);
+      await blockers.clearBlocker(a, 'window', 'x', 'reset');
+      assert.doesNotMatch(last(a), /cut off/, 'the notice was given, nothing missed');
+    } finally {
+      mode[m] = false;
+    }
+  }
+  const a = agent();
+  db.updateAgent(a.id, { activity: 'working' });
+  await blockers.addBlocker(a, { kind: 'window', account: 'x', reason: 'w' });
+  assert.equal(events(a, 'pause:notice-skipped').length, 1);
+  await blockers.clearBlocker(a, 'window', 'x', 'reset');
+  assert.match(last(a), /no longer paused/);
+  assert.match(last(a), /turn was cut off when you were paused, so you never got the pause notice/);
+  // Told once: a later pause and resume of the same agent carries no catch-up.
+  await blockers.addBlocker(a, { kind: 'budget', account: 'x', reason: 'b' });
+  await blockers.clearBlocker(a, 'budget', 'x', 'rolled');
+  assert.doesNotMatch(last(a), /cut off/);
+});
+
+test('the catch-up survives more than 200 later events and a resume that throws (S-3631)', async () => {
+  const a = agent();
+  db.updateAgent(a.id, { activity: 'working' });
+  await blockers.addBlocker(a, { kind: 'window', account: 'x', reason: 'w' });
+  for (let i = 0; i < 250; i++) db.addEvent(a.id, 'noise', { i });
+  assert.match(lifecycle.missedPause(a.id), /cut off/, 'found by type, not within the last 200 events');
+
+  // A resume that throws (a workspace agent with no session to resume) keeps the catch-up.
+  db.updateAgent(a.id, { workspace: 'ws' });
+  await assert.rejects(blockers.clearBlocker(a, 'window', 'x', 'reset'), /no session to resume/);
+  assert.equal(events(a, 'pause:notice-given').length, 0, 'not recorded after a failed resume');
+  assert.match(lifecycle.missedPause(a.id), /cut off/);
+
+  // The next attempt carries it, once.
+  db.updateAgent(a.id, { workspace: null });
+  await lifecycle.unpause(get(a), { by: 'human' });
+  assert.match(last(a), /turn was cut off/);
+  assert.equal(events(a, 'pause:notice-given').length, 1);
 });

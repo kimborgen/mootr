@@ -195,7 +195,7 @@ func (s *Server) checkStep(r *http.Request, c auth.Resolved) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	w, err := s.parseWrite(r, c, raw, true)
+	w, err := s.parseWrite(r, c, raw)
 	if err != nil {
 		return nil, err
 	}

@@ -74,7 +74,7 @@ P1=$(printf "%s" "$R" | jget "d['id']") || fail "gone's mail failed (got: $R)"
 echo "-- gone is archived on twin, and main sees it so"
 on twin "$STAM" archive gone >/dev/null
 on twin "$STAM" wait gone --until archived --timeout 30
-wait_until sh -c "curl -s -H 'authorization: Bearer $MAIN_TOKEN' '$MAIN_URL/api/agents' | python3 -c \"import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(a['id']=='$GONE' and a['lifecycle']=='archived' for a in d) else 1)\""
+wait_until sh -c "curl -s -H 'authorization: Bearer $MAIN_TOKEN' '$MAIN_URL/api/agents?state=all' | python3 -c \"import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(a['id']=='$GONE' and a['lifecycle']=='archived' for a in d) else 1)\""
 
 echo "-- with twin down, boss's reply in $KEY skips gone instead of failing"
 daemon_stop twin

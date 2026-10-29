@@ -40,8 +40,6 @@ set_settings() { printf '%s\n' "$1" > "$STAM_HOME/settings.json"; }
 N="e2e-ctx-$(date +%s)"; DIR="$(mktemp -d "$TEST_TMP/work.XXXX")"
 human_has() { "$STAM" mail inbox human | grep -q "$1"; }
 events_has() { "$STAM" events "$N" | grep -q "$1"; }
-# Bounded: each try is a state check on the daemon, so a state is seen as soon as it is reached.
-poll() { n=$1; shift; while [ "$n" -gt 0 ]; do "$@" && return 0; n=$((n - 1)); done; return 1; }
 # `mail read` returns only unread mail, so each check keeps its read in MAIL.
 
 set_settings '{"context":{"warnTokens":1000,"instructTokens":100000000,"enforceTokens":200000000},"idleCompaction":{"enabled":false}}'
@@ -51,21 +49,21 @@ set_settings '{"context":{"warnTokens":1000,"instructTokens":100000000,"enforceT
 "$STAM" wait "$N" --until idle --timeout 90
 
 echo "-- warning notice"
-poll 200 events_has 'context:threshold' || { echo "FAIL: no threshold event"; exit 1; }
-poll 200 events_has 'pushed' || { echo "FAIL: notice not delivered"; exit 1; }
+poll 60 events_has 'context:threshold' || { echo "FAIL: no threshold event"; exit 1; }
+poll 60 events_has 'pushed' || { echo "FAIL: notice not delivered"; exit 1; }
 "$STAM" wait "$N" --until idle --timeout 90
 
 echo "-- forced compaction"
 # Every threshold is below the agent's size even right after compaction: its size is 50000 here.
 set_settings '{"context":{"warnTokens":1000,"instructTokens":2000,"enforceTokens":3000},"idleCompaction":{"enabled":false}}'
 "$STAM" mail send --to "$N" --subject "hello" "Reply with exactly: hello"
-poll 200 events_has 'enforcement threshold' || { echo "FAIL: no forced compaction"; exit 1; }
-poll 200 events_has 'compaction:measured' || { echo "FAIL: size after compaction never measured"; exit 1; }
+poll 60 events_has 'enforcement threshold' || { echo "FAIL: no forced compaction"; exit 1; }
+poll 60 events_has 'compaction:measured' || { echo "FAIL: size after compaction never measured"; exit 1; }
 "$STAM" wait "$N" --until idle --timeout 180
 
 echo "-- no forced compaction again"
 "$STAM" mail send --to "$N" --subject "again" "Mail human the word again. Then end your turn."
-poll 200 human_has "again" || { echo "FAIL: no mail after compaction"; exit 1; }
+poll 60 human_has "again" || { echo "FAIL: no mail after compaction"; exit 1; }
 "$STAM" wait "$N" --until idle --timeout 90
 measured=$("$STAM" events "$N" | sed -n 's/.*compaction:measured {"tokens":\([0-9]*\)}.*/\1/p' | head -1)
 echo "size after compaction: ${measured:-none}"
@@ -86,7 +84,7 @@ until human_has "kept"; do
   sent=$((sent + 1))
   # Settled when the agent's mail is kept or its request was logged dropped.
   settled() { human_has "kept" || [ "$(dropped)" -gt "$before" ]; }
-  poll 200 settled || { echo "FAIL: compact_self neither accepted nor dropped"; exit 1; }
+  poll 80 settled || { echo "FAIL: compact_self neither accepted nor dropped"; exit 1; }
 done
 MAIL=$("$STAM" mail read human)
 echo "$MAIL" | grep -q "TULIP" || { echo "FAIL: word lost in compaction"; exit 1; }
@@ -95,7 +93,7 @@ events_has '"reason":"requested by the agent"' || { echo "FAIL: no compaction ev
 
 echo "-- idle compaction"
 set_settings '{"context":{"warnTokens":100000000,"instructTokens":100000001,"enforceTokens":100000002},"idleCompaction":{"enabled":true,"idleMinutes":0.1,"growthTokens":-1000000,"minTokens":1000}}'
-poll 2000 events_has 'context:idle-compaction' || { echo "FAIL: no idle compaction"; exit 1; }
+poll 400 events_has 'context:idle-compaction' || { echo "FAIL: no idle compaction"; exit 1; }
 "$STAM" wait "$N" --until idle --timeout 180
 
 echo "PASS e2e-context"

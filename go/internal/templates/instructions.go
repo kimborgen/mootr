@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"stam/internal/config"
 	"stam/internal/jsjson"
 )
 
@@ -29,8 +30,13 @@ var skipDirs = map[string]bool{"node_modules": true, ".git": true, "dist": true,
 // GitTimeout bounds the `git rev-parse` that finds a working folder's repo root.
 const GitTimeout = 10 * time.Second
 
-// GlobalInstructions is STAM_HOME/instructions.md, the user's text for all agents; "" when there is none.
+// GlobalInstructions is src/instructions.ts globalInstructions, the user's text for all agents: the settings home's
+// instructions.md, which a peer reads from its shared cache when it has one (S-387), else STAM_HOME/instructions.md;
+// "" when there is none.
 func (s *Set) GlobalInstructions() string {
+	if c := config.PeerShared(s.Home, s.Machine); c != nil && c.Instructions != nil {
+		return *c.Instructions
+	}
 	b, err := os.ReadFile(filepath.Join(s.Home, "instructions.md"))
 	if err != nil {
 		return ""
@@ -120,6 +126,30 @@ func (s *Set) globalFiles(harness string) []string {
 	}
 	if harness != "codex" && exists(codexGlobal) {
 		out = append(out, codexGlobal)
+	}
+	return out
+}
+
+// NativeFile is an instruction file the harness loads on its own; Source is "repo" or "user-global".
+type NativeFile struct {
+	Path, Source string
+}
+
+// NativeFiles is src/instructions.ts nativeFiles: the instruction files the harness loads on its own, in the order it
+// reads them: its user-global file, then from the git root down to the working folder, nearest last.
+func (s *Set) NativeFiles(ctx context.Context, harness, cwd string) []NativeFile {
+	var out []NativeFile
+	global := map[string]string{"claude": filepath.Join(s.UserHome, ".claude", "CLAUDE.md"), "codex": filepath.Join(s.UserHome, ".codex", "AGENTS.md")}[harness]
+	if global != "" && exists(global) {
+		out = append(out, NativeFile{global, "user-global"})
+	}
+	dirs := s.upwardDirs(ctx, cwd)
+	for i := len(dirs) - 1; i >= 0; i-- {
+		for _, f := range native[harness] {
+			if p := join(dirs[i], f); exists(p) {
+				out = append(out, NativeFile{p, "repo"})
+			}
+		}
 	}
 	return out
 }

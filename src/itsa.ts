@@ -4,13 +4,14 @@
 // fixed categories, some flagged as waiting on the human); readable keys like `S-42` from
 // settings.itsa.keyPrefix and one counter. Every ITSA lives on one home daemon
 // (settings.itsa.home); other daemons proxy to it. See docs/itsa-design.md.
-import { randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { freshId } from './short-id.ts';
 import * as db from './db.ts';
 import { settings } from './settings.ts';
 import { basename } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { HUMAN, humanMailBlock, sendMail, stamSender, type Attachment, type SentMail } from './mail.ts';
-import { findAgentPeer, locateAgent, peerByName, peerCall, type Via } from './peers.ts';
+import { HUMAN, humanMailBlock, humanRerouteTo, relayRouteOf, sendMail, stamSender, type Attachment, type RelayRoute, type SentMail } from './mail.ts';
+import { findAgentPeer, findAgentPeerFresh, locateAgent, peerByName, peerCall, type AgentHit, type Via } from './peers.ts';
 import { itsaRefusal, mayPostItsa } from './mail-visibility.ts';
 import { MACHINE } from './config.ts';
 // Named apart from this file's own `events` (an ITSA's event log).
@@ -70,7 +71,10 @@ export interface LinkMeta {
   review?: { verdict: string; by: string; summary: string | null; at: string };
   tests?: { passed: number; failed: number; skipped: number; command: string | null; at: string };
   screenshots?: { mail_id: string; name: string }[];
+  // The instruction-file digest of each head pr_open pushed, oldest first (S-3833): what merge-pr's instruction gate compares an approval to.
+  instr?: { head: string; digest: string; at: string }[];
 }
+export const INSTR_KEEP = 20;
 export const LINK_VERDICTS = ['approve', 'request_changes', 'comment'];
 function parseMeta(raw: unknown): LinkMeta | null {
   if (!raw) return null;
@@ -106,9 +110,43 @@ export interface ItsaView extends Itsa {
   actions: HumanAction[];
   // Field values by field key (S-364).
   fields: Record<string, unknown>;
+  // The revision of the text the human approves (revOf): the web UI sends it back with Approve.
+  rev: string;
 }
 
 const now = () => new Date().toISOString();
+
+// The revision of an ITSA's text as the human is shown it: its title, summary, and body (a
+// requirement approval's body carries the draft's statement and rev). Approve carries the revision
+// it showed (S-2998), and a change since refuses it, so it never approves text the human didn't see.
+// Each field is prefixed with its length in UTF-8 bytes, so text moved from one field into the next
+// changes it, and the Go daemon builds the same input (go/internal/server/itsa_rev.go).
+export function revOf(x: Pick<Itsa, 'title' | 'summary' | 'body'>): string {
+  const input = [x.title, x.summary, x.body].map((f) => `${Buffer.byteLength(f ?? '')}:${f ?? ''}`).join('\0');
+  return createHash('sha256').update(input).digest('hex').slice(0, 16);
+}
+export const TEXT_CHANGED = 'the text changed, review again';
+
+// The revision of the ITSA's text each mail that renders it showed (S-2998): the ask, and the
+// comments that show a changed text again (itsa-human.ts shownText). A mail thread's Approve names
+// the newest mail it shows, and the revision is the one recorded at or before it.
+// Where a mail's body holds the snapshot it shows, in UTF-16 units: at its start (an ask) or its end (a
+// re-show); none elsewhere, so a copy in the middle of an owner's comment never counts.
+export function shownAt(body: string, text: string): number | undefined {
+  if (!text) return undefined;
+  if (body.startsWith(text)) return 0;
+  if (body.endsWith(text)) return body.length - text.length;
+  return undefined;
+}
+// The revision recorded on the newest mail of the ITSA's thread at or before `mailId`, or none (a
+// mail not in its thread, or one sent before any was recorded).
+export function shownRev(itsaId: string, mailId: string): string | undefined {
+  const r = db.open().prepare(`SELECT s.rev FROM itsa_shown_revs s JOIN mail m ON m.id = s.mail_id
+    JOIN mail seen ON seen.id = ? JOIN itsas x ON x.id = s.itsa_id AND seen.thread_id = x.thread_id
+    WHERE s.itsa_id = ? AND (m.created_at < seen.created_at OR (m.created_at = seen.created_at AND m.rowid <= seen.rowid))
+    ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1`).get(mailId, itsaId) as { rev: string } | undefined;
+  return r?.rev;
+}
 
 // The editable status set from settings, keeping only the five known categories.
 export function statuses(): Status[] {
@@ -157,7 +195,7 @@ export async function person(ref: unknown): Promise<string | null> {
   if (s === HUMAN || s.toLowerCase() === 'the human') return HUMAN;
   const local = db.getAgent(s);
   if (local) return local.id;
-  const found = await findAgentPeer(s);
+  const found = await findAgentPeerFresh(s);
   if (found) return found.agent.id;
   throw new Error(`no agent ${s} (pass an agent id or name, or 'human')`);
 }
@@ -187,7 +225,7 @@ function nextKey(): string {
 // partial write. Resume on the same synchronous connection; never nested here.
 function tx<T>(fn: () => T): T {
   const d = db.open();
-  d.exec('BEGIN');
+  d.exec('BEGIN IMMEDIATE');
   try {
     const out = fn();
     d.exec('COMMIT');
@@ -198,9 +236,9 @@ function tx<T>(fn: () => T): T {
   }
 }
 
+// An id no ITSA holds; call it inside the write transaction.
 function newId(): string {
-  const alphabet = 'abcdefghijkmnpqrstuvwxyz23456789';
-  return 'i' + [...randomBytes(4)].map((b) => alphabet[b % alphabet.length]).join('');
+  return freshId('i', (id) => !!db.open().prepare('SELECT 1 FROM itsas WHERE id = ?').get(id), 'ITSA');
 }
 
 export function find(ref: string): Itsa | undefined {
@@ -228,6 +266,23 @@ export function must(ref: string): Itsa {
 export function participants(ref: string): string[] {
   const x = must(ref);
   return (db.open().prepare('SELECT agent_id FROM itsa_participants WHERE itsa_id = ? AND left_at IS NULL ORDER BY agent_id').all(x.id) as { agent_id: string }[]).map((r) => r.agent_id);
+}
+
+// S-4163: whether an agent's mail to the human goes to the human directly, not through its parent (S-548). It does when the
+// agent is live, owns every ITSA the mail is in (`itsas`), and the human takes part in each. Read from the DB at send time: a
+// reassigned ITSA, an archived agent, or an ITSA the agent doesn't own doesn't qualify.
+// `after` (S-4178) is the owner an ITSA has once the move that asks the human lands: the human joins it for that ask, so only
+// its owner is checked for it. The route check predicts the send with it, before the move is written.
+export function ownsItsaWithHuman(agentId: string, itsas: string[], after?: { id: string; owner: string | null }): boolean {
+  const ids = [...new Set(itsas)];
+  // A peer agent (a relayed original's sender) has no row here: its peer record says whether it is archived.
+  const lifecycle = db.getAgent(agentId)?.lifecycle ?? db.peerAgentLifecycle(agentId);
+  if (!ids.length || lifecycle === 'archived') return false;
+  return ids.every((id) => {
+    if (after?.id === id) return after.owner === agentId;
+    const x = find(id);
+    return !!x && x.owner === agentId && participants(x.id).includes(HUMAN);
+  });
 }
 
 // The open ITSAs with a link of `system` to `url`, newest link first (the process runner finds a PR's ITSAs with it).
@@ -362,7 +417,8 @@ export async function create(input: CreateInput): Promise<Itsa> {
   const st = statusOf(status);
   if (!st) throw new Error(`unknown status ${status}; statuses: ${statuses().map((s) => s.name).join(', ')}`);
   const owner = await person(input.owner);
-  const by = (await person(input.by)) ?? HUMAN;
+  // A local script (stam itsa new --system NAME) creates as itself, as set and post act (S-3802: the failure routing's fallback ITSA).
+  const by = isSystem(input.by) ? input.by : (await person(input.by)) ?? HUMAN;
   const people = (await Promise.all((input.participants ?? []).map(person))).filter((p): p is string => !!p);
   if (owner) people.push(owner);
   const participants = [...new Set(people)];
@@ -373,10 +429,10 @@ export async function create(input: CreateInput): Promise<Itsa> {
   }
   const parent_id = input.parent ? must(String(input.parent)).id : null;
   runGuards(null, { kind: input.kind ? String(input.kind) : null, status: st.name, body: input.body, parent_id, created_by: by }, by);
-  const id = newId();
   const t = now();
   let createdFields: { from: Record<string, unknown>; to: Record<string, unknown> } | null = null;
   const created = tx(() => {
+    const id = newId();
     const key = nextKey();
     db.open()
       .prepare(
@@ -396,7 +452,7 @@ export async function create(input: CreateInput): Promise<Itsa> {
     for (const l of links) addLinkRow(id, l);
     addEvent(id, by, 'created', { key, title, status });
     if (input.fields !== undefined) {
-      createdFields = applyFieldValues(id, input.fields, by);
+      createdFields = applyFieldValues(id, input.fields, by, input.kind ? String(input.kind) : null);
       if (createdFields) addEvent(id, by, 'fields', createdFields);
     }
     return find(id)!;
@@ -422,6 +478,21 @@ export interface ListFilters {
   participant?: string;
   kind?: string;
   text?: string;
+  // Created at or after this time: a sinceTime() form, an age or an ISO time.
+  since?: string;
+}
+
+// A `since` filter's time (S-1396), in created_at's form: an age back from now (90m, 24h, 2d, 1w), or an ISO date
+// (2026-10-21) or date-time with its zone (2026-10-21T08:00:00Z). Go mirrors it in go/internal/server/itsa.go.
+const AGE_MS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+export function sinceTime(text: string): string {
+  const age = /^(\d{1,4})([mhdw])$/.exec(text);
+  if (age) return new Date(Date.now() - Number(age[1]) * AGE_MS[age[2]]).toISOString();
+  const iso = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2}))?$/.exec(text) ? Date.parse(text) : NaN;
+  // Date.parse takes some impossible dates (2026-02-30) as real ones; the round trip refuses them.
+  if (Number.isNaN(iso) || (text.length === 10 && new Date(iso).toISOString().slice(0, 10) !== text))
+    throw new Error(`since expects an ISO time (2026-10-21, or 2026-10-21T08:00:00Z) or an age (90m, 24h, 2d, 1w); got "${text}"`);
+  return new Date(iso).toISOString();
 }
 
 export async function list(f: ListFilters = {}): Promise<ListedItsa[]> {
@@ -472,7 +543,11 @@ export async function list(f: ListFilters = {}): Promise<ListedItsa[]> {
     where.push('(key LIKE ? OR title LIKE ? OR summary LIKE ? OR body LIKE ?)');
     args.push(like, like, like, like);
   }
-  const sql = `SELECT * FROM itsas ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY created_at`;
+  if (f.since !== undefined) {
+    where.push('created_at >= ?');
+    args.push(sinceTime(String(f.since)));
+  }
+  const sql =`SELECT * FROM itsas ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY created_at`;
   return withCardFacts(db.open().prepare(sql).all(...args) as unknown as Itsa[]);
 }
 
@@ -538,6 +613,7 @@ export function get(ref: string): ItsaView {
     events: events(x.id, 100),
     actions: actionsOf(x.status),
     fields: fieldValuesByItsa(x.id).get(x.id) ?? {},
+    rev: revOf(x),
   };
 }
 
@@ -551,11 +627,15 @@ export interface SetInput {
   // null (or '', 'none', 'root') makes it a root; a ref reparents it.
   parent?: string | null;
   participants?: (string | null)[];
+  // Joins these members and keeps everyone already there (S-3061). Unlike `participants`, it never removes one.
+  addParticipants?: (string | null)[];
   // Compare-and-set: refuse the whole change unless the current owner is this agent id (or
   // null). Checked inside the transaction that writes, so a concurrent change can't slip between.
   ifOwner?: string | null;
   // Compare-and-set on the status, like ifOwner: refuse unless the ITSA is in this status.
   ifStatus?: string;
+  // Compare-and-set on the text (revOf), like ifStatus: refuse unless it is still this revision.
+  ifRev?: string;
   // Board order: a number, or null to fall back to creation order. Not an event.
   rank?: number | null;
   // The human action (itsa-human.ts) that made this status change, recorded as an `action` event
@@ -565,6 +645,19 @@ export interface SetInput {
   fields?: Record<string, unknown>;
   // The incident mark (S-2406). The route allows only the chief of staff or the human to set it.
   incident?: boolean;
+  // The routing facts a peer attached to a move it relayed (S-4178): the ask the move into a human status sends is routed by
+  // them. Only the peer's daemon sets it (daemon.ts), from its own DB.
+  relay_route?: RelayRoute;
+}
+
+// S-4178: refuses a move into a human status before it is written when the ask it sends would be refused. The ask is routed by
+// humanRerouteTo, the rule its send applies, with the ITSA's owner as the move leaves it, so the two can't disagree.
+// The ask's routing as the send will apply it: the ITSA it is about and every ITSA its thread holds (mail.ts inOwnItsa), with the
+// owner the move leaves for the ITSA itself. Returns the parent it reroutes to, or undefined when it goes direct.
+async function checkAskRoute(x: Itsa, actor: string, ownerAfter: string | null, route: RelayRoute | undefined): Promise<AgentHit | undefined> {
+  const fromName = db.getAgent(actor)?.name ?? (await findAgentPeer(actor))?.agent.name ?? actor;
+  const itsas = [x.id, ...(x.thread_id ? db.threadItsaIds(x.thread_id) : [])];
+  return humanRerouteTo(actor, route, ownsItsaWithHuman(actor, itsas, { id: x.id, owner: ownerAfter }), fromName);
 }
 
 // Changes any field, refusing a reparent that would create a cycle, and records each
@@ -577,13 +670,32 @@ export async function set(ref: string, f: SetInput, by: string | null = null): P
   const actor = isSystem(by) ? by : (await person(by)) ?? HUMAN;
   const owner = f.owner !== undefined ? await person(f.owner) : undefined;
   const resolvedParticipants = f.participants !== undefined ? [...new Set((await Promise.all((f.participants ?? []).map(person))).filter((p): p is string => !!p))] : undefined;
+  const resolvedAdd = f.addParticipants !== undefined ? [...new Set((await Promise.all(f.addParticipants.map(person))).filter((p): p is string => !!p))] : undefined;
 
   // A move to a human status by an agent whose model may not mail the human is refused: its parent decides.
   const blockedMove = f.status !== undefined && actor !== HUMAN && !isSystem(actor) && statusOf(String(f.status))?.human ? await humanMailBlock(actor) : undefined;
+  // S-4178: the ask a move into a human status sends is checked before the move is written, with the owner the move leaves.
+  // The owner the route check assumed is re-read inside the transaction below: a reassignment during the lookup aborts the move.
+  // The parent it routed to, and that peer's remembered lifecycle then, are re-read inside the transaction too.
+  let routed: { owner: string | null; parent?: AgentHit; parentLife?: string } | undefined;
+  if (f.status !== undefined && actor !== HUMAN && !isSystem(actor) && statusOf(String(f.status))?.human && String(f.status) !== must(ref).status) {
+    const x0 = must(ref);
+    const ownerAfter = owner !== undefined ? owner : x0.owner;
+    const parent = await checkAskRoute(x0, actor, ownerAfter, f.relay_route);
+    routed = { owner: ownerAfter, parent, parentLife: parent?.agent.lifecycle };
+  }
   const out = tx(() => {
     const cur = must(ref);
+    // S-4178: the ask was routed for the owner the move leaves; an owner set since (no `owner` in the move) aborts it, nothing written.
+    if (routed && owner === undefined && String(f.status) !== cur.status && (cur.owner ?? null) !== routed.owner) {
+      throw new Error(`the owner changed: ${cur.key} is owned by ${cur.owner ?? 'nobody'} now, not ${routed.owner ?? 'nobody'} as the move was routed; set it again`);
+    }
+    if (routed?.parent?.peer && String(f.status) !== cur.status && (db.peerAgentLifecycle(routed.parent.agent.id) ?? routed.parent.agent.lifecycle) !== routed.parentLife) {
+      throw new Error(`the parent changed: ${cur.key}'s ask reroutes to ${routed.parent.agent.name}, which changed since it was routed; set it again`);
+    }
     if (f.ifOwner !== undefined && cur.owner !== f.ifOwner) throw new Error(`owner changed: ${cur.key} is owned by ${cur.owner ?? 'nobody'}, not ${f.ifOwner ?? 'nobody'}`);
     if (f.ifStatus !== undefined && cur.status !== f.ifStatus) throw new Error(`status changed: ${cur.key} is ${cur.status} now, not ${f.ifStatus}`);
+    if (f.ifRev !== undefined && revOf(cur) !== f.ifRev) throw new Error(`${TEXT_CHANGED}: ${cur.key} changed since it was shown`);
     // An agent whose model may not mail the human can't hand the ITSA to the human at all: its parent decides.
     if (blockedMove && String(f.status) !== cur.status) {
       const blocked = blockedMove;
@@ -675,13 +787,15 @@ export async function set(ref: string, f: SetInput, by: string | null = null): P
     }
 
     // Closing leaves the process at its end node (S-1398), in the same change as the status, unless the caller names a stage.
+    const kindNow = upd.kind !== undefined ? upd.kind : cur.kind;
     let fieldValues = f.fields;
-    if (changes.status && isClosedStatus(String(changes.status.to)) && !(fieldValues && 'stage' in fieldValues) && findField('stage')) {
-      const end = closeStageOf?.(upd.kind !== undefined ? upd.kind : cur.kind);
+    const stageField = changes.status && isClosedStatus(String(changes.status.to)) && !(fieldValues && 'stage' in fieldValues) ? findField('stage') : undefined;
+    if (stageField && fieldApplies(stageField, kindNow)) {
+      const end = closeStageOf?.(kindNow);
       if (end) fieldValues = { ...(fieldValues ?? {}), stage: end };
     }
     if (fieldValues !== undefined) {
-      const ch = applyFieldValues(cur.id, fieldValues, actor);
+      const ch = applyFieldValues(cur.id, fieldValues, actor, kindNow);
       if (ch) changes.fields = ch;
     }
 
@@ -714,6 +828,13 @@ export async function set(ref: string, f: SetInput, by: string | null = null): P
     } else if (finalOwner) {
       rejoin(cur.id, finalOwner);
     }
+    // Additive joins read the members inside this transaction, so a join another write made a moment ago is kept.
+    if (resolvedAdd?.length) {
+      const before = changes.participants?.from ?? participants(cur.id);
+      for (const a of resolvedAdd) rejoin(cur.id, a);
+      const after = participants(cur.id);
+      if (JSON.stringify(after) !== JSON.stringify(before)) changes.participants = { from: before, to: after };
+    }
 
     // Reordering on a board isn't activity worth a line in the thread.
     for (const [field, ch] of Object.entries(changes)) if (field !== 'rank') addEvent(cur.id, actor, field, ch);
@@ -721,7 +842,7 @@ export async function set(ref: string, f: SetInput, by: string | null = null): P
     return { itsa: find(cur.id)!, changes };
   });
   if (out.changes.status) {
-    for (const fn of statusHandlers) fn(out.itsa, actor, String(out.changes.status.from));
+    for (const fn of statusHandlers) fn(out.itsa, actor, String(out.changes.status.from), f.relay_route);
     for (const fn of observers) fn({ type: 'status', itsa: out.itsa, actor, from: out.changes.status.from, to: out.changes.status.to });
   }
   if (out.changes.owner) for (const fn of observers) fn({ type: 'owner', itsa: out.itsa, actor, to: out.itsa.owner ?? null });
@@ -822,8 +943,8 @@ export function onChange(fn: (c: ItsaChange) => void): void {
 
 // Set by itsa-owners.ts and itsa-human.ts (which import this file) to tell a parent ITSA's
 // owner and the human; `from` is the status it left ('' for an ITSA created in its status).
-const statusHandlers: ((x: Itsa, actor: string, from: string) => void)[] = [];
-export function onStatus(fn: (x: Itsa, actor: string, from: string) => void): void {
+const statusHandlers: ((x: Itsa, actor: string, from: string, route?: RelayRoute) => void)[] = [];
+export function onStatus(fn: (x: Itsa, actor: string, from: string, route?: RelayRoute) => void): void {
   if (!statusHandlers.includes(fn)) statusHandlers.push(fn);
 }
 
@@ -880,7 +1001,7 @@ export function backfillClosedStage(endNodeOf: (kind: string | null) => string |
   let n = 0;
   for (const kind of new Set(kinds)) {
     const end = endNodeOf(kind);
-    if (!end) continue;
+    if (!end || !fieldApplies(f, kind)) continue;
     const rows = d
       .prepare(
         `SELECT i.id, i.status, v.value FROM itsas i JOIN itsa_field_values v ON v.itsa_id = i.id AND v.field_id = ?
@@ -984,12 +1105,30 @@ export function recordLink(ref: string, n: number, rec: LinkRecord, by: string |
   })();
 }
 
+// Records the instruction-file digest of a head pr_open pushed on the ITSA's link for `branch` (S-3833); nothing when the
+// ITSA has no such link or the newest record already has this head. The daemon writes it, so it is the time of the push.
+export function recordPush(ref: string, branch: string, head: string, digest: string): void {
+  tx(() => {
+    const x = must(ref);
+    const row = db.open().prepare("SELECT n, meta FROM itsa_links WHERE itsa_id = ? AND system = 'branch' AND external_id = ? ORDER BY n LIMIT 1").get(x.id, branch) as any;
+    if (!row) return;
+    const meta: LinkMeta = { ...(parseMeta(row.meta) ?? {}) };
+    const list = meta.instr ?? [];
+    // The same digest as the newest record adds nothing, so pushes of other files can't push an approved record out of INSTR_KEEP.
+    if (list.at(-1)?.digest === digest) return;
+    meta.instr = [...list, { head, digest, at: now() }].slice(-INSTR_KEEP);
+    db.open().prepare('UPDATE itsa_links SET meta = ? WHERE itsa_id = ? AND n = ?').run(JSON.stringify(meta), x.id, row.n);
+  });
+}
+
 export const HEALTHS = ['on_track', 'at_risk', 'off_track'];
 
 export interface PostInput {
   // Who posts: an agent id or name (local or on a peer), or the human.
   by?: string | null;
   body: string;
+  // The routing facts a peer attaches to a relayed post (S-4163); the home reads them only for a relayed sender.
+  relay_route?: RelayRoute;
   // `comment` (default) or `update`; an update needs a health.
   kind?: string | null;
   health?: string | null;
@@ -1005,7 +1144,7 @@ export interface PostInput {
   attachments?: Attachment[];
   reply_to?: string;
   // A post stam makes on its own behalf (an event subscription): it stands in as sender
-  // like mail.sendFromStam and is not added as a participant.
+  // like a stand-in and is not added as a participant.
   from_stam?: boolean;
   // Event notices (S-511): the human is never a recipient, even as a participant; agents still get it.
   agents_only?: boolean;
@@ -1047,9 +1186,11 @@ function mentions(body: string, names: string[]): boolean {
 // with the idle batch. An agent's post reaches the human only when it names them in `to`.
 //
 // `opts.ask` posts stam's mail asking the human to act (kind `ask`): only the human gets it,
-// and the sender doesn't become a participant.
-export async function post(ref: string, input: PostInput, opts: { ask?: boolean } = {}): Promise<SentMail> {
-  // Stam's own post stands in as an active agent (like mail.sendFromStam) and never joins
+// and the sender doesn't become a participant. `opts.shown` is the ITSA text the body renders and
+// its revision (itsa-human.ts shownText): the revision is recorded for the mail once it is sent, and
+// only if the stored body is the body sent, uncut (the mail cap may cut it; a copy elsewhere doesn't count).
+export async function post(ref: string, input: PostInput, opts: { ask?: boolean; shown?: { text: string; rev?: string } } = {}): Promise<SentMail> {
+  // Stam's own post stands in as an active agent (a stand-in) and never joins
   // the ITSA as a participant; otherwise `by` is the agent or the human posting.
   const asStam = Boolean(input.from_stam);
   const by = asStam ? stamSender()?.id : isSystem(input.by) ? input.by : (await person(input.by)) ?? HUMAN;
@@ -1093,18 +1234,12 @@ export async function post(ref: string, input: PostInput, opts: { ask?: boolean 
   for (const r of recipients) if (everyone || mentions(body, await names(r))) interrupt.push(r);
 
   // Allocate the thread before sending, so two first posts can't start two threads.
-  let threadId = x.thread_id;
-  const first = !threadId;
-  if (first) {
-    threadId = db.newMailId();
-    db.open().prepare('UPDATE itsas SET thread_id = ? WHERE id = ? AND thread_id IS NULL').run(threadId, x.id);
-    threadId = must(x.id).thread_id!;
-  }
-  if (!asStam && !opts.ask && !sys) ensureParticipant(x.id, by);
+  const first = !x.thread_id;
+  const threadId = ensureThread(x.id);
   const root = `${x.key} ${x.title}`;
   // The thread stays once allocated, even if this delivery fails: some copies may already
   // be stored under it, and a second thread would orphan them.
-  return sendMail({
+  const sent = await sendMail({
     from: by,
     system: sys,
     to: recipients,
@@ -1121,8 +1256,26 @@ export async function post(ref: string, input: PostInput, opts: { ask?: boolean 
     interrupt,
     override: input.override,
     from_stam: asStam,
-    ...(remoteName ? { forwarded: { from_name: remoteName }, relay: true } : {}),
+    ...(remoteName ? { forwarded: { from_name: remoteName }, relay: true, relay_route: input.relay_route } : {}),
   });
+  // The sender joins once its mail is sent: a refused post (S-4163) leaves the ITSA's people as they were.
+  if (!asStam && !opts.ask && !sys) ensureParticipant(x.id, by);
+  if (opts.shown?.rev && body.includes(opts.shown.text) && db.getMail(sent.id)?.body === body) {
+    // Where the snapshot sits: an ask leads with it, a re-show ends with it (shownAt).
+    const at = shownAt(body, opts.shown.text);
+    db.open().prepare('INSERT OR REPLACE INTO itsa_shown_revs (mail_id, itsa_id, rev, at, len) VALUES (?, ?, ?, ?, ?)')
+      .run(sent.id, x.id, opts.shown.rev, at ?? null, at === undefined ? null : opts.shown.text.length);
+  }
+  return sent;
+}
+
+// The ITSA's thread id, allocated here on the home when it has none yet: by its first post, or by an ask placed in it
+// (S-3827). One conditional UPDATE, so two first callers can't start two threads.
+export function ensureThread(ref: string): string {
+  const x = must(ref);
+  if (x.thread_id) return x.thread_id;
+  db.open().prepare('UPDATE itsas SET thread_id = ? WHERE id = ? AND thread_id IS NULL').run(db.newMailId(), x.id);
+  return must(x.id).thread_id!;
 }
 
 // `post` on this daemon when it is the ITSA home, else on the home over the peer link.
@@ -1142,7 +1295,9 @@ export async function postRouted(ref: string, input: PostInput, via?: Via): Prom
     name: a.name ?? (a.path ? basename(a.path) : 'attachment.txt'),
     content_b64: a.content_b64 ?? (a.path ? readFileSync(a.path).toString('base64') : Buffer.from(a.content ?? '').toString('base64')),
   }));
-  const r = await peerCall(peer, 'POST', `/api/itsas/${encodeURIComponent(ref)}/post`, { ...input, attachments }, 30_000, input.by === HUMAN, via);
+  // The routing facts of the sender, from this daemon's DB, for the home to apply the S-548 rule (S-4163).
+  const relay_route = relayRouteOf(await person(input.by));
+  const r = await peerCall(peer, 'POST', `/api/itsas/${encodeURIComponent(ref)}/post`, { ...input, attachments, relay_route }, 30_000, input.by === HUMAN, via);
   if (r.status === 403) throw new ForbiddenError(r.data?.error ?? `${home}: HTTP 403`);
   if (r.status !== 200) throw new Error(r.data?.error ?? `${home}: HTTP ${r.status}`);
   return r.data;
@@ -1235,6 +1390,8 @@ export interface Field {
   width: (typeof FIELD_WIDTHS)[number];
   align: (typeof FIELD_ALIGNS)[number];
   card: (typeof FIELD_CARDS)[number];
+  // The ITSA kinds the field applies to (S-3180); null is every kind. Kinds match exactly, ignoring case.
+  kinds: string[] | null;
   position: number;
   created_by: string;
   created_at: string;
@@ -1244,7 +1401,15 @@ export interface Field {
 // Definition changes belong to no ITSA, so their events carry this pseudo id.
 const FIELD_EVENTS = 'fields';
 
-const fieldOut = (r: any): Field => ({ ...r, options: r.options ? JSON.parse(r.options) : null });
+const fieldOut = (r: any): Field => ({ ...r, options: r.options ? JSON.parse(r.options) : null, kinds: r.kinds ? JSON.parse(r.kinds) : null });
+
+// Whether a field applies to an ITSA of this kind (S-3180). A field with no kinds applies to every ITSA;
+// otherwise the ITSA's kind must match one of them, exactly but for case. An ITSA with no kind matches none.
+export function fieldApplies(f: Pick<Field, 'kinds'>, kind: string | null | undefined): boolean {
+  if (!f.kinds) return true;
+  const k = (kind ?? '').toLowerCase();
+  return !!k && f.kinds.some((x) => x.toLowerCase() === k);
+}
 
 export function fields(): Field[] {
   return (db.open().prepare('SELECT * FROM itsa_fields ORDER BY position, created_at').all() as any[]).map(fieldOut);
@@ -1273,6 +1438,19 @@ async function assertMayDefine(by: string | null | undefined): Promise<string> {
   if (actor === cos || actor === cosId || by === cos) return actor;
   const who = db.getAgent(cos)?.name ?? cos;
   throw new ForbiddenError(`only the chief of staff (${who}) changes ITSA fields: mail ${who} to add, change, or remove a column`);
+}
+
+// A field's kinds: null for every kind, or a list of kind labels; an empty list means every kind too.
+function checkKinds(raw: unknown): string[] | null {
+  if (raw == null) return null;
+  if (!Array.isArray(raw)) throw new Error('kinds is a list of ITSA kinds, such as ["issue"]');
+  const out: string[] = [];
+  for (const k of raw) {
+    const label = typeof k === 'string' ? k.trim() : '';
+    if (!label) throw new Error('every kind in kinds needs a label');
+    if (!out.some((x) => x.toLowerCase() === label.toLowerCase())) out.push(label);
+  }
+  return out.length ? out : null;
 }
 
 const oneOf = <T extends string>(list: readonly T[], v: unknown, what: string): T => {
@@ -1334,6 +1512,7 @@ export interface FieldInput {
   width?: string;
   align?: string;
   card?: string;
+  kinds?: string[] | null;
 }
 
 const optText = (v: unknown) => (v == null || String(v).trim() === '' ? null : String(v));
@@ -1359,14 +1538,15 @@ export async function createField(input: FieldInput, by: string | null = null): 
   const width = input.width === undefined ? 'm' : oneOf(FIELD_WIDTHS, input.width, 'width');
   const align = input.align === undefined ? 'start' : oneOf(FIELD_ALIGNS, input.align, 'align');
   const card = input.card === undefined ? 'meta' : oneOf(FIELD_CARDS, input.card, 'card');
+  const kinds = checkKinds(input.kinds);
   return tx(() => {
     const d = db.open();
     const key = checkKey(input.key);
-    const id = 'f' + newId().slice(1);
+    const id = freshId('f', (x) => !!d.prepare('SELECT 1 FROM itsa_fields WHERE id = ?').get(x), 'ITSA field');
     const t = now();
     const position = ((d.prepare('SELECT MAX(position) AS m FROM itsa_fields').get() as { m: number | null }).m ?? -1) + 1;
-    d.prepare('INSERT INTO itsa_fields (id, key, label, type, options, description, hint, width, align, card, position, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-      id, key, label, type, options ? JSON.stringify(options) : null, optText(input.description), optText(input.hint), width, align, card, position, actor, t, t,
+    d.prepare('INSERT INTO itsa_fields (id, key, label, type, options, description, hint, width, align, card, kinds, position, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, key, label, type, options ? JSON.stringify(options) : null, optText(input.description), optText(input.hint), width, align, card, kinds ? JSON.stringify(kinds) : null, position, actor, t, t,
     );
     const created = mustField(id);
     addEvent(FIELD_EVENTS, actor, 'field_created', created);
@@ -1398,6 +1578,7 @@ export async function updateField(ref: string, patch: FieldInput, by: string | n
     if (patch.width !== undefined) next.width = oneOf(FIELD_WIDTHS, patch.width, 'width');
     if (patch.align !== undefined) next.align = oneOf(FIELD_ALIGNS, patch.align, 'align');
     if (patch.card !== undefined) next.card = oneOf(FIELD_CARDS, patch.card, 'card');
+    if (patch.kinds !== undefined) next.kinds = checkKinds(patch.kinds);
     const d = db.open();
     if (next.type !== cur.type || JSON.stringify(next.options) !== JSON.stringify(cur.options)) {
       for (const r of d.prepare('SELECT itsa_id, value FROM itsa_field_values WHERE field_id = ?').all(cur.id) as { itsa_id: string; value: string }[]) {
@@ -1409,11 +1590,11 @@ export async function updateField(ref: string, patch: FieldInput, by: string | n
       }
     }
     const changes: Record<string, { from: unknown; to: unknown }> = {};
-    for (const k of ['key', 'label', 'type', 'options', 'description', 'hint', 'width', 'align', 'card'] as const)
+    for (const k of ['key', 'label', 'type', 'options', 'description', 'hint', 'width', 'align', 'card', 'kinds'] as const)
       if (JSON.stringify(next[k]) !== JSON.stringify(cur[k])) changes[k] = { from: cur[k], to: next[k] };
     if (!Object.keys(changes).length) return cur;
-    d.prepare('UPDATE itsa_fields SET key = ?, label = ?, type = ?, options = ?, description = ?, hint = ?, width = ?, align = ?, card = ?, updated_at = ? WHERE id = ?').run(
-      next.key, next.label, next.type, next.options ? JSON.stringify(next.options) : null, next.description, next.hint, next.width, next.align, next.card, now(), cur.id,
+    d.prepare('UPDATE itsa_fields SET key = ?, label = ?, type = ?, options = ?, description = ?, hint = ?, width = ?, align = ?, card = ?, kinds = ?, updated_at = ? WHERE id = ?').run(
+      next.key, next.label, next.type, next.options ? JSON.stringify(next.options) : null, next.description, next.hint, next.width, next.align, next.card, next.kinds ? JSON.stringify(next.kinds) : null, now(), cur.id,
     );
     addEvent(FIELD_EVENTS, actor, 'field_updated', { id: cur.id, key: cur.key, changes });
     return mustField(cur.id);
@@ -1449,14 +1630,18 @@ export async function reorderFields(order: unknown, by: string | null = null): P
   });
 }
 
-// The values of one ITSA (or every ITSA), by itsa id then field key.
+// The values of one ITSA (or every ITSA), by itsa id then field key. A value whose field doesn't apply to the
+// ITSA's kind is kept in the database but not read (S-3180).
 function fieldValuesByItsa(itsaId?: string): Map<string, Record<string, unknown>> {
   const rows = db
     .open()
-    .prepare(`SELECT v.itsa_id, f.key, v.value FROM itsa_field_values v JOIN itsa_fields f ON f.id = v.field_id ${itsaId ? 'WHERE v.itsa_id = ?' : ''} ORDER BY f.position`)
-    .all(...(itsaId ? [itsaId] : [])) as { itsa_id: string; key: string; value: string }[];
+    .prepare(`SELECT v.itsa_id, f.key, f.kinds, i.kind, v.value FROM itsa_field_values v JOIN itsa_fields f ON f.id = v.field_id JOIN itsas i ON i.id = v.itsa_id ${itsaId ? 'WHERE v.itsa_id = ?' : ''} ORDER BY f.position`)
+    .all(...(itsaId ? [itsaId] : [])) as { itsa_id: string; key: string; kinds: string | null; kind: string | null; value: string }[];
   const out = new Map<string, Record<string, unknown>>();
-  for (const r of rows) out.set(r.itsa_id, { ...(out.get(r.itsa_id) ?? {}), [r.key]: JSON.parse(r.value) });
+  for (const r of rows) {
+    if (!fieldApplies({ kinds: r.kinds ? JSON.parse(r.kinds) : null }, r.kind)) continue;
+    out.set(r.itsa_id, { ...(out.get(r.itsa_id) ?? {}), [r.key]: JSON.parse(r.value) });
+  }
   return out;
 }
 
@@ -1467,16 +1652,23 @@ function itsaEvent(x: Itsa): Record<string, unknown> {
 }
 
 // Sets values by field key inside the caller's transaction; null clears. Returns what changed
-// ({ from, to } per key), or null if nothing did.
-function applyFieldValues(itsaId: string, values: Record<string, unknown>, actor: string): { from: Record<string, unknown>; to: Record<string, unknown> } | null {
+// ({ from, to } per key), or null if nothing did. The ITSA's `kind` decides which fields apply: a value
+// for one that doesn't is refused, though clearing it is always allowed (S-3180). Every value is
+// checked before any is written, so a refused field leaves the others unset.
+function applyFieldValues(itsaId: string, values: Record<string, unknown>, actor: string, kind: string | null): { from: Record<string, unknown>; to: Record<string, unknown> } | null {
   if (values === null || typeof values !== 'object' || Array.isArray(values)) throw new Error('fields is an object of field key to value');
   const d = db.open();
-  const from: Record<string, unknown> = {};
-  const to: Record<string, unknown> = {};
+  const checked: { f: Field; v: unknown }[] = [];
   for (const [key, raw] of Object.entries(values)) {
     const f = findField(key);
     if (!f) throw new Error(`no field ${key}; fields: ${fields().map((x) => x.key).join(', ') || 'none defined'}`);
     const v = checkFieldValue(f, raw);
+    if (v !== null && !fieldApplies(f, kind)) throw new Error(`field ${f.key} applies only to ${f.kinds!.join(', ')} ITSAs, not ${kind ? `${kind} ones` : 'ITSAs with no kind'}`);
+    checked.push({ f, v });
+  }
+  const from: Record<string, unknown> = {};
+  const to: Record<string, unknown> = {};
+  for (const { f, v } of checked) {
     const row = d.prepare('SELECT value FROM itsa_field_values WHERE itsa_id = ? AND field_id = ?').get(itsaId, f.id) as { value: string } | undefined;
     const before = row ? JSON.parse(row.value) : null;
     if (JSON.stringify(before) === JSON.stringify(v)) continue;

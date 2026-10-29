@@ -195,3 +195,51 @@ export function useSidebarPanes(known: readonly string[]): Sidebar {
   useEffect(() => { void loadOnce() }, [])
   return useSyncExternalStore((f) => { subs.add(f); return () => { subs.delete(f) } }, () => state)
 }
+
+// --- Layout defaults (S-3810): "my default" is a second record of the same field (id `default`), apart
+// from the live layout (id `main`). A revert replaces the whole live record with the default, so any
+// field the record gains (sizes) is reset with the rest; it never writes another setting.
+const DEFAULT_ID = 'default'
+
+const cloneValue = (v: Sidebar): PanesValue => ({ panes: clone(v.panes), tabBar: v.tabBar, v: LAYOUT_V })
+
+// mootr's own layout: the factory panes and the compact strip.
+export const mootrDefault = (): PanesValue => ({ panes: defaultPanes(), tabBar: 'compact', v: LAYOUT_V })
+
+// The human's saved default, or null when none is saved. Read from the record loaded with the live layout.
+// `saved` holds a default saved before the record has loaded (the record keeps no view then).
+let saved: PanesValue | null = null
+export function userDefault(): PanesValue | null {
+  const v = saved ?? record.cached(DEFAULT_ID)
+  return v ? cloneValue({ panes: sanitizePanes(v, knownIds), tabBar: sanitizeTabBar(v) }) : null
+}
+
+// Saves the live layout as the human's default.
+export function saveUserDefault() {
+  saved = cloneValue(state)
+  record.save(DEFAULT_ID, saved)
+  emit()
+}
+
+// Replaces the live layout, whole, with `v`.
+function replaceLive(v: PanesValue) {
+  state = { panes: sanitizePanes(v, knownIds), tabBar: sanitizeTabBar(v) }
+  record.save(ID, cloneValue(state))
+  emit()
+}
+
+export function revertToMootrDefault() { replaceLive(mootrDefault()) }
+
+// Reverts to the saved default; false (and no change) when none is saved.
+export function revertToUserDefault(): boolean {
+  const d = userDefault()
+  if (!d) return false
+  replaceLive(d)
+  return true
+}
+
+// Whether the human has a saved default. Loads the record, so it holds after a reload.
+export function useHasUserDefault(): boolean {
+  useEffect(() => { void loadOnce().then(() => { saved = null; emit() }) }, [])
+  return useSyncExternalStore((f) => { subs.add(f); return () => { subs.delete(f) } }, () => userDefault() !== null)
+}

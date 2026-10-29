@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"stam/internal/agentenv"
 	"stam/internal/db"
 	"stam/internal/jsjson"
 )
@@ -21,6 +22,24 @@ const compactDedupe = 10 * time.Second
 
 // compactTimeout is the headless /compact run's deadline (the Claude adapter's 600 s).
 const compactTimeout = 600 * time.Second
+
+// compactContinuePrompt is src/lifecycle.ts COMPACT_CONTINUE_PROMPT (S-4304): what a compaction that cut into work
+// ends with when it carries no prompt of its own.
+const compactContinuePrompt = "[stam] Your context was compacted. Continue your task from your compaction notes."
+
+// compactPrompt is the prompt a compaction ends with: its own, else the continue prompt for the reasons that interrupt
+// an agent's work (compact_self, the enforcement threshold). An idle compaction (cache lifetime, before a long rest)
+// has no work to continue and gets none. Shared by the Claude and OpenCode paths.
+func compactPrompt(p *jsjson.Object) string {
+	if prompt := pstr(p, "prompt"); prompt != "" {
+		return prompt
+	}
+	switch pstr(p, "reason") {
+	case "requested by the agent", "enforcement threshold":
+		return compactContinuePrompt
+	}
+	return ""
+}
 
 type compaction struct {
 	running bool
@@ -128,9 +147,8 @@ func (l *Lifecycle) trackCompaction(ctx context.Context, id string, data *jsjson
 }
 
 // admit is src/admission.ts admit for the turns the Go daemon starts (none is the human's): an agent taken over by a
-// live successor starts no turn, nor does one with cost blockers. The Go daemon records no blockers yet, and doesn't
-// know the account probes that may run past them, so a blocker the TS daemon recorded refuses every turn here;
-// blockers that can't be read refuse it too.
+// live successor starts no turn, nor does one with cost blockers, but for the probe blockers its account's probe turn
+// runs past (probes.go). Blockers that can't be read refuse it too.
 func (l *Lifecycle) admit(ctx context.Context, id, kind string) (bool, string) {
 	a, err := l.db.GetAgent(ctx, id)
 	if err != nil {
@@ -148,7 +166,7 @@ func (l *Lifecycle) admit(ctx context.Context, id, kind string) (bool, string) {
 			return refuse("taken over by " + s.Name)
 		}
 	}
-	blocked, err := l.db.Blockers(ctx, a.ID)
+	blocked, err := l.blockedBy(ctx, a.ID)
 	if err != nil {
 		return false, err.Error()
 	}
@@ -156,6 +174,24 @@ func (l *Lifecycle) admit(ctx context.Context, id, kind string) (bool, string) {
 		return refuse(strings.Join(blocked, "; "))
 	}
 	return true, ""
+}
+
+// blockedBy is src/admission.ts blockedBy: what holds the agent, "KIND on ACCOUNT: REASON" per blocker, oldest first,
+// without the probe blockers its account's probe turn runs past.
+func (l *Lifecycle) blockedBy(ctx context.Context, id string) ([]string, error) {
+	rows, err := l.holding(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, b := range rows {
+		what := b.Kind
+		if b.Account != "" {
+			what += " on " + b.Account
+		}
+		out = append(out, what+": "+b.Reason)
+	}
+	return out, nil
 }
 
 // compactNow is src/lifecycle.ts compactNow: p is the pending compact ({type, instructions?, prompt?, reason}). The
@@ -203,7 +239,7 @@ func (l *Lifecycle) compactNow(ctx context.Context, a db.Agent, p *jsjson.Object
 		if err != nil {
 			return err
 		}
-		return l.StartHarness(ctx, fresh, pstr(p, "prompt"), true, "compact")
+		return l.StartHarness(ctx, fresh, compactPrompt(p), true, "compact")
 	})
 }
 
@@ -213,9 +249,23 @@ func (l *Lifecycle) RequestCompaction(ctx context.Context, a db.Agent, instructi
 	return l.requestCompaction(ctx, a, instructions, "", reason)
 }
 
+// RequestCompactionNote is RequestCompaction for compact_self's prompt: the note the agent gets after the compaction is
+// the compacted-self template around it (src/daemon.ts case 'compact'). The lessons and workspace blocks aren't ported
+// (context.go), so the note renders without them.
+func (l *Lifecycle) RequestCompactionNote(ctx context.Context, a db.Agent, instructions, prompt, reason string) (string, error) {
+	note, err := l.render("compacted-self", map[string]string{"history": historyOf(a), "prompt": prompt, "lessons": "", "workspace": ""})
+	if err != nil {
+		return "", err
+	}
+	return l.requestCompaction(ctx, a, instructions, note, reason)
+}
+
 // requestCompaction is RequestCompaction with a prompt the relaunch types in after the compaction (the forced
 // compaction's note); a shut-down agent's resume has its own note, as in TS.
 func (l *Lifecycle) requestCompaction(ctx context.Context, a db.Agent, instructions, prompt, reason string) (string, error) {
+	if a.Harness == "opencode" && a.Lifecycle != "shut_down" {
+		return l.ocRequest(ctx, a, instructions, prompt, reason, nil)
+	}
 	if l.compactionBusy(a.ID) {
 		return l.droppedCompaction(ctx, a, reason), nil
 	}
@@ -259,7 +309,7 @@ func (l *Lifecycle) compactShutDown(ctx context.Context, a db.Agent, instruction
 }
 
 func (l *Lifecycle) compactAndResume(ctx context.Context, a db.Agent, instructions string) (string, error) {
-	release, err := l.acquire(a)
+	release, err := l.acquire(a, "resume")
 	if err != nil {
 		return "", err
 	}
@@ -300,7 +350,7 @@ func (l *Lifecycle) compactClaude(ctx context.Context, a db.Agent, instructions,
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = a.Cwd
-	cmd.Env = append(withoutEnv(os.Environ(), "STAM_AGENT_ID", "STAM_COMPACTOR"), "STAM_AGENT_ID=", "STAM_COMPACTOR="+a.ID+":"+op)
+	cmd.Env = append(withoutEnv(os.Environ(), append(agentenv.Names(), "STAM_COMPACTOR", "MOOTR_COMPACTOR")...), "STAM_AGENT_ID=", "MOOTR_AGENT_ID=", "STAM_COMPACTOR="+a.ID+":"+op, "MOOTR_COMPACTOR="+a.ID+":"+op)
 	cmd.Stdin = bytes.NewReader([]byte(jsjson.Trim("/compact " + instructions)))
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = io.Discard, &out

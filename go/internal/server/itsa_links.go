@@ -96,9 +96,6 @@ func (s *Server) linkRequest(r *http.Request, c auth.Resolved) (context.Context,
 	if err != nil {
 		return nil, jsfmt.Value{}, "", "", err
 	}
-	if err := s.resolveItsaActors(ctx, c, &body); err != nil {
-		return nil, jsfmt.Value{}, "", "", err
-	}
 	human := s.isHuman(r, c)
 	by, err := itsaActor(body, human, systemBodyOK(c, human, body))
 	if err != nil {
@@ -142,6 +139,7 @@ func (s *Server) itsaAddLinkRoute(r *http.Request, c auth.Resolved) (any, error)
 	if err != nil {
 		return nil, asItsaErr(err)
 	}
+	s.syncItsaSubscriptions(ctx, x.Text("id"))
 	out := jsfmt.Value{Kind: jsfmt.Object}
 	out.Set("link", link)
 	out.Set("itsa", x)
@@ -159,6 +157,9 @@ func (s *Server) itsaRemoveLinkRoute(r *http.Request, c auth.Resolved) (any, err
 	}
 	n, _ := strconv.ParseInt(r.PathValue("n"), 10, 64)
 	x, err := s.db.RemoveItsaLink(ctx, ref, n, actor)
+	if err == nil {
+		s.syncItsaSubscriptions(ctx, x.Text("id"))
+	}
 	return x, asItsaErr(err)
 }
 

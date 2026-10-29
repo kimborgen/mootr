@@ -5,11 +5,11 @@
 import { join } from 'node:path';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import * as db from './db.ts';
-import { homedir } from 'node:os';
+import { defaultHomes } from './default-home.ts';
 import { envVar } from './env.ts';
 
 export function testHooksAllowed(env: NodeJS.ProcessEnv, home: string, socket: string): boolean {
-  return envVar('TEST_COST_HOOKS', env) === '1' && Boolean(envVar('HOME', env)) && home !== join(homedir(), '.local', 'share', 'stam') && socket.startsWith('stam-test-');
+  return envVar('TEST_COST_HOOKS', env) === '1' && Boolean(envVar('HOME', env)) && !defaultHomes().includes(home) && socket.startsWith('stam-test-');
 }
 
 // Counts every statement execution (get, all, run, iterate) on the database handle until the returned

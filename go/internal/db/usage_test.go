@@ -215,3 +215,37 @@ func TestWritePanic(t *testing.T) {
 		t.Errorf("detail %v, heard %v", a.ActivityDetail, heard)
 	}
 }
+
+// TestRecordUsageWhile: a report is decided on the row the transaction reads, and written only while ok holds for that row.
+func TestRecordUsageWhile(t *testing.T) {
+	ctx := context.Background()
+	path := testDB(t)
+	d := openTest(t, path)
+	conn := rawConn(t, path)
+	newTestAgent(t, d, "aus2", "user1")
+	u := Usage{AgentID: "aus2", Day: "2026-10-20", Bucket: "2026-10-20T10:05:00.000Z", Harness: "opencode", Cost: 1, In: 5, Baseline: `{"v":2,"cost":1}`}
+	seen := ""
+	plan := func(a Agent) UsageChange {
+		seen = deref(a.UsageLast)
+		return UsageChange{Record: &u}
+	}
+	held, err := d.RecordUsageWhile(ctx, "aus2", func(Agent) bool { return false }, plan)
+	if err != nil || held || seen != "" || dump(t, conn, "SELECT count(*) FROM usage") != "0" {
+		t.Fatalf("refused: %v %v %q", held, err, seen)
+	}
+	held, err = d.RecordUsageWhile(ctx, "aus2", func(Agent) bool { return true }, plan)
+	if err != nil || !held || dump(t, conn, "SELECT cost_usd, tokens_in FROM usage") != "1.0|5" {
+		t.Fatalf("held: %v %v", held, err)
+	}
+	// The next plan sees the baseline the first left, and a baseline-only change records nothing.
+	base := `{"v":2,"cost":1,"id":"s"}`
+	if _, err := d.RecordUsageWhile(ctx, "aus2", func(Agent) bool { return true }, func(a Agent) UsageChange {
+		seen = deref(a.UsageLast)
+		return UsageChange{Baseline: &base}
+	}); err != nil || seen != `{"v":2,"cost":1}` {
+		t.Fatalf("second plan saw %q: %v", seen, err)
+	}
+	if got := dump(t, conn, "SELECT usage_last FROM agents WHERE id = 'aus2'"); got != base || dump(t, conn, "SELECT cost_usd FROM usage") != "1.0" {
+		t.Errorf("baseline %s", got)
+	}
+}

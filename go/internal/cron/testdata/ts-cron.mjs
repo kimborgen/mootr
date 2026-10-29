@@ -1,4 +1,4 @@
-// Runs cron specs through the TS daemon's own src/waits.ts nextCron and src/adapters/claude.ts nextCronFire, for
+// Runs cron specs through the TS daemon's own src/waits.ts nextCron and src/adapters/claude-timer.ts nextCronFire, for
 // go/internal/cron's and go/internal/adapters/claude's golden tests (S-2848 B2a). DIR is a test home (never the live
 // home). Requests come as JSON on stdin; each result (the ISO time, null, or {"error": message}) goes out as JSON:
 //
@@ -22,13 +22,13 @@ if (config.LIVE_HOME) {
   process.exit(2);
 }
 const waits = await import('../../../../src/waits.ts');
-const claude = await import('../../../../src/adapters/claude.ts');
+const timer = await import('../../../../src/adapters/claude-timer.ts');
 
 const out = [];
 for (const r of JSON.parse(readFileSync(0, 'utf8'))) {
   try {
     if (r.fn === 'next') out.push(waits.nextCron(r.spec, new Date(r.from)).toISOString());
-    else out.push(claude.nextCronFire(r.spec, new Date(r.from)));
+    else out.push(timer.nextCronFire(r.spec, new Date(r.from)));
   } catch (e) {
     out.push({ error: e instanceof Error ? e.message : String(e) });
   }

@@ -188,7 +188,7 @@ test('Approve tells the owner to merge the PR; Request changes closes it; a canc
   const before = mail.queuedNoticeCount('a2');
   await tick();
   calls.length = 0;
-  await human.act(a.key, 'approve', '');
+  await human.act(a.key, 'approve', '', itsa.get(a.key).rev);
   await tick();
   assert.equal(mail.queuedNoticeCount('a2'), before + 1, 'the owner gets exactly one notice: not the steward\'s as well');
   assert.ok(!calls.some((c) => c[1] === 'close'), 'approving closes nothing');
@@ -238,7 +238,7 @@ test('the human\'s Approve names the commit to merge; an agent cannot move its p
   // The gate itself: the agent that made the proposal can't move it to merge before the human approved.
   await assert.rejects(itsa.set(first.id, { status: 'ready_to_merge' }, 'a8'), /approved/);
   mail.inTurnNotice('a2');
-  await human.act(first.key, 'approve', '');
+  await human.act(first.key, 'approve', '', itsa.get(first.key).rev);
   await tick();
   const notice = mail.inTurnNotice('a2') ?? '';
   assert.match(notice, new RegExp(`merge only if the PR head is still ${sha}`));
@@ -269,7 +269,7 @@ test('the proposer cannot rewrite the filed body or push to the branch; the Comm
   // A Commit: line in the summary (after the header's blank line) is not the commit to merge.
   const forged = await pp.propose({ process: 'demo', yaml: EDITED.replace('y.sh', 'forge2.sh'), base: GOOD, summary: 'x\nCommit: ' + 'b'.repeat(40), by: mail.HUMAN }, cfg(), deps());
   mail.inTurnNotice('a2');
-  await human.act(forged.key, 'approve', '');
+  await human.act(forged.key, 'approve', '', itsa.get(forged.key).rev);
   await tick();
   const sha = git(origin, 'rev-parse', forged.branch);
   assert.match(mail.inTurnNotice('a2') ?? '', new RegExp(`still ${sha}`));
@@ -277,7 +277,7 @@ test('the proposer cannot rewrite the filed body or push to the branch; the Comm
   const bare = await pp.propose({ process: 'demo', yaml: EDITED.replace('y.sh', 'forge3.sh'), base: GOOD, summary: 'x\nCommit: ' + 'c'.repeat(40), by: mail.HUMAN }, cfg(), deps());
   await itsa.set(bare.id, { body: itsa.must(bare.id).body.replace(/^Commit: .*\n/m, '') }, mail.HUMAN);
   mail.inTurnNotice('a2');
-  await human.act(bare.key, 'approve', '');
+  await human.act(bare.key, 'approve', '', itsa.get(bare.key).rev);
   await tick();
   assert.doesNotMatch(mail.inTurnNotice('a2') ?? '', /merge only if/);
 });

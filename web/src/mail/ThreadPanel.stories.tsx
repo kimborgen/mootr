@@ -1,6 +1,6 @@
 import { ThreadPanel } from './ThreadPanel'
 import { ds, type Story } from '../stories/types'
-import { AGENTS_STOPPED, ASK_ITSA, STATUSES, T_ASK, T_BETWEEN, T_DIALOG, T_GATE, T_INPUT, T_LONG, T_PERM, T_PERM_DONE, T_PLAIN, T_RICH, T_UNREAD, T_WITHDRAWN } from '../stories/mailFixtures'
+import { AGENTS_STOPPED, ASK_ITSA, STATUSES, T_ASK, T_BETWEEN, T_DIALOG, T_GATE, T_INPUT, T_LONG, T_PERM, T_PERM_DONE, T_PLAIN, T_QUESTION, T_RICH, T_UNREAD, T_WITHDRAWN } from '../stories/mailFixtures'
 import type { Mail, MailItsa } from '../types'
 
 const panel = (mails: Mail[], o: Partial<Parameters<typeof ThreadPanel>[0]> = {}) => <div className="thread-view"><ThreadPanel className="thread-scroll" mails={mails} threadKey={mails[0]?.thread_id ?? ''} {...o} /></div>
@@ -23,6 +23,7 @@ export const stories: Story[] = [{
   when: 'Inside `ThreadView` (the `thread:ID` world, with answers staged for the reply), and inside `MailView` (an agent\'s inbox, read only, without `onStage`). It is the whole right-hand side of the Mail tab on a desktop and the full pane on a phone.',
   code: ['web/src/mail/ThreadPanel.tsx#ThreadPanel', 'web/src/mail/ThreadPanel.tsx#MailBody', 'web/src/mail/ThreadPanel.tsx#Avatar', 'web/src/mail/ThreadPanel.tsx#nameFor', 'web/src/mail/ThreadPanel.tsx#repeatedIds', 'web/src/mail/ThreadPanel.tsx#withdrawnFor', 'web/src/mail/ThreadPanel.tsx#between', 'web/src/mail/ThreadPanel.tsx#BetweenRow', 'web/src/mail/ThreadPanel.tsx#Card', 'web/src/mail/ThreadPanel.tsx#Folded', 'web/src/mail/ThreadPanel.tsx#MailAttachments', 'web/src/mail/ThreadPanel.tsx#SupersededBy', 'web/src/mail/ThreadPanel.tsx#VerdictMark', 'web/src/mail/mailblocks.ts#renderMail'],
   rules: [
+    'A mail the daemon records as showing an ITSA\'s text (an ask, a re-show) carries where that text sits in its body (`shown`, S-2998). `MailBody` draws that part in its own `.mb-shown` box on `--surface-page`, above everything after it, so nothing later in the mail can cover it. Only that recorded range makes the box; a range that doesn\'t land on the snapshot renders the mail whole.',
     'A `Card` handles its own clicks (S-1769): table sort and "show all rows", a mail link, an agent link, a file link and copy. A host that mounts it, such as the ITSA thread, needs no click handler of its own; the panel root keeps only the header\'s agent chips and the staging controls.',
     'A mail\'s attachments (`MailAttachments`), its superseded line (`SupersededBy`) and the verdict mark (`VerdictMark`) are shared with the ITSA thread (S-1508), whose conversation cards draw them the same way.',
     'A thread opens scrolled to its latest message (S-1500), not the top; a latest message taller than the pane starts at its own top. A mail link still scrolls to the message it names.',
@@ -34,6 +35,8 @@ export const stories: Story[] = [{
     'The header scrolls away with the messages on a desktop and on a phone, where who is in the thread folds behind one button (`.th-people`) so the header stays one line. On a desktop the header, the messages and the reply share one column at `--measure-conversation`, centred (S-1471).',
     'Folding is by default, not by loss: a tap on a folded row or a message header opens or folds it, and a new arrival opens by itself. A mail link scrolls to its message, opens it, and flashes it once (`--duration-focus`).',
     'Buttons on a card (Approve, Deny, the ITSA actions) meet `--size-hit-touch` on a phone (' + ds('Density') + '). An unread recipient shows a dot, never colour alone.',
+    'A question dialog (AskUserQuestion, S-3978) is headed "Waiting for your answer" and leads with its question. Each option is a full-width row with its label and its description, and Skip question closes it with Esc. There is no comment field: the option is the whole answer, typed into the dialog as its number. On a phone the rows wrap, each `--size-hit-touch` high, and nothing scrolls sideways.',
+    'A permission card has an "Add a comment…" field (`.perm-comment`, a `--size-control` input) on its own row, above Approve and Deny. The comment travels with the answer as its note, so the agent gets the verdict and the comment in one message (S-3829). A comment typed after Approve is still sent, and the reply preview shows it as it is typed (S-3927).',
     'The header mark shows the mail check (S-983): a check for pass, a warning for a fail, and a shield-alert warning when the sender overrode a refusal. Tapping or hovering shows the scores, or the sender\'s reason; the mark is an icon with a text label, never colour alone.',
     'Linked ITSAs are chips, not mail: no unread count and no new message. On a phone, the thread header chip shows status glyph, key and title and wraps, `--size-hit-touch` high (' + ds('Density') + '); a message chip is a small key with its glyph, `--size-hit-touch` high on a phone with negative margins so the line stays one control tall. A tap opens the ITSA; nothing scrolls sideways. A message with more than two ITSAs shows "+N": on a desktop it expands in place to all of them, with a "Fewer" chip to fold them again (tooltip "Show all N ITSAs"); on a phone it scrolls to the header.',
     'Agents attached to a mail (S-1305, `mail_attach`) are chips under the ITSA chips, an avatar and a name; a tap opens the agent. Like linked ITSAs they are not mail: no unread count, no new message.',
@@ -55,6 +58,7 @@ export const stories: Story[] = [{
     { name: 'Permission request, read only', render: () => panel(T_PERM.mails) },
     { name: 'Permission request answered', render: () => panel(T_PERM_DONE.mails) },
     { name: 'Dialog stopping an agent', data: { agents: AGENTS_STOPPED, perms: [T_DIALOG.mails[0].permission!], humanThreads: [T_DIALOG] }, render: () => panel(T_DIALOG.mails, { onStage: () => {} }) },
+    { name: 'Question with choices', data: { perms: [T_QUESTION.mails[0].permission!], humanThreads: [T_QUESTION] }, render: () => panel(T_QUESTION.mails, { onStage: () => {} }) },
     { name: 'Suggested input', render: () => panel(T_INPUT.mails, { onStage: () => {} }) },
     { name: 'An ITSA waiting on you', data: { ...STATE, agents: AGENTS_STOPPED, humanThreads: [T_ASK] }, render: () => panel(T_ASK.mails, { unread: unreadIds(T_ASK.mails), ask: { mailId: 'fm-41', itsa: ASK_ITSA.id, actions: ASK_ITSA.actions }, onStage: () => {} }) },
     { name: 'Withdrawn mail', render: () => panel(T_WITHDRAWN.mails) },

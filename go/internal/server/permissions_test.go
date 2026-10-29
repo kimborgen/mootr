@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"errors"
+	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -135,7 +137,7 @@ func TestPermissionHuman(t *testing.T) {
 	}
 }
 
-// A live reviewer on another machine answers 501 before anything is written.
+// A live reviewer on a machine that isn't a configured peer is refused (503) before anything is written.
 func TestPermissionPeerReviewer(t *testing.T) {
 	f, _ := permFixture(t)
 	ctx := context.Background()
@@ -147,7 +149,7 @@ func TestPermissionPeerReviewer(t *testing.T) {
 	// A newer dialog is refused before anything is written: the old request stays.
 	err := f.srv.DialogShown(ctx, f.agentObj("achild"), claude.Dialog{Action: "Claude Code asks to allow Bash", Details: `{"tool":"Bash"}`, Replaces: true})
 	var he *Error
-	if !errors.As(err, &he) || he.Status != 501 {
+	if !errors.As(err, &he) || he.Status != 503 || !strings.Contains(he.Message, "m2, which isn't a configured peer") {
 		t.Errorf("a dialog for a peer reviewer: %v", err)
 	}
 	if f.status(old.ID) != "pending" {
@@ -157,7 +159,7 @@ func TestPermissionPeerReviewer(t *testing.T) {
 	f.sql("DELETE FROM waits WHERE agent_id = 'achild'")
 	before := f.count("SELECT count(*) FROM permission_requests")
 	rec := f.sendH("POST", "/api/permissions", agentTok, nil, `{"action":"a","audience":"delegate"}`)
-	if rec.Code != 501 {
+	if rec.Code != 503 {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
 	if got := f.count("SELECT count(*) FROM permission_requests"); got != before {
@@ -168,7 +170,52 @@ func TestPermissionPeerReviewer(t *testing.T) {
 	}
 	// A peer reviewer known paused is no reviewer: the ask goes to the human.
 	f.sql("UPDATE peer_agents SET lifecycle = 'paused' WHERE id = 'afar'")
-	f.ask(`{"action":"a","audience":"delegate"}`)
+	f.ask(`{"action":"a","reason":"why","audience":"delegate"}`)
+}
+
+// A live reviewer on a configured peer that refuses the ask's mail (S-4100 review): the ask fails with nothing left
+// behind, no request and no wait the agent can't withdraw, and a newer dialog that can't reach the reviewer leaves the
+// earlier dialog's request pending.
+func TestPermissionPeerReviewerUndelivered(t *testing.T) {
+	f, _ := permFixture(t)
+	ctx := context.Background()
+	refusing := newPeerServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, Errorf(http.StatusForbidden, "no mail for afar"))
+	}))
+	down := newPeerServer(t, http.NotFoundHandler())
+	down.ts.Close()
+	// The earlier dialog went to a reviewer here.
+	must(t, f.srv.DialogShown(ctx, f.agentObj("achild"), claude.Dialog{Action: "Claude Code asks to allow Read", Details: `{"tool":"Read"}`, Replaces: true}))
+	old, _, _ := f.db.PendingDialog(ctx, "achild")
+	f.sql("UPDATE agents SET parent_id = 'afar' WHERE id = 'achild'")
+	f.sql("INSERT INTO peer_agents (id, name, machine, updated_at) VALUES ('afar', 'far', 'm2', '2026-01-01')")
+	for name, url := range map[string]string{"refusing": refusing.ts.URL} {
+		must(t, os.WriteFile(filepath.Join(f.home, "settings.json"), []byte(`{"peers":[{"name":"m2","url":"`+url+`","token":"`+sharedTok+`","peerToken":"`+peerTok+`"}]}`), 0o600))
+		requests, waits := f.count("SELECT count(*) FROM permission_requests"), f.count("SELECT count(*) FROM waits WHERE agent_id = 'achild'")
+		if err := f.srv.DialogShown(ctx, f.agentObj("achild"), claude.Dialog{Action: "Claude Code asks to allow Bash", Details: `{"tool":"Bash"}`, Replaces: true}); err == nil {
+			t.Errorf("%s: a newer dialog was taken", name)
+		}
+		if rec := f.sendH("POST", "/api/permissions", agentTok, nil, `{"action":"a","audience":"delegate"}`); rec.Code < 400 {
+			t.Errorf("%s: the ask: %d %s", name, rec.Code, rec.Body.String())
+		}
+		if got := f.count("SELECT count(*) FROM permission_requests"); got != requests {
+			t.Errorf("%s: %d requests, was %d", name, got, requests)
+		}
+		if got := f.count("SELECT count(*) FROM waits WHERE agent_id = 'achild'"); got != waits {
+			t.Errorf("%s: %d waits, was %d", name, got, waits)
+		}
+		if f.status(old.ID) != "pending" {
+			t.Errorf("%s: the earlier dialog is %s", name, f.status(old.ID))
+		}
+	}
+	// A reviewer on a peer that is down gets the ask once it is back: its mail waits in the outbox (S-235), so the newer
+	// dialog stands and replaces the earlier one.
+	must(t, os.WriteFile(filepath.Join(f.home, "settings.json"), []byte(`{"peers":[{"name":"m2","url":"`+down.ts.URL+`","token":"`+sharedTok+`","peerToken":"`+peerTok+`"}]}`), 0o600))
+	must(t, f.srv.DialogShown(ctx, f.agentObj("achild"), claude.Dialog{Action: "Claude Code asks to allow Bash", Details: `{"tool":"Bash"}`, Replaces: true}))
+	newer, _, _ := f.db.PendingDialog(ctx, "achild")
+	if f.status(old.ID) != "withdrawn" || newer.ID == old.ID || f.count("SELECT count(*) FROM peer_outbox p JOIN mail m ON m.id = p.mail_id WHERE m.permission_id = ?", newer.ID) != 1 {
+		t.Errorf("down: the earlier dialog is %s, the newer %s, %d queued", f.status(old.ID), newer.ID, f.count("SELECT count(*) FROM peer_outbox p JOIN mail m ON m.id = p.mail_id WHERE m.permission_id = ?", newer.ID))
+	}
 }
 
 // Escalating: a reason is required, the request moves to the human with one mail, the child hears who sent it on, and
@@ -330,15 +377,20 @@ func TestPermissionRoutes(t *testing.T) {
 		t.Errorf("no by: %d %s", code, body)
 	}
 	f.sql("UPDATE permission_requests SET kind = 'input' WHERE id = 'p1'")
-	f.sql("UPDATE permission_requests SET payload = '{}' WHERE id = 'p2'")
-	if code, body := f.answerAs(sharedTok, human, "p1", `{"approve":true}`); code != 501 {
+	f.sql(`UPDATE permission_requests SET payload = '{"change":{"kind":"registry","text":"{}"},"baseHash":"x"}' WHERE id = 'p2'`)
+	// Suggested input is approved only by the human as trustedHuman proves it: the shared token's human is refused.
+	if code, body := f.answerAs(sharedTok, human, "p1", `{"approve":true}`); code != 403 {
 		t.Errorf("input: %d %s", code, body)
 	}
-	if code, body := f.answerAs(parentTok, nil, "p2", `{"by":"aboss","approve":false}`); code != 501 {
+	// A registry change asked against a registry.json that changed since is approved but not applied (settings_ask.go).
+	if code, body := f.answerAs(sharedTok, human, "p2", `{"approve":true}`); code != 200 || !strings.Contains(body, `"status":"denied"`) {
 		t.Errorf("settings: %d %s", code, body)
 	}
-	if f.status("p1") != "pending" || f.status("p2") != "pending" {
-		t.Errorf("501s wrote: %s %s", f.status("p1"), f.status("p2"))
+	if _, err := os.Stat(filepath.Join(f.home, "registry.json")); err == nil {
+		t.Errorf("a stale registry change wrote registry.json")
+	}
+	if f.status("p1") != "pending" {
+		t.Errorf("refusals wrote: %s", f.status("p1"))
 	}
 	if code, body := f.answerAs(peerTok, map[string]string{"X-Stam-Local": "1"}, "pnone", `{"approve":true}`); code != 404 {
 		t.Errorf("local miss: %d %s", code, body)
@@ -363,5 +415,26 @@ func TestPermissionRestart(t *testing.T) {
 	}
 	if !hasNotice(n, "achild", "approved") {
 		t.Errorf("notices %q", n.all())
+	}
+}
+
+// An ask whose request closes after its row is made, but before its mail is stored (S-3979), leaves no open mail: the
+// mail is withdrawn as it is stored, since the close found no mail to pull.
+func TestAskClosedBeforeMailIsWithdrawn(t *testing.T) {
+	f, _ := permFixture(t)
+	f.srv.askMailHook = func(id string) {
+		if _, err := f.db.WithdrawPermissionRequest(context.Background(), id, "closed outside stam"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id := f.ask(`{"action":"rm -rf build","reason":"clean","audience":"human"}`)
+	if got := f.status(id); got != "withdrawn" {
+		t.Fatalf("request is %s, want withdrawn", got)
+	}
+	if n := f.count("SELECT COUNT(*) FROM mail WHERE permission_id = ?", id); n != 1 {
+		t.Fatalf("ask stored %d mails, want 1", n)
+	}
+	if n := f.count("SELECT COUNT(*) FROM mail_recipients r JOIN mail m ON m.id = r.mail_id WHERE m.permission_id = ? AND r.withdrawn_at IS NULL", id); n != 0 {
+		t.Fatalf("%d recipient copies of the ask are open, want none", n)
 	}
 }

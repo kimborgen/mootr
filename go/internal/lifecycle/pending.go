@@ -15,8 +15,9 @@ import (
 // A pending action (src/lifecycle.ts Pending) is kept as the JSON object TS writes, in its key order, so a row the Go
 // daemon writes reads the same to the TS daemon and compares equal as text (recoverOne's intent check).
 //
-// Ported: shutdown (with its final-round `at` deadline or `midTurn`), compact, restart and recover. A pending archive
-// or MCP reconnect is left as it is, for the TS daemon: archiving isn't ported, and Claude Code has no reconnect.
+// Ported: shutdown and archive (with their final-round `at` deadline or `midTurn`), compact, restart and recover. A
+// pending MCP reconnect is left as it is, for the TS daemon (Claude Code has no reconnect), and so is the archive of a
+// Codex agent, or of an OpenCode agent on a daemon without the shared server (archivePorted).
 
 // pendingOf is the agent's pending action, nil for none (or one that doesn't parse).
 func pendingOf(a db.Agent) *jsjson.Object {
@@ -163,15 +164,24 @@ func (l *Lifecycle) giveWrapUpTurn(ctx context.Context, a db.Agent, p *jsjson.Ob
 }
 
 // leftForTS is a pending action the Go daemon leaves for the TS daemon.
-func leftForTS(p *jsjson.Object) bool {
-	typ := pstr(p, "type")
-	return typ == "archive" || typ == "reconnect-mcp"
+func (l *Lifecycle) leftForTS(a db.Agent, p *jsjson.Object) bool {
+	switch pstr(p, "type") {
+	case "reconnect-mcp":
+		return true
+	case "archive":
+		return l.archivePorted(a) != nil
+	}
+	return false
 }
 
-// runPending is src/lifecycle.ts runPending for the actions ported; a pending archive stays for the TS daemon.
+// runPending is src/lifecycle.ts runPending for the actions ported; leftForTS's stay as they are.
 func (l *Lifecycle) runPending(ctx context.Context, a db.Agent, p *jsjson.Object) (string, error) {
-	if leftForTS(p) {
+	if l.leftForTS(a, p) {
 		return "", nil
+	}
+	if a.Harness == "opencode" && pstr(p, "type") == "compact" {
+		// Bound to the row the caller read; taken from it only while that binding holds (occompact.go).
+		return l.ocRunPending(ctx, a, p, l.rowBinding(ctx, a))
 	}
 	if err := l.db.UpdateAgent(ctx, a.ID, db.Field{Col: "pending_action", Val: nil}); err != nil {
 		return "", err
@@ -182,16 +192,20 @@ func (l *Lifecycle) runPending(ctx context.Context, a db.Agent, p *jsjson.Object
 // runTaken runs a pending action already cleared from the agent's row.
 func (l *Lifecycle) runTaken(ctx context.Context, a db.Agent, p *jsjson.Object) (string, error) {
 	typ := pstr(p, "type")
-	if typ == "shutdown" && l.giveWrapUpTurn(ctx, a, p) {
+	if (typ == "shutdown" || typ == "archive") && l.giveWrapUpTurn(ctx, a, p) {
 		return l.waiting(a), nil
 	}
 	switch typ {
+	case "archive":
+		// The turn ended: the round was asked for in it; no retro_final means it wasn't filed.
+		l.noteRoundSkipped(ctx, a, "turn_ended_no_round")
+		return "", l.archiveNowPending(ctx, a, p, "when its turn ended")
 	case "shutdown":
 		// The turn ended without retro_final after the round was asked for; a shutdown that didn't ask records nothing.
 		if ptruthy(p, "midTurn") || phas(p, "at") {
 			l.noteRoundSkipped(ctx, a, "turn_ended_no_round")
 		}
-		return "", l.quitHarness(ctx, a, "shut down")
+		return "", l.stopForGood(ctx, a, "shut down")
 	case "compact":
 		return l.compactNow(ctx, a, p)
 	case "restart":
@@ -204,18 +218,43 @@ func (l *Lifecycle) runTaken(ctx context.Context, a db.Agent, p *jsjson.Object) 
 			return "", err
 		}
 		fresh, err := l.db.GetAgent(ctx, a.ID)
-		if err != nil {
-			return "", err
+		if err == nil {
+			err = l.StartHarness(ctx, fresh, note, true, "restart")
 		}
-		return "", l.StartHarness(ctx, fresh, note, true, "restart")
+		// A permission-mode switch whose launch failed puts the old mode back (src/lifecycle.ts restartNow).
+		if v, _ := p.Get("permission"); err != nil {
+			if undo, ok := v.(*jsjson.Object); ok {
+				l.switchFailed(ctx, a.ID, undo, err)
+			}
+		}
+		return "", err
 	}
 	return "", nil
 }
 
 // OnIdle is src/lifecycle.ts onIdle, run when the agent's turn ends: its pending action runs. Not ported: the rest
-// clock's turn end and MCP reconnects.
+// clock's turn end and MCP reconnects. It binds to the session and generation the agent has as it is called (owner.bindSignal);
+// a turn end that dispatches it later binds where it begins (onIdleAt), so a launch in between makes the run stale.
 func (l *Lifecycle) OnIdle(ctx context.Context, id string) error {
-	a, p, err := l.takePending(ctx, id, func(p *jsjson.Object) bool { return !leftForTS(p) })
+	sid, gen, launching := l.ownerOf(id).bindSignal(l.runningTurn(ctx, id))
+	l.turnAt(id, "pending-gen")
+	return l.onIdleBound(ctx, id, signalSid(sid, launching), gen)
+}
+
+// onIdleBound is OnIdle for a turn end bound to sid under gen at its signal, before it was dispatched. An OpenCode agent's
+// pending compaction is run only for that binding (occompact.go); the generic take never takes one, so a compaction
+// written between the two reads stays on the row for the owner-bound path.
+func (l *Lifecycle) onIdleBound(ctx context.Context, id, sid string, gen int) error {
+	if a, err := l.db.GetAgent(ctx, id); err == nil && a.Harness == "opencode" {
+		l.turnAt(id, "pending-read")
+		if p := pendingOf(a); p != nil && pstr(p, "type") == "compact" {
+			_, err := l.ocRunPending(ctx, a, p, l.turnBinding(ctx, id, sid, gen))
+			return err
+		}
+	}
+	a, p, err := l.takePending(ctx, id, func(a db.Agent, p *jsjson.Object) bool {
+		return !l.leftForTS(a, p) && !(a.Harness == "opencode" && pstr(p, "type") == "compact")
+	})
 	if err != nil || p == nil {
 		return err
 	}
@@ -227,13 +266,13 @@ func (l *Lifecycle) OnIdle(ctx context.Context, id string) error {
 // the agent and the action; nil when there is none, want refuses it, or another caller took it first. TS runs a
 // pending action synchronously; here two turn ends, or a turn end and a deadline sweep, may race, and only the one
 // whose clear lands runs it.
-func (l *Lifecycle) takePending(ctx context.Context, id string, want func(*jsjson.Object) bool) (db.Agent, *jsjson.Object, error) {
+func (l *Lifecycle) takePending(ctx context.Context, id string, want func(db.Agent, *jsjson.Object) bool) (db.Agent, *jsjson.Object, error) {
 	a, err := l.db.GetAgent(ctx, id)
 	if err != nil {
 		return a, nil, nil
 	}
 	p := pendingOf(a)
-	if p == nil || !want(p) {
+	if p == nil || !want(a, p) {
 		return a, nil, nil
 	}
 	ok, err := l.db.TakePendingAction(ctx, id, *a.PendingAction)
@@ -245,11 +284,19 @@ func (l *Lifecycle) takePending(ctx context.Context, id string, want func(*jsjso
 }
 
 // onIdleSoon runs OnIdle in the background, as TS runs onIdle without awaiting it; a failure is a pending-error event.
+// The turn end is bound here, before it is dispatched (onIdleAt).
 func (l *Lifecycle) onIdleSoon(id string) {
+	sid, gen, launching := l.ownerOf(id).bindSignal(l.runningTurn(l.ctx, id))
+	l.onIdleAt(id, signalSid(sid, launching), gen)
+}
+
+// onIdleAt is onIdleSoon for a turn end already bound to sid under gen.
+func (l *Lifecycle) onIdleAt(id, sid string, gen int) {
 	l.bg.Add(1)
 	go func() {
 		defer l.bg.Done()
-		if err := l.OnIdle(l.ctx, id); err != nil && l.ctx.Err() == nil {
+		l.turnAt(id, "idle-dispatched")
+		if err := l.onIdleBound(l.ctx, id, sid, gen); err != nil && l.ctx.Err() == nil {
 			l.event(l.ctx, id, "pending-error", "Error: "+err.Error())
 		}
 	}()
@@ -322,21 +369,46 @@ func pendingStop(a db.Agent) *jsjson.Object {
 	return nil
 }
 
-// runPendingOnDead is src/lifecycle.ts runPendingOnDead (S-578) for a pending shutdown: the harness is gone, so there is
-// no step to wait for. A pending archive is left for the TS daemon.
-// TS skips one whose stop is due (pendingStopDue), which only an archive can be, so a shutdown runs either way; the
-// deadline sweep and this one may race, and only the one whose clear lands stops the harness.
+// runPendingOnDead is src/lifecycle.ts runPendingOnDead (S-578): the harness is gone, so there is no step to wait for and a
+// pending stop runs at once. An unforced archive is deferred while the harness still runs a turn with no pane (an
+// OpenCode turn in the shared server), or while that can't be told; a Claude Code harness has no turn without its pane,
+// so its unforced archive runs. An archive whose deadline passed is left to runDueArchives, so the two don't race (TS's pendingStopDue); a shutdown runs
+// either way, and the deadline sweep and this one may race: only the one whose clear lands stops the harness.
 func (l *Lifecycle) runPendingOnDead(ctx context.Context, a db.Agent) error {
-	fresh, p, err := l.takePending(ctx, a.ID, func(p *jsjson.Object) bool { return pstr(p, "type") == "shutdown" })
+	if p := pendingStop(a); p != nil && pstr(p, "type") == "archive" && !ptruthy(p, "force") {
+		if alive, known := l.turnAlive(ctx, a); alive || !known {
+			reason := "harness turn state unknown"
+			if alive {
+				reason = "harness still runs a turn with no pane"
+			}
+			l.event(ctx, a.ID, "archive:deferred", reasonEvent{Reason: reason})
+			return nil
+		}
+	}
+	fresh, p, err := l.takePending(ctx, a.ID, func(cur db.Agent, p *jsjson.Object) bool {
+		switch pstr(p, "type") {
+		case "shutdown":
+			return true
+		case "archive":
+			at, ok := pnum(p, "at")
+			return l.archivePorted(cur) == nil && !(ok && at <= nowMS())
+		}
+		return false
+	})
 	if err != nil || p == nil {
 		return err
 	}
-	return l.quitHarness(ctx, fresh, "shut down")
+	if pstr(p, "type") == "archive" {
+		l.noteRoundSkipped(ctx, fresh, "harness_gone")
+		return l.archiveNowPending(ctx, fresh, p, "because its harness is gone")
+	}
+	return l.stopForGood(ctx, fresh, "shut down")
 }
 
 // runDueShutdowns is the shutdown half of src/lifecycle.ts runDueArchives (S-1402): a shutdown past its final-round
-// deadline stops the harness whatever its turn does. Pending archives are the TS daemon's.
+// deadline stops the harness whatever its turn does. The archive half is runDueArchives, run after it.
 func (l *Lifecycle) runDueShutdowns(ctx context.Context, now float64) {
+	defer l.runDueArchives(ctx, now)
 	agents, err := l.db.ListPendingAgents(ctx)
 	if err != nil {
 		return
@@ -351,7 +423,7 @@ func (l *Lifecycle) runDueShutdowns(ctx context.Context, now float64) {
 			continue
 		}
 		// Taken as it was listed: the pending may have run or been replaced since.
-		fresh, cur, err := l.takePending(ctx, a.ID, func(cur *jsjson.Object) bool {
+		fresh, cur, err := l.takePending(ctx, a.ID, func(_ db.Agent, cur *jsjson.Object) bool {
 			curAt, ok := pnum(cur, "at")
 			return pstr(cur, "type") == "shutdown" && ok && curAt == at
 		})
@@ -360,7 +432,7 @@ func (l *Lifecycle) runDueShutdowns(ctx context.Context, now float64) {
 		}
 		l.event(ctx, a.ID, "shutdown:final-round-timeout", atEvent{At: at})
 		l.noteRoundSkipped(ctx, fresh, "deadline_no_round")
-		if err := l.quitHarness(ctx, fresh, "shut down"); err != nil {
+		if err := l.stopForGood(ctx, fresh, "shut down"); err != nil {
 			slog.Warn("lifecycle: shutdown at the deadline failed", "agent", a.ID, "err", err)
 		}
 	}

@@ -6,6 +6,7 @@ const { verdictLine, verdictOf, splitLine } = await import('../../../../src/ring
 export const topics = [
   'Review the change', 'Review PR 12', 'review pr #7 please', 'Review pull request 33 and PR 33', 'PR 5 and PR 6', 'the PRs 5',
   'pull request#8', 'PR 9', 'apr 3', 'PR 12abc', 'see PR 1, then PR 1', '', 'PR\v12', 'pull request\v#8',
+  'Review PR #1300 (owner/repo). Its base PR #1299 has merged, so diff against origin/main.',
 ];
 const texts = [
   '', 'looks fine', 'Verdict: approve', '  verdict : APPROVE  ', 'Verdict: approve.', 'I can’t approve this', 'changes requested', 'Request changes please',

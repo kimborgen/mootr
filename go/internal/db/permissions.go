@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 
+	"stam/internal/config"
 	"stam/internal/jsfmt"
 
 	"zombiezen.com/go/sqlite"
@@ -29,13 +30,17 @@ type PermissionRequest struct {
 	Audience  string
 	Payload   *string
 	CreatedAt string
-	Row       jsfmt.Value
+	// An input suggestion's text, its SHA-256 the human approves, when it expires, and the harness session an approval
+	// holds for ("" for none).
+	Text, SHA256, ExpiresAt, SessionID string
+	Row                                jsfmt.Value
 }
 
 func requestOf(v jsfmt.Value) PermissionRequest {
 	r := PermissionRequest{ID: v.Text("id"), AgentID: v.Text("agent_id"), Action: v.Text("action"), Reason: v.Text("reason"),
 		Details: v.Text("details"), Status: v.Text("status"), Kind: v.Text("kind"), Audience: v.Text("audience"),
-		CreatedAt: v.Text("created_at"), Row: v}
+		CreatedAt: v.Text("created_at"), Text: v.Text("text"), SHA256: v.Text("sha256"), ExpiresAt: v.Text("expires_at"),
+		SessionID: v.Text("session_id"), Row: v}
 	if d, ok := v.Get("dialog"); ok && d.Kind == jsfmt.Number && d.Num != "0" {
 		r.Dialog = true
 	}
@@ -114,6 +119,8 @@ type NewRequest struct {
 	Dialog                           bool
 	// Reviewer is the live reviewer a delegate ask waits on; "" for an ask that is the human's.
 	Reviewer string
+	// Payload is what a settings change applies on approval (src/permissions.ts SettingsPayload, as JSON); nil for none.
+	Payload *string
 }
 
 // CreatePermissionRequest is src/db.ts createPermissionRequest with the wait src/permissions.ts requestPermission adds,
@@ -131,7 +138,7 @@ func (d *DB) CreatePermissionRequest(ctx context.Context, n NewRequest) (Permiss
 	var out PermissionRequest
 	err := d.Write(ctx, func(conn *sqlite.Conn) error {
 		if err := runSQL(conn, `INSERT INTO permission_requests (id, agent_id, action, reason, details, dialog, payload, audience, kind, text, sha256, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL, ?)`, id, n.AgentID, n.Action, n.Reason, n.Details, b2i(n.Dialog), audience, kind, now()); err != nil {
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)`, id, n.AgentID, n.Action, n.Reason, n.Details, b2i(n.Dialog), sqlValue(n.Payload), audience, kind, now()); err != nil {
 			return err
 		}
 		w := NewWait{AgentID: n.AgentID, Kind: "human", Source: "stam", Target: &id, Detail: strPtr("your approval")}
@@ -151,6 +158,20 @@ func (d *DB) CreatePermissionRequest(ctx context.Context, n NewRequest) (Permiss
 	return out, wrap("create permission request", err)
 }
 
+// DropPermissionRequest undoes CreatePermissionRequest for a request whose mail reached no one (S-4100 review): the
+// pending request goes, with its waits, so no agent waits on an ask nobody holds. A request settled meanwhile stays.
+func (d *DB) DropPermissionRequest(ctx context.Context, agentID, id string) error {
+	return wrap("drop permission request", d.Write(ctx, func(conn *sqlite.Conn) error {
+		if err := runSQL(conn, "DELETE FROM permission_requests WHERE id = ? AND agent_id = ? AND status = 'pending'", id, agentID); err != nil {
+			return err
+		}
+		if conn.Changes() == 0 {
+			return nil
+		}
+		return d.clearRequestWaits(conn, agentID, id)
+	}))
+}
+
 // clearRequestWaits is src/db.ts clearRequestWaits in the caller's transaction: the agent's stam wait for the request,
 // whichever audience it waited on, its own wait_for human tied to it, and its decision mails about it.
 func (d *DB) clearRequestWaits(conn *sqlite.Conn, agentID, requestID string) error {
@@ -163,8 +184,8 @@ func (d *DB) clearRequestWaits(conn *sqlite.Conn, agentID, requestID string) err
 			return err
 		}
 	}
-	return runSQL(conn, `DELETE FROM decision_mails WHERE mail_id IN (SELECT m.id FROM decision_mails d JOIN mail m ON m.id = d.mail_id WHERE m.from_id = ? AND m.created_at <= '9999'
-      AND (instr(m.subject, ?) > 0 OR instr(m.body, ?) > 0 OR d.thread_id IN (SELECT COALESCE(thread_id, id) FROM mail WHERE permission_id = ?)))`,
+	return deleteDecisions(conn, "settled", nil, `DELETE FROM decision_mails WHERE mail_id IN (SELECT m.id FROM decision_mails d JOIN mail m ON m.id = d.mail_id WHERE m.from_id = ? AND m.created_at <= '9999'
+      AND (instr(m.subject, ?) > 0 OR instr(m.body, ?) > 0 OR d.thread_id IN (SELECT id FROM mail WHERE permission_id = ? AND (thread_id IS NULL OR thread_id = id))))`,
 		agentID, requestID, requestID, requestID)
 }
 
@@ -195,11 +216,18 @@ func (d *DB) EscalatePermissionRequest(ctx context.Context, id string) (moved bo
 // transaction, before the write: an error from it writes nothing, and is returned as is. False when the request was
 // no longer pending, and then nothing is written.
 func (d *DB) DecidePermissionRequest(ctx context.Context, id string, approve bool, by, note string, check func(PermissionRequest) error) (decided bool, err error) {
+	decided, _, err = d.DecidePermissionRequestNoticed(ctx, id, approve, by, note, check, nil)
+	return decided, err
+}
+
+// DecidePermissionRequestNoticed is DecidePermissionRequest with the answer's notice (S-3923) written in the same
+// transaction: the decision and its answer_notices row commit together, or neither does. row is 0 when none was written.
+func (d *DB) DecidePermissionRequestNoticed(ctx context.Context, id string, approve bool, by, note string, check func(PermissionRequest) error, n *NewAnswerNotice) (decided bool, row int64, err error) {
 	status := "denied"
 	if approve {
 		status = "approved"
 	}
-	err = d.Write(ctx, func(conn *sqlite.Conn) error {
+	err = d.answerWrite(ctx, "decide permission request", func(conn *sqlite.Conn) error {
 		r, ok, err := first(queryRequests(conn, "WHERE id = ? AND status = 'pending'", id))
 		if err != nil || !ok {
 			return err
@@ -212,13 +240,51 @@ func (d *DB) DecidePermissionRequest(ctx context.Context, id string, approve boo
 		if err := runSQL(conn, "UPDATE permission_requests SET status = ?, decided_by = ?, note = ?, decided_at = ? WHERE id = ?", status, by, note, now(), id); err != nil {
 			return err
 		}
+		if _, err := redactPayloads(conn, "id = ?", id); err != nil {
+			return err
+		}
 		decided = true
-		return d.clearRequestWaits(conn, r.AgentID, id)
+		if err := d.clearRequestWaits(conn, r.AgentID, id); err != nil {
+			return err
+		}
+		if n == nil {
+			return nil
+		}
+		row, err = insertAnswerNotice(conn, n.AgentID, n.Text)
+		return err
 	})
 	if err != nil {
-		decided = false
+		decided, row = false, 0
 	}
-	return decided, wrap("decide permission request", err)
+	return decided, row, wrap("decide permission request", err)
+}
+
+// redactPayloads rewrites, in the caller's transaction, each settings payload of the requests `where` picks without its
+// secrets (S-3869, config.RedactedPayload): an ask that no longer waits keeps no plaintext client_secret in stam.db.
+// Rewriting a redacted payload changes nothing. TS keeps the plaintext. It returns how many it rewrote.
+func redactPayloads(conn *sqlite.Conn, where string, args ...any) (int, error) {
+	var ids, payloads []string
+	if err := runSQLRows(conn, "SELECT id, payload FROM permission_requests WHERE payload IS NOT NULL AND "+where, func(stmt *sqlite.Stmt) {
+		ids, payloads = append(ids, stmt.ColumnText(0)), append(payloads, stmt.ColumnText(1))
+	}, args...); err != nil {
+		return 0, err
+	}
+	for i, id := range ids {
+		if err := runSQL(conn, "UPDATE permission_requests SET payload = ? WHERE id = ?", config.RedactedPayload(payloads[i]), id); err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), nil
+}
+
+// RedactDecidedPayloads is redactPayloads over every request that no longer waits and isn't redacted yet (S-3869): the
+// payloads a daemon stored before decisions redacted them. It returns how many it rewrote.
+func (d *DB) RedactDecidedPayloads(ctx context.Context) (n int, err error) {
+	err = d.Write(ctx, func(conn *sqlite.Conn) error {
+		n, err = redactPayloads(conn, `status NOT IN ('pending', 'held') AND payload NOT LIKE '%"redacted":true}'`)
+		return err
+	})
+	return n, wrap("redact decided payloads", err)
 }
 
 // WithdrawPermissionRequest is src/db.ts withdrawPermissionRequest and the clearRequestWaits after it, in one
@@ -230,6 +296,9 @@ func (d *DB) WithdrawPermissionRequest(ctx context.Context, id, note string) (wi
 			return err
 		}
 		if err := runSQL(conn, "UPDATE permission_requests SET status = 'withdrawn', note = ?, decided_at = ? WHERE id = ?", note, now(), id); err != nil {
+			return err
+		}
+		if _, err := redactPayloads(conn, "id = ?", id); err != nil {
 			return err
 		}
 		withdrawn = true

@@ -186,9 +186,10 @@ func TestPushIfIdle(t *testing.T) {
 	if p.Content != want {
 		t.Fatalf("second prompt %q\nwant %q", p.Content, want)
 	}
-	l.until("the second push", func() bool { return len(l.unpushed("alpu1")) == 0 })
-	if e := lastEvent(t, l, "alpu1", "pushed"); e != `{"mail":true,"notices":0}` {
-		t.Errorf("pushed: %s", e)
+	// The pushed event is written after the mail is marked, so wait for the event itself.
+	l.until("the second push", func() bool { return lastEvent(t, l, "alpu1", "pushed") == `{"mail":true,"notices":0}` })
+	if got := l.unpushed("alpu1"); len(got) != 0 {
+		t.Errorf("after the second push: unpushed %v", got)
 	}
 
 	// A working agent isn't prompted, nor a stopped one.
@@ -346,6 +347,57 @@ func TestPushHold(t *testing.T) {
 	}
 }
 
+// TestPushHoldMidFlight: a push already past its hold check when the typing starts finishes first, as TS's push runs
+// from the check to the prompt with no await: the typing waits for it, and a push that comes during the typing waits.
+func TestPushHoldMidFlight(t *testing.T) {
+	l := newLive(t)
+	l.spawn("alpm1")
+	l.idle("alpm1")
+	sh := l.shim(l.life, "alpm1")
+	l.mail("alpm1", "mlpm1", "first", false)
+	inPush, release := make(chan struct{}), make(chan struct{})
+	l.life.pushing = func(string) {
+		close(inPush)
+		<-release
+	}
+	pushed := make(chan struct{})
+	go func() {
+		defer close(pushed)
+		l.life.pushIfIdle(l.ctx, "alpm1")
+	}()
+	<-inPush
+	started := make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		held <- l.life.HoldingPushes("alpm1", func() error {
+			close(started)
+			// The push that was in flight is out before the typing starts.
+			if p := sh.next(t); !strings.Contains(p.Content, "mlpm1") {
+				t.Errorf("prompt %q", p.Content)
+			}
+			l.mail("alpm1", "mlpm2", "during the typing", false)
+			l.life.pushIfIdle(l.ctx, "alpm1")
+			sh.none(t, "a push during the typing")
+			return nil
+		})
+	}()
+	select {
+	case <-started:
+		t.Fatal("the typing started while a push was in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+	l.life.pushing = nil
+	close(release)
+	<-pushed
+	if err := <-held; err != nil {
+		t.Fatal(err)
+	}
+	// The push held off by the typing was rescheduled.
+	if p := sh.next(t); !strings.Contains(p.Content, "mlpm2") {
+		t.Fatalf("prompt %q", p.Content)
+	}
+}
+
 // TestPushAfterRestart: the notice queue is in memory, as in TS, but unread mail stays unpushed in the database: a new
 // daemon pushes it once the agent's shim connects to it.
 func TestPushAfterRestart(t *testing.T) {
@@ -392,7 +444,7 @@ func TestInTurnNotice(t *testing.T) {
 	l.set("alpt1", db.Field{Col: "activity", Val: "working"})
 	post := func() *string {
 		t.Helper()
-		out, err := l.life.OnHook(l.ctx, "claude", l.agent("alpt1"), jsjson.NewObject("hook_event_name", "PostToolUse", "tool_name", "Bash"))
+		out, err := l.life.OnHook(l.ctx, "claude", l.agent("alpt1"), jsjson.NewObject("hook_event_name", "PostToolUse", "tool_name", "Bash"), new([]int64))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -502,5 +554,58 @@ func TestStopPrompts(t *testing.T) {
 	sh3.none(t, "a blocked agent")
 	if l.has("alps3", "prompt:sent") || pendingText(l.agent("alps3")) == "" {
 		t.Errorf("blocked: prompt:sent %v, pending %q", l.has("alps3", "prompt:sent"), pendingText(l.agent("alps3")))
+	}
+}
+
+// TestStartPush: a notice queued while the agent starts, whose push found it not yet idle, reaches it when its
+// SessionStart turns it idle. A ring's round 1 queues while its fresh members start; with no push on SessionStart the
+// one debounced try came and went, and a slow member never got its turn (S-4168).
+func TestStartPush(t *testing.T) {
+	l := newLive(t)
+	l.spawn("alps1")
+	l.set("alps1", db.Field{Col: "activity", Val: "starting"})
+	sh := l.shim(l.life, "alps1")
+	// The notice's debounced push runs, and ends, while the agent still starts.
+	l.life.QueueRingNotice(l.ctx, "alps1", "Ring r1, round 1")
+	l.settled(l.life, "alps1")
+	sh.none(t, "a starting agent")
+	l.hook("alps1", "SessionStart")
+	if p := sh.next(t); !strings.Contains(p.Content, "Ring r1, round 1") {
+		t.Fatalf("prompt %q", p.Content)
+	}
+}
+
+// TestStartPushPaused: SessionStart doesn't push to an agent an owner paused while it started (its resume pushes); a
+// rest still takes the push (S-4168 review). Mail to a paused agent still goes in, as TestBlockerHumanPause pins.
+func TestStartPushPaused(t *testing.T) {
+	for _, tc := range []struct {
+		name, pausedBy string
+		delivered      bool
+	}{
+		{"the human's pause", `["human"]`, false},
+		{"an agent's pause", `["aboss"]`, false},
+		{"the rest", `["standing-idle"]`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newLive(t)
+			l.spawn("alpp1")
+			l.set("alpp1", db.Field{Col: "activity", Val: "starting"})
+			sh := l.shim(l.life, "alpp1")
+			l.life.QueueRingNotice(l.ctx, "alpp1", "Ring r1, round 1")
+			l.settled(l.life, "alpp1")
+			l.set("alpp1", db.Field{Col: "lifecycle", Val: "paused"}, db.Field{Col: "paused_by", Val: tc.pausedBy})
+			l.hook("alpp1", "SessionStart")
+			if !tc.delivered {
+				l.settled(l.life, "alpp1")
+				sh.none(t, tc.name)
+				if n := l.life.Notices("alpp1"); len(n) != 1 {
+					t.Errorf("the notice left the queue: %v", n)
+				}
+				return
+			}
+			if p := sh.next(t); !strings.Contains(p.Content, "Ring r1, round 1") {
+				t.Fatalf("prompt %q", p.Content)
+			}
+		})
 	}
 }

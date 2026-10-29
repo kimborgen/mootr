@@ -19,7 +19,7 @@ const home = tempHome('stam-waits-');
 process.env.STAM_HOME = home;
 for (const k of ['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT']) delete process.env[k];
 // A peer nothing listens on: a send to its agent is refused at once and queued (S-2663 copies).
-writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [{ name: 'far', url: 'http://127.0.0.1:1', token: 't' }] }));
+writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [{ name: 'far', url: 'http://127.0.0.1:1', token: 'test-peer-token' }] }));
 
 let db, waits, mail;
 before(async () => {
@@ -55,8 +55,15 @@ test("mail stam sends never clears a declared wait", async () => {
   assert.equal(mail.stamSender().id, a.id);
   const w = await waits.declare(b.id, { on: 'agent', target: a.id, note: 'the real reply' });
   assert.ok(db.listWaits(b.id).some((x) => x.id === w.id));
-  assert.equal(await mail.sendFromStam([b.id], 'Subject', 'Body'), true);
+  assert.equal(await mail.sendFromSystem('cost', [b.id], 'Subject', 'Body'), true);
   assert.ok(db.listWaits(b.id).some((x) => x.id === w.id), "stam's own mail cleared the declared wait");
+  // The system sender's mail is marked from_stam (src/mail.ts): a notice that human-mail observers never see, as for a stand-in's.
+  const seen = [];
+  mail.onMailToHuman((m) => seen.push(m.subject));
+  await mail.sendFromSystem('cost', [mail.HUMAN], 'System to human', 'Body');
+  const row = db.open().prepare("SELECT from_id, notice FROM mail WHERE subject = 'System to human'").get();
+  assert.deepEqual({ ...row }, { from_id: 'system:cost', notice: 1 });
+  assert.deepEqual(seen, [], 'a system sender is marked from_stam, so human-mail observers skip it');
   // A real mail from the awaited agent does clear it.
   await mail.sendMail({ from: a.id, to: [b.id], subject: 'the real reply', body: 'here', new_thread: true });
   assert.ok(!db.listWaits(b.id).some((x) => x.id === w.id), 'a real mail did not clear the wait');
@@ -311,4 +318,111 @@ test('a sender copy counts as an ask only of the agents it was sent to (S-2663)'
   db.addCopyRecipients('cp-root', [a.id]);
   await declare();
   assert.equal(nudges(), 1);
+});
+
+test('an event wait needs a filter that names a source, subjects, types or actors (S-2317)', async () => {
+  const a = agent('ev-empty', 'empty-filter');
+  for (const filter of [undefined, {}, { exclude_actors: ['bot'] }, { since: '2026-10-01T00:00:00Z' }]) {
+    await assert.rejects(waits.declare(a.id, { on: 'event', filter }), /needs a filter/);
+  }
+  assert.equal(db.listWaits(a.id).length, 0, 'a refused declare left a wait');
+  await waits.declare(a.id, { on: 'event', filter: { actors: ['alice'] } });
+  assert.equal(db.listWaits(a.id).length, 1);
+});
+
+test('an identical event wait returns the open one, across a restart (S-2317)', async () => {
+  const a = agent('ev-same', 'same-filter');
+  const w = await waits.declare(a.id, { on: 'event', filter: { source: 'github', subjects: ['github:o/r#5'] } });
+  // The same filter, written in another order, is the same wait.
+  const again = await waits.declare(a.id, { on: 'event', filter: { subjects: ['github:o/r#5'], source: 'github' } });
+  assert.equal(again.id, w.id, 'an identical declare added a wait');
+  assert.equal(db.listWaits(a.id).length, 1);
+  // A fresh process reads the stored row, not memory.
+  const script = `
+    const waits = await import(${JSON.stringify(pathToFileURL(join(here, '../src/waits.ts')).href)});
+    const w = await waits.declare(${JSON.stringify(a.id)}, { on: 'event', filter: { source: 'github', subjects: ['github:o/r#5'] } });
+    console.log(w.id);`;
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, STAM_HOME: home, TZ: 'Europe/Helsinki' }, encoding: 'utf8' });
+  assert.equal(out.trim(), w.id, 'a restarted daemon added a wait for an identical filter');
+  assert.equal(db.listWaits(a.id).length, 1);
+});
+
+test('event waits with different filters, and other agents\' waits, never merge (S-2317)', async () => {
+  const a = agent('ev-diff', 'diff-filter');
+  const b = agent('ev-other', 'diff-other');
+  const w1 = await waits.declare(a.id, { on: 'event', filter: { subjects: ['github:o/r#6'] } });
+  const w2 = await waits.declare(a.id, { on: 'event', filter: { subjects: ['github:o/r#7'] } });
+  const w3 = await waits.declare(b.id, { on: 'event', filter: { subjects: ['github:o/r#6'] } });
+  assert.notEqual(w1.id, w2.id, 'different filters merged');
+  assert.notEqual(w1.id, w3.id, "another agent's identical wait matched");
+  assert.equal(db.listWaits(a.id).length, 2);
+  assert.equal(db.listWaits(b.id).length, 1);
+});
+
+test('a cron timer is not merged, and an event wait is never a timer (S-2317)', async () => {
+  const a = agent('ev-cron', 'cron-timer');
+  const t1 = waits.wake(a.id, { note: 'standup', cron: '0 9 * * *' });
+  const t2 = waits.wake(a.id, { note: 'standup', cron: '0 9 * * *' });
+  assert.notEqual(t1.id, t2.id, 'a cron timer was merged');
+  await waits.declare(a.id, { on: 'event', filter: { source: 'github' } });
+  assert.equal(db.listWaits(a.id).length, 3);
+});
+
+test('a re-declared event wait takes its new timeout (S-2317)', async () => {
+  const a = agent('ev-refresh', 'refresh');
+  const filter = { source: 'linear', types: ['issue.updated'] };
+  const w = await waits.declare(a.id, { on: 'event', filter, timeout_minutes: 30 });
+  const again = await waits.declare(a.id, { on: 'event', filter, timeout_minutes: 120 });
+  assert.equal(again.id, w.id);
+  assert.ok(Date.parse(db.getWait(w.id).until) - Date.parse(w.until) > 60 * 60_000, 'the timeout was not refreshed');
+  assert.equal(JSON.parse(db.getWait(w.id).data).timeout_minutes, 120);
+  // A re-declare with no timeout keeps the one it has.
+  const kept = db.getWait(w.id).until;
+  await waits.declare(a.id, { on: 'event', filter });
+  assert.equal(db.getWait(w.id).until, kept);
+  assert.equal(db.listWaits(a.id).length, 1);
+});
+
+test('two concurrent identical event declares insert one wait (S-2317)', async () => {
+  const a = agent('ev-race', 'race');
+  const filter = { source: 'linear', types: ['issue.created'] };
+  // The check and the insert run in one synchronous step with no await between them, so the second
+  // declare sees the first's row.
+  const [x, y] = await Promise.all([waits.declare(a.id, { on: 'event', filter }), waits.declare(a.id, { on: 'event', filter })]);
+  assert.equal(x.id, y.id, 'the concurrent declares returned different waits');
+  assert.equal(db.listWaits(a.id).length, 1, 'both concurrent declares inserted');
+});
+
+test('an identical event wait ignores the order of its lists (S-2317)', async () => {
+  const a = agent('ev-order', 'order');
+  const w = await waits.declare(a.id, { on: 'event', filter: { subjects: ['github:o/r#5', 'github:o/r#6'] } });
+  const again = await waits.declare(a.id, { on: 'event', filter: { subjects: ['github:o/r#6', 'github:o/r#5'] } });
+  assert.equal(again.id, w.id, 'the same subjects in another order added a wait');
+  assert.equal(db.listWaits(a.id).length, 1);
+});
+
+test('a re-declared event wait keeps the later since, and never a dropped one (S-2317)', async () => {
+  const a = agent('ev-since', 'since');
+  const subjects = ['github:o/r#8'];
+  const w = await waits.declare(a.id, { on: 'event', filter: { subjects, since: '2026-10-20T00:00:00Z' } });
+  const since = () => JSON.parse(db.getWait(w.id).data).filter.since;
+  // A later since, from the next wake, replaces the stored one and still dedupes.
+  const later = await waits.declare(a.id, { on: 'event', filter: { subjects, since: '2026-10-21T00:00:00Z' } });
+  assert.equal(later.id, w.id, 'a moved since added a wait');
+  assert.equal(since(), '2026-10-21T00:00:00Z', 'the later since was not stored');
+  // An earlier since does not move it back.
+  await waits.declare(a.id, { on: 'event', filter: { subjects, since: '2026-10-19T00:00:00Z' } });
+  assert.equal(since(), '2026-10-21T00:00:00Z', 'an earlier since moved the wait back');
+  // No since on the new filter keeps the stored one.
+  await waits.declare(a.id, { on: 'event', filter: { subjects } });
+  assert.equal(since(), '2026-10-21T00:00:00Z', 'a re-declare without since dropped it');
+  assert.equal(db.listWaits(a.id).length, 1);
+});
+
+test('a re-declared event wait stores the new timeout (S-2317)', async () => {
+  const a = agent('ev-sync', 'sync');
+  const filter = { source: 'linear', types: ['issue.updated'] };
+  const w = await waits.declare(a.id, { on: 'event', filter, timeout_minutes: 30 });
+  await waits.declare(a.id, { on: 'event', filter, timeout_minutes: 90 });
+  assert.ok(Date.parse(db.getWait(w.id).until) - Date.parse(w.until) > 55 * 60_000, 'the new timeout is not stored');
 });

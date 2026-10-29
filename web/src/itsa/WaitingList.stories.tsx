@@ -29,6 +29,7 @@ export const stories: Story[] = [{
     'It is a popover (`.menu.popover`): at most 360 px wide on a desktop; on a phone it is a sheet at most 75% of the screen high, and the list scrolls inside it (' + ds('Modals and menus') + ').',
     'A row is at least `--size-hit-touch` tall on every device, so it is a touch target on a desktop too. The mark is the ITSA\'s status glyph, a shield for a request, a mail icon for a decision, a user icon for a reply; the mark and the second line\'s words ("waits on you", "asks your approval", "waits for your decision", "waits for your reply") carry the meaning (' + ds('State vocabulary') + ').',
     'The mark takes `--status-warning-fg`; the second line and the age are `--type-chrome-sm` and muted; the first line is cut with an ellipsis.',
+    'A request stands for the thread it started, folding that thread\'s decision and reply-wait rows into its own; one placed in another thread (S-3827) does not, so that thread\'s decision and reply wait keep their rows beside it (`ownPermThread`).',
     'Rows you deferred are off the list and off every count; they sit in the Mail list\'s Deferred group.',
     'An empty list says "Nothing waits on you." (' + ds('Empty, loading, and error') + ').',
   ],

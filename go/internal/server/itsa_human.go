@@ -256,14 +256,16 @@ func (s *Server) itsaAttentionRoute(r *http.Request, c auth.Resolved) (any, erro
 	if err := s.notHome(c); err != nil {
 		return nil, err
 	}
-	ctx := context.WithoutCancel(r.Context())
-	var names []string
-	for _, st := range s.itsaStatuses() {
-		if st.Human {
-			names = append(names, st.Name)
-		}
+	out, err := s.attention(context.WithoutCancel(r.Context()))
+	if err != nil {
+		return nil, err
 	}
-	waiting, err := s.db.ItsasInStatuses(ctx, names)
+	return jsfmt.ArrayValue(out), nil
+}
+
+// attention is src/itsa-human.ts attention: every ITSA in a human status, oldest first, with its actions and latest ask.
+func (s *Server) attention(ctx context.Context) ([]jsfmt.Value, error) {
+	waiting, err := s.waitingItsas(ctx)
 	if err != nil {
 		return nil, asItsaErr(err)
 	}
@@ -314,7 +316,7 @@ func (s *Server) itsaAttentionRoute(r *http.Request, c auth.Resolved) (any, erro
 		out = append(out, row)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Text("since") < out[j].Text("since") })
-	return jsfmt.ArrayValue(out), nil
+	return out, nil
 }
 
 // itsaActRoute is POST /api/itsas/:id/act: the human takes an action on an ITSA that waits on them, { action, text }.
@@ -340,13 +342,26 @@ func (s *Server) itsaActRoute(r *http.Request, c auth.Resolved) (any, error) {
 		}
 		return ""
 	}
-	out, err := s.act(ctx, ref, text("action"), text("text"))
+	// Approve needs if_rev, the revision of the text it showed (S-2998); a missing one is refused.
+	// A mail thread names the newest mail it showed instead (shown_mail).
+	ifRev, shownMail := "", ""
+	if v, ok := body.Get("if_rev"); ok && v.Kind == jsfmt.String {
+		ifRev = v.Str
+	}
+	if v, ok := body.Get("shown_mail"); ok && v.Kind == jsfmt.String {
+		shownMail = v.Str
+	}
+	out, err := s.act(ctx, ref, text("action"), text("text"), ifRev, shownMail)
 	return out, asItsaErr(err)
 }
 
 // act is src/itsa-human.ts act. The text is posted first: if delivery fails nothing has changed. The status then moves
 // only if the ITSA is still in the status the action was offered for (a stale button gets 409; the comment stays).
-func (s *Server) act(ctx context.Context, ref, actionID, text string) (any, error) {
+//
+// Approve carries ifRev, the revision of the text it showed (revOf, S-2998): text that changed since, or no revision at
+// all, refuses it before anything is posted, and the status move checks it again in the same transaction. A mail thread
+// names the newest mail it showed (shownMail): the revision is the one recorded at or before it (shownRev).
+func (s *Server) act(ctx context.Context, ref, actionID, text, ifRev, shownMail string) (any, error) {
 	x, err := s.mustItsa(ctx, ref)
 	if err != nil {
 		return nil, err
@@ -362,6 +377,18 @@ func (s *Server) act(ctx context.Context, ref, actionID, text string) (any, erro
 	if action == nil {
 		return nil, errors.New(x.Text("key") + " is in " + status + ", which has no action " + actionID)
 	}
+	approve := action.id == "approve"
+	if approve && ifRev == "" && shownMail != "" {
+		if ifRev, err = s.shownRev(ctx, x.Text("id"), shownMail); err != nil {
+			return nil, err
+		}
+	}
+	if approve && ifRev == "" {
+		return nil, errors.New(textChanged + ": Approve didn't say which text of " + x.Text("key") + " it saw; reload it")
+	}
+	if approve && ifRev != revOf(x) {
+		return nil, errors.New(textChanged + ": " + x.Text("key") + " changed since it was shown")
+	}
 	body := db.JSTrim(text)
 	if action.text == "required" && body == "" {
 		return nil, errors.New(action.label + " needs a comment: say what you want")
@@ -373,6 +400,9 @@ func (s *Server) act(ctx context.Context, ref, actionID, text string) (any, erro
 	f.Set("status", jsfmt.StringValue(action.to))
 	f.Set("ifStatus", jsfmt.StringValue(status))
 	f.Set("action", jsfmt.StringValue(action.id))
+	if approve {
+		f.Set("ifRev", jsfmt.StringValue(ifRev))
+	}
 	if body != "" {
 		// What this daemon does not carry (every 501 of a change is found in its checks) is answered before the comment
 		// lands, so a retry does not post it twice. A stale button (409) is still found after the post, as in TS.
@@ -382,16 +412,24 @@ func (s *Server) act(ctx context.Context, ref, actionID, text string) (any, erro
 				return nil, err
 			}
 		}
-		in := jsfmt.Value{Kind: jsfmt.Object}
-		in.Set("by", jsfmt.StringValue(humanBox))
-		in.Set("body", jsfmt.StringValue(body))
-		if _, err := s.post(ctx, x.Text("id"), in, false); err != nil {
-			return nil, err
+		// Approve's comment goes only after its guarded move succeeds, so a refusal leaves nothing behind.
+		if !approve {
+			if err := s.postHuman(ctx, x.Text("id"), body); err != nil {
+				return nil, err
+			}
 		}
+	}
+	if actBeforeSet != nil {
+		actBeforeSet()
 	}
 	set, err := s.setItsa(ctx, x.Text("id"), f, humanBox)
 	if err != nil {
 		return nil, err
+	}
+	if body != "" && approve {
+		if err := s.postHuman(ctx, x.Text("id"), body); err != nil {
+			return nil, err
+		}
 	}
 	moved, _ := set.(jsfmt.Value).Get("itsa")
 	which := jsfmt.Value{Kind: jsfmt.Object}
@@ -403,4 +441,13 @@ func (s *Server) act(ctx context.Context, ref, actionID, text string) (any, erro
 	res.Set("itsa", moved)
 	res.Set("action", which)
 	return res, nil
+}
+
+// postHuman posts the human's comment on an action into the ITSA's thread.
+func (s *Server) postHuman(ctx context.Context, id, body string) error {
+	in := jsfmt.Value{Kind: jsfmt.Object}
+	in.Set("by", jsfmt.StringValue(humanBox))
+	in.Set("body", jsfmt.StringValue(body))
+	_, err := s.post(ctx, id, in, false)
+	return err
 }

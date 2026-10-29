@@ -215,7 +215,7 @@ func jsOrEmpty(v jsfmt.Value) string {
 	return ""
 }
 
-// fieldOut is itsa.ts fieldOut: the row with its options decoded (null when there are none).
+// fieldOut is itsa.ts fieldOut: the row with its options and kinds decoded (null when there are none).
 func fieldOut(r jsfmt.Value) (jsfmt.Value, error) {
 	opts := jsfmt.NullValue()
 	if raw := r.Text("options"); raw != "" {
@@ -225,7 +225,76 @@ func fieldOut(r jsfmt.Value) (jsfmt.Value, error) {
 		}
 	}
 	r.Set("options", opts)
+	kinds, err := parseKinds(r.Text("kinds"))
+	if err != nil {
+		return r, fmt.Errorf("the kinds of field %s are not JSON", r.Text("key"))
+	}
+	r.Set("kinds", kinds)
 	return r, nil
+}
+
+// parseKinds decodes a field's stored kinds, null when it has none (S-3180).
+func parseKinds(raw string) (jsfmt.Value, error) {
+	if raw == "" {
+		return jsfmt.NullValue(), nil
+	}
+	return jsfmt.Parse([]byte(raw))
+}
+
+// FieldApplies is itsa.ts fieldApplies (S-3180): a field with no kinds applies to every ITSA; otherwise the ITSA's kind must
+// match one of them, ignoring case. An ITSA with no kind matches none. Stored kinds that are a list of strings are matched in
+// order, stopping at the first match. As TS does, a list item that isn't a string is an error where it is reached, and so is any
+// other truthy value (an object, a string, a number) once the ITSA has a kind (S-3233).
+func FieldApplies(kinds jsfmt.Value, kind string) (bool, error) {
+	if kinds.Kind != jsfmt.Array && !kinds.Truthy() {
+		return true, nil
+	}
+	k := strings.ToLower(kind)
+	if k == "" {
+		return false, nil
+	}
+	if kinds.Kind != jsfmt.Array {
+		return false, fmt.Errorf("the kinds of a field are not a list of ITSA kinds")
+	}
+	for _, x := range kinds.Items {
+		if x.Kind != jsfmt.String {
+			return false, fmt.Errorf("the kinds of a field hold a value that is not a string")
+		}
+		if strings.ToLower(x.Str) == k {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// checkKinds is itsa.ts checkKinds (S-3180): a field's kinds, null for every kind. An empty list is every kind too, and a
+// kind repeated in another case is kept once.
+func checkKinds(raw jsfmt.Value, ok bool) (jsfmt.Value, error) {
+	if !ok || raw.Kind == jsfmt.Null {
+		return jsfmt.NullValue(), nil
+	}
+	if raw.Kind != jsfmt.Array {
+		return jsfmt.Value{}, fmt.Errorf(`kinds is a list of ITSA kinds, such as ["issue"]`)
+	}
+	var out []jsfmt.Value
+	seen := map[string]bool{}
+	for _, k := range raw.Items {
+		label := ""
+		if k.Kind == jsfmt.String {
+			label = jsTrim(k.Str)
+		}
+		if label == "" {
+			return jsfmt.Value{}, fmt.Errorf("every kind in kinds needs a label")
+		}
+		if !seen[strings.ToLower(label)] {
+			seen[strings.ToLower(label)] = true
+			out = append(out, jsfmt.StringValue(label))
+		}
+	}
+	if len(out) == 0 {
+		return jsfmt.NullValue(), nil
+	}
+	return jsfmt.ArrayValue(out), nil
 }
 
 func fieldsOn(conn *sqlite.Conn) ([]jsfmt.Value, error) {
@@ -318,6 +387,14 @@ func nullable(v jsfmt.Value) any {
 	return v.Str
 }
 
+// kindsArg is a field's kinds as the column holds them: the JSON list, or null for every kind.
+func kindsArg(kinds jsfmt.Value) any {
+	if kinds.Kind == jsfmt.Null {
+		return nil
+	}
+	return jsfmt.Compact(kinds)
+}
+
 // CreateItsaField is itsa.createField after the caller's right to define was checked: the field, as the API shows it.
 func (d *DB) CreateItsaField(ctx context.Context, actor string, in jsfmt.Value) (jsfmt.Value, error) {
 	label := jsTrim(strOr(in.Get("label")))
@@ -357,6 +434,10 @@ func (d *DB) CreateItsaField(ctx context.Context, actor string, in jsfmt.Value) 
 	if err != nil {
 		return jsfmt.Value{}, err
 	}
+	kinds, err := checkKinds(in.Get("kinds"))
+	if err != nil {
+		return jsfmt.Value{}, err
+	}
 	desc, hint := optFieldText(in.Get("description")), optFieldText(in.Get("hint"))
 	var created jsfmt.Value
 	err = d.inFields(ctx, func(conn *sqlite.Conn) error {
@@ -365,7 +446,11 @@ func (d *DB) CreateItsaField(ctx context.Context, actor string, in jsfmt.Value) 
 		if err != nil {
 			return err
 		}
-		id, t := "f"+newItsaID()[1:], now()
+		id, err := freshItsaID(conn, "f", "itsa_fields", "ITSA field")
+		if err != nil {
+			return err
+		}
+		t := now()
 		pos, err := rows(conn, "SELECT MAX(position) AS m FROM itsa_fields")
 		if err != nil {
 			return err
@@ -379,8 +464,8 @@ func (d *DB) CreateItsaField(ctx context.Context, actor string, in jsfmt.Value) 
 		if options.Kind != jsfmt.Null {
 			opts = jsfmt.Compact(options)
 		}
-		if err := runSQL(conn, "INSERT INTO itsa_fields (id, key, label, type, options, description, hint, width, align, card, position, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			id, key, label, typ, opts, nullable(desc), nullable(hint), width, align, card, position, actor, t, t); err != nil {
+		if err := runSQL(conn, "INSERT INTO itsa_fields (id, key, label, type, options, description, hint, width, align, card, kinds, position, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			id, key, label, typ, opts, nullable(desc), nullable(hint), width, align, card, kindsArg(kinds), position, actor, t, t); err != nil {
 			return err
 		}
 		if created, err = mustFieldOn(conn, id); err != nil {
@@ -462,6 +547,13 @@ func (d *DB) UpdateItsaField(ctx context.Context, ref, actor string, patch jsfmt
 				next.Set(p.k, jsfmt.StringValue(s))
 			}
 		}
+		if v, has := patch.Get("kinds"); has {
+			k, err := checkKinds(v, true)
+			if err != nil {
+				return err
+			}
+			next.Set("kinds", k)
+		}
 		curOpts, _ := cur.Get("options")
 		nextOpts, _ := next.Get("options")
 		if nextType != curType || jsfmt.Compact(nextOpts) != jsfmt.Compact(curOpts) {
@@ -480,7 +572,7 @@ func (d *DB) UpdateItsaField(ctx context.Context, ref, actor string, patch jsfmt
 			}
 		}
 		changes := jsfmt.Value{Kind: jsfmt.Object}
-		for _, k := range []string{"key", "label", "type", "options", "description", "hint", "width", "align", "card"} {
+		for _, k := range []string{"key", "label", "type", "options", "description", "hint", "width", "align", "card", "kinds"} {
 			a, _ := cur.Get(k)
 			b, _ := next.Get(k)
 			if jsfmt.Compact(a) != jsfmt.Compact(b) {
@@ -500,8 +592,9 @@ func (d *DB) UpdateItsaField(ctx context.Context, ref, actor string, patch jsfmt
 		}
 		desc, _ := next.Get("description")
 		hint, _ := next.Get("hint")
-		if err := runSQL(conn, "UPDATE itsa_fields SET key = ?, label = ?, type = ?, options = ?, description = ?, hint = ?, width = ?, align = ?, card = ?, updated_at = ? WHERE id = ?",
-			next.Text("key"), next.Text("label"), nextType, opts, nullable(desc), nullable(hint), next.Text("width"), next.Text("align"), next.Text("card"), now(), cur.Text("id")); err != nil {
+		nextKinds, _ := next.Get("kinds")
+		if err := runSQL(conn, "UPDATE itsa_fields SET key = ?, label = ?, type = ?, options = ?, description = ?, hint = ?, width = ?, align = ?, card = ?, kinds = ?, updated_at = ? WHERE id = ?",
+			next.Text("key"), next.Text("label"), nextType, opts, nullable(desc), nullable(hint), next.Text("width"), next.Text("align"), next.Text("card"), kindsArg(nextKinds), now(), cur.Text("id")); err != nil {
 			return err
 		}
 		ev := jsfmt.Value{Kind: jsfmt.Object}
@@ -610,17 +703,22 @@ type FieldValuesChange struct{ From, To jsfmt.Value }
 
 // ApplyFieldValues is itsa.ts applyFieldValues inside the caller's transaction: it sets values by field key (null clears)
 // and returns what changed, or false if nothing did.
-func (t ItsaTx) ApplyFieldValues(itsaID string, values jsfmt.Value, actor string) (FieldValuesChange, bool, error) {
-	return applyFieldValues(t.conn, itsaID, values, actor)
+// kind is the ITSA's kind, "" for none: it decides which fields apply.
+func (t ItsaTx) ApplyFieldValues(itsaID string, values jsfmt.Value, actor, kind string) (FieldValuesChange, bool, error) {
+	return applyFieldValues(t.conn, itsaID, values, actor, kind)
 }
 
-func applyFieldValues(conn *sqlite.Conn, itsaID string, values jsfmt.Value, actor string) (FieldValuesChange, bool, error) {
+// checkedField is a field and the value checked for it, waiting to be written.
+type checkedField struct{ f, v jsfmt.Value }
+
+func applyFieldValues(conn *sqlite.Conn, itsaID string, values jsfmt.Value, actor, kind string) (FieldValuesChange, bool, error) {
 	var ch FieldValuesChange
 	if values.Kind != jsfmt.Object {
 		return ch, false, fmt.Errorf("fields is an object of field key to value")
 	}
 	from, to := jsfmt.Value{Kind: jsfmt.Object}, jsfmt.Value{Kind: jsfmt.Object}
 	done := map[string]bool{}
+	var checked []checkedField
 	for _, k := range values.Keys {
 		if done[k] {
 			continue
@@ -651,6 +749,31 @@ func applyFieldValues(conn *sqlite.Conn, itsaID string, values jsfmt.Value, acto
 		if err != nil {
 			return ch, false, err
 		}
+		// A value for a field that doesn't apply to the ITSA's kind is refused; clearing it is always allowed (S-3180).
+		kinds, _ := f.Get("kinds")
+		applies := true
+		if v.Kind != jsfmt.Null {
+			applies, err = FieldApplies(kinds, kind)
+			if err != nil {
+				return ch, false, fmt.Errorf("field %s: %w", f.Text("key"), err)
+			}
+		}
+		if !applies {
+			var names []string
+			for _, x := range kinds.Items {
+				names = append(names, jsStr(x))
+			}
+			what := kind + " ones"
+			if kind == "" {
+				what = "ITSAs with no kind"
+			}
+			return ch, false, fmt.Errorf("field %s applies only to %s ITSAs, not %s", f.Text("key"), strings.Join(names, ", "), what)
+		}
+		checked = append(checked, checkedField{f, v})
+	}
+	// Every value is checked before any is written, so a refused field leaves the others unset (S-3180).
+	for _, c := range checked {
+		f, v := c.f, c.v
 		held, err := rows(conn, "SELECT value FROM itsa_field_values WHERE itsa_id = ? AND field_id = ?", itsaID, f.Text("id"))
 		if err != nil {
 			return ch, false, err

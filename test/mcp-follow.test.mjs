@@ -37,7 +37,7 @@ test('a running server takes up the current release, retrying one that failed to
       'export const tools: Tool[] = [\n',
       "export const tools: Tool[] = [\n  { name: 'release_b_probe', group: 'agents', description: 'Added in release B.', inputSchema: { type: 'object', properties: {} }, run: async () => text('probe ok') },\n",
     )
-    .replace("let agentId = process.env.STAM_AGENT_ID;", "let agentId = process.env.STAM_AGENT_ID;\nif ((await import('node:fs')).existsSync(process.env.STAM_HOME + '/broken')) throw new Error('half deployed');");
+    .replace("let agentId = envVar('AGENT_ID');", "let agentId = envVar('AGENT_ID');\nif ((await import('node:fs')).existsSync(process.env.STAM_HOME + '/broken')) throw new Error('half deployed');");
   assert.match(src, /release_b_probe/);
   assert.match(src, /half deployed/);
   writeFileSync(join(B, 'src/mcp.ts'), src);

@@ -20,7 +20,7 @@ MOVED=abcdef1234567890abcdef1234567890abcdef12
 cat >"$G/gh" <<GH
 #!/bin/sh
 echo "\$*" >>"$G/calls"
-case "\$1 \$2" in "pr view") case "\$*" in *headRefName*) echo "{\"headRefName\":\"\$(cat "$G/branch" 2>/dev/null || echo stam/someone-else)\"}" ;; *) echo "{\"headRefOid\":\"$HEAD\"}" ;; esac ;; esac
+case "\$1 \$2" in "pr view") case "\$*" in *headRefName*) echo "{\"headRefName\":\"\$(cat "$G/branch" 2>/dev/null || echo stam/someone-else)\"}" ;; *) echo "{\"headRefOid\":\"$HEAD\"}" ;; esac ;; "api "*) echo '{}' ;; esac
 GH
 chmod +x "$G/gh"
 printf '%s' peer-token-main >"$TEST_TMP/main/peer-token"

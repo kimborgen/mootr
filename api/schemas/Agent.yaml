@@ -46,6 +46,8 @@ required:
   - type
   - paused_by
   - forwarded_to
+  - launched_at
+  - resumed_at
   - created_at
   - updated_at
   - parents
@@ -175,6 +177,12 @@ properties:
   forwarded_to:
     type: string
     nullable: true
+  launched_at:
+    type: string
+    nullable: true
+  resumed_at:
+    type: string
+    nullable: true
   created_at:
     type: string
   updated_at:
@@ -205,6 +213,23 @@ properties:
     type: array
     items:
       $ref: '#/components/schemas/AgentWait'
+  open_ask:
+    type: string
+    nullable: true
+    description: The key of the open ask this agent waits on, as GET /api/asks keys it (S-3977); null when none. Set by the TS daemon only (the Go daemon does not port it yet).
+  open_ask_detail:
+    type: object
+    nullable: true
+    additionalProperties: false
+    description: The mail the open ask lives in and its kind, never its text (S-3982, src/asks.ts askDetail); null when none.
+    required: [mail, kind]
+    properties:
+      mail:
+        type: string
+        nullable: true
+      kind:
+        type: string
+        enum: [Permission, Harness dialog, Settings change, Suggested input, ITSA, Decision]
   resting:
     $ref: '#/components/schemas/AgentResting'
   in_itsa:

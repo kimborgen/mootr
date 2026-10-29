@@ -76,16 +76,18 @@ export interface Adapter {
   // a dialog, or no session) and 'draft' (someone's text in the box) type nothing; 'failed' (the
   // box didn't show exactly the text, or a menu stayed under it) and 'cancelled' (proceed said no)
   // erased what it typed.
-  typeLiteralInput?(agent: Agent, text: string, proceed?: () => boolean | Promise<boolean>): Promise<'typed' | 'busy' | 'draft' | 'failed' | 'cancelled'>;
+  typeLiteralInput?(agent: Agent, text: string, proceed?: (stillTyped: () => boolean) => boolean | Promise<boolean>): Promise<'typed' | 'busy' | 'draft' | 'failed' | 'cancelled'>;
   // What the agent's input box holds now (S-524), to tell the agent what blocks an approved line.
   inputText?(agent: Agent): string | undefined;
-  // Answers the request's dialog on the agent's screen: yes, or no (cancel). Types nothing
-  // when the dialog is gone or its session ended ('gone'), or for a yes it can't tie to the
-  // request's own dialog ('unsafe').
-  answerDialog?(agent: Agent, request: PermissionRequest, approve: boolean): 'typed' | 'gone' | 'unsafe';
+  // Answers the request's dialog on the agent's screen: yes, or no (cancel). A question dialog
+  // takes `choice`, one of its option labels, instead of a yes. Types nothing when the dialog is
+  // gone or its session ended ('gone'), or for a yes or choice it can't tie to the request's own
+  // dialog ('unsafe'). A harness that answers over its API returns a promise; a throw keeps the
+  // request pending.
+  answerDialog?(agent: Agent, request: PermissionRequest, approve: boolean, choice?: string): ('typed' | 'gone' | 'unsafe') | Promise<'typed' | 'gone' | 'unsafe'>;
   // True when the harness sits at an empty input box, not running a turn or showing a
   // dialog. Lets the daemon correct a 'working' agent whose end-of-turn signal was lost.
-  atPrompt?(agent: Agent): boolean;
+  atPrompt?(agent: Agent): boolean | Promise<boolean>;
   // Whether the harness is still running the agent's turn with no tmux pane to show it, which a
   // server-backed harness (OpenCode's shared server) can do after its TUI exits. Lets a lost
   // terminal be checked against the harness itself before an unforced archive (S-578).

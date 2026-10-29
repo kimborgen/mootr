@@ -6,7 +6,8 @@ import { randomUUID } from 'node:crypto';
 import type { ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { STAM_HOME } from './config.ts';
-import { apply, emptyLayout, validLayout, type Layout, type LayoutOp } from './layout-ops.ts';
+import { apply, deadImageTabOps, emptyLayout, validLayout, type Layout, type LayoutOp } from './layout-ops.ts';
+import { PageLiveness } from './page-liveness.ts';
 
 // One op as a short phrase, for the agent's event log: `open agent:X in main`.
 export function describeOp(op: LayoutOp): string {
@@ -112,19 +113,36 @@ export function subscribe(fn: (l: Layout) => void): () => void {
   return () => listeners.delete(fn);
 }
 
+// The web pages that hold a layout stream are live (page-liveness.ts); the sweep closes the image tabs of
+// the ones that aren't, and those are the only tabs it touches.
+const SWEEP = 15_000;
+const PAGE_ID = /^[a-z0-9]{1,12}$/;
+const pages = new PageLiveness(Date.now());
+export function dropDeadImageTabs(now = Date.now()): void {
+  pages.prune(now);
+  const ops = deadImageTabOps(layout, (page) => pages.live(page, now));
+  if (ops.length) applyOps(ops);
+}
+setInterval(() => {
+  try { dropDeadImageTabs(); } catch (e) { console.error(`layout: couldn't close the image tabs of dead pages (${e instanceof Error ? e.message : e})`); }
+}, SWEEP).unref();
+
 // Server-sent events: the layout on connect and after every change. A client that falls
 // more than STREAM_CAP bytes behind (it stopped reading) is dropped; it reconnects and gets
 // the whole layout again.
 const STREAM_CAP = 1 << 20;
 const streams = new Set<ServerResponse>();
-export function streamLayout(res: ServerResponse): void {
+export function streamLayout(res: ServerResponse, page?: string): void {
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
   streams.add(res);
+  const id = page !== undefined && PAGE_ID.test(page) ? page : null;
+  if (id !== null) pages.open(id);
   const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
   // Cleanup first: nothing below awaits, and a closed socket must leave the set at once.
   res.on('close', () => {
     clearInterval(ping);
     streams.delete(res);
+    if (id !== null) pages.close(id, Date.now());
   });
   res.write(`event: layout\ndata: ${JSON.stringify(layout)}\n\n`);
 }

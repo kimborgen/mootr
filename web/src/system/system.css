@@ -6,6 +6,11 @@
   /* The layout reads these through a probe (SystemView.tsx readPx), so CSS and layout agree. */
   --sv-card-w: var(--size-card);
   --sv-card-h: calc(var(--space-12) * 2);
+  /* The agent card's ISSUE row: one nested row per row the issue layout holds (SystemView sets it from the layout). */
+  --sv-issue-h: var(--space-4);
+  /* The agent card's BADGES and FOOT rows: one row each when the layout places an item there, else none (SystemView sets them). */
+  --sv-badges-h: var(--space-4);
+  --sv-foot-h: var(--space-4);
   --sv-gap-x: var(--space-6);
   --sv-gap-y: calc(var(--space-12) + var(--space-2));
   /* The least space down between two cards on the orbits (S-460). */
@@ -143,9 +148,10 @@
 .sv-orbit { fill: none; stroke: var(--border-subtle); stroke-width: 1px; vector-effect: non-scaling-stroke; stroke-dasharray: var(--space-05) var(--space-15); }
 
 /* ---- A card: an instrument tile, square like chrome, a hairline, no shadow at rest ---- */
+/* The card's height is --sv-card-h less its three default rows, with the rows the layout places (agentCardHeight, layout.ts). */
 .sv-card {
-  position: absolute; left: 0; top: 0; height: var(--sv-card-h); padding: var(--space-2);
-  display: grid; grid-template-rows: var(--space-5) var(--space-4) var(--space-4) var(--space-4); row-gap: var(--space-1); align-content: start;
+  position: absolute; left: 0; top: 0; height: calc(var(--sv-card-h) - var(--space-4) * 3 + var(--sv-issue-h) + var(--sv-badges-h) + var(--sv-foot-h)); padding: var(--space-2);
+  display: grid; grid-template-rows: var(--space-5) var(--sv-issue-h) var(--sv-badges-h) var(--sv-foot-h); row-gap: var(--space-1); align-content: start;
   background: var(--surface-page); border: 1px solid var(--border-default); border-radius: var(--radius-sm);
   font-size: var(--type-chrome-md); line-height: var(--space-5); cursor: pointer; user-select: none; -webkit-user-select: none;
   /* Its transform and opacity are Motion's (SystemCard, S-463): one transform string, on springs. */
@@ -163,7 +169,9 @@
 .sv-card.human .glyph, .sv-card.sel .glyph { --pip-cut: var(--surface-raised); }
 
 .sv-r1, .sv-r2, .sv-r3 { display: flex; align-items: center; min-width: 0; }
-.sv-r1 { gap: var(--space-15); }
+.sv-r1 { grid-row: 1; gap: var(--space-15); }
+.sv-r2 { grid-row: 2; }
+.sv-r3 { grid-row: 3; }
 .sv-nm { font-weight: var(--weight-semibold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; text-align: left; }
 /* The name without the words it shares with its parent's (names.ts, S-572) is the far chip's. */
 .sv-nm .short { display: none; }
@@ -214,7 +222,18 @@
 .sv-r3 .badge { flex: none; font-size: var(--type-chrome-xs); font-weight: var(--weight-medium); }
 .sv-r3 .badge:not(.ok):not(.warn):not(.err):not(.progress) { background: var(--status-neutral-bg); color: var(--status-neutral-fg); }
 .sv-field { flex: none; display: inline-flex; font-size: var(--type-chrome-xs); }
-.sv-r4 { grid-row: 4; font-size: var(--type-chrome-sm); line-height: var(--space-4); color: var(--text-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sv-r4 { grid-row: 4; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, max-content); align-items: center; column-gap: var(--space-1); font-size: var(--type-chrome-sm); line-height: var(--space-4); color: var(--text-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* The row's items are columns of max-content width, capped by the row: a short item keeps its width, and the long items split what is left. Each ellipsises when cut. */
+.sv-r4 > * { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* The nested issue card (S-1438 PR 4): flush rows in the agent card, with no box of its own. Its first row is the
+   status mark, key and title; its rows after are the issue layout's BADGES and FOOT. Rows are space-4 (--sv-issue-h). */
+.ic-nested { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; }
+.ic-row { flex: none; height: var(--space-4); display: flex; align-items: center; gap: var(--space-1); min-width: 0; overflow: hidden;
+  font-size: var(--type-chrome-sm); line-height: var(--space-4); color: var(--text-secondary); white-space: nowrap; }
+.ic-head { box-shadow: inset 0 1px 0 var(--border-subtle); }
+.ic-key { flex: none; color: var(--text-muted); }
+.ic-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ic-foot { color: var(--text-muted); }
 /* The context bar: a hairline along the foot, its fill grows by transform. */
 .sv-ctx { position: absolute; left: 0; right: 0; bottom: 0; height: var(--space-05); overflow: hidden; border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
 .sv-ctx i { display: block; height: 100%; background: var(--border-strong); transform-origin: left; transition: transform var(--duration-tick) var(--ease-out); }

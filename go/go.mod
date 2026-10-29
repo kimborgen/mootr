@@ -3,8 +3,12 @@ module stam
 go 1.26
 
 require (
+	github.com/andybalholm/brotli v1.1.1
+	github.com/coder/websocket v1.8.12
+	github.com/creack/pty v1.1.24
 	github.com/oapi-codegen/runtime v1.1.1
 	golang.org/x/sys v0.33.0
+	golang.org/x/text v0.14.0
 	gopkg.in/yaml.v3 v3.0.1
 	zombiezen.com/go/sqlite v1.4.2
 )

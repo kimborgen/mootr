@@ -56,6 +56,34 @@ func (d *DB) AddEvent(ctx context.Context, agentID, typ string, data any) error 
 	return nil
 }
 
+// AddEventWhile is AddEvent only while ok holds for the agent's row, read in the same transaction; it reports whether it
+// recorded.
+func (d *DB) AddEventWhile(ctx context.Context, agentID, typ string, data any, ok func(Agent) bool) (bool, error) {
+	var arg any
+	if data != nil {
+		s, err := stringify(data)
+		if err != nil {
+			return false, fmt.Errorf("db: event %s data: %w", typ, err)
+		}
+		arg = s
+	}
+	done := false
+	err := d.Write(ctx, func(conn *sqlite.Conn) error {
+		a, err := agentOn(conn, agentID)
+		if err != nil || !ok(a) {
+			return err
+		}
+		done = true
+		return sqlitex.Execute(conn, "INSERT INTO events (agent_id, ts, type, data) VALUES (?, ?, ?, ?)", &sqlitex.ExecOptions{
+			Args: []any{agentID, now(), typ, arg},
+		})
+	})
+	if err != nil {
+		return false, fmt.Errorf("db: add event %s: %w", typ, err)
+	}
+	return done, nil
+}
+
 // stringify writes JSON as JSON.stringify does: no HTML escaping of <, > and &, and no trailing newline.
 func stringify(v any) (string, error) {
 	var b bytes.Buffer

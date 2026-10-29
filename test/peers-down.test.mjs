@@ -39,7 +39,7 @@ const wake = () => {
   for (const [req, res] of held.splice(0)) answer(req, res);
 };
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
-writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [{ name: 'far', url: `http://127.0.0.1:${server.address().port}`, token: 't' }] }));
+writeFileSync(join(home, 'settings.json'), JSON.stringify({ peers: [{ name: 'far', url: `http://127.0.0.1:${server.address().port}`, token: 'test-peer-token' }] }));
 const peers = await import('../src/peers.ts');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const timed = async (f) => {

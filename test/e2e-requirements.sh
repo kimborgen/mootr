@@ -97,7 +97,8 @@ for k in $SEEDED; do
   [ "$(getc "/api/requirements/$k")" = 200 ] || fail "seeded $k is missing"
   [ "$(jget "d['status']")" = draft ] || fail "seeded $k isn't a draft"
 done
-[ "$(human POST "/api/itsas/$ASK/act" '{"action":"approve","text":""}')" = 200 ] || fail "Approve failed: $(cat "$TEST_TMP/out")"
+getc "/api/itsas/$ASK" >/dev/null; REV=$(jget "d['rev']")
+[ "$(human POST "/api/itsas/$ASK/act" "{\"action\":\"approve\",\"text\":\"\",\"if_rev\":\"$REV\"}")" = 200 ] || fail "Approve failed: $(cat "$TEST_TMP/out")"
 in_force() { for k in $SEEDED; do getc "/api/requirements/$k" >/dev/null; [ "$(jget "d['status']")" = in_force ] || return 1; done; }
 wait_until in_force
 "$STAM" req seed "$TEST_TMP/seed.json" > "$TEST_TMP/seed.out" || fail "the human's seed failed"

@@ -35,11 +35,30 @@ afterEach(() => {
 const flush = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
 describe('ReqBatch', () => {
+  it('reports the revision its shown drafts were read with, and keeps it while a reload is slow (S-2998)', async () => {
+    let resolveSlow: (v: unknown) => void = () => {}
+    hoisted.get = vi.fn(() => Promise.resolve({ ...view, rev: 'revA' }))
+    const onBatch = vi.fn()
+    await act(async () => root.render(<ReqBatch it={it1} onBatch={onBatch} />))
+    await flush()
+    expect(onBatch).toHaveBeenLastCalledWith(true, 'revA')
+    // The ITSA changed (u2); the batch's reload answers late, so the old drafts and their revision stay.
+    hoisted.get = vi.fn(() => new Promise((r) => { resolveSlow = r }))
+    await act(async () => root.render(<ReqBatch it={{ ...it1, updated_at: 'u2' }} onBatch={onBatch} />))
+    await flush()
+    expect(onBatch).toHaveBeenLastCalledWith(true, 'revA')
+    expect(host.querySelector('.rq-batch-shall')?.textContent).toBe('The approval shall list each draft.')
+    await act(async () => { resolveSlow({ ...view, rev: 'revB', items: [{ ...view.items[0], text: 'Changed text.' }] }) })
+    await flush()
+    expect(onBatch).toHaveBeenLastCalledWith(true, 'revB')
+    expect(host.querySelector('.rq-batch-shall')?.textContent).toBe('Changed text.')
+  })
+
   it('reports the batch and lists its drafts while requirements are on', async () => {
     const onBatch = vi.fn()
     await act(async () => root.render(<ReqBatch it={it1} onBatch={onBatch} />))
     await flush()
-    expect(onBatch).toHaveBeenLastCalledWith(true)
+    expect(onBatch).toHaveBeenLastCalledWith(true, undefined)
     expect(host.querySelector('[data-req-batch]')).not.toBeNull()
   })
 
@@ -47,7 +66,7 @@ describe('ReqBatch', () => {
     const onBatch = vi.fn()
     await act(async () => root.render(<ReqBatch it={it1} onBatch={onBatch} />))
     await flush()
-    expect(onBatch).toHaveBeenLastCalledWith(true)
+    expect(onBatch).toHaveBeenLastCalledWith(true, undefined)
     hoisted.enabled = false
     await act(async () => root.render(<ReqBatch it={it1} onBatch={onBatch} />))
     await flush()

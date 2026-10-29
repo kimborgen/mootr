@@ -1,8 +1,10 @@
 // `stam mcp`: the MCP server every agent talks to. A thin stdio process: all logic lives
 // in the daemon, so the daemon can restart or update without the agent reconnecting.
 // For Claude Code it is also a channel (claude/channel), so the daemon can push prompts.
-import { api, WRITE_CALL_MS, writeId } from './client.ts';
+import { api, SWITCH_CALL_MS, WRITE_CALL_MS, writeId } from './client.ts';
 import { normalizeMailInput } from './mail-input.ts';
+import { unconfirmedVerdict } from './pr-review-message.ts';
+import { formatPrediction, type PrPrediction } from './pr-predict-format.ts';
 import { existsSync, realpathSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -14,6 +16,9 @@ import { template } from './templates.ts';
 import { FEEDBACK_KINDS } from './feedback.ts';
 import { blendHits } from './hit-blend.ts';
 import { activityInfoOf, type Mode } from './activity-info.ts';
+import { holdersText } from './developer-cap.ts';
+import { compactUsage } from './usage-compact.ts';
+import { fieldsChange, fieldsLine } from './itsa-fields-line.ts';
 import { EFFORT_KEYS, EVIDENCE_KINDS, RETRO_KINDS, STAM_ISSUE_KIND, runRetro } from './retro.ts';
 import { envVar, setEnvVar } from './env.ts';
 
@@ -73,14 +78,20 @@ function me(args: any = {}): string {
 }
 
 const self = { type: 'string', description: 'Your stam agent id. Needed only when your system prompt asks for it.' };
+// Where an ask to the human goes (S-3827, src/ask-home.ts): its home thread, named by the mail it arose from or its ITSA.
+const ASK_HOME =
+  " When it reaches your user it goes in its home thread, so they see it with its work: the thread of `thread` (the mail it arose from), else the thread of `itsa`, else of the one active ITSA you own. With none of these it goes in a new thread; pass `override` with a one-line reason when no thread or ITSA fits. A `thread` or `itsa` you can't read is refused.";
+const askHomeProps = {
+  thread: { type: 'string', description: 'The id of the mail this ask arose from, one you can read: the ask goes in that thread.' },
+  itsa: { type: 'string', description: "The ITSA it is for (key or id): the ask goes in that ITSA's thread when you pass no thread. Without it, the one active ITSA you own." },
+  override: { type: 'string', description: 'Only when no thread or ITSA fits: a one-line reason to send it in a new thread. Your user sees the reason.' },
+};
+const askHomeArgs = (a: Record<string, any>) => ({ thread: a.thread, itsa: a.itsa, override: a.override });
+// The daemon's hint when the ask found no home thread (it went to a new one).
+const hinted = (r: { hint?: string }) => (r?.hint ? ` It found no home thread, so it went to a new one. ${r.hint}` : '');
 
 // The ITSA a tool acts on: its `ref` (or `itsa` for itsa_post), with key and id accepted as aliases.
 // Missing, it says what to pass rather than failing later with "no ITSA undefined".
-// Field values as one compact line, `key=value` pairs; empty when the ITSA holds none.
-function fieldsLine(f: Record<string, unknown> | undefined): string {
-  const e = Object.entries(f ?? {});
-  return e.map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' ');
-}
 
 function itsaRef(a: any, name = 'ref'): string {
   const ref = a[name] ?? a.ref ?? a.key ?? a.id;
@@ -96,7 +107,8 @@ async function namesOf(self: string, ids: (string | null | undefined)[]): Promis
   const want = new Set(ids.filter((x): x is string => !!x && x !== 'human'));
   if (!want.size) return out;
   try {
-    const list = await api<any[]>('GET', `/api/agents?as=${encodeURIComponent(self)}`);
+    // Only the wanted agents, in any state (S-3816), not the whole list.
+    const list = await api<any[]>('GET', `/api/agents?${new URLSearchParams({ as: self, ids: [...want].join(',') })}`);
     for (const a of list) if (want.has(a.id)) out.set(a.id, a.name);
   } catch {}
   return out;
@@ -140,7 +152,7 @@ export const TOOL_GROUPS = [
 type ToolGroup = (typeof TOOL_GROUPS)[number]['key'];
 
 // `when: 'requirements'` lists the tool only while settings.requirements.enabled is true.
-type Tool = { name: string; description: string; inputSchema: any; group: ToolGroup; when?: 'requirements'; run: (args: any) => Promise<unknown> };
+type Tool = { name: string; description: string; inputSchema: any; group: ToolGroup; when?: 'requirements'; validate?: (args: any) => void; run: (args: any) => Promise<unknown> };
 
 // The PR events watch_pr can select: each preset is one event type. A merge or close always
 // ends a PR watch (PR_END_TYPES), so it is delivered even when the preset list leaves it out.
@@ -195,7 +207,7 @@ export const tools: Tool[] = [
   {
     name: 'whoami',
     group: 'registry',
-    description: 'Your own stam registry entry: id, name, role, state, and the path to your conversation history file.',
+    description: 'Your own stam registry entry: id, name, role, state, the path to your conversation history file, and now (the daemon\'s clock, ISO UTC).',
     inputSchema: { type: 'object', properties: { self } },
     run: async (a) => json(await api('GET', `/api/agents/${me(a)}`)),
   },
@@ -244,19 +256,34 @@ export const tools: Tool[] = [
   {
     name: 'find_agents',
     group: 'registry',
-    description: 'Search the stam registry by id, name, or role text. Without a query, lists every agent you may see. `role` keeps only agents whose role or name contains the text (case-insensitive); standing specialists come first, marked standing with their workspace name.',
-    inputSchema: { type: 'object', properties: { self, query: { type: 'string' }, role: { type: 'string', description: 'Specialty to find, matched against role and name as a case-insensitive substring.' } } },
+    description: 'Search the stam registry by id, name, or role text. Without a query, lists the live agents you may see (active, paused and shut-down ones; archived ones are left out). With a query, archived agents are left out too, unless the query is exactly an agent\'s id or name. `state` overrides this: "archived" lists only archived agents, "all" lists every match. `role` keeps only agents whose role or name contains the text (case-insensitive); standing specialists come first, marked standing with their workspace name. Each agent carries its type: the saved type it was spawned as, or null.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        self,
+        query: { type: 'string' },
+        role: { type: 'string', description: 'Specialty to find, matched against role and name as a case-insensitive substring.' },
+        state: { type: 'string', enum: ['active', 'archived', 'all'], description: 'Which agents to list: active (not archived), archived, or all. Without it: live agents, plus an archived one only on an exact id or name match of the query.' },
+      },
+    },
     run: async (a) => {
       const q = new URLSearchParams();
       if (a.query) q.set('q', a.query);
       if (a.role) q.set('role', a.role);
       if (agentId ?? a.self) q.set('as', agentId ?? a.self);
-      const list = await api<any[]>('GET', `/api/agents?${q}`);
+      // The daemon lists only what is asked for (S-3816); the filter below still decides, for a daemon that lists all.
+      q.set('state', a.state === 'all' ? 'all' : a.state === 'archived' ? 'archived' : 'live,stopped');
+      if (!a.state && a.query) q.set('ids', a.query);
+      const list = (await api<any[]>('GET', `/api/agents?${q}`)).filter((x) => {
+        if (a.state) return a.state === 'all' || (a.state === 'archived') === (x.lifecycle === 'archived');
+        return x.lifecycle !== 'archived' || (!!a.query && (x.id === a.query || x.name === a.query));
+      });
       return json(
         list.map((x) => ({
           id: x.id,
           name: x.name,
           role: x.role,
+          type: x.type ?? null,
           harness: x.harness,
           model: x.model,
           machine: x.machine,
@@ -269,6 +296,8 @@ export const tools: Tool[] = [
           ...(x.standing && x.load ? { load: x.load } : {}),
           ...(x.lifecycle === 'paused' && !x.resting ? { paused_by: [...(x.paused_by ? JSON.parse(x.paused_by) : []), ...(x.blockers?.length ? ['stam'] : [])] } : {}),
           ...(x.waits?.length ? { waits: x.waits.map((w: any) => ({ id: w.id, kind: w.kind, target: w.target, detail: w.detail, since: w.since, until: w.until })) } : {}),
+          // The open ask this agent waits on: its mail to open it in, and its kind (S-3982). Never the ask's text.
+          ...(x.open_ask_detail ? { open_ask: x.open_ask_detail } : {}),
           ...(x.blockers?.length ? { blockers: x.blockers.map((b: any) => ({ kind: b.kind, account: b.account, reason: b.reason, since: b.since, clear: b.clear })) } : {}),
         })),
       );
@@ -285,30 +314,31 @@ export const tools: Tool[] = [
     name: 'settings_ask',
     group: 'registry',
     description:
-      "Ask the human to change stam's settings (chief of staff and assistant only). Pass patch, an object of the keys to change, merged into the settings (a nested object merges per key; fill:true only fills keys that are unset). This sends the human a settings-change approval with a diff and returns the request id; nothing is written until the human approves, and then stam applies the patch itself, unless a setting it changes has changed since you asked (then ask again; other settings changing doesn't matter). Read the current settings first with the settings GET (secrets show as REDACTED). Other agents are refused: ask your chief of staff.",
+      "Ask the human to change stam's settings (chief of staff and assistant only). Pass patch, an object of the keys to change, merged into the settings (a nested object merges per key; fill:true only fills keys that are unset). This sends the human a settings-change approval with a diff and returns the request id; nothing is written until the human approves, and then stam applies the patch itself, unless a setting it changes has changed since you asked (then ask again; other settings changing doesn't matter). Read the current settings first with the settings GET (secrets show as REDACTED). Other agents are refused: ask your chief of staff." + ASK_HOME,
     inputSchema: {
       type: 'object',
       properties: {
         self,
         patch: { type: 'object', description: 'The settings keys to change, such as {"instructions":{"summaries":{"model":"claude-haiku-5-5"}}}.' },
         fill: { type: 'boolean', description: 'Only set keys that are not set yet.' },
+        ...askHomeProps,
       },
       required: ['patch'],
     },
     run: async (a) => {
-      const r = await api('PATCH', '/api/config/settings', { patch: a.patch, fill: a.fill === true });
-      return text(`Asked the human to change the settings (request ${r.requested}). Nothing changes until they approve; stam then applies the patch and tells you the result.`);
+      const r = await api('PATCH', '/api/config/settings', { patch: a.patch, fill: a.fill === true, ...askHomeArgs(a) });
+      return text(`Asked the human to change the settings (request ${r.requested}). Nothing changes until they approve; stam then applies the patch and tells you the result.${hinted(r)}`);
     },
   },
   {
     name: 'usage_info',
     group: 'cost',
     description:
-      'Spend and tokens by day, model, and agent, and subscription windows (such as Claude 5-hour and weekly limits), with estimated shares of each window by agent and tree, the usual percent per hour by hour of day and weekday, and when it reaches 100% (at the rate of the last 30 minutes, and following the usual pattern), the trees\' allocations with their current use, plus the user\'s cost instructions. Pass tree (an agent name or id) for that tree\'s estimated share and hourly history of each window, its allocations, and what a finished issue with its root\'s harness and model typically used. Use it to plan cost-aware work, for example picking a cheaper preset. It also includes machines: each computer\'s one-minute CPU, RAM, and swap averages, load, and its agents by state (null from a peer on an older release), to schedule work by load.',
-    inputSchema: { type: 'object', properties: { days: { type: 'number' }, tree: { type: 'string', description: 'An agent name or id: show its tree\'s estimated share of each window.' } } },
+      'Spend and tokens by day, model, and agent, and subscription windows (such as Claude 5-hour and weekly limits), with estimated shares of each window by agent and tree, the usual percent per hour by hour of day and weekday, and when it reaches 100% (at the rate of the last 30 minutes, and following the usual pattern), the trees\' allocations with their current use, plus the user\'s cost instructions. Compact by default (the windows with their projections, the top 5 trees, agents and models, the allocations, the machines); pass detail (true) for every agent, tree, model and cost unit with the hourly history, about 1 MB. Pass tree (an agent name or id) for that tree\'s estimated share and hourly history of each window, its allocations, and what a finished issue with its root\'s harness and model typically used. Use it to plan cost-aware work, for example picking a cheaper preset. It also includes machines: each computer\'s one-minute CPU, RAM, and swap averages, load, and its agents by state (null from a peer on an older release), to schedule work by load.',
+    inputSchema: { type: 'object', properties: { days: { type: 'number' }, tree: { type: 'string', description: 'An agent name or id: show its tree\'s estimated share of each window.' }, detail: { type: 'boolean', description: 'The whole route answer, about 1 MB, not the compact one. False by default.' } } },
     run: async (a) => {
       const r = await api<Record<string, unknown>>('GET', `/api/usage?days=${a.days ?? 7}${a.tree ? `&tree=${encodeURIComponent(a.tree)}` : ''}${agentId ?? a.self ? `&as=${encodeURIComponent(agentId ?? a.self)}` : ''}`);
-      return json({ ...r, see_also: 'For time and bottlenecks, call activity_info.' });
+      return json({ ...(a.detail === true ? r : compactUsage(r, agentId ?? a.self)), see_also: 'For time and bottlenecks, call activity_info.' });
     },
   },
   {
@@ -394,7 +424,7 @@ export const tools: Tool[] = [
       required: ['agent', 'preset'],
     },
     run: async (a) => {
-      const r = await api('POST', '/api/cost/switch', { agent: a.agent, preset: a.preset, soft_stop_minutes: a.soft_stop_minutes, by: me(a) });
+      const r = await api('POST', '/api/cost/switch', { agent: a.agent, preset: a.preset, soft_stop_minutes: a.soft_stop_minutes, by: me(a) }, SWITCH_CALL_MS);
       if (r.status === 'quiescing') return text(`${r.from} is finishing its step (up to ${r.minutes} minutes); then its work moves to ${r.to} on ${r.preset}. You'll get a notice when it's done.`);
       const moved = `${r.moved.children.length} children, ${r.moved.threads} threads, ${r.moved.unread} unread mails`;
       return text(`${r.from} now continues as ${r.to} on ${r.preset} (${moved}${r.interrupted ? '; its turn was interrupted' : ''}${r.handover ? '' : '; no HANDOVER.md'}). ${r.from} is stopped and held as taken over.`);
@@ -525,7 +555,7 @@ export const tools: Tool[] = [
         machine: { type: 'string', description: 'Machine to run it on, from the machine field in find_agents. Defaults to yours.' },
         worktree: { type: 'boolean', description: 'Give it its own git worktree and branch, removed when it is archived. Defaults to the type\'s worktree default (the developer type is true). A developer that ends up without one in the live deploy checkout is refused, since its commits there would hold every deploy.' },
         base: { type: 'string', description: 'A git ref to cut the worktree\'s branch from, such as origin/stam/x (fetched first; a local branch works too). The spawn fails if it does not resolve. Without it, a repo with an origin remote is cut from a freshly fetched origin/main (falling back to the checkout\'s HEAD if the fetch fails; the spawn\'s workspace:base event says which). A base of origin/stam/X (or storage/stam/X) continues that PR: the worktree goes on stam/X itself at the base\'s commit, so pr_open updates the PR with no fast-forward (the spawn result and the workspace:base event say so). The spawn is refused when stam/X is checked out in another worktree (archive its holder) or a local stam/X has commits the base lacks. To stack a NEW PR on stam/X instead, pass branch: "new" (a reviewer type always gets its own branch). Only with a worktree.' },
-        branch: { type: 'string', description: 'The worktree\'s branch name. Defaults to stam/NAME, or to the PR branch itself when base is origin/stam/X. Pass a new name, or "new" for stam/NAME, to cut a new branch (a stacked PR) from that base instead of continuing it. A name that already exists is refused. Only with a worktree.' },
+        branch: { type: 'string', description: 'The worktree\'s branch name. Defaults to stam/NAME, or to the PR branch itself when base is origin/stam/X. Pass a new name, or "new" for stam/NAME, to cut a new branch (a stacked PR) from that base instead of continuing it. An explicit name is used as given. When the default stam/NAME is already taken (here or on origin), the branch gets a free -2, -3 suffix; the spawn result and the agent\'s brief name it. Only with a worktree.' },
         workspace_script: { type: 'string', description: 'Shell command that prints the directory to work in.' },
         workspace_instructions: { type: 'string', description: 'Tell it to create its own workspace this way.' },
         standing: { type: 'boolean', description: 'A long-lived specialist, kept as a standing agent rather than one for a single task. A standing agent idle for standing.idleHours (default 4) rests, harness stopped, and mail, a fired wake_me or an assigned ITSA wakes it.' },
@@ -556,7 +586,7 @@ export const tools: Tool[] = [
       }
       if (r.queued) {
         return text(
-          `Queued ${r.name}: place ${r.place} of ${r.queue_length}${r.urgent ? ` (urgent: ${r.urgent})` : ''} for a developer slot on ${r.machine}, all ${r.cap} in use. Holders: ${r.holders.join(', ')}. It starts by itself when a slot frees, and you get a notice then (or if it fails to start). Do not spawn it again.`,
+          `Queued ${r.name}: place ${r.place} of ${r.queue_length}${r.urgent ? ` (urgent: ${r.urgent})` : ''} for a developer slot on ${r.machine}, all ${r.cap} in use. Holders: ${holdersText(r.holders, r.holder_info)}. It starts by itself when a slot frees, and you get a notice then (or if it fails to start). Do not spawn it again.`,
         );
       }
       const wt = (() => {
@@ -626,7 +656,7 @@ export const tools: Tool[] = [
     name: 'request_permission',
     group: 'permissions',
     description:
-      "Ask for permission when something you need is blocked or needs consent. `audience` is `human` when only your user's consent unblocks it: a harness or auto-mode safety block, an irreversible or outward action, spend above the caps. `delegate` when your parent or the chief of staff can decide it; they escalate to your user if needed. If omitted, it goes to your parent or the chief of staff, or to your user when you have neither. A delegate ask with no parent or chief of staff to decide goes to your user. The answer arrives as a stam notice saying who answered. Keep working on other things meanwhile.",
+      "Ask for permission when something you need is blocked or needs consent. `audience` is `human` when only your user's consent unblocks it: a harness or auto-mode safety block, an irreversible or outward action, spend above the caps. `delegate` when your parent or the chief of staff can decide it; they escalate to your user if needed. If omitted, it goes to your parent or the chief of staff, or to your user when you have neither. A delegate ask with no parent or chief of staff to decide goes to your user. The answer arrives as a stam notice saying who answered. Keep working on other things meanwhile." + ASK_HOME,
     inputSchema: {
       type: 'object',
       properties: {
@@ -635,31 +665,33 @@ export const tools: Tool[] = [
         reason: { type: 'string', description: 'Why it is needed for your task.' },
         details: { type: 'string', description: 'The exact command or tool call, and what the check said.' },
         audience: { type: 'string', enum: ['human', 'delegate'], description: "'human': only your user's consent unblocks it. 'delegate': your parent or the chief of staff can decide it. Omit it to default to delegate." },
+        ...askHomeProps,
       },
       required: ['action', 'reason'],
     },
     run: async (a) => {
-      const r = await api('POST', '/api/permissions', { agent: me(a), action: a.action, reason: a.reason, details: a.details ?? '', audience: a.audience });
-      return text(`Request ${r.id} sent. You'll get a notice with the answer.`);
+      const r = await api('POST', '/api/permissions', { agent: me(a), action: a.action, reason: a.reason, details: a.details ?? '', audience: a.audience, ...askHomeArgs(a) });
+      return text(`Request ${r.id} sent. You'll get a notice with the answer.${hinted(r)}`);
     },
   },
   {
     name: 'suggest_input',
     group: 'permissions',
     description:
-      "Claude Code only. Suggest one line for your user to approve, which stam then types into your own input box exactly as written and sends, as if your user typed it: for example `! git push` to run a command auto mode blocked. Only the human can approve it, from stam's web UI; reviewing agents can only deny it. It expires after 30 minutes, and a new suggestion replaces your pending one. The answer arrives as a stam notice: typed, held until your input box is free, or expired.",
+      "Claude Code only. Suggest one line for your user to approve, which stam then types into your own input box exactly as written and sends, as if your user typed it: for example `! git push` to run a command auto mode blocked. Only the human can approve it, from stam's web UI; reviewing agents can only deny it. A suggestion waits until your user answers it or it is withdrawn, and a new suggestion replaces your pending one. Once approved, it waits 30 minutes for your input box to be free, and expires after that. The answer arrives as a stam notice: typed, held until your input box is free, or expired." + ASK_HOME,
     inputSchema: {
       type: 'object',
       properties: {
         self,
         text: { type: 'string', description: 'The exact line to type: one line, no control characters, at most 2000 characters.' },
         reason: { type: 'string', description: 'Why you need it, for your user.' },
+        ...askHomeProps,
       },
       required: ['text', 'reason'],
     },
     run: async (a) => {
-      const r = await api('POST', '/api/suggest-input', { self: me(a), text: a.text, reason: a.reason });
-      return text(`Suggestion ${r.id} sent to your user; it expires at ${r.expires_at}. You'll get a notice when it is typed, held, or expired.`);
+      const r = await api('POST', '/api/suggest-input', { self: me(a), text: a.text, reason: a.reason, ...askHomeArgs(a) });
+      return text(`Suggestion ${r.id} sent to your user; waits until your user answers it. You'll get a notice when it is typed, held, or expired.${hinted(r)}`);
     },
   },
   {
@@ -721,7 +753,7 @@ export const tools: Tool[] = [
         agree: { type: 'boolean' },
         verdict: { type: 'string', enum: ['approve', 'request_changes'], description: 'Your verdict on the PR, in a ring that reviews one. Left out, stam reads it from your text.' },
         round: { type: 'number', description: 'The round your turn prompt shows ("round N of at most M"). A submit for a round the ring has moved past is refused and writes nothing. Left out, it goes to the ring\'s current round.' },
-        seat: { type: 'string', description: 'The member the text is for, by the name your turn prompt shows ("You are NAME"). Required when you hold two or more open seats in the ring, such as your own and a predecessor\'s; a seat you don\'t hold, or one already filled this round, is refused. Left out, the text goes to your one open seat.' },
+        seat: { type: 'string', description: 'The member the text is for, by the name your turn prompt shows ("You are NAME"). Required when you hold two or more open seats in the ring, such as your own and a predecessor\'s; a seat you don\'t hold is refused; one already filled this round is rewritten (rounds rings). Left out, the text goes to your one open seat.' },
       },
       required: ['ring', 'text', 'agree'],
     },
@@ -818,7 +850,7 @@ export const tools: Tool[] = [
         thread: { type: 'string', description: 'A mail id: clear only for mail in that mail\'s thread.' },
         filter: {
           type: 'object',
-          description: "For on 'event': which events clear the wait.",
+          description: "For on 'event' (required): which events clear the wait. Name at least one of source, subjects, types or actors; an empty filter is refused.",
           properties: {
             source: { type: 'string', description: 'Such as github or linear.' },
             subjects: { type: 'array', items: { type: 'string' }, description: 'Subject keys, such as github:OWNER/REPO#12; * is a glob within one segment.' },
@@ -882,6 +914,10 @@ export const tools: Tool[] = [
     group: 'mail',
     description: 'Read a mail thread you take part in, oldest first: the messages you sent or received in it. Also a thread with your user that one of your parents took part in, found with search_mail, and the threads of an ITSA you own or take part in, or whose parent ITSA you own. thread_id may be any mail id in the thread, such as one cited in your brief. Doesn\'t mark anything read.',
     inputSchema: { type: 'object', properties: { self, thread_id: { type: 'string' } }, required: ['thread_id'] },
+    // Before the decision-step check, so a call that can't run costs no daemon request (S-4120).
+    validate: (a) => {
+      if (typeof a.thread_id !== 'string' || !a.thread_id.trim()) throw new Error('thread_id is required: any mail id in the thread, such as m1a2b3c');
+    },
     run: async (a) => {
       const mails = await api<any[]>('GET', `/api/threads/${a.thread_id}?box=${me(a)}`);
       if (!mails.length) return text(`No mail of yours in thread ${a.thread_id}.`);
@@ -1274,6 +1310,8 @@ export const tools: Tool[] = [
       if (x.summary) lines.push(x.summary);
       if (x.body) lines.push(x.body);
       lines.push(`owner: ${nameOf(x.owner, m)}`);
+      // The open ask it waits on: its mail, then its kind, never the ask's text (S-3982).
+      if (x.open_ask_detail) lines.push(`open ask: ${[x.open_ask_detail.mail, x.open_ask_detail.kind].filter(Boolean).join(' · ')}`);
       if (x.parent_chain?.length) lines.push(`parents: ${x.parent_chain.map((p: any) => `${p.key} ${p.title}`).join(' > ')}`);
       if (fieldsLine(x.fields)) lines.push(`fields: ${fieldsLine(x.fields)}`);
       if (x.participants?.length) lines.push(`participants: ${x.participants.map((p: string) => nameOf(p, m)).join(', ')}`);
@@ -1373,7 +1411,10 @@ export const tools: Tool[] = [
       if (!Object.keys(patch).length) throw new Error('nothing to set: pass at least one field (status, owner, title, ...)');
       const r = await api<any>('PATCH', `/api/itsas/${encodeURIComponent(ref)}`, { ...patch, by: me(a) });
       const m = await namesOf(me(a), [r.itsa.owner, ...idsIn(Object.values(r.changes).flatMap((c: any) => [c.from, c.to]))]);
-      const changed = Object.entries(r.changes).map(([f, c]: [string, any]) => `${f}: ${showValue(c.from, m)} -> ${showValue(c.to, m)}`);
+      // Fields change as {from, to} maps of key to value, so they show as key=value pairs, not as objects.
+      const changed = Object.entries(r.changes).map(([f, c]: [string, any]) =>
+        f === 'fields' ? fieldsChange(c) : `${f}: ${showValue(c.from, m)} -> ${showValue(c.to, m)}`,
+      );
       return text(`${r.itsa.key}: ${changed.join('; ') || 'nothing changed'}${a.title !== undefined ? longTitleNote(r.itsa.key, a.title) : ''}${r.retro_offer ? `\n\n${r.retro_offer}` : ''}`);
     },
   },
@@ -1397,13 +1438,14 @@ export const tools: Tool[] = [
         width: { type: 'string', enum: ['s', 'm', 'l'] },
         align: { type: 'string', enum: ['start', 'end'] },
         card: { type: 'string', enum: ['chip', 'meta'] },
+        kinds: { type: 'array', items: { type: 'string' }, description: 'The ITSA kinds this field applies to, such as ["issue"]: other ITSAs skip it, and a value on one is refused. Omit or [] for every kind. Narrowing keeps values and hides them.' },
         order: { type: 'array', items: { type: 'string' }, description: 'order: field keys, first to last.' },
       },
     },
     run: async (a) => {
       const action = a.action ?? 'list';
       const body: Record<string, unknown> = { by: me(a) };
-      for (const k of ['key', 'label', 'type', 'options', 'description', 'hint', 'width', 'align', 'card'] as const) if (a[k] !== undefined) body[k] = a[k];
+      for (const k of ['key', 'label', 'type', 'options', 'description', 'hint', 'width', 'align', 'card', 'kinds'] as const) if (a[k] !== undefined) body[k] = a[k];
       const need = () => {
         if (!a.field) throw new Error(`${action} needs field (the key or id)`);
         return encodeURIComponent(String(a.field));
@@ -1427,7 +1469,7 @@ export const tools: Tool[] = [
         list = await api<any[]>('POST', '/api/itsas/fields/order', { order: a.order, by: me(a) });
         done = 'reordered';
       } else throw new Error('action is list, create, update, remove, or order');
-      const rows = list.map((f) => `${f.key} · ${f.label} · ${f.type}${f.options ? ` (${f.options.map((o: any) => o.value).join(' | ')})` : ''}${f.description ? ` — ${f.description}` : ''}`);
+      const rows = list.map((f) => `${f.key} · ${f.label} · ${f.type}${f.options ? ` (${f.options.map((o: any) => o.value).join(' | ')})` : ''}${f.kinds ? ` · kinds: ${f.kinds.join(', ')}` : ''}${f.description ? ` — ${f.description}` : ''}`);
       return text([done, rows.length ? rows.join('\n') : 'No fields.'].filter(Boolean).join('\n'));
     },
   },
@@ -1492,23 +1534,29 @@ export const tools: Tool[] = [
     name: 'pr_open',
     group: 'itsas',
     description:
-      'Open a branch\'s pull request on GitHub, from any machine (S-514). It runs on the ITSA home, where gh is: it fetches the branch from storage (or, on the home, from your own worktree), pushes it to origin, and opens the PR, or replaces the body of the open PR for that branch. The body is the docs/pull-requests.md body: its ITSA, Gates, and Deploy lines first. With itsa, the ITSA gets the PR and branch links, and a branch you own that is not yet linked is linked to it. Returns the PR number and url; then watch_pr it. Every later push to the branch needs pr_open again: a push to origin reaches storage only, not GitHub, so pr_open is what updates the PR.',
+      'Open a branch\'s pull request on GitHub, from any machine (S-514). It runs on the ITSA home, where gh is: it fetches the branch from storage (or, on the home, from your own worktree), pushes it to origin, and opens the PR, or replaces the body of the open PR for that branch. The body is the docs/pull-requests.md body: its ITSA, Gates, and Deploy lines first. With itsa, the ITSA gets the PR and branch links, and a branch you own that is not yet linked is linked to it. Returns the PR number and url; then watch_pr it. Every later push to the branch needs pr_open again: a push to origin reaches storage only, not GitHub, so pr_open is what updates the PR. Run it with predict: true first (S-3287): a dry run that needs no title or body, pushes nothing to GitHub and opens nothing, and returns the tests the gate adds for the branch (each with its path and rule), which LIGHT ones it ran and passed, and the exact NAME: PASS lines the body must carry. A prediction that fails or times out is an error, never an empty list.',
     inputSchema: {
       type: 'object',
       properties: {
         self,
         branch: { type: 'string', description: 'The branch you pushed to storage.' },
-        title: { type: 'string', description: 'One line.' },
+        predict: { type: 'boolean', description: 'Dry run (default false): return the NAME: PASS lines the body must carry. Needs no title or body; pushes nothing to GitHub and opens no PR.' },
+        title: { type: 'string', description: 'One line. Not needed with predict.' },
         body: { type: 'string', description: 'The PR body, in the docs/pull-requests.md format. Exactly one of body and body_file.' },
         body_file: { type: 'string', description: 'The path of a file holding the PR body, in your worktree or your scratch dir (read on your machine, at most 256 KiB). Exactly one of body and body_file.' },
         itsa: { type: 'string', description: 'The ITSA the branch delivers (id or key), to link the PR and branch to.' },
       },
-      required: ['branch', 'title'],
+      required: ['branch'],
     },
     run: async (a) => {
       const by = me(a);
       const unknown = Object.keys(a).filter((k) => !PR_OPEN_PARAMS.includes(k));
       if (unknown.length) throw new Error(`pr_open has no parameter ${unknown.join(', ')}: its parameters are ${PR_OPEN_PARAMS.join(', ')}`);
+      if (a.predict) {
+        // A dry run: never a timeout recovery, since it opened nothing. A failure throws; the list is never made up (S-3287).
+        return text(formatPrediction(await api<PrPrediction>('POST', '/api/pr/predict', { branch: a.branch, by }, PR_OPEN_CALL_MS)));
+      }
+      if (!String(a.title ?? '').trim()) throw new Error('pr_open needs a title (or predict: true for a dry run)');
       try {
         const r = await api<any>('POST', '/api/pr/open', { branch: a.branch, title: a.title, body: a.body, body_file: a.body_file, itsa: a.itsa, by }, PR_OPEN_CALL_MS);
         return text(`${r.created ? 'Opened' : 'Updated'} PR #${r.number} for ${r.branch}: ${r.url}\nEvery later push to ${r.branch} needs pr_open again: a push to origin reaches storage only, not GitHub.${r.warning ? `\nWARNING: ${r.warning}` : ''}${r.advisory?.length ? `\nADVISORY (LIGHT tests, not a refusal): ${r.advisory.join('; ')}` : ''}`);
@@ -1522,7 +1570,7 @@ export const tools: Tool[] = [
     name: 'pr_merge',
     group: 'itsas',
     description:
-      'Merge an approved pull request, from any machine (S-2279). The ITSA home starts the merge script for it, detached from your shell (a build without the merge scripts refuses, and you merge with gh pr merge), and mails you the outcome when it ends: the merge sha, a refusal with its reason, or "not merged" with the script\'s last lines (call again to retry). Only the tree that owns the PR\'s ITSA (its body\'s ITSA: line) or its branch, or the chief of staff, may merge it. A call while a merge of the PR runs returns that run. With status, it starts nothing and returns the run\'s state and queue place. With cancel (S-2709), it takes the PR out of the merge queue without closing it: the ITSA home stops the PR\'s merge run and worker by recorded pid and drops its queue ticket, on the same tree rules; you and the run\'s requester get a "merge cancelled" mail. If a train holds the gate lock the cancel is refused with "retry after it" and nothing changes; a PR with no run is an error.',
+      'Merge an approved pull request, from any machine (S-2279). The ITSA home starts the merge script for it, detached from your shell (a build without the merge scripts refuses, and you merge with gh pr merge), and mails you the outcome when it ends: the merge sha, a refusal with its reason, or "not merged" with the script\'s last lines (call again to retry). Only the tree that owns the PR\'s ITSA (its body\'s ITSA: line) or its branch, or the chief of staff, may merge it. A call while a merge of the PR runs returns that run. With status, it starts nothing and returns the run\'s state and queue place. With cancel (S-2709), it takes the PR out of the merge queue without closing it: the ITSA home stops the PR\'s merge run and worker by recorded pid and drops its queue ticket, on the same tree rules; you and the run\'s requester get a "merge cancelled" mail. If a train holds the gate lock and carries the PR, the cancel claims the PR\'s ticket and the train drops the PR before its merge (the result says the cancel is pending in the train, and the run\'s mail reports it); if the train already claimed the merge the cancel is refused as "already merging" and the PR merges; a lock held by anything else refuses the cancel with nothing changed. A PR with no run is an error.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1545,6 +1593,7 @@ export const tools: Tool[] = [
       }
       if (a.cancel) {
         const c = await api<any>('POST', '/api/pr/merge-cancel', { pr: a.pr, by }, 120_000);
+        if (c.pending === 'train') return text(`Cancel claimed for PR #${c.pr}: it is in a running train, which drops it before its merge (no train step is stopped; the other PRs go on). The run ends as cancelled when the train ends, and you and the requester get the "merge cancelled" mail. The PR is still open.`);
         return text(`Cancelled the merge of PR #${c.pr}: stopped ${[c.stopped.shell && 'the run', c.stopped.worker && 'the merge worker'].filter(Boolean).join(' and ') || 'nothing running'}, dropped ${c.stopped.tickets} queue ticket(s). The PR is still open; pr_merge queues it again.`);
       }
       const r = await api<any>('POST', '/api/pr/merge', { pr: a.pr, by }, 120_000);
@@ -1595,6 +1644,38 @@ export const tools: Tool[] = [
     },
   },
   {
+    name: 'pr_view',
+    group: 'itsas',
+    description:
+      'Read a pull request, from any machine (S-3107): its title, state, base and head branches, the full head sha, its merge base with the base branch and the one git diff for the PR (S-3751), its body, the files changed with their +/- counts, and its checks and commit statuses (stam/review included). It runs on the ITSA home, where gh is, so you need no GitHub login. Read-only apart from refreshing storage\'s PR head mirror when it lags. pr is a number (in the home\'s default repo) or OWNER/REPO#N in a repo of settings.itsa.repos.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        self,
+        pr: { type: ['string', 'number'], description: 'The PR number, or OWNER/REPO#N.' },
+      },
+      required: ['pr'],
+    },
+    run: async (a) => {
+      // Longer than the home's peer wait (pr-view.ts VIEW_PEER_MS), so the caller doesn't give up first.
+      const r = await api<any>('POST', '/api/pr/view', { pr: a.pr, by: me(a) }, 180_000);
+      const files = r.files.map((f: any) => `  ${f.path} +${f.additions} -${f.deletions}`);
+      const checks = r.checks.map((c: any) => `  ${c.name}: ${c.state}`);
+      return text([
+        `PR #${r.number} in ${r.repo}: ${r.title}`,
+        `${r.url}`,
+        `State ${r.state}. Base ${r.base}, head ${r.head_branch} at ${r.head}.`,
+        ...(r.merge_base ? [`Merge base ${r.merge_base}.`, `Diff: ${r.diff}`] : []),
+        `Files (${r.files.length}):`,
+        ...(files.length ? files : ['  none']),
+        `Checks (${r.checks.length}):`,
+        ...(checks.length ? checks : ['  none']),
+        'Body:',
+        r.body,
+      ].join('\n'));
+    },
+  },
+  {
     name: 'pr_review',
     group: 'itsas',
     description:
@@ -1611,7 +1692,15 @@ export const tools: Tool[] = [
       required: ['pr', 'verdict', 'summary', 'head'],
     },
     run: async (a) => {
-      const r = await api<any>('POST', '/api/pr/review', { pr: a.pr, verdict: a.verdict, summary: a.summary, head: a.head, by: me(a) });
+      // Longer than the home's peer wait (pr-review.ts forwardMs), so this call doesn't give up before the home answers (S-2631).
+      let r: any;
+      try {
+        r = await api<any>('POST', '/api/pr/review', { pr: a.pr, verdict: a.verdict, summary: a.summary, head: a.head, by: me(a) }, 190_000);
+      } catch (e: any) {
+        // No HTTP answer at all: the call timed out or the connection dropped, so the verdict may be posted (S-2631).
+        if (e?.status === undefined) throw new Error(unconfirmedVerdict(a.pr, 'this daemon timed out or lost its connection'));
+        throw e;
+      }
       return text(`Posted ${r.verdict} on PR #${r.pr} at ${String(r.head).slice(0, 7)}: ${r.line}`);
     },
   },
@@ -1795,7 +1884,7 @@ export function toolCatalog(opts: { requirements?: boolean } = {}): {
 // PR_OPEN_PEER_MS), so a slow storage fetch doesn't end the wait while the PR is still being made (S-1332).
 const PR_OPEN_CALL_MS = 360_000;
 // pr_open's parameters (S-2677): any other key is refused by name, so a misspelt one (body-file) isn't taken as no body.
-const PR_OPEN_PARAMS = ['self', 'branch', 'title', 'body', 'body_file', 'itsa'];
+const PR_OPEN_PARAMS = ['self', 'branch', 'predict', 'title', 'body', 'body_file', 'itsa'];
 
 // Whether a call gave up waiting (the client's or a peer's timeout), not a refusal.
 const isTimeout = (e: unknown): boolean => e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError' || /aborted due to timeout/.test(e.message));
@@ -1955,6 +2044,7 @@ async function handle(m: any) {
     try {
       if (!tool) throw new Error(`unknown tool ${m.params?.name}`);
       const args = m.params.arguments ?? {};
+      tool.validate?.(args);
       const check = await checkStep(tool.name, args, m.params.arguments?.self);
       if (check && !check.allow) send({ jsonrpc: '2.0', id: m.id, result: { ...text(check.error ?? `Denied by a decision step: ${tool.name}`), isError: true } });
       else send({ jsonrpc: '2.0', id: m.id, result: await tool.run(args) });

@@ -2,6 +2,7 @@
 # Runs CMD... in one of N machine-wide slots, so heavy test commands (test/run.sh,
 # web/check) don't pile up: storage hit load 41 on 8 cores from six worktrees at once (S-692).
 #   scripts/test-slot.sh [--light] CMD [ARGS...]
+# A CMD that is test/run.sh takes no slot here: run.sh takes its own, light or heavy, from its names (S-3585).
 # N is STAM_TEST_SLOTS, else max(1, nproc/4). Each slot is a flock on $STAM_TEST_SLOT_DIR/slot.I
 # (default /tmp/stam-test-slots). It tries every slot without waiting, then polls them every second
 # and, once, names the holders (pid, worktree) from the slot.I.owner files. The lock is released when
@@ -28,6 +29,8 @@
 # Runs CMD with its own TMPDIR under the worktree when the caller set none (S-2586, test/runtmp.sh): CMD is a
 # child then, so the folder can be removed when it ends; with a TMPDIR already set it is exec'd as before.
 runcmd() {
+  # S-3463: a missing command still exits 127 below; this only says why, on stderr.
+  command -v "$1" >/dev/null 2>&1 || echo "test-slot: $1 isn't found or runnable. For a vitest file, run \`npm test -- FILE\` from web/ (S-3463)." >&2
   root=$(dirname "$(dirname "$HERE")")
   . "$root/test/runtmp.sh"
   runtmp_make "$root"
@@ -74,6 +77,10 @@ if [ "$STAM_TEST_SLOT_RUN" = 1 ]; then
   runcmd "$@"
 fi
 if held; then runcmd "$@"; fi
+# test/run.sh takes its own slot once it knows its names (its exec of this script, below): a light pool when every
+# name is LIGHT (run.sh:1242). A slot taken here first would hide that pool, so a run of only LIGHT names queued behind
+# heavy runs (S-3585). So the wrapped form runs at once, and that exec below takes the slot.
+case "$1" in */test/run.sh | test/run.sh) runcmd "$@" ;; esac
 N=${COUNT:-$(( $(nproc 2>/dev/null || echo 4) / 4 ))}
 case $N in ''|*[!0-9]*) N=1 ;; esac
 [ "$N" -ge 1 ] || N=1
@@ -127,6 +134,15 @@ try() {
     i=$((i + 1))
   done
 }
+# This waiter's place among the queued tickets, 1 first (S-3403).
+position() {
+  p=0
+  for n in $(ls "$QUEUE" 2>/dev/null | sort -n); do
+    p=$((p + 1))
+    [ "$n" = "$MINE" ] && { echo "$p"; return; }
+  done
+  echo 0
+}
 holders() {
   for o in "$DIR"/$POOL.*.owner; do
     [ -f "$o" ] || continue
@@ -142,7 +158,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if [ "$(first)" = "$MINE" ]; then try "$@"; fi
-echo "waiting for a test slot (all $N busy, STAM_TEST_${COUNTVAR}SLOTS to change); holders:"
+echo "waiting for a test slot (all $N busy, STAM_TEST_${COUNTVAR}SLOTS to change); queue position $(position) of $(ls "$QUEUE" 2>/dev/null | wc -l | tr -d ' '); holders:"
 holders
 while :; do
   sleep 1

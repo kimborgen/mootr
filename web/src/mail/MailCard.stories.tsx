@@ -26,6 +26,7 @@ export const stories: Story[] = [{
     'The thread title heads the body in `--type-chrome-xl` semibold, three lines at most (an ellipsis cuts a longer one). The text is the mail Markdown through the shared mail renderer (lists, bold, code, links, ITSA keys, tables), read-only, bounded by a height with a fade, in `--type-chrome-md` (`--type-chrome-lg` on a phone); unread is the dot and a medium weight, never colour alone (' + ds('State vocabulary') + ').',
     'The kind band holds an icon and a word besides its colour: warning for a decision, error for a blocker, success for done, neutral for plain mail (' + ds('State vocabulary') + '). A sent card has no band. The recommended option has a success badge with a check and the word.',
     'An approval or an ITSA ask waiting on you is a warning badge with a glyph and words; an ITSA it is about is a neutral chip (' + ds('Checkboxes and badges') + ').',
+    'A card that shows a mail from its start keeps the recorded snapshot range (`shown`, S-2998) and draws the snapshot above the rest as the thread does; when the card cuts the body or shows a summary, the range fails its own check and the text renders as before.',
     'Selected is `--accent-subtle` with its border, as a selected row is; never a solid accent fill (' + ds('Developer rules') + ').',
   ],
   states: [

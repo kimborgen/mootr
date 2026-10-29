@@ -83,8 +83,10 @@ type screenEvent struct {
 
 // typeFirstPrompt types the first prompt into Claude Code's input box, as one bracketed paste and then Enter. A launch
 // a restart or resume superseded stops quietly (first-prompt:superseded).
-func (l *Lifecycle) typeFirstPrompt(ctx context.Context, id, text string, current func() bool) error {
-	err := l.deliverFirstPrompt(ctx, id, text, current)
+func (l *Lifecycle) typeFirstPrompt(ctx context.Context, id, text string, current, admit func() bool) error {
+	taken, done := l.awaitFirstPrompt(id)
+	defer done()
+	err := l.deliverFirstPrompt(ctx, id, text, taken, current, admit)
 	if err != nil && current() {
 		return err
 	}
@@ -97,12 +99,8 @@ func (l *Lifecycle) typeFirstPrompt(ctx context.Context, id, text string, curren
 // deliverFirstPrompt is src/adapters/claude.ts deliverFirstPrompt. It waits for an empty input box (a faint
 // placeholder counts as empty), pastes the prompt, and presses Enter only on a box that holds exactly one copy of it.
 // A paste that never shows is pasted again (up to three times); a box with anything else in it is left alone. It is
-// done when UserPromptSubmit ends 'starting'.
-func (l *Lifecycle) deliverFirstPrompt(ctx context.Context, id, text string, current func() bool) error {
-	delivered := func() bool {
-		a, err := l.db.GetAgent(ctx, id)
-		return err == nil && a.Activity != "starting"
-	}
+// done when a UserPromptSubmit that isn't a channel push comes (firstprompt.go).
+func (l *Lifecycle) deliverFirstPrompt(ctx context.Context, id, text string, delivered, current, admit func() bool) error {
 	type view struct {
 		lines []string
 		box   string
@@ -164,6 +162,10 @@ func (l *Lifecycle) deliverFirstPrompt(ctx context.Context, id, text string, cur
 		if err := sleep(ctx, 300*time.Millisecond); err != nil {
 			return err
 		}
+	}
+	// The admission gate, asked again right before the prompt goes in: a blocker added during the launch keeps it back.
+	if admit != nil && !admit() {
+		return nil
 	}
 	for paste := 0; ; paste++ {
 		if err := alive(); err != nil {

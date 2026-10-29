@@ -44,7 +44,7 @@ before(async () => {
     far.once('exit', (c) => reject(new Error(`the far machine exited with ${c}`)));
   });
   farUrl = `http://127.0.0.1:${port}`;
-  writeFileSync(join(homes.near, 'settings.json'), JSON.stringify({ cost: COST, itsa: { home: 'far' }, peers: [{ name: 'far', url: farUrl, token: 't' }] }));
+  writeFileSync(join(homes.near, 'settings.json'), JSON.stringify({ cost: COST, itsa: { home: 'far' }, peers: [{ name: 'far', url: farUrl, token: 'test-peer-token' }] }));
   Object.assign(process.env, baseEnv('near'));
   db = await import('../src/db.ts');
   const { seedScale, splitFixture } = await import('./activity-fixture.mjs');

@@ -4,10 +4,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TMUX_SOCKET, MACHINE } from './config.ts';
 import { agentProcesses, stopProcesses } from './proctree.ts';
+import { agentKill } from './agent-exec.ts';
 import { timed } from './stall.ts';
+import { AGENT_IDENTITY, envVar, withMootrTwins, withTwins } from './env.ts';
 
-function tmux(args: string[]): string {
-  return execFileSync('tmux', ['-L', TMUX_SOCKET, ...args], { encoding: 'utf8' });
+// How long a tmux call may take (S-3817). The daemon makes most of them synchronously, and a tmux server that stopped
+// answering held its event loop for 3-28 s per call; past this the call fails, or reads as unknown where noted. Making a
+// session gets longer: a client killed mid-start can leave the session made. STAM_TMUX_TIMEOUT_MS is a test's seam.
+const TIMEOUT_MS = Number(envVar('TMUX_TIMEOUT_MS')) || 5000;
+const START_TIMEOUT_MS = TIMEOUT_MS * 6;
+
+function tmux(args: string[], timeout = TIMEOUT_MS): string {
+  return execFileSync('tmux', ['-L', TMUX_SOCKET, ...args], { encoding: 'utf8', timeout });
 }
 
 export function shellQuote(s: string): string {
@@ -19,19 +27,51 @@ function tmuxQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+// The new-session words for tmux: the env as `-e K=V` (each STAM_X with its MOOTR_X twin, S-3345), then the command, which an
+// `env -u` prefix wraps when an identity name must be dropped. A twin written beside its STAM_ name is never dropped.
+export function sessionCommand(name: string, cwd: string, env: Record<string, string>, argv: string[]): string[] {
+  env = withTwins(env);
+  const envArgs = Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+  // The pane inherits the daemon's (and the tmux server's) environment, and readers prefer MOOTR_ over STAM_ (S-2889): drop
+  // the agent identity, under both names, for each name this session doesn't set, so a session that isn't an agent's (the
+  // OpenCode server) never carries one (S-3229, S-3329). A name set here keeps its value and twin (withTwins above).
+  const scrub = withMootrTwins(AGENT_IDENTITY).filter((k) => !(k in env)).flatMap((k) => ['-u', k]);
+  const cmdArgv = scrub.length ? ['/usr/bin/env', ...scrub, ...argv] : argv;
+  return ['new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', cwd, ...envArgs, cmdArgv.map(shellQuote).join(' ')];
+}
+
+// A tmux server with no sessions left exits on its own, and a start-server that reaches it while it exits fails with
+// EXITING_SERVER (S-3618). Retry only that, every START_BACKOFF_MS, until START_DEADLINE_MS has passed.
+const EXITING_SERVER = 'server exited unexpectedly';
+const START_DEADLINE_MS = 2000;
+const START_BACKOFF_MS = 50;
+
+export function retryExitingServer(attempt: () => void): void {
+  const end = Date.now() + START_DEADLINE_MS;
+  for (;;) {
+    try {
+      attempt();
+      return;
+    } catch (err) {
+      const stderr = String((err as { stderr?: unknown }).stderr ?? '');
+      if (!stderr.includes(EXITING_SERVER) || Date.now() > end) throw err;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, START_BACKOFF_MS);
+  }
+}
+
 // One tmux session per agent, named by agent id, so a human attaches with `stam attach`.
 // The env holds the agent's token, so it never goes on a command line (S-477): a tmux
 // server keeps the argv of the client that started it, for anyone to read in `ps`. The
 // new-session command goes in a file only this user can read, which tmux sources.
 export function newSession(name: string, cwd: string, env: Record<string, string>, argv: string[]): void {
-  const envArgs = Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-  const cmd = ['new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', cwd, ...envArgs, argv.map(shellQuote).join(' ')];
+  const cmd = sessionCommand(name, cwd, env, argv);
   const dir = mkdtempSync(join(tmpdir(), 'stam-session-'));
   try {
     const file = join(dir, 'new-session.conf');
     writeFileSync(file, cmd.map(tmuxQuote).join(' ') + '\n', { mode: 0o600 });
     // source-file alone doesn't start a server.
-    tmux(['start-server', ';', 'source-file', file]);
+    retryExitingServer(() => tmux(['start-server', ';', 'source-file', file], START_TIMEOUT_MS));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -42,8 +82,12 @@ export function newSession(name: string, cwd: string, env: Record<string, string
   tmux(['set-option', '-t', name, 'status', 'off']);
 }
 
+// As in hasSessionAsync, only exit code 1 says the session is gone; no answer (a timeout) reads as present.
 export function hasSession(name: string): boolean {
-  return timed('tmux has-session', () => spawnSync('tmux', ['-L', TMUX_SOCKET, 'has-session', '-t', `=${name}`]).status === 0);
+  const r = timed('tmux has-session', () => spawnSync('tmux', ['-L', TMUX_SOCKET, 'has-session', '-t', `=${name}`], { timeout: TIMEOUT_MS }));
+  if (r.status === 0 || r.status === 1) return r.status === 0;
+  console.error(`tmux has-session ${name}: no answer (status ${r.status}); treated as present`);
+  return true;
 }
 
 // hasSession without holding the event loop while tmux answers: a fork from the daemon's big heap costs
@@ -64,9 +108,14 @@ export function setTmuxRunner(fn: ((args: string[]) => Promise<Out>) | null): vo
   runner = fn ?? ((args) => run(args));
 }
 
-// Whether a `stam attach` or other tmux client has the agent's session open.
+// Whether a `stam attach` or other tmux client has the agent's session open. No answer (a timeout) reads as open, so a
+// slow tmux never lets the rest sweep stop a harness a human has attached (S-3817).
 export function hasClients(name: string): boolean {
-  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-clients', '-t', `=${name}`], { encoding: 'utf8' });
+  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-clients', '-t', `=${name}`], { encoding: 'utf8', timeout: TIMEOUT_MS });
+  if (r.status === null) {
+    console.error(`tmux list-clients ${name}: no answer; treated as attached`);
+    return true;
+  }
   return r.status === 0 && r.stdout.trim() !== '';
 }
 
@@ -78,21 +127,23 @@ export function killSession(name: string): void {
     return;
   }
   // A dead pane's pid may belong to another process by now, so only a live pane counts.
-  const [pid, dead] = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-panes', '-t', `=${name}:`, '-F', '#{pane_pid} #{pane_dead}'], { encoding: 'utf8' })
+  const [pid, dead] = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-panes', '-t', `=${name}:`, '-F', '#{pane_pid} #{pane_dead}'], { encoding: 'utf8', timeout: TIMEOUT_MS })
     .stdout.trim()
     .split('\n')[0]
     .split(' ')
     .map(Number);
   // Found before the session goes: once the pane dies, its children leave its tree.
   const procs = agentProcesses(name, pid > 1 && !dead ? pid : undefined, serverPids());
-  tmux(['kill-session', '-t', `=${name}`]);
+  try {
+    tmux(['kill-session', '-t', `=${name}`]);
+  } catch (e) {
+    // No answer: the server may still end the session, so the agent's processes are stopped all the same (S-3817).
+    if ((e as { code?: unknown }).code !== 'ETIMEDOUT') throw e;
+    console.error(`tmux kill-session ${name}: no answer; stopping its processes anyway`);
+  }
   // The Codex TUI outlives the hangup that closing the pane sends, and keeps its
   // app-server running, so the pane's whole process group gets a SIGTERM too.
-  if (pid > 1 && !dead) {
-    try {
-      process.kill(-pid, 'SIGTERM');
-    } catch {}
-  }
+  if (pid > 1 && !dead) agentKill(-pid, 'SIGTERM');
   stopProcesses(procs);
 }
 
@@ -106,7 +157,7 @@ function serverPids(): number[] {
 // The running tmux server as its pid and start time, or null when none runs on the
 // socket. A changed value means the server stopped and another took its place.
 export function serverId(): string | null {
-  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'display-message', '-p', '#{pid} #{start_time}'], { encoding: 'utf8' });
+  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'display-message', '-p', '#{pid} #{start_time}'], { encoding: 'utf8', timeout: TIMEOUT_MS });
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
@@ -161,20 +212,28 @@ function parseEmpty(id: Out): Snapshot | null {
 
 export function snapshot(): Snapshot | null {
   const at = Date.now();
-  const r = spawnSync('tmux', LIST_PANES, { encoding: 'utf8', timeout: 5000 });
+  const r = spawnSync('tmux', LIST_PANES, { encoding: 'utf8', timeout: TIMEOUT_MS });
   const p = parseSnapshot(r);
-  const out = p !== 'ask' ? p : parseEmpty(spawnSync('tmux', SERVER_SESSIONS, { encoding: 'utf8', timeout: 5000 }));
+  const out = p !== 'ask' ? p : parseEmpty(spawnSync('tmux', SERVER_SESSIONS, { encoding: 'utf8', timeout: TIMEOUT_MS }));
   if (out) startedAt.set(out, at);
   return out;
 }
 
 function run(args: string[]): Promise<Out> {
   return new Promise((resolve) =>
-    execFile('tmux', args, { encoding: 'utf8', timeout: 5000 }, (e, stdout, stderr) => {
+    execFile('tmux', args, { encoding: 'utf8', timeout: TIMEOUT_MS }, (e, stdout, stderr) => {
       const code = (e as { code?: unknown } | null)?.code;
       resolve({ status: e ? (typeof code === 'number' ? code : null) : 0, stdout: stdout ?? '', stderr: stderr ?? '' });
     }),
   );
+}
+
+// The async calls below mirror the sync ones of the same name, so a caller on the event loop never waits on tmux (S-3841).
+// A failed call throws, as the sync one does; a timeout counts as a failure (status null).
+async function tmuxAsync(args: string[]): Promise<string> {
+  const r = await runner(['-L', TMUX_SOCKET, ...args]);
+  if (r.status !== 0) throw new Error(`tmux ${args[0]} failed${r.status === null ? ' (no answer)' : ''}: ${r.stderr.trim()}`);
+  return r.stdout;
 }
 
 // snapshot() without holding the event loop while tmux answers (S-2125).
@@ -212,8 +271,13 @@ export function sharedSnapshot(): Promise<Snapshot | null> {
   return p;
 }
 
+// A failed call says the session is gone, so dead; no answer (a timeout) reads as alive, as hasSession reads it present.
 export function isDead(name: string): boolean {
-  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-panes', '-t', `=${name}:`, '-F', '#{pane_dead}'], { encoding: 'utf8' });
+  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-panes', '-t', `=${name}:`, '-F', '#{pane_dead}'], { encoding: 'utf8', timeout: TIMEOUT_MS });
+  if (r.status === null) {
+    console.error(`tmux list-panes ${name}: no answer; treated as alive`);
+    return false;
+  }
   return r.status !== 0 || r.stdout.trim() === '1';
 }
 
@@ -221,10 +285,14 @@ export function capturePane(name: string): string {
   return tmux(['capture-pane', '-p', '-t', `=${name}:`]);
 }
 
+export function capturePaneByNameAsync(name: string): Promise<string> {
+  return tmuxAsync(['capture-pane', '-p', '-t', `=${name}:`]);
+}
+
 // One pane's screen (by its %N id) without holding the event loop while tmux answers (S-349).
 export function capturePaneAsync(pane: string): Promise<string> {
   return new Promise((resolve, reject) =>
-    execFile('tmux', ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-t', pane], { encoding: 'utf8', timeout: 5000 }, (e, out) => (e ? reject(e) : resolve(out))),
+    execFile('tmux', ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-t', pane], { encoding: 'utf8', timeout: TIMEOUT_MS }, (e, out) => (e ? reject(e) : resolve(out))),
   );
 }
 
@@ -232,7 +300,7 @@ export function capturePaneAsync(pane: string): Promise<string> {
 // gone (tmux then names no session). A pane id is unique only within one server, so a caller
 // compares both.
 export function paneOwner(pane: string): string | null {
-  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', pane, '#{pid} #{start_time}\t#{session_name}'], { encoding: 'utf8', timeout: 5000 });
+  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', pane, '#{pid} #{start_time}\t#{session_name}'], { encoding: 'utf8', timeout: TIMEOUT_MS });
   const [server, session] = r.status === 0 ? r.stdout.trim().split('\t') : [];
   return server && session ? `${server}\t${session}` : null;
 }
@@ -256,6 +324,11 @@ export function sendKeysToPane(pane: string, ...keys: string[]): void {
 // The pane's screen with its colours (ANSI), trailing blank lines dropped, at most `lines` lines.
 export function capturePaneAnsi(name: string, lines = 40): string {
   const rows = tmux(['capture-pane', '-p', '-e', '-t', `=${name}:`]).replace(/\s+$/, '').split('\n');
+  return rows.slice(-lines).join('\n');
+}
+
+export async function capturePaneAnsiAsync(name: string, lines = 40): Promise<string> {
+  const rows = (await tmuxAsync(['capture-pane', '-p', '-e', '-t', `=${name}:`])).replace(/\s+$/, '').split('\n');
   return rows.slice(-lines).join('\n');
 }
 
@@ -287,7 +360,7 @@ export async function pasteText(name: string, text: string): Promise<void> {
 // on a command line.
 export function paste(name: string, text: string): void {
   const buf = 'stam-' + Math.random().toString(36).slice(2, 8);
-  execFileSync('tmux', ['-L', TMUX_SOCKET, 'load-buffer', '-b', buf, '-'], { input: text });
+  execFileSync('tmux', ['-L', TMUX_SOCKET, 'load-buffer', '-b', buf, '-'], { input: text, timeout: TIMEOUT_MS });
   tmux(['paste-buffer', '-p', '-d', '-b', buf, '-t', `=${name}:`]);
 }
 
@@ -298,41 +371,43 @@ export function paste(name: string, text: string): void {
 // a hook gives each window made later the same mode until it's set back to `latest`.
 // Failures are ignored: the session may have just ended.
 export function setWindowSize(name: string, mode: 'manual' | 'latest'): void {
-  const w = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-windows', '-t', `=${name}`, '-F', '#{window_index}'], { encoding: 'utf8' });
+  const w = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-windows', '-t', `=${name}`, '-F', '#{window_index}'], { encoding: 'utf8', timeout: TIMEOUT_MS });
   if (w.status === 0)
     for (const idx of w.stdout.trim().split('\n'))
-      spawnSync('tmux', ['-L', TMUX_SOCKET, 'set-option', '-w', '-t', `=${name}:${idx}`, 'window-size', mode]);
-  if (mode === 'manual') spawnSync('tmux', ['-L', TMUX_SOCKET, 'set-hook', '-t', name, 'after-new-window', 'set-option -w window-size manual']);
-  else spawnSync('tmux', ['-L', TMUX_SOCKET, 'set-hook', '-u', '-t', name, 'after-new-window']);
+      spawnSync('tmux', ['-L', TMUX_SOCKET, 'set-option', '-w', '-t', `=${name}:${idx}`, 'window-size', mode], { timeout: TIMEOUT_MS });
+  if (mode === 'manual') spawnSync('tmux', ['-L', TMUX_SOCKET, 'set-hook', '-t', name, 'after-new-window', 'set-option -w window-size manual'], { timeout: TIMEOUT_MS });
+  else spawnSync('tmux', ['-L', TMUX_SOCKET, 'set-hook', '-u', '-t', name, 'after-new-window'], { timeout: TIMEOUT_MS });
 }
 
 // The daemon's start: a crash leaves windows `manual` with no viewer left to reset them, so
 // every session on the socket goes back to `latest` before any viewer attaches.
 export function resetWindowSizes(): void {
-  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8' });
+  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8', timeout: TIMEOUT_MS });
   if (r.status === 0) for (const name of r.stdout.trim().split('\n')) if (name) setWindowSize(name, 'latest');
 }
 
 export function resizeWindow(name: string, cols: number, rows: number): void {
-  spawnSync('tmux', ['-L', TMUX_SOCKET, 'resize-window', '-t', `=${name}:`, '-x', String(cols), '-y', String(rows)]);
+  spawnSync('tmux', ['-L', TMUX_SOCKET, 'resize-window', '-t', `=${name}:`, '-x', String(cols), '-y', String(rows)], { timeout: TIMEOUT_MS });
 }
 
 export function attachArgs(name: string): string[] {
   return ['-L', TMUX_SOCKET, 'attach-session', '-t', `=${name}`];
 }
 
-// The human's own terminals: a login shell in tmux, named sh-XXXXX, kept until it exits.
+// The human's own terminals: a login shell in tmux, named sh-XXXXX, kept until it exits. It gets no STAM_AGENT* or
+// agent identity (AGENT_IDENTITY under both spellings, S-3406), so it is not any agent.
 export function newShell(cwd: string): { id: string; cwd: string; machine: string } {
   const id = 'sh-' + Math.random().toString(36).slice(2, 7);
   const shell = process.env.SHELL || 'bash';
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(STAM|MOOTR)_AGENT/.test(k))) as Record<string, string>;
-  execFileSync('tmux', ['-L', TMUX_SOCKET, 'new-session', '-d', '-s', id, '-x', '120', '-y', '40', '-c', cwd, shell, '-l'], { env: { ...env, TERM: 'xterm-256color' } });
+  const identity = new Set(withMootrTwins(AGENT_IDENTITY));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(STAM|MOOTR)_AGENT/.test(k) && !identity.has(k))) as Record<string, string>;
+  execFileSync('tmux', ['-L', TMUX_SOCKET, 'new-session', '-d', '-s', id, '-x', '120', '-y', '40', '-c', cwd, shell, '-l'], { env: { ...env, TERM: 'xterm-256color' }, timeout: START_TIMEOUT_MS });
   tmux(['set-option', '-t', id, 'status', 'off']);
   return { id, cwd, machine: MACHINE };
 }
 
 export function listShells(): { id: string; cwd: string; machine: string }[] {
-  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-sessions', '-F', '#{session_name}\t#{pane_current_path}'], { encoding: 'utf8' });
+  const r = spawnSync('tmux', ['-L', TMUX_SOCKET, 'list-sessions', '-F', '#{session_name}\t#{pane_current_path}'], { encoding: 'utf8', timeout: TIMEOUT_MS });
   if (r.status !== 0) return [];
   return r.stdout.trim().split('\n').filter((l) => l.startsWith('sh-')).map((l) => { const [id, cwd] = l.split('\t'); return { id, cwd, machine: MACHINE }; });
 }

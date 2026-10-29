@@ -79,6 +79,13 @@ describe('waitingRows', () => {
     expect(rows.map((r) => r.key)).toEqual(['i:1', 'p:p1'])
   })
 
+  it("keeps another agent's decision and reply wait as rows in a thread that holds a placed ask (S-3827)", () => {
+    // The request's mail joined thread th1, which another agent's mail started: the ask doesn't stand for that thread.
+    setData({ humanThreads: [{ thread_id: 'th1', mails: [{ id: 'th1' }, { id: 'mp', thread_id: 'th1', permission_id: 'p1' }] }] } as unknown as Parameters<typeof setData>[0])
+    const rows = waitingRows({ attention: [], agents: [agent('a3', [wait('w1', null, 'th1')])], perms: [perm('p1', 'a2')], decisions: [dec('m2', 'th1', '10:00')] })
+    expect(rows.map((r) => r.key).sort()).toEqual(['d:m2', 'p:p1'])
+  })
+
   it("folds an agent's reply wait tied to a decision mail's thread into that row", () => {
     const rows = waitingRows({ attention: [], agents: [agent('a2', [wait('w1', null, 't1')])], perms: [], decisions: [dec('m1', 't1', '10:00')] })
     expect(rows.map((r) => r.key)).toEqual(['d:m1'])

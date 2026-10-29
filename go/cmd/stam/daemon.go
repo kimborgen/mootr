@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"stam/internal/agentenv"
 	"stam/internal/client"
 	"stam/internal/jsfmt"
 )
@@ -66,10 +67,14 @@ func daemonRun(e env) error {
 // starts is no agent's, and without the identity an archive's sweep never takes its tmux server for the agent's own, nor
 // the token for the shared one (S-240).
 func childEnv(environ []string) []string {
+	drop := map[string]bool{}
+	for _, n := range agentenv.Names() {
+		drop[n] = true
+	}
 	out := make([]string, 0, len(environ))
 	for _, kv := range environ {
 		k, _, _ := strings.Cut(kv, "=")
-		if k == "STAM_AGENT_ID" || k == "STAM_AGENT_NAME" || k == "STAM_TOKEN" {
+		if drop[k] {
 			continue
 		}
 		out = append(out, kv)

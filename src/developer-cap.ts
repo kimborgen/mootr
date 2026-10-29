@@ -13,7 +13,9 @@ export interface Slotted {
   lifecycle: string;
   machine?: string;
   activity?: string;
+  activity_detail?: string | null;
   idle_since?: string | null;
+  created_at?: string | null;
 }
 
 // A spawn is a developer when its workspace is a worktree and its type is no reviewer, typed or not.
@@ -53,6 +55,49 @@ export function developerHolders(agents: Slotted[], types: Record<string, AgentT
 export function slotHolders(agents: Slotted[], types: Record<string, AgentType>, machine: string, now = Date.now()): string[] {
   const held = developerHolders(agents, types, machine, now);
   return [...held, ...[...reserved].filter((n) => !held.includes(n)).map((n) => `${n} (starting)`)];
+}
+
+// What a queued reply shows of each holder (S-3106): its name, its age (time since it was spawned, null when
+// created_at is missing or unparsable), and its activity, with the activity detail when it is short. A spawn in
+// flight has no row yet: no age, activity `starting`. Reads only the rows slotHolders reads.
+export interface HolderInfo {
+  name: string;
+  age_ms: number | null;
+  activity: string | null;
+}
+const HOLDER_DETAIL_MAX = 20;
+const ageMs = (created: string | null | undefined, now: number): number | null => {
+  const at = created ? Date.parse(created) : NaN;
+  return Number.isNaN(at) ? null : Math.max(0, now - at);
+};
+export function holderInfo(agents: Slotted[], types: Record<string, AgentType>, machine: string, now = Date.now()): HolderInfo[] {
+  const byName = new Map(agents.map((a) => [a.name, a]));
+  const held = developerHolders(agents, types, machine, now).map((name): HolderInfo => {
+    const a = byName.get(name)!;
+    const detail = a.activity_detail && a.activity_detail.length <= HOLDER_DETAIL_MAX ? a.activity_detail : null;
+    return { name, age_ms: ageMs(a.created_at, now), activity: [a.activity, detail].filter(Boolean).join(' ') || null };
+  });
+  return [...held, ...[...reserved].filter((n) => !held.some((h) => h.name === n)).map((name): HolderInfo => ({ name, age_ms: null, activity: 'starting' }))];
+}
+
+// `2h10m`, `25m`, `40s`.
+const formatAge = (ms: number): string => {
+  const min = Math.floor(ms / 60_000);
+  if (min < 1) return `${Math.floor(ms / 1000)}s`;
+  if (min < 60) return `${min}m`;
+  return `${Math.floor(min / 60)}h${min % 60}m`;
+};
+
+// The holders as text: `card-editor-dev (2h10m, working), incident-prio-dev (25m, idle ready)`. Without `info` (a peer
+// daemon older than S-3106 sends only `holders`) it is the names, as before. A missing age is left out (S-3106).
+export function holdersText(holders: string[], info?: HolderInfo[]): string {
+  if (!Array.isArray(info)) return holders.join(', ');
+  return info
+    .map((h) => {
+      const facts = [h.age_ms === null ? null : formatAge(h.age_ms), h.activity].filter(Boolean);
+      return facts.length ? `${h.name} (${facts.join(', ')})` : h.name;
+    })
+    .join(', ');
 }
 
 // The refusal for a spawn of `type`, or null when it may start: other types and a cap of 0 are never limited.

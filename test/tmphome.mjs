@@ -6,10 +6,16 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // A stam agent's environment carries MOOTR_ names (S-2889), and they would win over the STAM_ overrides a test sets. Drop them
-// here, so the CLI and the daemons a test starts read its STAM_ names only.
+// here, so the CLI and the daemons a test starts never inherit one.
 for (const k of Object.keys(process.env)) if (k.startsWith('MOOTR_')) delete process.env[k];
+// A daemon a test starts runs stam's own OpenCode server at boot: it runs the scripted fake (test/fake-opencode), as under
+// test/lib.sh, unless this is a smoke test or the test names a binary of its own (S-4237, S-107). callerOpencodeBin is the
+// value the test was started with, for opencode-shell-env, which runs the OpenCode binary itself against a stub model, no daemon.
+export const callerOpencodeBin = process.env.STAM_OPENCODE_BIN;
+if (!process.env.STAM_TEST_SMOKE) process.env.STAM_OPENCODE_BIN ??= fileURLToPath(new URL('./fake-opencode/opencode', import.meta.url));
 
 const dirs = new Set();
 let hooked = false;

@@ -10,11 +10,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"stam/internal/auth"
 	"stam/internal/config"
 	"stam/internal/db"
 	"stam/internal/jsfmt"
+	"stam/internal/peers"
 )
 
 // The ITSA routes of src/daemon.ts over src/itsa.ts (S-2849, PR 1): the status set, list, get, create and set.
@@ -70,12 +72,15 @@ func (s *Server) itsaRoutes() {
 	s.handle("GET /api/itsas/{id}/thread", s.itsaThreadRoute)
 	s.handle("GET /api/itsas/{id}/threads", s.itsaThreadsRoute)
 	s.handle("GET /api/itsas/attention", s.itsaAttentionRoute)
+	s.handle("GET /api/itsas/search", s.itsaSearchRoute)
+	s.handle("GET /api/itsas/{id}/plus-ones", s.itsaPlusOnesRoute)
+	s.handle("GET /api/itsas/{id}/incident", s.itsaIncidentRoute)
 	s.peerHookRoutes()
 	// The routes this daemon does not carry yet. Each is listed by its method and path so that a path TS has no route for
 	// stays "no route", and none is read as an ITSA's key.
 	for _, p := range []string{
-		"GET /api/itsas/search", "GET /api/itsas/queue", "GET /api/itsas/open-agents",
-		"GET /api/itsas/{id}/cost", "GET /api/itsas/{id}/plus-ones",
+		"GET /api/itsas/queue", "GET /api/itsas/open-agents",
+		"GET /api/itsas/{id}/cost",
 	} {
 		what := p[strings.Index(p, " ")+1:]
 		s.handle(p, func(_ *http.Request, c auth.Resolved) (any, error) {
@@ -97,7 +102,7 @@ func itsaErr(format string, args ...any) *Error {
 	switch {
 	case strings.HasPrefix(e.Message, "no ITSA ") || strings.HasPrefix(e.Message, "no link ") || strings.HasPrefix(e.Message, "no field "):
 		e.Status = http.StatusNotFound
-	case strings.HasPrefix(e.Message, "status changed"):
+	case strings.HasPrefix(e.Message, "status changed"), strings.HasPrefix(e.Message, textChanged), strings.HasPrefix(e.Message, "the owner changed"), strings.HasPrefix(e.Message, "the parent changed"):
 		e.Status = http.StatusConflict
 	}
 	return e
@@ -233,7 +238,8 @@ func (s *Server) itsaStatusRoute(r *http.Request, c auth.Resolved) (any, error) 
 // --- people and lookups ---
 
 // person is src/itsa.ts person: an owner or participant, an agent id or name, or `human`, as an id; "" for none. An agent
-// unknown here is an error (a peer's agents are not looked up).
+// on another machine resolves through the peers (findAgentPeerFresh), as mail resolves remote recipients, so the home can
+// store and edit an ITSA a remote agent owns. An agent no one has is an error, and so is a name two agents match.
 func (s *Server) person(ctx context.Context, v jsfmt.Value, present bool) (string, error) {
 	if !present || v.Kind == jsfmt.Null {
 		return "", nil
@@ -247,11 +253,15 @@ func (s *Server) person(ctx context.Context, v jsfmt.Value, present bool) (strin
 	}
 	a, err := s.db.GetAgent(ctx, ref)
 	if errors.Is(err, db.ErrNotFound) {
-		// A peer's agent is found by TS (findPeerAgent); this daemon does not act for one yet.
-		if peer, perr := s.db.HasPeerAgent(ctx, ref); perr != nil {
-			return "", perr
-		} else if peer {
-			return "", Errorf(http.StatusNotImplemented, "%s is an agent of a peer machine, and ITSAs naming a peer's agent are not ported to the Go daemon yet", ref)
+		hit, err := s.peers.LocateFresh(ctx, s.db, ref)
+		var amb *peers.AmbiguousError
+		switch {
+		case errors.As(err, &amb):
+			return "", itsaErr("%s", amb.Msg)
+		case err != nil:
+			return "", err
+		case hit != nil:
+			return hit.Agent.ID, nil
 		}
 		return "", itsaErr("no agent %s (pass an agent id or name, or 'human')", ref)
 	}
@@ -281,15 +291,6 @@ func retroGate(body string, byHuman, toDone bool) error {
 		return Errorf(http.StatusNotImplemented, "a body with an Answers: line is checked by the retro gate, and closing it closes the retro items it answers (closeAnswered); neither is ported to the Go daemon yet")
 	}
 	return nil
-}
-
-// resolveItsaActors is resolveBodyActors, except that a peer's own call (x-stam-local) is trusted as it is unless it carries an
-// agent's token (src/daemon.ts: `if (!local || caller.kind === 'agent') resolveActors`).
-func (s *Server) resolveItsaActors(ctx context.Context, c auth.Resolved, body *jsfmt.Value) error {
-	if c.Local && c.Kind != auth.Agent {
-		return nil
-	}
-	return s.resolveBodyActors(ctx, c, body)
 }
 
 func (s *Server) personOf(ctx context.Context, body jsfmt.Value, key string) (string, error) {
@@ -416,6 +417,7 @@ func (s *Server) itsaView(ctx context.Context, x jsfmt.Value) (jsfmt.Value, erro
 	x.Set("events", jsfmt.ArrayValue(nonNilValues(events)))
 	x.Set("actions", actionsValue(s.actionsOf(x.Text("status"))))
 	x.Set("fields", fields)
+	x.Set("rev", jsfmt.StringValue(revOf(x)))
 	return x, nil
 }
 
@@ -661,18 +663,31 @@ func (s *Server) mayActOn(ctx context.Context, c auth.Resolved, by, ref string, 
 
 // itsaEvent is src/itsa.ts itsaEvent: the itsa.changed payload.
 func (s *Server) emitItsaChanged(ctx context.Context, x jsfmt.Value) {
-	values, _ := s.db.ItsaFieldValues(ctx, x.Text("id"))
-	fields, ok := values[x.Text("id")]
-	if !ok {
-		fields = jsfmt.Value{Kind: jsfmt.Object}
+	values, err := s.db.ItsaFieldValues(ctx, x.Text("id"))
+	if err != nil {
+		// The change is written already, so the event goes out without fields, and the log says why.
+		slog.Error("ITSA changed event: fields", "itsa", x.Text("id"), "err", err)
 	}
+	_ = s.hub.Emit("itsa.changed", itsaChangedPayload(x, values, err))
+}
+
+// itsaChangedPayload is the itsa.changed payload: the ITSA's id, key, status and owner, and its fields. A read error leaves the
+// fields key out, so the web keeps the card's fields rather than blanking them (web/src/store.ts) (S-3233).
+func itsaChangedPayload(x jsfmt.Value, values map[string]jsfmt.Value, readErr error) jsfmt.Value {
 	ev := jsfmt.Value{Kind: jsfmt.Object}
 	for _, k := range []string{"id", "key", "status", "owner"} {
 		v, _ := x.Get(k)
 		ev.Set(k, v)
 	}
+	if readErr != nil {
+		return ev
+	}
+	fields, ok := values[x.Text("id")]
+	if !ok {
+		fields = jsfmt.Value{Kind: jsfmt.Object}
+	}
 	ev.Set("fields", fields)
-	_ = s.hub.Emit("itsa.changed", ev)
+	return ev
 }
 
 // --- list and get ---
@@ -743,11 +758,46 @@ func (s *Server) itsaListRoute(r *http.Request, c auth.Resolved) (any, error) {
 	if hasText {
 		f.Text = strings.TrimSpace(text)
 	}
+	if q.Has("since") {
+		since, err := sinceTime(q.Get("since"), time.Now())
+		if err != nil {
+			return nil, err
+		}
+		f.Since = &since
+	}
 	list, err := s.db.ListItsas(ctx, f)
 	if err != nil {
 		return nil, err
 	}
 	return nonNilValues(list), nil
+}
+
+// The `since` regexps and units of src/itsa.ts sinceTime: four digits at most, so an age stays in time.Duration's range.
+var (
+	sinceAge   = regexp.MustCompile(`^(\d{1,4})([mhdw])$`)
+	sinceISO   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2}))?$`)
+	sinceUnits = map[string]time.Duration{"m": time.Minute, "h": time.Hour, "d": 24 * time.Hour, "w": 7 * 24 * time.Hour}
+)
+
+// sinceTime is a `since` filter's time (S-1396) in created_at's form: an age back from now (90m, 24h, 2d, 1w), or an ISO
+// date or a date-time with its zone. A bad one is a 400, not an empty list.
+func sinceTime(text string, now time.Time) (string, error) {
+	var t time.Time
+	var err error
+	if m := sinceAge.FindStringSubmatch(text); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		t = now.Add(-time.Duration(n) * sinceUnits[m[2]])
+	} else if !sinceISO.MatchString(text) {
+		err = errors.New("not an ISO time")
+	} else if strings.Contains(text, "T") {
+		t, err = time.Parse(time.RFC3339Nano, text)
+	} else {
+		t, err = time.Parse("2006-01-02", text)
+	}
+	if err != nil {
+		return "", itsaErr("since expects an ISO time (2026-10-21, or 2026-10-21T08:00:00Z) or an age (90m, 24h, 2d, 1w); got %q", text)
+	}
+	return t.UTC().Format("2006-01-02T15:04:05.000Z"), nil
 }
 
 func (s *Server) itsaGetRoute(r *http.Request, c auth.Resolved) (any, error) {
@@ -762,7 +812,22 @@ func (s *Server) itsaGetRoute(r *http.Request, c auth.Resolved) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.itsaView(r.Context(), x)
+	v, err := s.itsaView(r.Context(), x)
+	if err != nil {
+		return nil, err
+	}
+	// The open ask this ITSA holds, as its mail and kind (S-3982): the text an agent reads of it (itsa_get), never the ask's text.
+	held, err := s.heldItsas(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	_, itsas, err := s.openAskLinks(r.Context(), held)
+	if err != nil {
+		return nil, err
+	}
+	ask, ok := itsas[v.Text("id")]
+	v.Set("open_ask_detail", askDetail(ask, ok))
+	return v, nil
 }
 
 // --- create ---
@@ -784,9 +849,6 @@ func (s *Server) itsaCreateRoute(r *http.Request, c auth.Resolved) (any, error) 
 	ctx := context.WithoutCancel(r.Context())
 	body, err := jsonBody(r)
 	if err != nil {
-		return nil, err
-	}
-	if err := s.resolveItsaActors(ctx, c, &body); err != nil {
 		return nil, err
 	}
 	human := s.isHuman(r, c)
@@ -955,9 +1017,11 @@ func (s *Server) createItsa(ctx context.Context, body jsfmt.Value, actorID strin
 		}
 		s.stages.order.Unlock()
 	}
+	s.syncItsaSubscriptions(ctx, created.Text("id"))
 	s.emitItsaChanged(ctx, created)
 	s.ownerStatusNotice(ctx, created, by)
 	s.afterItsaChange(ctx, created, "created", by, "", "")
+	s.indexItsa(created)
 	if start != nil {
 		start()
 	}
@@ -1042,18 +1106,23 @@ func (s *Server) itsaSetRoute(r *http.Request, c auth.Resolved) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := s.resolveItsaActors(ctx, c, &body); err != nil {
-		return nil, err
-	}
 	human := s.isHuman(r, c)
 	by, err := itsaActor(body, human, systemBodyOK(c, human, body))
 	if err != nil {
 		return nil, err
 	}
+	// S-4178: the routing facts of a move a peer relayed come from that peer's DB (relay.go), never from an agent's body; they
+	// ride the context, not the fields, and only a peer's relayed move carries them (relayRouteFrom).
+	if err := refuseStamFields(body, c, []string{"relay_route"}, "edit"); err != nil {
+		return nil, err
+	}
+	if c.Local {
+		ctx = withRelayRoute(ctx, parseRelayRoute(body))
+	}
 	// `action` is recorded only by the human's act route, never from a request; `system` is not a field.
 	f := jsfmt.Value{Kind: jsfmt.Object}
 	for i, k := range body.Keys {
-		if k != "action" && k != "system" {
+		if k != "action" && k != "system" && k != "relay_route" {
 			f.Set(k, body.Items[i])
 		}
 	}
@@ -1073,7 +1142,24 @@ func (s *Server) itsaSetRoute(r *http.Request, c auth.Resolved) (any, error) {
 			return nil, Errorf(http.StatusForbidden, "only the chief of staff or the assistant makes an ITSA a retro item or feedback report, or turns one into another kind")
 		}
 	}
-	return s.setItsa(ctx, ref, f, by)
+	res, err := s.setItsa(ctx, ref, f, by)
+	if err != nil {
+		return nil, err
+	}
+	// Closing a project or initiative offers its epic retro (S-163), in the same result.
+	out, _ := res.(jsfmt.Value)
+	changes, _ := out.Get("changes")
+	after, _ := out.Get("itsa")
+	if _, ok := changes.Get("status"); ok && s.isClosedStatus(after.Text("status")) {
+		offer, err := s.epicRetroOffer(ctx, after)
+		if err != nil {
+			return nil, err
+		}
+		if offer != "" {
+			out.Set("retro_offer", jsfmt.StringValue(offer))
+		}
+	}
+	return out, nil
 }
 
 func (s *Server) setItsa(ctx context.Context, ref string, f jsfmt.Value, by string) (any, error) {
@@ -1137,7 +1223,40 @@ func (s *Server) setItsaMode(ctx context.Context, ref string, f jsfmt.Value, by 
 		}
 	}
 
-	closedStage, err := s.db.HasItsaField(ctx, "stage")
+	// S-4178: a relayed move's ask is routed by the owner the move leaves and, when it reroutes, by the parent. Both are read here,
+	// before the transaction (a peer lookup writes, which can't run inside it), and the transaction checks them again.
+	if facts := relayRouteFrom(ctx); facts != nil && hasStatus && actor != humanBox && !system {
+		if st, ok := s.statusOf(newStatus); ok && st.Human {
+			cur, err := s.mustItsa(ctx, ref)
+			if err != nil {
+				return nil, err
+			}
+			facts.routed = true
+			facts.owner = cur.Text("owner")
+			if hasOwner {
+				facts.owner = owner
+			}
+			lifecycle, _, err := s.db.PeerAgentLifecycle(ctx, actor)
+			if err != nil {
+				return nil, err
+			}
+			// The parent is needed only when the ask reroutes: the sender owns every ITSA the thread holds, as askOwns checks them.
+			own, err := s.askOwns(ctx, actor, lifecycle, cur.Text("id"), cur.Text("thread_id"), facts.owner)
+			if err != nil {
+				return nil, err
+			}
+			if !facts.exempt && facts.parent != "" && !own {
+				hit, res, err := s.resolveRecipient(ctx, facts.parent, false)
+				if err != nil {
+					return nil, err
+				}
+				facts.parentFound = res == foundAgent
+				facts.parentLife = hit.Agent.Lifecycle
+			}
+		}
+	}
+
+	stageKinds, hasStage, err := s.db.ItsaFieldKinds(ctx, "stage")
 	if err != nil {
 		return nil, err
 	}
@@ -1176,6 +1295,9 @@ func (s *Server) setItsaMode(ctx context.Context, ref string, f jsfmt.Value, by 
 		}
 		if v, ok := f.Get("ifStatus"); ok && (v.Kind != jsfmt.String || v.Str != curStatus) {
 			return u, itsaErr("status changed: %s is %s now, not %s", curKey, curStatus, anyString(v))
+		}
+		if v, ok := f.Get("ifRev"); ok && (v.Kind != jsfmt.String || v.Str != revOf(cur)) {
+			return u, itsaErr("%s: %s changed since it was shown", textChanged, curKey)
 		}
 		if blocked && newStatus != curStatus {
 			return u, itsaErr("%s can't move to %s: it would mail your user, and %s may not (Settings › Mail to you). Hand it to your parent%s with itsa_post or send_mail; it decides.", curKey, newStatus, blockModel, handTo(blockParent))
@@ -1358,9 +1480,13 @@ func (s *Server) setItsaMode(ctx context.Context, ref string, f jsfmt.Value, by 
 
 		// Closing leaves the process at its end node (S-1398), in the same change as the status, unless the caller names a stage.
 		fv, hasFields := f.Get("fields")
-		if statusChanged && s.isClosedStatus(newStatus) && closedStage && !(hasFields && fv.Kind == jsfmt.Object && hasKey(fv, "stage")) &&
+		if statusChanged && s.isClosedStatus(newStatus) && hasStage && !(hasFields && fv.Kind == jsfmt.Object && hasKey(fv, "stage")) &&
 			(!hasFields || fv.Kind == jsfmt.Null || fv.Kind == jsfmt.Object) {
-			if end := s.closeNodeOfKind(nextKind); end != "" {
+			applies, err := db.FieldApplies(stageKinds, nextKind)
+			if err != nil {
+				return u, err
+			}
+			if end := s.closeNodeOfKind(nextKind); applies && end != "" {
 				withStage := jsfmt.Value{Kind: jsfmt.Object}
 				if hasFields && fv.Kind == jsfmt.Object {
 					for i, k := range fv.Keys {
@@ -1372,7 +1498,7 @@ func (s *Server) setItsaMode(ctx context.Context, ref string, f jsfmt.Value, by 
 			}
 		}
 		if hasFields {
-			ch, changed, err := tx.ApplyFieldValues(cur.Text("id"), fv, actor)
+			ch, changed, err := tx.ApplyFieldValues(cur.Text("id"), fv, actor, nextKind)
 			if err != nil {
 				return u, err
 			}
@@ -1382,7 +1508,7 @@ func (s *Server) setItsaMode(ctx context.Context, ref string, f jsfmt.Value, by 
 					from = v.Str
 				}
 				if err := s.stageGuard(nextKind, newStatusOrCur(statusChanged, newStatus, curStatus), from, st.Str); err != nil {
-					return u, err
+					return u, asGuard(err)
 				}
 				if err := s.stageEntryRefusalAs(ctx, cur.Text("id"), nextKind, st.Str, actor, ownerPtr(hasOwner, owner)); err != nil {
 					return u, err
@@ -1421,27 +1547,8 @@ func (s *Server) setItsaMode(ctx context.Context, ref string, f jsfmt.Value, by 
 					return u, err
 				}
 				if err := proposalGate(events, &gateCur{key: cur.Text("key"), kind: curKind, body: cur.Text("body")}, nextKind, newStatusOrCur(statusChanged, newStatus, curStatus), nextBody, actor); err != nil {
-					return u, err
+					return u, asGuard(err)
 				}
-				if a, ok := f.Get("action"); ok && db.JSStr(a) == "changes" && curProc {
-					watched, err := tx.HasWatchedLink(cur.Text("id"))
-					if err != nil {
-						return u, err
-					}
-					if watched {
-						return u, unported("Request changes on process proposal %s cancels it and closes its pull request, and closing an ITSA with a pull request link changes its watch on it (watch.syncItsa), which is not ported to the Go daemon yet", cur.Text("key"))
-					}
-				}
-			}
-		}
-		// Closing or reopening an ITSA changes the watches its links start (watch.syncItsa).
-		if statusChanged && s.isClosedStatus(newStatus) != s.isClosedStatus(curStatus) {
-			watched, err := tx.HasWatchedLink(cur.Text("id"))
-			if err != nil {
-				return u, err
-			}
-			if watched {
-				return u, Errorf(http.StatusNotImplemented, "closing or reopening an ITSA with a link to a GitHub or Linear pull request or issue changes its watch on it (watch.syncItsa), which is not ported to the Go daemon yet")
 			}
 		}
 		// The observers of a change (decision steps, requirement checks, the owner notice, the wake of a resting owner).
@@ -1466,9 +1573,6 @@ func (s *Server) setItsaMode(ctx context.Context, ref string, f jsfmt.Value, by 
 			if err := retroGate(nextBody, actor == humanBox, statusChanged && newStatus == "done"); err != nil {
 				return u, err
 			}
-		}
-		if statusChanged && s.isClosedStatus(newStatus) && epicKinds[nextKind] {
-			return u, Errorf(http.StatusNotImplemented, "closing a project or initiative offers its epic retro, which is not ported to the Go daemon yet")
 		}
 
 		finalOwner := cur.Text("owner")
@@ -1575,8 +1679,10 @@ func (s *Server) setItsaMode(ctx context.Context, ref string, f jsfmt.Value, by 
 	}
 	if hasAny(changes, "title", "summary", "body") {
 		s.afterItsaChange(ctx, after, "edit", actor, "", "")
+		s.indexItsa(after)
 	}
 	if len(changes) > 0 {
+		s.syncItsaSubscriptions(ctx, after.Text("id"))
 		s.emitItsaChanged(ctx, after)
 	}
 	co := jsfmt.Value{Kind: jsfmt.Object}

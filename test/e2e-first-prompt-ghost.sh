@@ -29,7 +29,7 @@ fake_claude "$TEST_TMP/ghost.json"
 isolate
 fail() { echo "FAIL: $1"; "$STAM" ls; exit 1; }
 # A lost paste goes in again after a 10 s wait and a settle, past wait_until's 20 s: up to 60 s.
-wait_long() { for _i in $(seq 1 300); do "$@" >/dev/null 2>&1 && return 0; sleep 0.2; done; echo "FAIL: timed out waiting for: $*"; exit 1; }
+wait_long() { for _i in $(seq 1 300); do "$@" >/dev/null 2>&1 && return 0; sleep 0.2; done; echo "FAIL: timed out waiting for: $*"; [ -z "${ON_TIMEOUT:-}" ] || $ON_TIMEOUT; exit 1; }
 field() { "$STAM" show "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1]))' "$2"; }
 NAME="ghost-$(date +%s)"
 DIR="$(mktemp -d "$TEST_TMP/work.XXXX")"
@@ -89,7 +89,14 @@ dropped() { [ -s "$ENTER.dropped" ]; }
 wait_long dropped
 "$STAM" restart "$S" "stale second" >/dev/null
 superseded() { "$STAM" events "$S" | grep -q 'first-prompt:superseded'; }
-wait_long superseded
+# S-3454: on a timeout, the stale agent's events and its session's screen go to the kept log.
+dump_stale() {
+  echo "events of $S, latest 200:"
+  "$STAM" events "$S" --limit 200 || true
+  echo "screen of $S:"
+  tmux -L "$STAM_TMUX_SOCKET" capture-pane -p -t "=$(field "$S" id):" 2>&1 || true
+}
+ON_TIMEOUT=dump_stale wait_long superseded
 [ "$(field "$S" activity)" != errored ] || fail "the stale launch failed the new one: $(field "$S" activity_detail)"
 if "$STAM" events "$S" | grep -q 'first-prompt:screen'; then fail "the stale launch recorded a failure"; fi
 rm "$ENTER"

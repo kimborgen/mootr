@@ -43,7 +43,9 @@ NEW_TOKEN=$(token_of "$NEW")
 [ "$NEW_TOKEN" != "$SHARED" ] || { echo "FAIL: $NEW got the shared token"; exit 1; }
 # The daemon keeps only the hash: the plain token is in no file of its home.
 TAR=$(curl -sf -H "authorization: Bearer $SHARED" "$STAM_URL/api/test/token-at-rest?token=$NEW_TOKEN")
-[ "$TAR" = '{"plain":false,"hashed":true}' ] || { echo "FAIL: the agent token isn't stored only as a hash: $TAR"; exit 1; }
+# Compared as parsed JSON, so the key order doesn't count (S-4083): exactly these two keys, each the JSON boolean, since
+# Python's == takes 0 for False and 1 for True.
+printf '%s' "$TAR" | python3 -c 'import json, sys; d = json.load(sys.stdin); sys.exit(0 if isinstance(d, dict) and set(d) == {"plain", "hashed"} and d["plain"] is False and d["hashed"] is True else 1)' || { echo "FAIL: the agent token isn't stored only as a hash: $TAR"; exit 1; }
 
 # The legacy caller (shared token) lists agents but can't name one with its own token (S-545); the new agent reaches the daemon.
 [ "$(status "$SHARED" GET /api/agents)" = 200 ] || { echo "FAIL: the shared token can't list agents"; exit 1; }

@@ -2,7 +2,6 @@ import { join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, realpathSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { STAM_BIN, STAM_HOME, STAM_URL, ROOT } from '../config.ts';
 import * as db from '../db.ts';
 import { mintServerToken } from '../agent-token.ts';
@@ -10,6 +9,8 @@ import { signal as costSignal } from '../rules.ts';
 import type { Agent, Activity } from '../db.ts';
 import type { Adapter, ErrorClass, LaunchSpec } from './types.ts';
 import * as tmux from '../tmux.ts';
+import { shellQuote } from '../tmux.ts';
+import { agentExec } from '../agent-exec.ts';
 import { schedulePush } from '../mail.ts';
 import { onIdle, dropRestRequest } from '../lifecycle.ts';
 import { onContext, setCompactInstructions } from '../context.ts';
@@ -24,7 +25,8 @@ import { replaceHookWaits, type HookWait } from './hook-waits.ts';
 import { opencodeProviders } from './opencode-providers.ts';
 import { settings } from '../settings.ts';
 import { registry } from '../registry.ts';
-import { envVar } from '../env.ts';
+import { envVar, goBinDir, withGoBinArgv } from '../env.ts';
+import { opencodeBinFor } from '../test-env.ts';
 
 // stam runs its own OpenCode server, so it needs no access to the user's background
 // service. Every stam OpenCode agent is a TUI attached to this server.
@@ -33,6 +35,14 @@ const SERVER = `http://127.0.0.1:${PORT}`;
 const SERVER_SESSION = '_opencode';
 const BIN = envVar('OPENCODE_BIN') ?? (existsSync(join(homedir(), '.opencode/bin/opencode')) ? join(homedir(), '.opencode/bin/opencode') : 'opencode');
 const CONFIG_DIR = join(STAM_HOME, 'opencode');
+// The binary the server's start, a launch's TUI, the version check and the upgrade command run: BIN, except in a test home, where it is BIN resolved once to an absolute path, and the real OpenCode is refused (throws,
+// running nothing; opencodeBinFor, S-4237).
+function checkedBin(): { bin: string; checked?: true } {
+  const r = opencodeBinFor(BIN);
+  if ('refused' in r) throw new Error(r.refused);
+  return r;
+}
+const bin = (): string => checkedBin().bin;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function password(): string {
@@ -152,16 +162,17 @@ function ensureServer(): Promise<void> {
 }
 
 async function startServer(): Promise<void> {
+  bin();
   if (tmux.hasSession(SERVER_SESSION) && !tmux.isDead(SERVER_SESSION) && (await healthy())) return;
   writeConfig();
   tmux.killSession(SERVER_SESSION);
   // The server's own token (S-240), not the shared one: an OpenCode agent acts only as itself.
   const token = mintServerToken();
-  tmux.newSession(
-    SERVER_SESSION,
-    STAM_HOME,
-    { ...providerEnv(), ...providers().env, OPENCODE_SERVER_PASSWORD: password(), OPENCODE_CONFIG_DIR: CONFIG_DIR, ...{ STAM_URL, STAM_TOKEN: token } },
-    [BIN, 'serve', '--hostname', '127.0.0.1', '--port', String(PORT)],
+  // The Go bin dir goes first on the server's PATH too (S-3666): the agents' bash runs in this server, not in their own sessions.
+  agentExec(
+    withGoBinArgv([bin(), 'serve', '--hostname', '127.0.0.1', '--port', String(PORT)], goBinDir(homedir())),
+    { ...providerEnv(), ...providers().env, OPENCODE_SERVER_PASSWORD: password(), OPENCODE_CONFIG_DIR: CONFIG_DIR, STAM_URL, STAM_TOKEN: token },
+    { mode: 'session', cwd: STAM_HOME, session: SERVER_SESSION },
   );
   for (let i = 0; i < 40; i++) {
     await sleep(500);
@@ -346,6 +357,53 @@ async function readJobs(): Promise<void> {
   }
 }
 
+// An ask's details (S-3980): the permission it was raised for, the session that asked, the action, and its resources.
+// Only these fields go in: nothing else of the OpenCode event, such as its metadata, reaches the ask or its mail.
+interface OpenCodeAsk {
+  permission?: string;
+  session?: string;
+  action?: string;
+}
+
+function askOf(details: string): OpenCodeAsk {
+  try {
+    const p = JSON.parse(details);
+    return p && typeof p === 'object' ? p : {};
+  } catch {
+    return {};
+  }
+}
+
+// Raises an OpenCode ask (S-3980) with permissions.ts's dialogShown, which awaits askHome before it creates the row. A
+// reply that came in the same burst, before this ran, means no ask. A reply that came while it was being raised closes
+// the row it made, if that row is for this permission id. `p` is permissions.ts, and tests pass their own.
+export async function raiseAsk(agent: Agent, id: string, action: string, details: string, p: Pick<typeof import('../permissions.ts'), 'dialogShown' | 'dialogClosed'>): Promise<void> {
+  if (replied.delete(id)) return;
+  await p.dialogShown(agent, action, details, true);
+  if (!replied.delete(id)) return;
+  const r = db.pendingDialog(agent.id);
+  if (r && askOf(r.details).permission === id) p.dialogClosed(agent);
+}
+
+// permissions.ts imports the adapters, this one included, so it loads on the first event rather than at import: a static
+// import here starts that cycle while opencode-view.ts still waits on this module.
+function permissionsLater(run: (p: typeof import('../permissions.ts')) => unknown): Promise<unknown> {
+  return import('../permissions.ts').then(run);
+}
+
+// Permission ids stam is replying to now: a permission.replied for one is stam's own answer, not the TUI's.
+const answering = new Set<string>();
+
+// Permission ids OpenCode replied to outside stam. A reply in the same burst as its permission.asked comes first, since
+// the ask's raise is deferred (permissionsLater), so the raise checks this set before it creates the ask.
+const replied = new Set<string>();
+
+// The requested resources as the agent asked for them, shown whole: the human approves exactly what the agent runs.
+function askResources(resources: unknown): string[] {
+  if (!Array.isArray(resources)) return [];
+  return resources.filter((r): r is string => typeof r === 'string');
+}
+
 // Other readers of the server's event stream: stam's own agent view (opencode-view.ts).
 export const eventListeners = new Set<(ev: { type: string; data?: any }) => void>();
 
@@ -374,7 +432,27 @@ export function onEvent(ev: { type: string; data?: any }): void {
     case 'session.tool.called':
       return set('working', 'running a tool');
     case 'permission.asked':
-      return set('blocked', d.action === 'question' ? 'question' : `permission ${d.action ?? ''}`.trim());
+      set('blocked', d.action === 'question' ? 'question' : `permission ${d.action ?? ''}`.trim());
+      // An ask in the human's thread (S-3980), answered through the reply endpoint for this permission id.
+      if (typeof d.id === 'string' && d.id) {
+        const action = d.action === 'question' ? 'OpenCode asks a question' : `OpenCode asks to allow ${d.action ?? 'an action'}`;
+        // The mail reads a harness dialog's details as its tool and input (dialogMail), so the resources go in as the input.
+        const resources = askResources(d.resources);
+        const input = d.action === 'shell' ? { command: resources.join('\n') } : { pattern: resources.join('\n') };
+        const details = JSON.stringify({ tool: d.action ?? '', input, action: d.action ?? '', permission: d.id, session: d.sessionID });
+        const id = d.id;
+        permissionsLater((p) => raiseAsk(agent, id, action, details, p)).catch((e) => db.addEvent(agent.id, 'permission-error', String(e)));
+      }
+      return;
+    case 'permission.replied': {
+      // Answered outside stam (the TUI or the agent view): the ask it raised is closed.
+      if (typeof d.requestID !== 'string' || answering.has(d.requestID)) return;
+      replied.add(d.requestID);
+      const r = db.pendingDialog(agent.id);
+      const pid = r && askOf(r.details).permission;
+      if (r && pid && pid === d.requestID) permissionsLater((p) => p.dialogClosed(agent));
+      return;
+    }
     case 'form.created':
       return set('blocked', 'question');
     case 'session.execution.succeeded':
@@ -460,8 +538,12 @@ export async function interruptSession(sid: string, attempts: number, keep?: () 
 
 export const opencode: Adapter = {
   name: 'opencode',
-  upgradeCommand: `${BIN} upgrade`,
-  version: () => execFileSync(BIN, ['--version'], { encoding: 'utf8' }).trim(),
+  // sh runs it (upgradeHarness): in a test home the checked path goes in quoted, so the shell's PATH never looks it up.
+  get upgradeCommand() {
+    const r = checkedBin();
+    return `${r.checked ? shellQuote(r.bin) : BIN} upgrade`;
+  },
+  version: () => agentExec([bin(), '--version'], {}, { mode: 'fileSync' }).trim(),
   classifyError: classifyOpenCodeError,
 
   async afterUpgrade() {
@@ -487,7 +569,7 @@ export const opencode: Adapter = {
       // A session keeps the permissions it was made with, so one made before the secret denies (S-1891)
       // gets them at its resume. session.update takes the same permissions as a new session.
       await oc('PATCH', `/api/session/${agent.session_id}`, { permissions: sessionPermissions(agent.permission_mode, agent.cwd) });
-      const argv = [BIN, '--server', SERVER, '--session', agent.session_id];
+      const argv = [bin(), '--server', SERVER, '--session', agent.session_id];
       return { argv, env: { OPENCODE_SERVER_PASSWORD: password() } };
     }
     let model = null;
@@ -497,7 +579,7 @@ export const opencode: Adapter = {
     }
     const permissions = sessionPermissions(agent.permission_mode, agent.cwd);
     const s = await oc('POST', '/api/session', { title: agent.name, location: { directory: agent.cwd }, model, permissions, metadata: { stam_agent: agent.id } });
-    const argv = [BIN, '--server', SERVER, '--session', s.id];
+    const argv = [bin(), '--server', SERVER, '--session', s.id];
     return { argv, env: { OPENCODE_SERVER_PASSWORD: password() }, fields: { session_id: s.id } };
   },
 
@@ -550,6 +632,35 @@ export const opencode: Adapter = {
   async interrupt(agent: Agent): Promise<boolean> {
     if (!agent.session_id) return false;
     return interruptSession(agent.session_id, 1);
+  },
+
+  // Answers the ask's permission through the session's reply endpoint (S-3980), never the TUI. The permission must
+  // still be pending in its session: one the session no longer lists is 'gone', and nothing is sent. A question has no
+  // single safe choice, so only a no answers it ('unsafe' for a yes). A failed inspection or reply throws, and the
+  // request stays pending; only a 404 on the listing means the session is gone.
+  async answerDialog(agent, request, approve) {
+    const ask = askOf(request.details);
+    if (!agent.session_id || (ask.session && ask.session !== agent.session_id)) return 'gone';
+    const pid = ask.permission;
+    if (!pid) return 'unsafe';
+    if (approve && ask.action === 'question') return 'unsafe';
+    const sid = agent.session_id;
+    let pending: unknown;
+    try {
+      pending = await oc('GET', `/api/session/${sid}/permission`);
+    } catch (e) {
+      if (/: 404 /.test((e as Error).message)) return 'gone';
+      throw e;
+    }
+    if (!(Array.isArray(pending) ? pending : []).some((p) => p?.id === pid)) return 'gone';
+    // Marked before the reply, since OpenCode's permission.replied for it can arrive before the reply's response.
+    answering.add(pid);
+    try {
+      await oc('POST', `/api/session/${sid}/permission/${encodeURIComponent(pid)}/reply`, { decision: approve ? 'once' : 'reject' });
+    } finally {
+      answering.delete(pid);
+    }
+    return 'typed';
   },
 
   // The TUI dies with the tmux session, but the turn runs in the shared server: interrupt the

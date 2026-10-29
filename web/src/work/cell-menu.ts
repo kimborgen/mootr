@@ -6,6 +6,7 @@ import { currentDiffRepos } from '../diff/diffRepos'
 import { openDiff } from '../files/open'
 import { cellActions } from './cell-actions'
 import { prEntries } from './pr-actions'
+import { LINK_KINDS, linkKind, linkLabel, linkTitle } from './links'
 import { optionsFor, type HeaderLive } from './header-menu'
 import type { WorkRow } from './model'
 
@@ -26,7 +27,11 @@ function cellItems(h: HeaderLive, colId: string, row: WorkRow, restore?: Element
     label: p.label, hint: p.hint, icon: p.diff ? 'git-pull-request' : 'external-link',
     action: () => { if (p.diff) openDiff(p.diff.repo, p.diff.pr); else window.open(p.url, '_blank', 'noopener') },
   })) : []
-  return [...prs, ...(prs.length && entries.length ? ['sep' as const] : []), ...entries.map((e): MenuItem => (e === 'sep' ? 'sep' : { label: e.label, hint: e.hint, action: () => { h.edit(e.apply); back() } }))]
+  // A link kind's cell names the links, so an icon-only link on a phone card is reachable without hover; a test or other link opens from here too.
+  const named: MenuItem[] = (LINK_KINDS as readonly string[]).includes(colId)
+    ? row.it.links?.filter((l) => linkKind(l) === colId).flatMap((l): MenuItem[] => [{ section: linkLabel(l) }, ...(colId === 'branch' || colId === 'github' ? [] : [{ label: 'Open', hint: linkLabel(l), title: linkTitle(l), icon: 'external-link', action: () => { window.open(l.url, '_blank', 'noopener') } }])]) ?? []
+    : []
+  return [...named, ...(named.length && (prs.length || entries.length) ? ['sep' as const] : []), ...prs, ...(prs.length && entries.length ? ['sep' as const] : []), ...entries.map((e): MenuItem => (e === 'sep' ? 'sep' : { label: e.label, hint: e.hint, action: () => { h.edit(e.apply); back() } }))]
 }
 
 // Returns whether a menu opened: a column with nothing to offer leaves the browser's own menu alone.

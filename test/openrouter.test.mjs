@@ -195,16 +195,32 @@ test('pollCredits > a top-up that stays below the threshold re-arms', async () =
   assert.equal(lowMails(), before + 2, 'a new top-up is warned about even while still low');
 });
 
-test('pollCredits > keeps a warning pending until a sender can send it', async () => {
+test('pollCredits > a warning goes out with no active agent', async () => {
   setCredits({ total_credits: 10, total_usage: 9 });
   setKey({});
   reset();
   const before = lowMails();
-  db.updateAgent('a1', { lifecycle: 'shut_down' }); // no active agent to send from
+  db.updateAgent('a1', { lifecycle: 'shut_down' }); // the system sender needs no agent
   await credits.pollCredits();
+  assert.equal(lowMails(), before + 1, 'the warning was sent');
+  assert.equal(entry().pending, false);
+  assert.equal(db.open().prepare("SELECT from_id FROM mail WHERE subject LIKE '%OpenRouter%' ORDER BY rowid DESC LIMIT 1").get()?.from_id, 'system:cost');
+  db.updateAgent('a1', { lifecycle: 'active' });
+});
+
+test('pollCredits > keeps a warning pending until a send succeeds', async () => {
+  setCredits({ total_credits: 10, total_usage: 9 });
+  setKey({});
+  reset();
+  const before = lowMails();
+  db.open().exec('ALTER TABLE mail RENAME TO mail_aside'); // the send fails
+  try {
+    await credits.pollCredits();
+  } finally {
+    db.open().exec('ALTER TABLE mail_aside RENAME TO mail');
+  }
   assert.equal(lowMails(), before, 'nothing was sent');
   assert.equal(entry().pending, true, 'the warning stays pending');
-  db.updateAgent('a1', { lifecycle: 'active' });
   await credits.pollCredits();
   assert.equal(lowMails(), before + 1, 'the pending warning is retried');
   assert.equal(entry().pending, false);

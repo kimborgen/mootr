@@ -89,8 +89,8 @@ func sessionEndWait() time.Duration {
 // as TS marks it. A nil snapshot (a tmux call that failed without saying the server is gone) changes nothing.
 //
 // Ported: the lost server and the resume of the agents it took down, the harness exit and the resume after a
-// context-limit exit, the session that ended long ago with its pane alive, the agent stuck starting with no pane, the
-// re-delivery of a first prompt a restart cut short, running compactions (held) and one a restart cut short, pending
+// context-limit exit, the session that ended long ago with its pane alive, the agent stuck starting with no pane, a start
+// with a live pane that settles at its prompt or is restarted once and then errored (S-3250), the re-delivery of a first prompt a restart cut short, running compactions (held) and one a restart cut short, pending
 // shutdowns (on a gone harness, and past their deadline), and the stale-working sweep. Not yet: pending archives (left
 // for the TS daemon), the idle shut-down archive sweep, cost switches and ring seats a restart cut short.
 func (l *Lifecycle) Reconcile(ctx context.Context, snap *tmux.Snapshot) {
@@ -141,7 +141,7 @@ func (l *Lifecycle) Reconcile(ctx context.Context, snap *tmux.Snapshot) {
 		delete(st.lossDeferred, a.ID)
 		if a.Activity == "starting" {
 			// S-759: a first prompt this restart cut off before delivery is delivered again now.
-			if first && l.firstPromptLost(ctx, a) {
+			if (first || lostHere) && l.firstPromptLost(ctx, a) {
 				l.bg.Add(1)
 				go func(a db.Agent) {
 					defer l.bg.Done()
@@ -149,8 +149,25 @@ func (l *Lifecycle) Reconcile(ctx context.Context, snap *tmux.Snapshot) {
 				}(a)
 				continue
 			}
+			// S-1400: the server went down (a reboot) under a starting agent with a conversation to resume: lost like
+			// any active agent and resumed, not aged by created_at into "never started".
+			if lostHere && !listed && a.Lifecycle == "active" && a.SessionID != nil && *a.SessionID != "" {
+				l.markLost(ctx, a, reason, lostOpts{})
+				lost = true
+				continue
+			}
 			if l.startingStuck(a, !gone, now) {
 				l.markStartingDead(ctx, a)
+			} else if !l.settleStart(ctx, a, !gone) && l.startStalled(ctx, a, !gone, now) {
+				// S-3250: a promptless launch whose SessionStart was lost settles at its prompt; any other start still
+				// stuck past settings.stuckStartMinutes restarts once, then errors. In the background, as the first prompt's.
+				l.bg.Add(1)
+				go func(id string) {
+					defer l.bg.Done()
+					if _, err := l.restartStalledStart(l.ctx, id, now); err != nil && l.ctx.Err() == nil {
+						l.event(l.ctx, id, "pending-error", "Error: "+err.Error())
+					}
+				}(a.ID)
 			}
 			continue
 		}
@@ -165,7 +182,7 @@ func (l *Lifecycle) Reconcile(ctx context.Context, snap *tmux.Snapshot) {
 		}
 		delete(st.held, a.ID)
 		// S-578: the harness is gone, so a pending stop has no step to wait for; it runs before the checks below read
-		// the downed harness as an exit. A pending archive is left for the TS daemon.
+		// the downed harness as an exit. An archive past its deadline is runDueArchives'.
 		if gone && pendingStop(a) != nil {
 			if err := l.runPendingOnDead(ctx, a); err != nil {
 				l.event(ctx, a.ID, "pending-error", "Error: "+err.Error())
@@ -218,6 +235,12 @@ func (l *Lifecycle) Reconcile(ctx context.Context, snap *tmux.Snapshot) {
 	if lost || first {
 		l.recoverLostSoon()
 	}
+	// A switch whose soft stop a restart cut short goes on at its deadline.
+	if first {
+		if resumed := l.ResumeSwitches(ctx); len(resumed) > 0 {
+			slog.Info("cost switch: resumed", "agents", resumed)
+		}
+	}
 	l.runDueShutdowns(ctx, float64(now.UnixMilli()))
 	l.reconcileStaleWorking(ctx)
 }
@@ -261,13 +284,15 @@ func (l *Lifecycle) startingStuck(a db.Agent, paneAlive bool, now time.Time) boo
 	return err == nil && now.Sub(since) >= limit
 }
 
-// markStartingDead is src/lifecycle.ts markStartingDead for a harness with no server turn to ask about (Claude Code):
-// re-read, it is marked stopped unless a launch began meanwhile, its parent (else the chief of staff) is told, and a
-// pending shutdown runs. A pending archive is left for the TS daemon.
+// markStartingDead is src/lifecycle.ts markStartingDead: unless the harness still runs a turn with no pane, or can't be
+// asked (an OpenCode turn in the shared server), and re-read, it is marked stopped unless a launch began meanwhile, its parent (else the chief of staff) is told, its rings
+// hear of it (SetStartingDead), and a pending shutdown runs. A pending archive is left for the TS daemon.
 func (l *Lifecycle) markStartingDead(ctx context.Context, a db.Agent) {
-	l.mu.Lock()
-	gen := l.gens[a.ID]
-	l.mu.Unlock()
+	gen := l.genOf(a.ID)
+	// Only an answer that no turn runs lets it on; a live turn or an unknown one waits.
+	if alive, known := l.turnAlive(ctx, a); alive || !known {
+		return
+	}
 	now, err := l.db.GetAgent(ctx, a.ID)
 	if err != nil || !l.current(a.ID, gen) || (now.Lifecycle != "active" && now.Lifecycle != "paused") {
 		return
@@ -286,6 +311,14 @@ func (l *Lifecycle) markStartingDead(ctx context.Context, a db.Agent) {
 	l.event(ctx, a.ID, "starting:dead", startingDeadEvent{AfterMS: after})
 	mins := jsjson.Number(round(l.settings.Get().StartingTimeoutMinutes))
 	l.tellParent(ctx, now, fmt.Sprintf("%s never started: no harness process after %s minutes; stam marked it stopped.", now.Name, mins))
+	l.orgMu.Lock()
+	heard := l.startingDead
+	l.orgMu.Unlock()
+	if heard != nil {
+		if fresh, err := l.db.GetAgent(ctx, a.ID); err == nil {
+			heard(ctx, fresh)
+		}
+	}
 	if fresh, err := l.db.GetAgent(ctx, a.ID); err == nil {
 		if err := l.runPendingOnDead(ctx, fresh); err != nil {
 			l.event(ctx, a.ID, "pending-error", "Error: "+err.Error())

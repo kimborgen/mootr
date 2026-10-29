@@ -5,7 +5,7 @@ import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from './tmphome.mjs';
 import { test } from 'node:test';
-import { classify, commandOf, daemonCounts, freeTests, keptLog, looksLikeQuota, mergeParity, parityProblems, staleTests, statusOf, withMissing } from '../scripts/go-parity.mjs';
+import { classify, commandOf, daemonCounts, freeTests, goHost, keptLog, looksLikeQuota, mergeParity, parityProblems, staleTests, statusOf, withMissing } from '../scripts/go-parity.mjs';
 
 const META = { go_sha: 'g', ts_sha: 't', run_at: 'now' };
 
@@ -166,4 +166,9 @@ test('go-parity reruns a failure whose kept log shows a full disk, once; an ordi
   assert.equal(readFileSync(join(root, 'calls-flaky'), 'utf8').split('\n').filter(Boolean).length, 2);
   assert.equal(readFileSync(join(root, 'calls-plain'), 'utf8').split('\n').filter(Boolean).length, 1);
   assert.match(r.stdout, /parity: 1 of 3 daemon e2e tests pass, 1 skipped, 0 n\/a/);
+});
+
+test('goHost: STAM_GO_PARITY_HOST names the Go host, else storage (S-2979)', () => {
+  assert.equal(goHost({ STAM_GO_PARITY_HOST: 'box' }), 'box');
+  assert.equal(goHost({}), 'storage');
 });

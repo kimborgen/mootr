@@ -16,9 +16,9 @@ describe('cardBadges: the Work columns a card shows', () => {
   const fields = [field({ id: 'f1', key: 'stage', card: 'chip' }), field({ id: 'f2', key: 'note', type: 'text', card: 'meta' })]
   const all = ['work', 'status', 'health', 'review', 'tests', 'field:f1', 'field:f2', 'cost']
 
-  it('shows health, review, tests, and the chip fields, in the layout order', () => {
+  it('shows health, review, tests, and each field with a value, in the layout order', () => {
     const b = cardBadges(it0, all, fields)
-    expect(b.map((x) => x.id)).toEqual(['health', 'review', 'tests', 'field:f1'])
+    expect(b.map((x) => x.id)).toEqual(['health', 'review', 'tests', 'field:f1', 'field:f2'])
     expect(b[0]).toMatchObject({ word: 'at risk', tone: 'warn' })
     expect(b[1]).toMatchObject({ word: 'approved', tone: 'ok' })
     expect(b[2]).toMatchObject({ word: '2 failed of 14', tone: 'err' })
@@ -26,9 +26,9 @@ describe('cardBadges: the Work columns a card shows', () => {
   it('follows the order and the hidden columns of the Work layout', () => {
     expect(cardBadges(it0, ['field:f1', 'tests'], fields).map((x) => x.id)).toEqual(['field:f1', 'tests'])
   })
-  it('leaves out a meta field, an on-track health, and empty values', () => {
+  it('leaves out an on-track health and a field with no value, and shows a field whatever its card setting', () => {
     const quiet = itsa({ health: 'on_track', fields: { note: 'x' } })
-    expect(cardBadges(quiet, all, fields)).toEqual([])
+    expect(cardBadges(quiet, all, fields).map((x) => x.id)).toEqual(['field:f2'])
   })
 })
 

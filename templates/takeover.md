@@ -7,7 +7,7 @@ How to pick up the work:
 
 2. Check the workspace (`git status`, `git log`) against it.
 3. If the handover is a generated brief, stale, or unclear, read the end of {{predecessor}}'s transcript: {{transcript}}
-4. Continue from the next step. Don't redo finished work, and don't tell anyone you took over unless it matters to them: stam has told your parents.
+4. Continue from the next step. Don't redo finished work, and don't tell anyone you took over unless it matters to them: mootr has told your parents.
 
 {{predecessor}}'s original instructions, as it was spawned:
 

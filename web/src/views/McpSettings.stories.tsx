@@ -7,7 +7,13 @@ import { ds, reply, type Story } from '../stories/types'
 const SERVERS = SETTINGS.mcpServers as Servers
 // A login whose client secret the store holds: the form shows its name, not the value (S-2736).
 const OAUTH_STORED: Servers = { 'fixture-login': { url: 'https://login.example.com/mcp', auth: { type: 'oauth', client_id: 'fixture-client', client_secret: { secret: 'mcp-fixture-login-1a2b3c4d-client' } } } }
-const STATUS = { 'GET /api/mcp/status': { servers: [{ name: 'fixture-docs', type: 'oauth', logged_in: true, expires_at: null }] } }
+const STATUS = { 'GET /api/mcp/status': { servers: [{ name: 'fixture-docs', type: 'oauth', logged_in: true, expires_at: null }], home: null } }
+// A peer: its login is the home's. `fixture-docs` is leased and logged in there; the peer keeps an old grant for `fixture-login`, which the home doesn't share.
+const PEER_STATUS = { 'GET /api/mcp/status': { servers: [
+  { name: 'fixture-docs', type: 'oauth', logged_in: true, expires_at: null, leased_from: 'fixture-home' },
+  { name: 'fixture-login', type: 'oauth', logged_in: false, expires_at: null, local_grant: true },
+], home: { name: 'fixture-home', reachable: true } } }
+const PEER_DOWN_STATUS = { 'GET /api/mcp/status': { servers: [], home: { name: 'fixture-home', reachable: false, error: 'the home fixture-home is unreachable, so its MCP logins can\'t be leased; start fixture-home and retry' } } }
 // Keeps the servers it is given, as ConfigView does, so a change shows.
 function Host({ initial, run }: { initial: Servers; run?: (el: HTMLElement) => void }) {
   const [servers, setServers] = useState(initial)
@@ -26,10 +32,15 @@ export const stories: Story[] = [{
     'Secrets are never shown: a row lists the names of the env variables and headers, and the preview of a paste masks each value as `••••`. An OAuth client secret the store holds shows as `Stored as NAME`; a blank field keeps it, and a typed value replaces it.',
     'A remote server defaults to the GitHub CLI login when its host is githubcopilot.com or a subdomain of it, because GitHub\'s server has no dynamic client registration and OAuth can\'t work there.',
     'Remove asks to confirm; replacing a server of the same name when adding asks too. An error from the daemon shows above the list as an alert in `--status-error-fg`.',
+    'On a peer, a remote OAuth server shows `Logged in on NAME`, `Not logged in on NAME` or `Not shared by NAME` (NAME is the home\'s name) in place of the login, with no Log in button. A peer\'s own old grant shows `Remove local login`, and nothing else. When the home does not answer, the row shows `NAME unreachable` and no login state, and the reason shows once above the list.',
+    'The edit form of a remote OAuth server has a Share with peers box, off by default. On a peer the box is not shown, because the home refuses that save. A server with a `leaseMaxSeconds` cap shows the cap as read-only text.',
   ],
   states: [
     { name: 'Servers', routes: STATUS, render: () => <Host initial={SERVERS} /> },
     { name: 'No servers yet', routes: STATUS, render: () => <Host initial={{}} /> },
+    { name: 'Peer: login on home', routes: PEER_STATUS, render: () => <Host initial={{ ...SERVERS, ...OAUTH_STORED }} /> },
+    { name: 'Peer: home unreachable', routes: PEER_DOWN_STATUS, render: () => <Host initial={{ ...SERVERS, ...OAUTH_STORED }} /> },
+    { name: 'Peer: edit form', routes: PEER_STATUS, render: () => <Host initial={{ ...SERVERS, ...OAUTH_STORED }} run={(el) => { const b = [...el.querySelectorAll<HTMLElement>('[data-server=fixture-docs] button')].find((x) => x.textContent?.startsWith('Edit')); b?.click() }} /> },
     {
       name: 'Test passed',
       routes: { ...STATUS, 'POST /api/mcp/fixture-files/test': { ok: true, tools: ['read_file', 'write_file', 'list_dir', 'search', 'move', 'stat', 'delete'] } },

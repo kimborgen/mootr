@@ -90,7 +90,7 @@ export async function withdrawAsk(mailId: string, by: string, reason: string, op
   if (m.kind === 'ask') throw new AskRefused(409, `${mailId} is an ITSA ask: move the ITSA out of its human status, which withdraws it`);
   if (!db.decisionMailOpen(mailId)) throw new AskRefused(409, `${mailId} isn't waiting on the human: it is answered, already withdrawn, or not a decision mail`);
   if (m.thread_id && db.isThreadDeferred(m.thread_id)) throw new AskRefused(409, `${mailId} is one the human deferred (Decide later), so it stays with them`);
-  db.removeDecisionMail(mailId);
+  db.removeDecisionMail(mailId, 'withdrawn');
   // The name the caller's daemon knows the agent by, when this one doesn't (a chief of staff on a peer).
   const name = db.getAgent(by)?.name ?? db.findPeerAgent(by)?.name ?? opts.byName ?? by;
   return withdrawFromHuman([mailId], by, reason.trim() ? `Withdrawn by @${name}: ${reason.trim()}` : `Withdrawn by @${name}`);

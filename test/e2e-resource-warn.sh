@@ -16,7 +16,9 @@ printf 'MemTotal:       16000000 kB\nMemAvailable:   12000000 kB\nSwapTotal:    
 printf '9.00 8.00 7.00 1/200 1234\n' >"$PROC_DIR/loadavg"
 
 daemon_home main
-printf '{ "peers": [], "chiefOfStaff": "cos" }\n' >"$TEST_TMP/main/settings.json"
+# The disk reads the real root filesystem (no stub), so its line is at most 100%: a real disk can't cross
+# it, and a full disk on the machine can't add a second mail to the CPU one.
+printf '{ "peers": [], "chiefOfStaff": "cos", "resourceWarn": { "diskPct": 100 } }\n' >"$TEST_TMP/main/settings.json"
 printf '{ "turns": [] }\n' >"$TEST_TMP/warn.json"
 fake_claude "$TEST_TMP/warn.json"
 use main

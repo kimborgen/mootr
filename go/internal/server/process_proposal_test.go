@@ -302,7 +302,6 @@ func TestProposeUnportedBeforeGit(t *testing.T) {
 		{"no github repo set", map[string]any{"repos": map[string]string{"app": p.repo}}, "itsa.prOpen.github"},
 		{"two repos and none named", map[string]any{"repos": map[string]string{"app": p.repo, "other": p.repo}, "prOpen": map[string]string{"github": ghHost}}, "needs itsa.prOpen.repo"},
 		{"a repo that isn't listed", map[string]any{"repos": map[string]string{"app": p.repo}, "prOpen": map[string]string{"github": ghHost, "repo": "ghost"}}, "repo ghost is not in settings.itsa.repos"},
-		{"a github.com repo", map[string]any{"repos": map[string]string{"app": p.repo}, "prOpen": map[string]string{"github": "acme/app"}}, "starts a watch on it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			set(tc.itsa)
@@ -468,7 +467,7 @@ func TestProposalStatusObservers(t *testing.T) {
 	}
 
 	key, _, sha := file("Approved")
-	if rec := p.post2("POST", "/api/itsas/"+key+"/act", `{"action":"approve"}`); rec.Code != 200 {
+	if rec := p.approve(key); rec.Code != 200 {
 		t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
 	}
 	waitFor(t, func() bool { return len(p.srv.life.Notices("aboss")) == 1 }, "the owner's notice")
@@ -521,17 +520,18 @@ func TestProposalStatusObservers(t *testing.T) {
 	}
 }
 
-// With the PR link on github.com a Request changes would cancel a watched ITSA, which is not ported: refused before it is written.
-func TestProposalChangesRefusedWithAWatchedLink(t *testing.T) {
+// A Request changes on a proposal whose PR link is on github.com goes through, and the ITSA's watch on the PR follows its status
+// (watch.syncItsa).
+func TestProposalChangesWithAWatchedLink(t *testing.T) {
 	p := proposalFixture(t)
 	key := p.createItsa(`{"title":"w","kind":"proposal","body":"Process proposal: flow\n","status":"needs_approval"}`)
 	p.sql("INSERT INTO itsa_links (itsa_id, n, system, external_id, url) SELECT id, 1, 'github', '9', 'https://github.com/acme/app/pull/9' FROM itsas WHERE key = ?", key)
 	rec := p.post2("POST", "/api/itsas/"+key+"/act", `{"action":"changes","text":"no"}`)
-	if rec.Code != 501 || !strings.Contains(rec.Body.String(), "Request changes on process proposal") {
-		t.Errorf("%d %s", rec.Code, rec.Body.String())
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
-	if got := p.text("SELECT status FROM itsas WHERE key = ?", key); got != "needs_approval" {
-		t.Errorf("the refusal wrote: %q", got)
+	if n := p.count("SELECT COUNT(*) FROM event_subscriptions WHERE created_by = 'stam' AND note = 'linked github:acme/app#9'"); n != 1 {
+		t.Errorf("%d link subscriptions after the move", n)
 	}
 }
 

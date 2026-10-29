@@ -110,14 +110,159 @@ test('the actions are the settings’ defaults, and none unless the ITSA waits o
 
 test('Approve moves needs_review to ready_to_merge, which does not notify the human', async () => {
   const x = await itsa.create({ title: 'Approve me', by: 'human', owner: 'alice', status: 'needs_review' });
-  const r = await human.act(x.key, 'approve', 'Looks good');
+  const r = await human.act(x.key, 'approve', 'Looks good', itsa.get(x.key).rev);
   assert.equal(r.itsa.status, 'ready_to_merge');
   await tick();
   const t = thread(x);
   assert.ok(t.some((m) => m.from_id === 'human' && m.body === 'Looks good'));
   assert.equal(t.filter((m) => m.kind === 'ask').length, 0);
   assert.equal(human.attention().some((a) => a.id === x.id), false);
-  await assert.rejects(human.act(x.key, 'approve', ''), /no action approve/);
+  await assert.rejects(human.act(x.key, 'approve', '', itsa.get(x.key).rev), /no action approve/);
+});
+
+test('Approve carries the text it showed (S-2998): a body changed since, or no revision at all, is refused and nothing moves', async () => {
+  const x = await itsa.create({ title: 'Approve the diff', body: 'diff one', by: 'human', owner: 'alice', status: 'needs_approval' });
+  const shown = itsa.get(x.key).rev;
+  // The owner swaps the diff while the ask is open; the human's page still shows the first one.
+  await itsa.set(x.key, { body: 'diff two' }, 'a1');
+  await assert.rejects(human.act(x.key, 'approve', 'ok', shown), /the text changed, review again/);
+  // A page from before Approve sent a revision (no if_rev) fails closed too.
+  await assert.rejects(human.act(x.key, 'approve', ''), /the text changed, review again/);
+  await assert.rejects(human.act(x.key, 'approve', '', ''), /the text changed, review again/);
+  assert.equal(itsa.must(x.id).status, 'needs_approval');
+  assert.ok(!thread(x).some((m) => m.from_id === 'human' && m.body === 'ok'), 'a refused Approve posts nothing');
+  // Approving the text shown now works.
+  assert.equal((await human.act(x.key, 'approve', '', itsa.get(x.key).rev)).itsa.status, 'in_progress');
+});
+
+test('Approve re-checks the text in the transaction that moves the status (S-2998): a change after the first check is refused', async () => {
+  const x = await itsa.create({ title: 'Race the move', body: 'diff one', by: 'human', owner: 'alice', status: 'needs_approval' });
+  const shown = itsa.get(x.key).rev;
+  // act checks the revision, then awaits before the move's transaction: the owner swaps the diff in between.
+  const p = human.act(x.key, 'approve', '', shown);
+  db.open().prepare('UPDATE itsas SET body = ? WHERE id = ?').run('diff two', x.id);
+  await assert.rejects(p, /the text changed, review again: \S+ changed since it was shown/);
+  assert.equal(itsa.must(x.id).status, 'needs_approval');
+});
+
+test('a mail thread approves what its newest mail showed (S-2998): a body swapped after the ask is refused', async () => {
+  const x = await itsa.create({ title: 'Approve from the thread', body: 'diff one', by: 'human', owner: 'alice', status: 'in_progress' });
+  await itsa.post(x.key, { by: 'alice', body: 'Please approve diff one.' });
+  await itsa.set(x.key, { status: 'needs_approval' }, 'alice');
+  const [ask] = await askedBy(x, 1);
+  // The owner swaps the body after the ask went out; the thread still shows the ask.
+  await itsa.set(x.key, { body: 'diff two' }, 'alice');
+  await assert.rejects(human.act(x.key, 'approve', '', undefined, ask.id), /the text changed, review again/);
+  // A mail of another thread, or none recorded, names no revision.
+  const other = await itsa.create({ title: 'Elsewhere', by: 'human', owner: 'alice', status: 'in_progress' });
+  const elsewhere = await itsa.post(other.key, { by: 'alice', body: 'hi' });
+  await assert.rejects(human.act(x.key, 'approve', '', undefined, elsewhere.id), /the text changed, review again/);
+  assert.equal(itsa.must(x.id).status, 'needs_approval');
+  // A mail that shows the new text records its revision; a thread showing it approves.
+  const shown = human.shownText(itsa.must(x.id));
+  const again = await itsa.post(x.key, { by: 'alice', body: `Now diff two.\n\n${shown.text}` }, { shown });
+  // Approve from a thread that shows only the ask still fails; one that shows the new mail works.
+  await assert.rejects(human.act(x.key, 'approve', '', undefined, ask.id), /the text changed, review again/);
+  assert.equal((await human.act(x.key, 'approve', '', undefined, again.id)).itsa.status, 'in_progress');
+});
+
+test('the ask shows the text it asks about and records the revision of that snapshot (S-2998)', async () => {
+  const x = await itsa.create({ title: 'Show me', summary: 'One line.', body: 'diff B', by: 'human', owner: 'alice', status: 'in_progress' });
+  // The owner comments on diff A, then sets the body to B, then asks: the ask renders B, so B is what a thread approves.
+  await itsa.post(x.key, { by: 'alice', body: 'Here is diff A.' });
+  await itsa.set(x.key, { status: 'needs_approval' }, 'alice');
+  const [ask] = await askedBy(x, 1);
+  // It comes first, so nothing the owner wrote can hide it.
+  assert.match(ask.body, /^<details><summary>What you approve: \S+ Show me<\/summary>\n\nOne line\.\n\ndiff B\n\n<\/details>\n\n/);
+  assert.equal(itsa.shownRev(x.id, ask.id), itsa.get(x.key).rev);
+  // The thread serves where the snapshot sits in the body, in UTF-16 units, for the web to draw it above the rest.
+  const served = (itsaId, id) => db.threadMail(itsa.must(itsaId).thread_id).find((m) => m.id === id);
+  // A comment that renders no ITSA text records nothing: a thread whose newest mail is one, with no ask before it, is refused.
+  const plain = await itsa.create({ title: 'Plain', by: 'human', owner: 'alice', status: 'in_progress' });
+  const c = await itsa.post(plain.key, { by: 'alice', body: 'just a comment' });
+  assert.equal(itsa.shownRev(plain.id, c.id), undefined);
+  assert.deepEqual(served(x.id, ask.id).shown, { at: 0, len: human.shownText(itsa.must(x.id)).text.length });
+  assert.equal(served(plain.id, c.id).shown, undefined);
+});
+
+test('markup in the title or summary is escaped, so it can\'t hide the snapshot (S-2998)', () => {
+  for (const title of ['<!-- hide', '<span hidden>x</span>', '<span style="display:none">x</span>']) {
+    const { text } = human.shownText({ key: 'S-1', title, summary: `${title} & more`, body: 'diff' });
+    assert.doesNotMatch(text, /<!--|<span/, `raw markup from ${title}`);
+    assert.match(text, /&lt;/);
+    assert.match(text, /&amp; more/);
+    assert.match(text, /\n\ndiff\n\n<\/details>$/, 'the body follows, whole');
+  }
+  assert.match(human.shownText({ key: 'S-1', title: 'a "b"', summary: null, body: null }).text, /a &quot;b&quot;/);
+});
+
+test('an ask whose snapshot was cut off by the mail cap records no revision (S-2998)', async () => {
+  const x = await itsa.create({ title: 'Near the cap', body: 'diff', by: 'human', owner: 'alice', status: 'in_progress' });
+  // The owner's comment, which the ask repeats, nearly fills the mail: the appended snapshot is cut off.
+  await itsa.post(x.key, { by: 'alice', body: 'y'.repeat(19_900) });
+  await itsa.set(x.key, { status: 'needs_approval' }, 'alice');
+  const [ask] = await askedBy(x, 1);
+  assert.match(ask.body, /body truncated/);
+  assert.equal(itsa.shownRev(x.id, ask.id), undefined);
+  await assert.rejects(human.act(x.key, 'approve', '', undefined, ask.id), /the text changed, review again/);
+});
+
+test('a title or comment with markup can\'t hide the ask\'s snapshot, and a hidden copy in a cut mail records nothing (S-2998)', async () => {
+  const x = await itsa.create({ title: 'x <div hidden>', body: 'real diff', by: 'human', owner: 'alice', status: 'in_progress' });
+  // The owner's comment carries CSS that would hide or cover the snapshot (the web strips it: mailblocks.test.ts),
+  // opens a hidden block and an HTML comment, and carries a copy of the snapshot, then pads past the cap.
+  const copy = human.shownText(itsa.must(x.id)).text;
+  const css = '<style>details{display:none!important}</style>\n\n<div style="position:fixed;inset:0">cover</div>\n\n';
+  await itsa.post(x.key, { by: 'alice', body: `${css}<div hidden>\n\n${copy}\n\n<!-- hide\n\n${'y'.repeat(19_900)}` });
+  await itsa.set(x.key, { status: 'needs_approval' }, 'alice');
+  const [ask] = await askedBy(x, 1);
+  // The real snapshot comes first and the title is escaped everywhere in the ask.
+  assert.ok(ask.body.startsWith(copy), 'the snapshot leads the ask');
+  assert.ok(ask.body.indexOf('<style>') > copy.length, 'the comment\'s CSS comes after the snapshot');
+  assert.doesNotMatch(ask.body.split('\n').slice(0, 4).join('\n'), /<div hidden>/);
+  assert.match(ask.body, /x &lt;div hidden&gt;/);
+  // Cut by the cap: no revision, though a whole copy of the snapshot is in the body.
+  assert.match(ask.body, /body truncated/);
+  assert.equal(itsa.shownRev(x.id, ask.id), undefined);
+  await assert.rejects(human.act(x.key, 'approve', '', undefined, ask.id), /the text changed, review again/);
+});
+
+test('a body too long for the mail is cut, records no revision, and the thread fails closed (S-2998)', async () => {
+  const long = 'x'.repeat(human.ASK_TEXT_MAX + 10);
+  const x = await itsa.create({ title: 'Too long', body: long, by: 'human', owner: 'alice', status: 'in_progress' });
+  await itsa.post(x.key, { by: 'alice', body: 'Please look.' });
+  await itsa.set(x.key, { status: 'needs_approval' }, 'alice');
+  const [ask] = await askedBy(x, 1);
+  assert.match(ask.body, /… Cut here: open \S+ to review all of it\./);
+  assert.equal(itsa.shownRev(x.id, ask.id), undefined);
+  await assert.rejects(human.act(x.key, 'approve', '', undefined, ask.id), /the text changed, review again/);
+  // The ITSA view, which shows it all, approves.
+  assert.equal((await human.act(x.key, 'approve', '', itsa.get(x.key).rev)).itsa.status, 'in_progress');
+});
+
+test('a refused Approve with a comment posts nothing and records nothing (S-2998)', async () => {
+  const x = await itsa.create({ title: 'Comment race', body: 'diff one', by: 'human', owner: 'alice', status: 'needs_approval' });
+  const shown = itsa.get(x.key).rev;
+  const mails = () => db.open().prepare('SELECT COUNT(*) AS n FROM mail').get().n;
+  const evts = () => itsa.events(x.id, 1000).length;
+  const [m0, e0] = [mails(), evts()];
+  const p = human.act(x.key, 'approve', 'Looks good', shown);
+  db.open().prepare('UPDATE itsas SET body = ? WHERE id = ?').run('diff two', x.id);
+  await assert.rejects(p, /the text changed, review again/);
+  await tick();
+  assert.equal(mails(), m0, 'no comment was posted');
+  assert.equal(evts(), e0, 'no event was recorded');
+  // An Approve that goes through posts its comment after the move.
+  const r = await human.act(x.key, 'approve', 'Looks good', itsa.get(x.key).rev);
+  assert.equal(r.itsa.status, 'in_progress');
+  assert.ok(thread(x).some((m) => m.from_id === 'human' && m.body === 'Looks good'));
+});
+
+test('the revision covers each field apart (S-2998): text moved between fields changes it, and Go builds the same', () => {
+  assert.equal(itsa.revOf({ title: 'Gamma', summary: null, body: null }), 'f767a69f7540656b', 'the value go/internal/server TestItsaRevOf expects');
+  assert.notEqual(itsa.revOf({ title: 'ab', summary: 'c', body: null }), itsa.revOf({ title: 'a', summary: 'bc', body: null }));
+  assert.notEqual(itsa.revOf({ title: 'a', summary: null, body: 'b' }), itsa.revOf({ title: 'a', summary: 'b', body: null }));
+  assert.notEqual(itsa.revOf({ title: 'é', summary: null, body: null }), itsa.revOf({ title: 'e', summary: null, body: null }));
 });
 
 test('Request changes needs text, moves to in_progress, and the comment interrupts the owner', async () => {
@@ -131,7 +276,7 @@ test('Request changes needs text, moves to in_progress, and the comment interrup
   // From the human, it interrupts: the owner's in-turn notice lists it.
   const loud = db.inbox('a1', true, 10, true).map((k) => k.id);
   assert.ok(loud.includes(m.id));
-  await assert.rejects(human.act(x.key, 'approve', ''), /no action approve/);
+  await assert.rejects(human.act(x.key, 'approve', '', itsa.get(x.key).rev), /no action approve/);
 });
 
 test('Answer on needs_input needs text; the settings override the actions of a status', async () => {
@@ -142,8 +287,8 @@ test('Answer on needs_input needs text; the settings override the actions of a s
 
   const y = await itsa.create({ title: 'Ship me', by: 'human', owner: 'alice', status: 'needs_test' });
   assert.deepEqual(itsa.actionsOf('needs_test').map((a) => [a.label, a.to]), [['Ship it', 'deploying']]);
-  await assert.rejects(human.act(y.key, 'approve', 'hm'), /takes no comment/);
-  assert.equal((await human.act(y.key, 'approve', '')).itsa.status, 'deploying');
+  await assert.rejects(human.act(y.key, 'approve', 'hm', itsa.get(y.key).rev), /takes no comment/);
+  assert.equal((await human.act(y.key, 'approve', '', itsa.get(y.key).rev)).itsa.status, 'deploying');
 });
 
 test('the attention list is the ITSAs in human statuses, oldest first', async () => {
@@ -339,6 +484,8 @@ test('S-3080: the human answering an ITSA ask through its action clears the agen
 test('S-3080: a move between human statuses keeps the agent’s wait on the ITSA, which still waits on the human', async () => {
   const x = await openAsk('Moved ask', 'alice');
   const w = await waits.declare('a1', { on: 'human', thread: itsa.must(x.id).thread_id, note: 'the call' });
+  // Every move to a human status is a new ask, so it needs its own comment first.
+  await itsa.post(x.key, { by: 'alice', body: 'Done, please review.' });
   await itsa.set(x.key, { status: 'needs_review' }, 'alice');
   await tick();
   assert.equal(itsa.must(x.id).status, 'needs_review');

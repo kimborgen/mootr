@@ -182,7 +182,7 @@ function Bottom() {
   useData()
   const typing = useTyping()
   const [toAsst, setToAsst] = useState(false)
-  useUi()
+  const { agentSelect } = useUi()
   useBottomSlotVersion()
   const composer = useRef<ComposerHandle>(null)
   const bottom = useRef<HTMLElement>(null)
@@ -200,7 +200,8 @@ function Bottom() {
   const keys = phone && !!typing?.closest('#w-main .term-view')
   // Nothing in the main world takes input (or nothing is selected): the bar suggests a recipient (S-1474).
   const bt = bottomTarget(shell.activeIn('main'))
-  const hidden = phone ? bt.kind !== 'none' && !(t.kind === 'agent' || t.kind === 'shell' || t.kind === 'chief' || t.kind === 'rapid') : !shell.worldOpen('bottom')
+  // A phone's select mode (S-3282) hides the bar: its bulk bar takes the foot of the Agents list, and the composer would show under it.
+  const hidden = phone ? !!agentSelect || (bt.kind !== 'none' && !(t.kind === 'agent' || t.kind === 'shell' || t.kind === 'chief' || t.kind === 'rapid')) : !shell.worldOpen('bottom')
   // On a desktop a conversation or a thread takes the focused pane's column (S-2284).
   useBottomColumn(bottom, !phone && (t.key.startsWith('view:') || t.key.startsWith('thread:')))
   return (
@@ -294,34 +295,46 @@ export function TopWorld() {
 // The bottom navigation: the agent tree, the mail list, the issues, the world in main
 // (named for what it shows), and the assistant. Each keeps its place: the tree and the
 // lists cover main without changing it, and main comes back as it was.
-function MobileNav() {
+type NavSlot = 'left' | 'mail' | 'issues' | 'main' | 'work' | 'assistant'
+// The worlds a fixed slot names (S-3346). A world in this map is on in its slot, and the main
+// slot keeps "Main" and its terminal icon there, as it does on the Inbox page. Issues has no world
+// of its own: its slot is the issues side.
+const WORLD_SLOT: Partial<Record<string, NavSlot>> = { 'w:agents': 'left', 'w:inbox': 'mail', 'w:work': 'work' }
+const FIXED_LABELS = ['Agents', 'Mail', 'Issues', 'Work', 'Assistant']
+// Exactly one slot is on: the assistant over all, else a phone side, else the slot the world names, else main.
+// `mainTitle` is the title the main slot shows, or null for "Main": a world a fixed slot names, or a title one already has, shows Main.
+export function navState(cw: string | null, side: shell.Mobile, topOpen: boolean, worldTitle: string | null) {
+  const named = cw ? WORLD_SLOT[cw] : undefined
+  const on: NavSlot = topOpen ? 'assistant' : side === 'left' || side === 'issues' ? side : named ?? 'main'
+  const mainTitle = !named && worldTitle && !FIXED_LABELS.includes(worldTitle) ? worldTitle : null
+  return { on, mainTitle }
+}
+
+export function MobileNav() {
   const { humanThreads, humanArchived, humanDeferred } = useData()
   const { topOpen } = useUi()
-  const on = shell.phoneShows()
   const cw = shell.currentWorld()
   const world = !cw ? null : viewMeta(cw.startsWith('t:') ? 'thread:' + cw.slice(2) : cw.startsWith('w:') ? cw.slice(2) : 'agent:' + cw)
+  const nav = navState(cw, shell.phoneShows(), topOpen, world?.title ?? null)
+  const on = (slot: NavSlot) => nav.on === slot ? 'on' : ''
   // What waits on you, counted once (`useWaiting`): the Mail, Issues and Work badges agree. Unread is the Inbox page's own count.
   const waitingRows = useWaiting()
   const unread = unreadCount({ humanThreads, humanArchived, humanDeferred }, waitingRows, useDeferred())
   const waiting = waitingRows.length
-  const onWork = cw === 'w:work'
-  const onMail = cw === 'w:inbox'
-  // The Inbox page is Mail's, so the Main slot keeps its own name and icon there.
-  const onOwn = onWork || onMail
   const go = (side: 'left' | 'issues' | null) => { openAssistant(false); closeSearch(); closeSuggest(); shell.phoneShow(side) }
   const goWork = () => { openAssistant(false); closeSearch(); closeSuggest(); shell.phoneShow(null); openWorld('work') }
   const goMail = () => { openAssistant(false); closeSearch(); closeSuggest(); openMail() }
   return (
     <nav id="mobile-nav" aria-label="Navigation">
-      <button data-nav="left" className={on === 'left' && !topOpen ? 'on' : ''} onClick={() => go('left')}><Icon name="users" /><span className="nl">Agents</span></button>
-      <button data-nav="mail" className={onMail && !topOpen ? 'on' : ''} onClick={goMail}><Icon name="mail" /><span className="nl">Mail</span>
+      <button data-nav="left" className={on('left')} onClick={() => go('left')}><Icon name="users" /><span className="nl">Agents</span></button>
+      <button data-nav="mail" className={on('mail')} onClick={goMail}><Icon name="mail" /><span className="nl">Mail</span>
         {waiting ? <span className="badge warn" title={`${waiting} waiting on you`}>{waiting}</span> : unread ? <span className="badge" title={`${unread} unread`}>{unread}</span> : null}</button>
-      <button data-nav="issues" className={on === 'issues' && !topOpen ? 'on' : ''} onClick={() => go('issues')}><Icon name="list-checks" /><span className="nl">Issues</span>
+      <button data-nav="issues" className={on('issues')} onClick={() => go('issues')}><Icon name="list-checks" /><span className="nl">Issues</span>
         {waiting ? <span className="badge warn" title={`${waiting} waiting on you`}>{waiting}</span> : null}</button>
-      <button data-nav="main" className={!on && !topOpen ? 'on' : ''} onClick={() => { go(null); leaveMail() }}>{!onOwn && world?.icon ? world.icon : <Icon name="terminal" />}<span className="nl">{!onOwn && world?.title ? world.title : 'Main'}</span></button>
-      <button data-nav="work" className={onWork ? 'on' : ''} onClick={goWork}><Icon name="layout-list" /><span className="nl">Work</span>
+      <button data-nav="main" className={on('main')} onClick={() => { go(null); leaveMail() }}>{nav.mainTitle && world?.icon ? world.icon : <Icon name="terminal" />}<span className="nl">{nav.mainTitle ?? 'Main'}</span></button>
+      <button data-nav="work" className={on('work')} onClick={goWork}><Icon name="layout-list" /><span className="nl">Work</span>
         {waiting ? <span className="badge warn" title={`${waiting} waiting on you`}>{waiting}</span> : null}</button>
-      <button data-nav="assistant" className={topOpen ? 'on' : ''} onClick={() => openAssistant()}><Icon name="bot" /><span className="nl">Assistant</span></button>
+      <button data-nav="assistant" className={on('assistant')} onClick={() => openAssistant()}><Icon name="bot" /><span className="nl">Assistant</span></button>
     </nav>
   )
 }

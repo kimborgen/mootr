@@ -21,6 +21,7 @@ import { isOpenRouter, matchAccount, openRouterAccounts, payPerTokenProvider } f
 import { priceUsd } from './attribution.ts';
 import { registry } from './registry.ts';
 import { timed } from './stall.ts';
+import { codexView, type ResetWindow } from './codex-usage-view.ts';
 
 // A reading older than this, while an agent on the account is active, is stale and counts as
 // unknown (docs/cost-policy.md, Readings).
@@ -47,6 +48,8 @@ export interface AccountReading {
   // The provider that bills it per token (accounts.payPerTokenProvider), or null.
   provider: string | null;
   windows: Record<string, AccountWindow>;
+  // Codex only: windows whose reset time has passed, shown without their old percentage (S-1361).
+  reset_windows?: Record<string, ResetWindow>;
   // When the account's limits or billing reading was last written, and its age.
   updated_at: string | null;
   age_ms: number | null;
@@ -180,7 +183,10 @@ export function accountReadings(now: number = Date.now()): AccountReading[] {
   for (const [name, acct] of Object.entries(accounts)) {
     if (!acct) continue;
     const basis = basisOf(acct, name, providers);
-    const sub = timed('snapshot: subscription row', () => entry(acct.match.harness));
+    let sub = timed('snapshot: subscription row', () => entry(acct.match.harness));
+    // Codex: the newest of this machine's and the peers' readings, a passed reset taken out (S-1361).
+    const view = acct.match.harness === 'codex' ? codexView(sub?.data ?? null, sub?.updated_at ?? null, now) : null;
+    if (view && view.updated_at) sub = { data: view.live, updated_at: view.updated_at };
     const credits = timed('snapshot: credits row', () => creditsFor(acct, name));
     const isCodex = acct.match.harness === 'codex';
     const active = isCodex || activeAccounts.has(name);
@@ -212,6 +218,7 @@ export function accountReadings(now: number = Date.now()): AccountReading[] {
       match: acct.match,
       provider: payPerTokenProvider(acct, name, providers),
       windows: windowsOf(sub),
+      ...(view ? { reset_windows: view.reset } : {}),
       updated_at: updatedAt,
       age_ms: ageMs(updatedAt, now),
       stale: isStale(updatedAt, active, now),

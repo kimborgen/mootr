@@ -2,7 +2,7 @@
 // which slot. They are one record in stam settings, `cardLayouts`, keyed `issue` and `agent`, written
 // as the human, so a layout made on one device follows the user to the others. Nothing draws from it
 // yet; the defaults are today's hard-coded cards, so drawing from it later changes nothing.
-import { useEffect, useReducer } from 'react'
+import { useEffect, useMemo, useReducer, useRef } from 'react'
 import type { Field } from './itsa/fields'
 import { settingsRecord } from './settings-views'
 
@@ -19,6 +19,8 @@ export interface CardLayout {
   // The field items this layout has been offered (`field:<id>`): a field not listed is new and lands
   // in BADGES once; a listed one the human hid stays hidden.
   seen: string[]
+  // Set once the human has saved the layout in the editor: the seed and the legacy migration never overwrite it.
+  chosen?: boolean
 }
 
 export const SLOTS: Record<CardId, readonly string[]> = {
@@ -26,9 +28,10 @@ export const SLOTS: Record<CardId, readonly string[]> = {
   agent: ['HEAD', 'ISSUE', 'BADGES', 'FOOT'],
 }
 // The most items a slot holds. BADGES has no cap: it clips.
-export const SLOT_CAPS: Record<string, number> = { TOP: 3, META: 5, FOOT: 3 }
+export const SLOT_CAPS: Record<string, number> = { TOP: 3, META: 5, FOOT: 3, ISSUE: 1 }
 // Items the card draws itself, never placed in a slot: the issue key, title and needs-you mark, the agent mark and name.
-const LOCKED: Record<CardId, string[]> = { issue: ['key', 'title', 'needs'], agent: ['mark', 'name'] }
+// The editor shows them as fixed, and the model refuses to place them.
+export const LOCKED: Record<CardId, string[]> = { issue: ['key', 'title', 'needs'], agent: ['mark', 'name'] }
 const MAX_ITEM = 64
 
 // Today's cards: the board card (Board.tsx Card) and the system view's agent card (SystemCard.tsx).
@@ -40,7 +43,7 @@ const DEFAULTS: Record<CardId, CardLayout> = {
     seen: [],
   },
   agent: {
-    slots: { HEAD: ['model', 'cost'], ISSUE: ['issue'], BADGES: [], FOOT: ['activity'] },
+    slots: { HEAD: ['model', 'cost'], ISSUE: ['issue'], BADGES: ['health', 'review', 'tests'], FOOT: ['activity'] },
     hairline: true,
     seen: [],
   },
@@ -70,9 +73,10 @@ export function cleanCardLayout(x: unknown, id: CardId): CardLayout {
     slots[slot] = items.slice(0, SLOT_CAPS[slot] ?? items.length)
   }
   const offered = Array.isArray(x.seen) ? [...new Set(x.seen.filter(isItem))] : []
-  if (id === 'agent') return { slots, hairline: typeof x.hairline === 'boolean' ? x.hairline : true, seen: offered }
+  const chosen = x.chosen === true ? { chosen: true } : {}
+  if (id === 'agent') return { slots, hairline: typeof x.hairline === 'boolean' ? x.hairline : true, seen: offered, ...chosen }
   const lines = x.titleLines
-  return { slots, titleLines: lines === 1 || lines === 2 || lines === 3 ? lines : 3, seen: offered }
+  return { slots, titleLines: lines === 1 || lines === 2 || lines === 3 ? lines : 3, seen: offered, ...chosen }
 }
 
 // The issue layout with the fields it hasn't been offered (the seen rule, as workViews has it): each
@@ -93,8 +97,7 @@ export function settleIssueFields(layout: CardLayout, fields: string[]): CardLay
 // Work columns' field ids in the order the human sees them; a field not in it follows, by position.
 // Every field counts as seen, so only a field added later lands new.
 export function seedIssueLayout(fields: Pick<Field, 'id' | 'card' | 'position'>[], order: string[] = []): CardLayout {
-  const rank = (f: { id: string; position: number }) => { const i = order.indexOf(`field:${f.id}`); return i < 0 ? order.length + f.position : i }
-  const sorted = [...fields].sort((a, b) => rank(a) - rank(b))
+  const sorted = byOrder(fields, order)
   const base = defaultCardLayout('issue')
   const ids = (card: Field['card']) => sorted.filter((f) => f.card === card).map((f) => `field:${f.id}`)
   const metaRoom = Math.max(0, (SLOT_CAPS.META ?? 0) - base.slots.META.length)
@@ -104,6 +107,36 @@ export function seedIssueLayout(fields: Pick<Field, 'id' | 'card' | 'position'>[
     slots: { ...base.slots, META: [...base.slots.META, ...meta.slice(0, metaRoom)], BADGES: [...ids('chip'), ...meta.slice(metaRoom)] },
     seen: sorted.map((f) => `field:${f.id}`),
   }, 'issue')
+}
+
+// The agent layout the first load seeds: today's defaults, with each field the system view showed as a chip
+// (`card: 'chip'`) after the word badges, in the Work columns' order. Only the first load seeds it.
+export function seedAgentLayout(fields: Pick<Field, 'id' | 'card' | 'position'>[], order: string[] = []): CardLayout {
+  const base = defaultCardLayout('agent')
+  const sorted = byOrder(fields, order)
+  const chips = sorted.filter((f) => f.card === 'chip').map((f) => `field:${f.id}`)
+  return cleanCardLayout({ ...base, slots: { ...base.slots, BADGES: [...base.slots.BADGES, ...chips] }, seen: sorted.map((f) => `field:${f.id}`) }, 'agent')
+}
+
+// The agent record main wrote before the system view read it (Board.tsx): no BADGES and nothing seen. It is the
+// old empty default, not a choice, so the first load replaces it with the seed, and the card keeps its badges.
+const isLegacyAgent = (l: CardLayout) => !l.chosen && l.seen.length === 0 && (l.slots.BADGES ?? []).length === 0
+
+// The agent layout with the chip fields it hasn't been offered: each new chip lands at the end of BADGES,
+// once, as settleIssueFields does for the issue card. Other fields are marked seen and stay out of the card.
+export function settleAgentFields(layout: CardLayout, fields: Pick<Field, 'id'>[]): CardLayout {
+  const known = new Set(layout.seen)
+  const fresh = fields.filter((f) => !known.has(`field:${f.id}`))
+  if (!fresh.length) return layout
+  const placed = new Set(Object.values(layout.slots).flat())
+  const badges = fresh.filter((f) => !placed.has(`field:${f.id}`)).map((f) => `field:${f.id}`)
+  return { ...layout, slots: { ...layout.slots, BADGES: [...(layout.slots.BADGES ?? []), ...badges] }, seen: [...layout.seen, ...fresh.map((f) => `field:${f.id}`)] }
+}
+
+// The fields in the order the human sees them: the Work columns' order first, then the rest by position.
+function byOrder<F extends Pick<Field, 'id' | 'position'>>(fields: F[], order: string[]): F[] {
+  const rank = (f: F) => { const i = order.indexOf(`field:${f.id}`); return i < 0 ? order.length + f.position : i }
+  return [...fields].sort((a, b) => rank(a) - rank(b))
 }
 
 export const CARD_LAYOUT_EVENT = 'stam:card-layout'
@@ -133,16 +166,18 @@ export function saveCardLayout(id: CardId, layout: CardLayout): void {
 export async function migrateCardLayouts(fields: Pick<Field, 'id' | 'card' | 'position'>[], order: string[] = []): Promise<void> {
   const have = await records.load()
   if (!have.issue) await records.fill('issue', seedIssueLayout(fields, order))
-  if (!have.agent) await records.fill('agent', defaultCardLayout('agent'))
+  if (!have.agent) await records.fill('agent', seedAgentLayout(fields, order))
+  else if (isLegacyAgent(have.agent)) records.save('agent', seedAgentLayout(fields, order))
   window.dispatchEvent(new Event(CARD_LAYOUT_EVENT))
 }
 
 // How often an open page reads the record again, so a layout another page saved shows here (while visible).
 export const CARD_LAYOUT_POLL_MS = 5000
 
-// A card's layout as the page shows it. Until the record has loaded, the issue layout is the migration's
-// seed for the fields this page knows, so a page never draws a layout the record would not (a field with
-// `card: 'meta'` sits in META). `fields` are the fields the card may show: a stored issue layout takes any it hasn't seen.
+// A card's layout as the page shows it. Until the record has loaded, each layout is the migration's seed for
+// the fields this page knows, so a page never draws a layout the record would not (a field with `card: 'meta'`
+// sits in META, a chip in the agent's BADGES). `fields` are the fields the card may show: a stored issue layout
+// takes any it hasn't seen.
 export function useCardLayout(id: CardId, fields: Pick<Field, 'id' | 'card' | 'position'>[] = []): CardLayout {
   const [, bump] = useReducer((n: number) => n + 1, 0)
   useEffect(() => {
@@ -157,7 +192,21 @@ export function useCardLayout(id: CardId, fields: Pick<Field, 'id' | 'card' | 'p
     }, CARD_LAYOUT_POLL_MS)
     return () => { clearInterval(poll); window.removeEventListener(CARD_LAYOUT_EVENT, on) }
   }, [])
-  if (id === 'agent') return records.cached(id) ?? defaultCardLayout(id)
-  const stored = records.cached(id)
-  return stored ? settleIssueFields(stored, fields.map((f) => `field:${f.id}`)) : seedIssueLayout(fields)
+  // Kept by content: a settings refresh builds new record objects each poll, and a caller may build its fields each render.
+  // Either would change the layout's identity, and with it every card's, though nothing a card draws has changed.
+  const stored = useByContent(records.cached(id))
+  const known = useByContent(fields)
+  const seeded = useMemo(() => (id === 'agent' ? seedAgentLayout(known) : seedIssueLayout(known)), [id, known])
+  return useMemo(() => {
+    if (!stored || (id === 'agent' && isLegacyAgent(stored))) return seeded
+    return id === 'agent' ? settleAgentFields(stored, known) : settleIssueFields(stored, known.map((f) => `field:${f.id}`))
+  }, [id, stored, seeded, known])
+}
+
+// The value as it was while its JSON holds: the same object for the same content, so a memo on it doesn't churn.
+function useByContent<T>(v: T): T {
+  const kept = useRef<{ json: string; v: T } | null>(null)
+  const json = JSON.stringify(v) ?? 'null'
+  if (!kept.current || kept.current.json !== json) kept.current = { json, v }
+  return kept.current.v
 }

@@ -8,7 +8,7 @@
 //   node scripts/sweep-test-homes.mjs --review-hours 6 the review folders' age (default 6; see below)
 // It also prunes the deps caches (STAM_HOME/deps, ~/.cache/stam-gate-deps: keep entries a release or worktree
 // hard-links, main's current keys, and the newest 3 unused) and keeps the newest 2 stam.db.bak-* (S-1965).
-//   node scripts/sweep-test-homes.mjs --install        write stam-sweep-test-homes.service and .timer, and enable the timer
+//   node scripts/sweep-test-homes.mjs --install        write sweep-test-homes units (stam-* under a real stam home, mootr-* under a mootr one), and enable the timer
 // Review leftovers (S-1235): the folders under ~/.cache/stam-review (clones named after a PR or task, and
 // .tmp-*), the non-standard homes under ~/.cache/stam-test (rev271, pr198, ...), and ~/.cache/review-*
 // go by the same proof (age, cwd, open files, env, argv), plus: no live agent's cwd, workspace, name or
@@ -28,10 +28,12 @@ import { homedir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { envVar, setEnvVar } from '../src/env.ts';
+import { defaultHome } from '../src/default-home.ts';
 import { isMain } from './main-guard.mjs';
+import { unitScript, unitToInstall } from './unit-names.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
-const UNIT = 'stam-sweep-test-homes';
+const NAME = 'sweep-test-homes';
 
 // The prefixes test/*.mjs gives its temporary folders: tempHome('PREFIX-'), tempDir('PREFIX-') (the
 // S-668 helper), tempDirOutside('PREFIX-') (the same, in /tmp), and mkdtemp(Sync)(join(tmpdir(), 'PREFIX-')). They are read from the sources at
@@ -590,7 +592,7 @@ export function pruneBackups(home, { keep = KEEP_BACKUPS, claims, dryRun = false
 // gain is the df difference on the stam home, since hard links make du overcount.
 export function pruneCaches({ dryRun = false, env = process.env, claims } = {}) {
   const held = claims ?? claimedPaths(envVar('SWEEP_PROC', env) || '/proc', pidsOf(env));
-  const home = envVar('HOME', env) || join(homedir(), '.local/share/stam');
+  const home = envVar('HOME', env) || defaultHome();
   const gate = envVar('GATE_DEPS', env) || join(env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'stam-gate-deps');
   const main = envVar('SWEEP_MAIN', env) || join(homedir(), 'projects/stam2');
   const keys = currentKeys(main);
@@ -613,10 +615,12 @@ export function pruneCaches({ dryRun = false, env = process.env, claims } = {}) 
 export function install(env = process.env) {
   const dir = envVar('SWEEP_UNIT_DIR', env) || join(homedir(), '.config/systemd/user');
   mkdirSync(dir, { recursive: true });
+  const home = envVar('HOME', env) || defaultHome();
+  const UNIT = unitToInstall(dir, NAME, home);
   // A timer outlives the worktree this ran from, so it runs the deployed release's copy (else the main checkout's); and a user unit's PATH
   // lacks ~/.local/bin and node's dir, which `stam` (the live-agent check) needs.
-  const candidates = [join(homedir(), '.local/share/stam/releases/current/scripts/sweep-test-homes.mjs'), join(homedir(), 'projects/stam2/scripts/sweep-test-homes.mjs')];
-  const script = candidates.find((c) => existsSync(c)) ?? SELF;
+  const checkout = join(homedir(), 'projects/stam2/scripts/sweep-test-homes.mjs');
+  const script = unitScript(home, 'scripts/sweep-test-homes.mjs', existsSync(checkout) ? checkout : SELF);
   const path = [dirname(process.execPath), join(homedir(), '.local/bin'), '/usr/local/bin', '/usr/bin', '/bin'].join(':');
   writeFileSync(join(dir, `${UNIT}.service`), ['[Unit]', 'Description=Remove unused, old test homes and review clones (S-428, S-1235)', '', '[Service]', 'Type=oneshot', `Environment=PATH=${path}`, `ExecStart=${process.execPath} --no-warnings ${script}`, ''].join('\n'));
   writeFileSync(join(dir, `${UNIT}.timer`), ['[Unit]', 'Description=Sweep old test homes and review clones every hour (S-428, S-1235)', '', '[Timer]', 'OnCalendar=hourly', 'Persistent=true', `Unit=${UNIT}.service`, '', '[Install]', 'WantedBy=timers.target', ''].join('\n'));

@@ -60,6 +60,8 @@ const server = createServer((req, res) => {
       const want = existsSync(join(dir, 'key')) ? readFileSync(join(dir, 'key'), 'utf8').trim() : '';
       const got = h.authorization?.match(/^Bearer (.*)$/)?.[1] ?? h.authorization?.match(/^AWS4-HMAC-SHA256 Credential=([^/]+)\//)?.[1];
       if (want && got !== want) return res.writeHead(401).end('{}');
+      // A file DIR/revoked makes every Converse call answer 403, as a dead or revoked Bedrock key does (S-3245).
+      if (existsSync(join(dir, 'revoked'))) return res.writeHead(403, { 'x-amzn-errortype': 'UnrecognizedClientException' }).end('{"message":"The security token included in the request is invalid. sk-leak"}');
       // The Converse body as a chat body, for chat() to answer.
       const b = raw ? JSON.parse(raw) : {};
       const flat = (blocks) => (blocks ?? []).map((x) => x.text ?? '').join('\n');

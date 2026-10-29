@@ -40,8 +40,7 @@ PATH="$WRAP:$PATH" daemon_up quiet
 # A tmux server with a session of its own, so the daemon's reconcile sees a live server.
 on quiet tmux -L "$STAM_TMUX_SOCKET" new-session -d -s keeper 'sleep 600'
 events_has() { "$STAM" events "$1" | grep -q "$2"; }
-poll() { n=$1; shift; while [ "$n" -gt 0 ]; do "$@" && return 0; n=$((n - 1)); done; return 1; }
-poll 400 events_has marker-1 'tmux-lost' || { echo "FAIL: the first reconcile tick never ran"; exit 1; }
+poll 90 events_has marker-1 'tmux-lost' || { echo "FAIL: the first reconcile tick never ran"; exit 1; }
 calls=$(grep -c 'arch-' "$LOG" || true)
 test "$calls" = 0 || { echo "FAIL: $calls tmux calls for archived agents in one reconcile tick"; grep 'arch-' "$LOG" | head -5; exit 1; }
 # S-345: live sessions for 30 agents, and one whose harness already exited (its pane stays, dead).

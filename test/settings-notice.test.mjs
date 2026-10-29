@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// A config notice waits for a sender and is sent on a later read, even when that read is a cache hit
-// (S-344, src/settings.ts and src/accounts.ts). Throwaway STAM_HOME, no daemon:
+// A config notice is sent from system:cost with no agent running, once, and a retry on a cache-hit read
+// sends nothing more (S-344, src/settings.ts and src/accounts.ts). Throwaway STAM_HOME, no daemon:
 // `node --test test/settings-notice.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -22,11 +22,14 @@ const settle = async (check) => {
   return check();
 };
 
-test('with no sender the notice waits; a read after an agent appears sends it, though the file is unchanged', async () => {
+test('with no agent at all the notice goes out from system:cost, and a cache-hit read does not send it twice', async () => {
+  assert.equal(db.listAgents().length, 0, 'no agent can stand in as the sender');
   s.settings();
-  assert.equal(rejected(), 0, 'no sender yet, so nothing is sent');
-  db.createAgent({ id: 'sender-1', name: 'sender', role: '', machine: 'test', harness: 'claude', model: null, effort: null, cwd: '', parent_id: null, session_id: null });
-  // The file hasn't changed, so this read is a cache hit: the retry still runs.
+  assert.equal(await settle(() => rejected() === 1), true, 'the notice is sent with no agent');
+  assert.equal(db.open().prepare("SELECT from_id FROM mail WHERE subject = '[stam] Cost config rejected'").get().from_id, 'system:cost');
+  // The file hasn't changed, so these reads are cache hits: the retry has nothing pending.
   s.settings();
-  assert.equal(await settle(() => rejected() === 1), true, 'the notice is sent on a cache-hit read');
+  s.settings();
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(rejected(), 1, 'the notice is not sent again');
 });

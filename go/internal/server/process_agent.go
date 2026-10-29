@@ -149,9 +149,9 @@ func (s *Server) agentRun(ctx context.Context, id string, p *process.Def, a proc
 			case c == db.AlreadyClaimed:
 				refuse(a.Node + ": this entry was already acted on; ignored")
 			default:
-				if !s.sendFromStam(ctx, []string{a.To}, a.Itsa+" entered "+a.Node,
+				if !s.sendFromSystem(ctx, "process", []string{a.To}, a.Itsa+" entered "+a.Node,
 					fmt.Sprintf("The process %s moved %s to `%s`. It is yours: take the next step.", p.ID, a.Itsa, a.Node)) {
-					failed(errors.New("no agent can stand in as sender of stam's mail"))
+					failed(errors.New("the mail from system:process was not sent"))
 				}
 			}
 			return
@@ -219,7 +219,7 @@ func (s *Server) agentRun(ctx context.Context, id string, p *process.Def, a proc
 		logRun(fmt.Sprintf("process-run: %s: spawning a %s failed: %v", id, a.Type, err))
 		s.noteProcessRun(ctx, id, fmt.Sprintf("process %s: spawning a %s for %s failed: %v", p.ID, a.Type, a.Itsa, err))
 		if a.Parent != "" {
-			s.sendFromStam(ctx, []string{a.Parent}, "Process spawn for "+a.Itsa+" failed",
+			s.sendFromSystem(ctx, "process", []string{a.Parent}, "Process spawn for "+a.Itsa+" failed",
 				fmt.Sprintf("The process %s could not spawn a %s for %s: %v\n\nIt will not retry; the ITSA is unchanged.", p.ID, a.Type, a.Itsa, err))
 		}
 	})

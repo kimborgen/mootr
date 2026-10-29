@@ -13,7 +13,9 @@ package proctree
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,7 +42,10 @@ func readStat(pid int) (stat, bool) {
 	if err != nil {
 		return stat{}, false
 	}
-	s := string(b)
+	return parseStat(string(b))
+}
+
+func parseStat(s string) (stat, bool) {
 	// comm may hold spaces and parens; fields resume after the last ')'.
 	i := strings.LastIndex(s, ")")
 	if i < 0 || i+2 > len(s) {
@@ -52,6 +57,36 @@ func readStat(pid int) (stat, bool) {
 	}
 	ppid, _ := strconv.Atoi(rest[1])
 	return stat{ppid: ppid, start: rest[19], state: rest[0]}, true
+}
+
+// StartOf is a process's start time, to pair with its pid, read strictly: gone is true only when its /proc entry isn't
+// there or it is a zombie. A stat that can't be read for any other reason, or doesn't parse, is an error, never gone.
+func StartOf(pid int) (start string, gone bool, err error) {
+	b, err := os.ReadFile(filepath.Join(procDir, strconv.Itoa(pid), "stat"))
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+		return "", true, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	s, ok := parseStat(string(b))
+	if !ok {
+		return "", false, fmt.Errorf("proctree: /proc/%d/stat doesn't parse", pid)
+	}
+	if s.state == "Z" {
+		return "", true, nil
+	}
+	return s.start, false, nil
+}
+
+// Exited is whether the process that had pid and start time start has exited: StartOf says it is gone, or the pid holds
+// another process (a new start time). An error is never an exit, so a caller that waits for the exit keeps waiting.
+func Exited(pid int, start string) (bool, error) {
+	now, gone, err := StartOf(pid)
+	if err != nil {
+		return false, err
+	}
+	return gone || now != start, nil
 }
 
 // ProcStart is a process's start time, to pair with its pid for SignalProcesses; "" when it is gone.

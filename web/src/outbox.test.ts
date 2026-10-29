@@ -59,6 +59,19 @@ describe('outbox', () => {
     expect(new Set(ids).size).toBe(1)
   })
 
+  // A send left waiting for its retry when the outbox is reset (a test ending, a fixture) must not fire
+  // into the fresh outbox, nor show up in its rows: the next test would see a stray request.
+  it('a reset leaves no retry of the old outbox to send', async () => {
+    const sent: string[] = []
+    row(async () => { sent.push('first'); if (sent.length === 1) throw new TypeError('Failed to fetch') })
+    await settle()
+    expect(sent).toEqual(['first'])
+    resetOutbox(memory())
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(sent).toEqual(['first'])
+    expect(getRows()).toEqual([])
+  })
+
   it('retries a 5xx but fails a 4xx at once', async () => {
     let n = 0
     row(async () => { if (n++ === 0) throw new ApiError('boom', 502) })

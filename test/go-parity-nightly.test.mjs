@@ -43,12 +43,62 @@ test('the timer is nightly, persistent across a missed night, and the service is
   assert.ok(!/KillMode=process/.test(service), 'the default control-group kill stops a leaked daemon');
 });
 
-test('--install writes the two units to the named folder and enables nothing', () => {
+// A home whose folder is named NAME ('stam' is a real legacy home, 'mootr' a mootr one), with a deployed copy of the script.
+function homeWith(name) {
+  const home = join(tempDir('gpn-home-'), name);
+  mkdirSync(join(home, 'releases/current/scripts'), { recursive: true });
+  writeFileSync(join(home, 'releases/current/scripts/go-parity-nightly.mjs'), '');
+  return home;
+}
+const installIn = (dir, home) => spawnSync(process.execPath, ['--no-warnings', SCRIPT, '--install'], { env: { ...process.env, STAM_GO_PARITY_UNIT_DIR: dir, STAM_HOME: home }, encoding: 'utf8' });
+
+test('--install under a mootr home writes mootr-go-parity running the mootr home\'s release, and enables nothing', () => {
   const dir = tempDir('gpn-units-');
-  const r = spawnSync(process.execPath, ['--no-warnings', SCRIPT, '--install'], { env: { ...process.env, STAM_GO_PARITY_UNIT_DIR: dir }, encoding: 'utf8' });
+  const home = homeWith('mootr');
+  const r = installIn(dir, home);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(join(dir, 'mootr-go-parity.service')) && existsSync(join(dir, 'mootr-go-parity.timer')));
+  assert.ok(!existsSync(join(dir, 'stam-go-parity.service')));
+  assert.match(readFileSync(join(dir, 'mootr-go-parity.service'), 'utf8'), new RegExp(`^ExecStart=.* ${join(home, 'releases/current/scripts/go-parity-nightly.mjs').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+  assert.match(readFileSync(join(dir, 'mootr-go-parity.timer'), 'utf8'), /^Unit=mootr-go-parity\.service$/m);
+  assert.match(r.stdout, /not enabled/);
+});
+
+test('--install under a real stam home writes stam-go-parity with stam paths, even on a clean unit dir (S-3349)', () => {
+  const dir = tempDir('gpn-legacy-');
+  const home = homeWith('stam');
+  const r = installIn(dir, home);
   assert.equal(r.status, 0, r.stderr);
   assert.ok(existsSync(join(dir, 'stam-go-parity.service')) && existsSync(join(dir, 'stam-go-parity.timer')));
-  assert.match(r.stdout, /not enabled/);
+  assert.ok(!existsSync(join(dir, 'mootr-go-parity.service')) && !existsSync(join(dir, 'mootr-go-parity.timer')));
+  assert.ok(readFileSync(join(dir, 'stam-go-parity.service'), 'utf8').includes(`${home}/releases/current/`));
+  assert.match(readFileSync(join(dir, 'stam-go-parity.timer'), 'utf8'), /^Unit=stam-go-parity\.service$/m);
+});
+
+test('--install with the stam symlink itself as the home (after the move) writes mootr-go-parity running the mootr release (S-3349)', () => {
+  const dir = tempDir('gpn-symlink-');
+  const share = tempDir('gpn-share-');
+  const mootr = join(share, 'mootr');
+  mkdirSync(join(mootr, 'releases/current/scripts'), { recursive: true });
+  writeFileSync(join(mootr, 'releases/current/scripts/go-parity-nightly.mjs'), '');
+  symlinkSync('mootr', join(share, 'stam'));
+  const r = installIn(dir, join(share, 'stam'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(join(dir, 'mootr-go-parity.service')) && !existsSync(join(dir, 'stam-go-parity.service')));
+  const exec = readFileSync(join(dir, 'mootr-go-parity.service'), 'utf8').split('\n').find((l) => l.startsWith('ExecStart='));
+  assert.ok(exec.endsWith(join(mootr, 'releases/current/scripts/go-parity-nightly.mjs')) && !exec.includes(join(share, 'stam') + '/'), exec);
+});
+
+test('--install under a mootr home keeps stam-go-parity while that timer is installed, so the job never runs twice (S-3349)', () => {
+  const dir = tempDir('gpn-keep-');
+  writeFileSync(join(dir, 'stam-go-parity.timer'), 'LIVE\n');
+  const home = homeWith('mootr');
+  const r = installIn(dir, home);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(join(dir, 'stam-go-parity.service')));
+  assert.ok(!existsSync(join(dir, 'mootr-go-parity.service')) && !existsSync(join(dir, 'mootr-go-parity.timer')));
+  const exec = readFileSync(join(dir, 'stam-go-parity.service'), 'utf8').split('\n').find((l) => l.startsWith('ExecStart='));
+  assert.ok(exec.includes(`${home}/releases/current/`), 'the stam name runs the mootr home\'s path');
 });
 
 test('sweepLeftovers removes the homes of a dead run and keeps a live run and other owners', () => {
@@ -134,10 +184,14 @@ test('a failing build leaves a build-failed result and a no-result line', () => 
 test('a second run while one holds the lock is refused and changes nothing', () => {
   const dir = tempDir('gpn-lock-');
   mkdirSync(dir, { recursive: true });
-  // Hold the lock from a child that sleeps; its process group is stopped at the end.
-  const holder = spawn('flock', ['-n', join(dir, 'lock'), 'sleep', '30'], { detached: true, stdio: 'ignore' });
+  // Hold the lock from a child that sleeps; its process group is stopped at the end. It waits for the lock (no -n) and
+  // writes `held` once it has it, so the test waits on that, not on time or on a probe of the lock: a probe holds the lock
+  // for a moment, and a holder started with -n in that moment gave up, leaving the second run free to take it (S-3930).
+  const held = join(dir, 'held');
+  const holder = spawn('flock', [join(dir, 'lock'), 'sh', '-c', ': > "$0"; exec sleep 30', held], { detached: true, stdio: 'ignore' });
   try {
-    for (let i = 0; i < 50 && spawnSync('flock', ['-n', join(dir, 'lock'), 'true']).status === 0; i++) spawnSync('sleep', ['0.1']);
+    for (let i = 0; i < 300 && !existsSync(held); i++) spawnSync('sleep', ['0.1']);
+    assert.ok(existsSync(held), 'the holder took the lock');
     const r = runNightly({ PARITY_OUT: join(dir, 'posted.txt') }, stubOrigin({ a: 'pass' }), dir);
     assert.equal(r.status, 75);
     assert.match(r.stderr, /another run holds the lock; refused/);

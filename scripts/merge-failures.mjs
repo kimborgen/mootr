@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { envVar } from '../src/env.ts';
+import { defaultHome } from '../src/default-home.ts';
 import { isMain } from './main-guard.mjs';
 
 const UNITS = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
@@ -62,7 +63,7 @@ function main(args, env = process.env) {
     else throw new Error('usage: node scripts/merge-failures.mjs [--since 7d] [--json]');
   }
   const since = sinceText ? new Date(Date.now() - parseSince(sinceText)) : null;
-  const file = join(envVar('HOME', env) || join(homedir(), '.local/share/stam'), 'merge-train-failures.jsonl');
+  const file = join(envVar('HOME', env) || defaultHome(), 'merge-train-failures.jsonl');
   const entries = readFailures(file, since);
   console.log(json ? JSON.stringify(entries, null, 2) : render(entries, sinceText));
 }

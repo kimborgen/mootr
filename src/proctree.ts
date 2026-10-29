@@ -6,6 +6,7 @@ import { STAM_HOME } from './config.ts';
 import { derivedRepoParent, derivedRepoPath } from './default-repo.ts';
 import { envVar, entryValue } from './env.ts';
 import { testHome } from './test-env.ts';
+import { agentKill } from './agent-exec.ts';
 
 const execFileAsync = promisify(execFile);
 import { homedir } from 'node:os';
@@ -186,10 +187,7 @@ export function signalProcesses(pids: Map<number, string>, signal: NodeJS.Signal
   let sent = 0;
   for (const [pid, start] of pids) {
     if (stat(pid)?.start !== start) continue;
-    try {
-      process.kill(pid, signal);
-      sent++;
-    } catch {}
+    if (agentKill(pid, signal)) sent++;
   }
   return sent;
 }

@@ -5,6 +5,7 @@
 // cost notices. Runs against a throwaway STAM_HOME with a stubbed harness: no daemon, no
 // network, no models: `node --test test/cost-pause.test.mjs`.
 import { test, before, after, beforeEach } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -45,7 +46,7 @@ before(async () => {
   };
 });
 after(() => {
-  spawnSync('tmux', ['-L', process.env.STAM_TMUX_SOCKET, 'kill-server']);
+  killTmuxServer(process.env.STAM_TMUX_SOCKET);
   rmSync(home, { recursive: true, force: true });
 });
 

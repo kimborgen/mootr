@@ -15,7 +15,7 @@
 // metadata's issuer must equal the URL it was fetched for (RFC 8414 §3.3), the protected
 // resource must match the server URL's origin and path, and no request may follow a
 // redirect. Tests set STAM_MCP_AUTH_INSECURE=1 to allow the fake http loopback servers.
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -26,8 +26,9 @@ import { STAM_HOME } from './config.ts';
 import { isSettingsHome, setSetting, settings, settingsOnDisk } from './settings.ts';
 import * as secrets from './secrets.ts';
 import { checkCredential } from './llm/http.ts';
-import type { McpAuth } from './instructions.ts';
+import type { McpAuth, McpServer } from './instructions.ts';
 import { envVar } from './env.ts';
+import { PeerBadReply, peerByName, peerCall } from './peers.ts';
 
 const execFileAsync = promisify(execFile);
 const storeFile = () => join(STAM_HOME, 'mcp-auth.json');
@@ -120,7 +121,13 @@ async function fetchJson(url: string, init: RequestInit = {}): Promise<any> {
   const res = await fetch(url, { redirect: 'manual', ...init, signal: AbortSignal.timeout(15_000), headers: { accept: 'application/json', ...(init.headers ?? {}) } });
   const text = await res.text();
   if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
-  return text ? JSON.parse(text) : {};
+  if (!text) return {};
+  // A SyntaxError quotes the start of the body, which can hold a credential, so the message is fixed (S-3503).
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`an OAuth endpoint answered non-JSON from ${url}`);
+  }
 }
 
 async function postForm(url: string, form: URLSearchParams): Promise<any> {
@@ -128,11 +135,31 @@ async function postForm(url: string, form: URLSearchParams): Promise<any> {
   return fetchJson(url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form.toString() });
 }
 
+// The provider errors that may be echoed, and nothing else (Go's providerCodes in go/internal/mcpauth/mcpauth.go, keep
+// the two lists in step): the RFC 6749 §5.2 codes and Slack's oauth.v2.access errors.
+export const providerCodes = new Set([
+  // RFC 6749.
+  'invalid_request', 'invalid_client', 'invalid_grant', 'unauthorized_client', 'unsupported_grant_type', 'invalid_scope',
+  'access_denied', 'server_error', 'temporarily_unavailable',
+  // Slack oauth.v2.access.
+  'accesslimited', 'account_inactive', 'bad_client_secret', 'bad_redirect_uri', 'cannot_install_an_org_installed_app',
+  'deprecated_endpoint', 'ekm_access_denied', 'enterprise_is_restricted', 'fatal_error', 'internal_error', 'invalid_arg_name',
+  'invalid_arguments', 'invalid_array_arg', 'invalid_auth', 'invalid_charset', 'invalid_client_id', 'invalid_code',
+  'invalid_code_verifier', 'invalid_form_data', 'invalid_grant_type', 'invalid_post_type', 'invalid_refresh_token',
+  'method_deprecated', 'missing_post_type', 'missing_scope', 'no_permission', 'no_scopes', 'not_allowed_token_type',
+  'not_authed', 'oauth_authorization_url_mismatch', 'org_login_required', 'pkce_not_allowed', 'preview_feature_not_available',
+  'ratelimited', 'request_timeout', 'service_unavailable', 'team_access_not_granted', 'team_added_to_org', 'token_expired',
+  'token_revoked', 'two_factor_setup_required', 'user_email_unverified',
+]);
+
 // A token endpoint's answer as stam reads it. Slack answers HTTP 200 with `ok: false` and an
-// `error` (never echoed beyond that field), and its user token sits under `authed_user`, so
-// that is used when the top level has no access_token.
+// `error`, which is echoed only when it is one of providerCodes (anything else is 'unknown error', since a provider
+// can put a token in it). Its user token sits under `authed_user`, so that is used when the top level has no access_token.
 export function tokenResponse(tok: any): any {
-  if (tok?.ok === false) throw new Error(`the token endpoint refused: ${String(tok.error ?? 'unknown error').slice(0, 200)}`);
+  if (tok?.ok === false) {
+    const code = typeof tok.error === 'string' && providerCodes.has(tok.error) ? tok.error : 'unknown error';
+    throw new Error(`the token endpoint refused: ${code}`);
+  }
   if (!tok?.access_token && tok?.authed_user?.access_token) {
     const u = tok.authed_user;
     return { access_token: u.access_token, refresh_token: u.refresh_token, expires_in: u.expires_in };
@@ -264,6 +291,7 @@ function keepClientSecret(server: string, secret: secrets.SecretRef | string | u
 // `/oauth/callback`. The state, verifier, and client registration stay in memory for ten
 // minutes and are single use.
 export async function startLogin(name: string, redirect: string): Promise<{ url: string }> {
+  refuseOnPeer(name, 'log in');
   const { url, auth } = await authFor(name);
   if (auth.type !== 'oauth') throw new Error(`${name} logs in with gh, not OAuth`);
   const prm = await discover(url);
@@ -299,7 +327,9 @@ function saveTokens(name: string, tok: any, p: { server_url: string; client_id: 
     ...(p.scopes.length ? { scopes: p.scopes } : {}),
     ...(tok.access_token ? { access_token: String(tok.access_token) } : {}),
     ...(tok.refresh_token ? { refresh_token: String(tok.refresh_token) } : prev.refresh_token ? { refresh_token: prev.refresh_token } : {}),
-    ...(typeof tok.expires_in === 'number' ? { expires_at: Date.now() + tok.expires_in * 1000 } : prev.expires_at ? { expires_at: prev.expires_at } : {}),
+    // A response with no expires_in gets no expiry: the old one belongs to the old access token, so keeping it
+    // would let a token that never expires pass as one that does (a lease, S-3176). token() then reads the grant as stale.
+    ...(typeof tok.expires_in === 'number' ? { expires_at: Date.now() + tok.expires_in * 1000 } : {}),
   };
   writeStore(s);
 }
@@ -344,36 +374,212 @@ export async function ghToken(): Promise<string> {
   return token;
 }
 
+// The refreshes in flight, by server (S-3176): concurrent callers share one refresh, since a provider that
+// rotates refresh tokens revokes the whole family when two refreshes race.
+const refreshing = new Map<string, Promise<void>>();
+
+// Refreshes a grant once for every caller that asks while the refresh runs. A caller that arrives after a
+// refresh left the grant fresh doesn't refresh again, unless it forces one.
+function refreshOnce(name: string, force: boolean): Promise<void> {
+  const running = refreshing.get(name);
+  if (running) return running;
+  const e = store()[name];
+  if (!e?.refresh_token) return Promise.resolve();
+  if (!force && e.expires_at && Date.now() <= e.expires_at - 60_000) return Promise.resolve();
+  const p = refresh(name, e).finally(() => refreshing.delete(name));
+  refreshing.set(name, p);
+  return p;
+}
+
 // The current bearer for a server: `gh`'s token, or the stored access_token, refreshed with
 // the refresh_token when it is within a minute of expiry (or when asked to). A grant made
 // for a different server url is refused, so a token never follows a moved server.
 export async function token(name: string, opts: { refresh?: boolean } = {}): Promise<string> {
   const { url, auth } = await authFor(name);
   if (auth.type === 'gh') return ghToken();
+  if (!isSettingsHome()) return (await peerLease(name, opts, url)).token;
   let e = store()[name];
   if (!e?.access_token && !e?.refresh_token) throw new Error(`${name} is not logged in`);
   if (e.server_url !== url) throw new Error(`${name}: the server url changed; log in again`);
   const stale = !e.expires_at || Date.now() > e.expires_at - 60_000;
   if (e.refresh_token && (opts.refresh || stale)) {
-    await refresh(name, e);
+    await refreshOnce(name, Boolean(opts.refresh));
     e = store()[name];
   }
   if (!e?.access_token) throw new Error(`${name} is not logged in`);
   return e.access_token;
 }
 
-// The proxy's ask: the bearer, the url to reach, and when the token expires.
+// The proxy's ask: the bearer, the url to reach, and when the token expires. On a peer the bearer is the home's
+// lease (S-3177), and its url and expiry come with it.
 export async function tokenFor(name: string, opts: { refresh?: boolean } = {}): Promise<{ name: string; url: string; token: string; expires_at: number | null }> {
-  const { url } = await authFor(name);
+  const { url, auth } = await authFor(name);
+  if (auth.type !== 'gh' && !isSettingsHome()) {
+    const lease = await peerLease(name, opts, url);
+    return { name, url, token: lease.token, expires_at: lease.expires_at };
+  }
   const value = await token(name, opts);
   return { name, url, token: value, expires_at: store()[name]?.expires_at ?? null };
 }
 
-// One row per auth server, without any token.
-export async function status(): Promise<{ name: string; type: string; logged_in: boolean; expires_at: number | null }[]> {
-  const out: { name: string; type: string; logged_in: boolean; expires_at: number | null }[] = [];
+// A peer's copy of a lease (S-3177), kept in this daemon's memory only, per server: never written to disk, settings,
+// logs or mail, and gone at a restart. It serves until 60 s before it expires, and one fetch from the home serves every
+// caller that asks while it runs.
+interface HeldLease {
+  url: string;
+  token: string;
+  expires_at: number;
+}
+// Keyed by server name and the url this machine's settings name for it, so a lease for another url is never served.
+const held = new Map<string, HeldLease>();
+// The fetch from the home now running for a key, and the forced fetch queued behind it (S-3472). A non-forced caller
+// joins the running fetch. A forced caller never does, since that fetch may bring back the token it is replacing: it
+// joins the queued forced fetch, which starts once the running one ends, so its token is newer than the request.
+interface Flight {
+  p: Promise<HeldLease>;
+  queued?: Promise<HeldLease>;
+}
+const leasing = new Map<string, Flight>();
+
+async function peerLease(name: string, opts: { refresh?: boolean }, want: string): Promise<HeldLease> {
+  const key = `${name}\n${want}`;
+  const force = Boolean(opts.refresh);
+  const cached = held.get(key);
+  if (!force && cached && cached.url === want && Date.now() <= cached.expires_at - 60_000) return cached;
+  const flight = leasing.get(key);
+  if (!flight) return launchLease(key, name, want, force);
+  console.log(`mcp lease: ${name} waits for the running fetch from the home${force ? ', then fetches again' : ''}`);
+  if (!force) return flight.p;
+  flight.queued ??= flight.p.then(
+    () => launchLease(key, name, want, true),
+    () => launchLease(key, name, want, true),
+  );
+  return flight.queued;
+}
+
+// Starts a fetch from the home for a key and makes it the running one. A lease replaces the held one. A refusal
+// (any error but an unreachable home) drops the held one, so a lease the home no longer gives is never served from the
+// cache; an unreachable home keeps it, so the peer serves it until its margin (S-3472).
+function launchLease(key: string, name: string, want: string, force: boolean): Promise<HeldLease> {
+  const flight: Flight = {
+    p: leaseMatching(name, want, force).then(
+      (lease) => {
+        held.set(key, lease);
+        return lease;
+      },
+      (e) => {
+        if (!(e instanceof HomeUnreachable)) held.delete(key);
+        throw e;
+      },
+    ),
+  };
+  leasing.set(key, flight);
+  const done = () => {
+    if (leasing.get(key) === flight && !flight.queued) leasing.delete(key);
+  };
+  flight.p.then(done, done);
+  return flight.p;
+}
+
+// A lease whose url isn't the one this machine's settings name is dropped, and the home is asked once more (S-3177
+// review). The second ask isn't forced: the url is the home's settings, which a refresh doesn't change, so it would only
+// call the provider again (S-3472). If the second lease still names another url, the bearer is refused and never
+// returned: it belongs to a different resource. Both urls are named, and no token is.
+async function leaseMatching(name: string, want: string, refresh: boolean): Promise<HeldLease> {
+  let lease = await leaseFromHome(name, refresh);
+  if (lease.url !== want) lease = await leaseFromHome(name, false);
+  if (lease.url !== want)
+    throw new Error(`${name}: the home leases a token for ${lease.url}, but this machine's settings name ${want}; the token is not used. Make the url of ${name} the same on both machines, then retry`);
+  return lease;
+}
+
+// A peer holds no logins: a login, and a logout, happen on the home, which keeps every grant (S-3177).
+function refuseOnPeer(name: string, what: string): void {
+  if (isSettingsHome()) return;
+  throw new Error(`${name}: ${what} on ${settings().home}, which keeps the MCP logins; this machine leases them from ${settings().home}`);
+}
+
+// The error for a home that got nothing, or whose answer never came back (S-3472): a network failure, not a refusal.
+export class HomeUnreachable extends Error {}
+
+// A GET to the home's peer routes (S-3176), with the lease token from settings.peers, the only bearer the
+// home's lease routes accept. `what` names the request in each error. Nothing here logs or returns the token.
+// A network failure is HomeUnreachable; an answer that isn't JSON is its own error, since the home is up (S-3472);
+// an answer with any status is returned, for homeError.
+async function homeGet(what: string, path: string): Promise<{ status: number; data: any }> {
+  const home = settings().home;
+  const peer = peerByName(home);
+  if (!peer) throw new Error(`${what}: ${home} isn't in settings.peers, so its MCP logins can't be leased`);
+  if (!peer.leaseToken) throw new Error(`${what}: settings.peers[${home}].leaseToken is missing; copy the value of STAM_HOME/mcp-lease-token from ${home} into it`);
+  try {
+    return await peerCall({ ...peer, token: peer.leaseToken, peerToken: peer.leaseToken }, 'GET', path);
+  } catch (e) {
+    if (e instanceof PeerBadReply) throw new Error(`${what}: ${home} answered something that is not JSON, so its MCP logins can't be leased; check that settings.peers[${home}].url is ${home}'s daemon`);
+    throw new HomeUnreachable(`${what}: the home ${home} is unreachable, so its MCP logins can't be leased; start ${home} and retry`);
+  }
+}
+
+// The error for a home answer that is not the one asked for (S-3177). Each status says what to do; the home's
+// message names the cause, and no answer carries a token.
+function homeError(what: string, home: string, res: { status: number; data: any }): Error {
+  const why = typeof res.data?.error === 'string' ? `: ${res.data.error}` : '';
+  if (res.status === 401 || res.status === 403)
+    return new Error(`${what}: ${home} refused the lease token (${res.status}${why}). Check that settings.peers[${home}].leaseToken is the value of STAM_HOME/mcp-lease-token on ${home}, and that the server has shareWithPeers on ${home}`);
+  if (res.status === 409) return new Error(`${what}: ${home} has no lease for it${why}. Re-login or refresh on ${home}, then retry`);
+  if (res.status === 200) return new Error(`${what}: ${home} answered 200 without a lease`);
+  return new Error(`${what}: ${home} answered ${res.status}${why}`);
+}
+
+async function leaseFromHome(name: string, refresh: boolean): Promise<HeldLease> {
+  const home = settings().home;
+  const res = await homeGet(name, `/api/peer/mcp/${encodeURIComponent(name)}/lease${refresh ? '?refresh=1' : ''}`);
+  const d = res.data;
+  if (res.status !== 200 || !d?.access_token || typeof d.expires_at !== 'number') throw homeError(name, home, res);
+  console.log(`mcp lease: ${name} from ${home}, expires ${new Date(d.expires_at).toISOString()}`);
+  return { url: String(d.url), token: String(d.access_token), expires_at: d.expires_at };
+}
+
+// One row per auth server, without any token. `only` keeps the servers it names. On a peer the rows are the
+// home's shared servers, each marked as leased from the home (S-3177).
+// `local_grant` marks a peer's own grant from before the lease (S-3177); its `logged_in` is false, since the peer
+// holds no lease for it. `home` is set on a peer only: whether the home answered (S-3178), with `error` when it didn't.
+export type McpStatusRow = { name: string; type: string; logged_in: boolean; expires_at: number | null; leased_from?: string; local_grant?: boolean };
+export type McpHomeState = { name: string; reachable: boolean; error?: string };
+export type McpStatusPage = { servers: McpStatusRow[]; home: McpHomeState | null };
+
+// The page of status rows for this daemon. On a peer the rows are its own gh logins and grants, then the home's
+// shared rows. A home that doesn't answer leaves its rows out and says so, so no stale "logged in" is shown.
+export async function status(): Promise<McpStatusPage> {
+  if (!isSettingsHome()) return peerStatus();
+  return { servers: await localStatus(), home: null };
+}
+
+async function peerStatus(): Promise<McpStatusPage> {
+  const home = settings().home;
+  const own: McpStatusRow[] = [];
   for (const [name, s] of Object.entries(settings().mcpServers ?? {})) {
     if (!s?.auth) continue;
+    if (s.auth.type === 'gh') {
+      const logged_in = await ghToken().then(() => true).catch(() => false);
+      own.push({ name, type: 'gh', logged_in, expires_at: null });
+    } else if (store()[name]) {
+      own.push({ name, type: 'oauth', logged_in: false, expires_at: null, local_grant: true });
+    }
+  }
+  try {
+    const res = await homeGet('MCP status', '/api/peer/mcp/status');
+    if (res.status !== 200) throw homeError('MCP status', home, res);
+    const leased = (res.data.servers as McpStatusRow[]).map((row) => ({ ...row, leased_from: home }));
+    return { servers: [...own, ...leased], home: { name: home, reachable: true } };
+  } catch (e) {
+    return { servers: own, home: { name: home, reachable: false, error: e instanceof Error ? e.message : String(e) } };
+  }
+}
+
+async function localStatus(only: (name: string) => boolean = () => true): Promise<McpStatusRow[]> {
+  const out: McpStatusRow[] = [];
+  for (const [name, s] of Object.entries(settings().mcpServers ?? {})) {
+    if (!s?.auth || !only(name)) continue;
     if (s.auth.type === 'gh') {
       const logged_in = await ghToken().then(() => true).catch(() => false);
       out.push({ name, type: 'gh', logged_in, expires_at: null });
@@ -385,6 +591,73 @@ export async function status(): Promise<{ name: string; type: string; logged_in:
   return out;
 }
 
+// The lease (S-3176): a short-lived access token a peer may hold, minted on the home from the grant
+// the home keeps. Only a server the settings share (`shareWithPeers`) is leased, and never a `gh` server
+// (a peer uses its own gh) or a grant that never expires. Every refusal is a LeaseError with its status;
+// a settings or grant read that fails refuses too, since nothing is known to be shared.
+export class LeaseError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+// The longest lifetime a lease may carry for a server (S-3176): its leaseMaxSeconds, a positive integer, or
+// 3600 when absent. Any other value refuses the lease, so a bad value never means "no cap".
+const LEASE_CAP_DEFAULT = 3600;
+function leaseCapSeconds(name: string, server: McpServer): number {
+  const cap = server.leaseMaxSeconds;
+  if (cap === undefined) return LEASE_CAP_DEFAULT;
+  if (Number.isSafeInteger(cap) && cap > 0) return cap;
+  throw new LeaseError(409, `${name}'s leaseMaxSeconds must be a positive integer (settings mcpServers.${name}.leaseMaxSeconds)`);
+}
+
+export async function leaseFor(name: string, opts: { refresh?: boolean } = {}): Promise<{ url: string; access_token: string; expires_at: number }> {
+  let server: McpServer | undefined;
+  try {
+    server = settings().mcpServers?.[name];
+  } catch (e) {
+    throw new LeaseError(403, `${name}: the settings could not be read, so sharing can't be checked (${e instanceof Error ? e.message : e})`);
+  }
+  if (!server) throw new LeaseError(404, `no MCP server named ${name}`);
+  if (server.shareWithPeers !== true) throw new LeaseError(403, `${name} is not shared with peers (shareWithPeers is off)`);
+  if (server.auth?.type === 'gh') throw new LeaseError(400, `${name} uses gh; a peer uses its own gh login`);
+  const cap = leaseCapSeconds(name, server);
+  const grant = store()[name];
+  if (!grant?.access_token && !grant?.refresh_token) throw new LeaseError(409, `${name} is not logged in on this home`);
+  if (!grant.expires_at) throw new LeaseError(409, `${name}'s grant never expires, so it is not leased`);
+  // A grant already over the cap is refused before any forced refresh (S-3212): a refresh would only bring
+  // the same 409 and call the provider again on every ask.
+  if (opts.refresh && grant.expires_at - Date.now() > cap * 1000) throw overCap(name, grant.expires_at - Date.now(), cap);
+  const got = await tokenFor(name, opts);
+  if (!got.expires_at) throw new LeaseError(409, `${name}'s grant never expires, so it is not leased`);
+  // A lease must outlive the peer's cache of it, so one that ends within a minute is refused too.
+  if (got.expires_at <= Date.now() + 60_000) throw new LeaseError(409, `${name}'s grant ends within a minute, so it is not leased`);
+  // The cap is on the lifetime the peer would hold: rotating the lease token can't revoke a bearer already sent,
+  // so a token that lives longer is refused, not shortened.
+  const remaining = got.expires_at - Date.now();
+  if (remaining > cap * 1000) throw overCap(name, remaining, cap);
+  return { url: got.url, access_token: got.token, expires_at: got.expires_at };
+}
+
+// The refusal for a token that lives longer than the server's cap (S-3176). It names no token.
+function overCap(name: string, remainingMs: number, cap: number): LeaseError {
+  return new LeaseError(409, `${name}'s token lives ${Math.round(remainingMs / 1000)} s, over the ${cap} s cap: the provider issues longer-lived tokens than peers accept (settings mcpServers.${name}.leaseMaxSeconds)`);
+}
+
+// The status rows of the servers the settings share, for a peer (S-3176). No token is in them.
+export async function sharedStatus(): Promise<McpStatusRow[]> {
+  return localStatus((name) => settings().mcpServers?.[name]?.shareWithPeers === true);
+}
+
+// Whether two secrets are equal, compared in constant time: both are hashed first, so the length of
+// the presented one isn't checked against the other's.
+export function sameSecret(presented: string, secret: string): boolean {
+  const digest = (s: string) => createHash('sha256').update(s).digest();
+  return timingSafeEqual(digest(presented), digest(secret));
+}
+
 // The secret name the settings reference for a server, if any.
 function settingsSecretName(name: string): string | undefined {
   const v = settingsOnDisk()?.mcpServers?.[name]?.auth?.client_secret;
@@ -393,7 +666,10 @@ function settingsSecretName(name: string): string | undefined {
 
 // Forgets a server's stored login. A client secret the registration made goes with it; one the
 // settings name stays, since the next login needs it (S-2736).
+// A peer issues no logins, but a grant it still holds from before the lease (S-3177) is deleted here, refresh token and
+// all. A peer with no grant of its own is refused, naming the home.
 export function logout(name: string): void {
+  if (!store()[name]) refuseOnPeer(name, 'log out');
   const s = store();
   const ref = s[name]?.client_secret;
   delete s[name];

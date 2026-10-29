@@ -14,6 +14,7 @@ import { embed } from './embed.ts';
 import { fanOut, type Via } from './peers.ts';
 import { excerpt, rank } from './search.ts';
 import { nearest } from './vectors.ts';
+import { isPlacedAsk, mayReadMail, withoutHiddenAsks } from './mail-visibility.ts';
 
 export interface MailHit {
   thread_id: string;
@@ -81,15 +82,16 @@ function ancestorsOf(id: string): string[] {
 
 // The threads a viewer may read beyond its own mail: those with the human that an ancestor took part in.
 // Not an ITSA's thread, which only those the ITSA belongs to read whole (S-480, mail-visibility.ts).
+// A placed ask (S-3827) makes neither the human nor its sender part of its home thread, so it opens that thread to nobody.
 export function sharedThreads(viewer: string): string[] {
-  const withHuman = new Set(db.humanThreadIds());
+  const withHuman = new Set(db.humanThreadIds(true));
   const itsaThreads = db.itsaThreadIds();
-  return [...new Set(ancestorsOf(viewer).flatMap((a) => db.threadIdsOf(a)))].filter((t) => withHuman.has(t) && !itsaThreads.has(t));
+  return [...new Set(ancestorsOf(viewer).flatMap((a) => db.threadIdsOf(a, true)))].filter((t) => withHuman.has(t) && !itsaThreads.has(t));
 }
 
 // The text a thread's hit shows: its latest mail, its people, and an excerpt around the query.
-function textOf(thread: string, m: db.Mail, q: string): Omit<Part, 'cos' | 'kw'> {
-  const mails = db.threadMail(thread);
+function textOf(viewer: string, thread: string, m: db.Mail, q: string): Omit<Part, 'cos' | 'kw'> {
+  const mails = withoutHiddenAsks(viewer, db.threadMail(thread));
   const latest = mails.at(-1) ?? m;
   const people = new Set<string>();
   for (const x of mails) {
@@ -112,7 +114,9 @@ function localParts(viewer: string, q: string, opts: SearchOpts, vec: Float32Arr
   const withId = opts.with ? (db.getAgent(opts.with)?.id ?? opts.with) : undefined;
   const inWith = withId ? new Set(db.threadIdsOf(withId)) : undefined;
   // Keyword: the best mail per thread. Ask for more than the limit, since the `with` filter can drop some.
-  const found = db.searchMailText(q, viewer, opts.limit * 10, sharedThreads(viewer));
+  // A placed ask (S-3827) is found only by those who see it, not by everyone who reads its home thread.
+  const hidden = (x: db.Mail) => viewer !== HUMAN && isPlacedAsk(x) && !mayReadMail(viewer, x);
+  const found = db.searchMailText(q, viewer, opts.limit * 10, sharedThreads(viewer)).filter((m) => !hidden(m));
   const kw = new Map<string, { m: db.Mail; score: number }>();
   for (const m of found) {
     const thread = m.thread_id ?? m.id;
@@ -122,7 +126,7 @@ function localParts(viewer: string, q: string, opts: SearchOpts, vec: Float32Arr
   }
   // Meaning: each thread's nearest in-scope mail.
   const threadOf = new Map<string, string>();
-  for (const s of db.mailScope(viewer, sharedThreads(viewer))) if (!inWith || inWith.has(s.thread)) threadOf.set(s.id, s.thread);
+  for (const s of db.mailScope(viewer, sharedThreads(viewer))) if ((!inWith || inWith.has(s.thread)) && !(s.placed && hidden(db.getMail(s.id)!))) threadOf.set(s.id, s.thread);
   const best = new Map<string, { ref: string; cos: number }>();
   if (vec) {
     for (const { ref, score } of nearest('mail', vec, new Set(threadOf.keys()), Infinity)) {
@@ -136,7 +140,7 @@ function localParts(viewer: string, q: string, opts: SearchOpts, vec: Float32Arr
     const b = best.get(t);
     const k = kw.get(t);
     const m = k?.m ?? db.getMail(b!.ref)!;
-    parts.push({ ...textOf(t, m, q), cos: b && b.cos >= MEANING_FLOOR ? b.cos : null, kw: k?.score ?? 0 });
+    parts.push({ ...textOf(viewer, t, m, q), cos: b && b.cos >= MEANING_FLOOR ? b.cos : null, kw: k?.score ?? 0 });
   }
   return parts;
 }

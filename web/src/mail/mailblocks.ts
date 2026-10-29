@@ -22,6 +22,39 @@ export function configure(opts: { mention?: (name: string) => string | null; its
 // Links in mail open in a new tab.
 DOMPurify.addHook('afterSanitizeAttributes', (n) => { if (n.tagName === 'A') { n.setAttribute('target', '_blank'); n.setAttribute('rel', 'noopener'); } });
 
+// A mail's own markup can't style or place itself: a style, class or id in it could hide or cover
+// other text, such as the text an ask asks to approve (S-2998). Each render has a fresh key, own()
+// marks what a component wrote with it, and clean() strips the rest; a code block keeps its language.
+let renderKey = '';
+let strict = false;
+const KEY_ATTR = 'data-mb-key';
+const UNOWNED = ['style', 'id', 'popover', 'popovertarget', 'popovertargetaction', 'overflow', 'transform'];
+DOMPurify.addHook('beforeSanitizeAttributes', (n) => {
+  if (!strict || n.nodeType !== Node.ELEMENT_NODE) return;
+  if (!renderKey || n.getAttribute(KEY_ATTR) !== renderKey) {
+    for (const a of UNOWNED) n.removeAttribute(a);
+    const lang = [...n.classList].filter((c) => /^language-[\w+#.-]+$/.test(c));
+    if (lang.length) n.setAttribute('class', lang.join(' ')); else n.removeAttribute('class');
+  }
+  n.removeAttribute(KEY_ATTR);
+});
+// No MathML profile: raw MathML (mpadded, mspace) can paint over other text, and the math component's KaTeX
+// comes after clean(). SVG animation could move or hide again what the hook strips.
+const SANITIZE = { USE_PROFILES: { html: true, svg: true, svgFilters: true }, ADD_ATTR: ['data-choose', 'data-decision', 'data-own'],
+  FORBID_TAGS: ['style', 'animate', 'animatetransform', 'animatemotion', 'animatecolor', 'set'] };
+function clean(html: string): string {
+  strict = true;
+  try { return DOMPurify.sanitize(html, SANITIZE); } finally { strict = false; }
+}
+function own(html: string): string {
+  if (!renderKey || !html) return html;
+  const t = document.createElement('template');
+  t.innerHTML = html;
+  for (const el of t.content.querySelectorAll('*')) el.setAttribute(KEY_ATTR, renderKey);
+  return t.innerHTML;
+}
+const newKey = (): string => Array.from(crypto.getRandomValues(new Uint32Array(4)), (x) => x.toString(36)).join('');
+
 // --- TLDR -------------------------------------------------------------------------
 const TLDR = /^\s*(?:\*\*)?TL;?DR(?:\*\*)?\s*:?\s*(?:\*\*)?\s*(.+)$/i;
 // The body's TLDR line, if its first line is one, and the rest.
@@ -924,10 +957,10 @@ const MATH_EXT: { extensions: TokenizerAndRendererExtension[] } = {
   extensions: [
     { name: 'mathBlock', level: 'block', start: (src: string) => src.match(/^\$\$/m)?.index,
       tokenizer(src: string) { const m = /^\$\$\n?([\s\S]+?)\n?\$\$(?:\n|$)/.exec(src); if (m) return { type: 'mathBlock', raw: m[0], tex: m[1] }; },
-      renderer: (t) => mathBlock(t.tex as string) },
+      renderer: (t) => own(mathBlock(t.tex as string)) },
     { name: 'mathInline', level: 'inline', start: (src: string) => src.indexOf('\\('),
       tokenizer(src: string) { const m = /^\\\(([\s\S]+?)\\\)/.exec(src); if (m) return { type: 'mathInline', raw: m[0], tex: m[1] }; },
-      renderer: (t) => `<span class="mb-math" data-tex="${esc((t.tex as string).trim())}"><code>${esc((t.tex as string).trim())}</code></span>` },
+      renderer: (t) => own(`<span class="mb-math" data-tex="${esc((t.tex as string).trim())}"><code>${esc((t.tex as string).trim())}</code></span>`) },
   ],
 };
 type KatexApi = typeof import('katex');
@@ -943,7 +976,8 @@ export async function renderMath(el: ParentNode): Promise<void> {
   }
   for (const m of todo) {
     m.classList.add('typeset');
-    try { katex.render(m.dataset.tex!, m, { displayMode: m.classList.contains('display'), throwOnError: true, output: 'htmlAndMathml' }); }
+    // maxSize caps a \raisebox or a rule, which could otherwise reach far over the text around it (S-2998).
+    try { katex.render(m.dataset.tex!, m, { displayMode: m.classList.contains('display'), throwOnError: true, output: 'htmlAndMathml', maxSize: 10 }); }
     catch (err) { m.classList.add('failed'); m.title = String(err instanceof Error ? err.message : err); }
   }
 }
@@ -1017,7 +1051,7 @@ function parser(): Marked {
     renderer: {
       code(token: Tokens.Code) {
         // One component that throws on odd content shows as plain code instead of taking its mail, view, or the app down (S-2084).
-        try { return component(token); } catch (e) { console.error('mail component', token.lang, e); return false; }
+        try { const c = component(token); return c === false ? c : own(c); } catch (e) { console.error('mail component', token.lang, e); return false; }
       },
     },
   });
@@ -1053,8 +1087,9 @@ function component({ text, lang }: Tokens.Code): string | false {
   if (['embed', 'video', 'audio', 'image', 'file'].includes(name)) return embed(text);
   return false;
 }
-const inner = (text: string): string => parser().parse(text) as string;
-const inline = (text: string): string => parser().parseInline(text) as string;
+// A component's text is the mail's own markup: cleaned before the component wraps it.
+const inner = (text: string): string => clean(parser().parse(text) as string);
+const inline = (text: string): string => clean(parser().parseInline(text) as string);
 
 // Callouts: GitHub alert syntax on a block quotation.
 const CALLOUT: Record<string, string> = {
@@ -1175,14 +1210,44 @@ export function handleCopy(e: { target: EventTarget | null }): boolean {
   return true;
 }
 
+export interface Shown { at: number; len: number }
+const SHOWN_HEAD = '<details><summary>What you approve: ';
+const isLow = (c: number): boolean => c >= 0xdc00 && c <= 0xdfff;
+// The body cut around its snapshot, or null when the range doesn't land on one exactly (out of range, mid-surrogate,
+// or not the snapshot's own block): the mail then renders whole, as before the range was recorded.
+export function shownParts(body: unknown, shown?: Shown | null): [string, string, string] | null {
+  if (typeof body !== 'string' || !shown) return null;
+  const { at, len } = shown;
+  if (!Number.isInteger(at) || !Number.isInteger(len) || at < 0 || len <= 0 || at + len > body.length) return null;
+  if (isLow(body.charCodeAt(at)) || (at + len < body.length && isLow(body.charCodeAt(at + len)))) return null;
+  const snap = body.slice(at, at + len);
+  if (!snap.startsWith(SHOWN_HEAD) || !snap.endsWith('</details>')) return null;
+  return [body.slice(0, at), snap, body.slice(at + len)];
+}
+
 // A mail body as sanitized HTML, components rendered.
-export function renderMail(body: unknown): string {
+// `shown` is where the body holds the ITSA text it showed the human, as the daemon recorded it (S-2998).
+export function renderMail(body: unknown, shown?: Shown | null): string {
   const mk = parser();
   decisions = 0;
-  const { tldr, rest } = splitTldr(body);
-  const html = (tldr ? `<p class="mb-tldr">${mk.parseInline(tldr)}</p>` : '') + mk.parse(rest);
   const tpl = document.createElement('template');
-  tpl.innerHTML = DOMPurify.sanitize(html, { ADD_ATTR: ['data-choose', 'data-decision', 'data-own'] });
+  renderKey = newKey();
+  try {
+    const cut = shownParts(body, shown);
+    if (cut) {
+      // The snapshot in its own box, drawn above everything after it: nothing later in the mail can cover it. Each part
+      // is parsed and cleaned as its own fragment, so no tag in one (a stray </div>, a </details>) reaches the box or
+      // what is around it.
+      const part = (md: string): DocumentFragment => { const t = document.createElement('template'); t.innerHTML = clean(mk.parse(md) as string); return t.content; };
+      const box = document.createElement('div');
+      box.className = 'mb-shown';
+      box.append(part(cut[1]));
+      tpl.content.append(part(cut[0]), box, part(cut[2]));
+    } else {
+      const { tldr, rest } = splitTldr(body);
+      tpl.innerHTML = clean((tldr ? own('<p class="mb-tldr"></p>').replace('</p>', () => inline(tldr) + '</p>') : '') + mk.parse(rest));
+    }
+  } finally { renderKey = ''; }
   // A mail's own markup can't carry a reference link's data (DOMPurify keeps data-*); only refLinks sets them.
   for (const a of tpl.content.querySelectorAll('[data-ref-pick], [data-ref-act]')) { a.removeAttribute('data-ref-pick'); a.removeAttribute('data-ref-act'); }
   callouts(tpl.content);

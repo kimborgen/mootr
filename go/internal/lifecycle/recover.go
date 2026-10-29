@@ -28,22 +28,50 @@ const recoverStagger = 3 * time.Second
 // networkWait is how long recoverLost waits for the network before it tries anyway (ten minutes).
 const networkWait = 10 * time.Minute
 
-// acquire is src/lifecycle.ts acquire for a resume, the one transition ported: one at a time per agent.
-func (l *Lifecycle) acquire(a db.Agent) (func(), error) {
+// being is src/lifecycle.ts BEING: how a refusal names the transition that holds the agent.
+var being = map[string]string{"archive": "archived", "switch": "switched", "resume": "resumed"}
+
+// transition is one agent's held transition lock: its kind, and a token of its own so a release removes only it.
+type transition struct{ kind string }
+
+// acquire is src/lifecycle.ts acquire: one transition (a cost switch, its rollback included, or a resume) at a time per
+// agent, held for its whole run. It refuses while another holds the agent, naming that one.
+func (l *Lifecycle) acquire(a db.Agent, kind string) (func(), error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.transitions[a.ID] {
-		return nil, fmt.Errorf("%s is being resumed; try again when it is done", a.Name)
+	return l.acquireLocked(a, kind)
+}
+
+// Archiving is the agents whose archive is in flight: from its transition lock, taken before the harness stops, to its
+// release, after the row is marked archived or the archive failed. The developer slot queue counts them as holders, so
+// a slot frees only once the archive has finished with the worktree.
+func (l *Lifecycle) Archiving() map[string]bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := map[string]bool{}
+	for id, t := range l.transitions {
+		if t.kind == "archive" {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+// acquireLocked is acquire under l.mu, which the caller holds; the release takes it itself.
+func (l *Lifecycle) acquireLocked(a db.Agent, kind string) (func(), error) {
+	if held := l.transitions[a.ID]; held != nil {
+		return nil, fmt.Errorf("%s is being %s; try again when it is done", a.Name, being[held.kind])
 	}
 	if l.transitions == nil {
-		l.transitions = map[string]bool{}
+		l.transitions = map[string]*transition{}
 	}
-	l.transitions[a.ID] = true
+	token := &transition{kind: kind}
+	l.transitions[a.ID] = token
 	released := false
 	return func() {
 		l.mu.Lock()
 		defer l.mu.Unlock()
-		if !released {
+		if !released && l.transitions[a.ID] == token {
 			delete(l.transitions, a.ID)
 		}
 		released = true
@@ -72,12 +100,12 @@ func (l *Lifecycle) assertNotTakenOver(ctx context.Context, a db.Agent) error {
 	return fmt.Errorf("%s was taken over by %s: switch back with `cost_switch %s %s`, or archive %s first", cur.Name, s.Name, s.Name, l.presetFor(cur), s.Name)
 }
 
-// presetFor is the first registry preset (defaults, then STAM_HOME/registry.json over them by name) of the agent's
+// presetFor is the first registry preset (defaults, then the user registry (the home's cached copy on a peer) over them by name) of the agent's
 // harness and model, else PRESET.
 func (l *Lifecycle) presetFor(a db.Agent) string {
 	merged := jsjson.NewObject()
 	defaults, _ := readJSON(filepath.Join(l.claude.Templates.Root, "registry", "defaults.json"))
-	user, _ := readJSON(filepath.Join(l.claude.Templates.Home, "registry.json"))
+	user := jsjson.Value(l.claude.Templates.UserRegistry())
 	dropped := map[string]bool{}
 	for _, doc := range []jsjson.Value{defaults, user} {
 		o, _ := doc.(*jsjson.Object)
@@ -112,7 +140,7 @@ func (l *Lifecycle) presetFor(a db.Agent) string {
 // Resume is src/lifecycle.ts resume for a shut-down agent: it comes back on its session, told where it is. Bringing
 // back an archived agent (its workspace restored) isn't ported.
 func (l *Lifecycle) Resume(ctx context.Context, a db.Agent, note string) (string, error) {
-	release, err := l.acquire(a)
+	release, err := l.acquire(a, "resume")
 	if err != nil {
 		return "", err
 	}
@@ -524,7 +552,7 @@ func (l *Lifecycle) firstPromptLost(ctx context.Context, a db.Agent) bool {
 	if a.Activity != "starting" || a.Lifecycle != "active" || a.FirstPrompt == nil || *a.FirstPrompt == "" {
 		return false
 	}
-	if len(heldBy(a)) > 0 {
+	if l.isHeld(ctx, a) {
 		return false
 	}
 	if _, ok := l.takenOverBy(ctx, a); ok {
@@ -553,4 +581,9 @@ func (l *Lifecycle) recoverFirstPrompt(ctx context.Context, a db.Agent) {
 		db.Field{Col: "activity_detail", Val: "first prompt not delivered: " + msg})
 	l.event(ctx, a.ID, "first-prompt:failed", errorEvent{Error: msg})
 	l.tellParent(ctx, a, fmt.Sprintf("%s never got its first prompt (%s); respawn it.", a.Name, msg))
+}
+
+// RestoreTranscript is restoreTranscript for the agent view, which reads an archived agent's transcript.
+func RestoreTranscript(path *string) error {
+	return restoreTranscript(path)
 }

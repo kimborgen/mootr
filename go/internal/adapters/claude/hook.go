@@ -26,6 +26,28 @@ type HookResult struct {
 	Waits HookWaits
 	// Dialog is the harness dialog that blocks the agent, nil for none.
 	Dialog *Dialog
+	// CostSignal is the cost signal a StopFailure reports (src/adapters/claude.ts costSignal), nil for none.
+	CostSignal *CostSignal
+}
+
+// CostSignal is a provider error the cost policy acts on: its class (limit, credits, auth or transient) and the
+// harness's error value.
+type CostSignal struct {
+	Class, Error string
+}
+
+// errorClass is src/adapters/claude.ts CLAUDE_ERROR_CLASS: StopFailure's error values the cost policy acts on.
+// max_output_tokens, invalid_request, model_not_found and unknown are none.
+var errorClass = map[string]string{
+	"rate_limit":             "limit",
+	"billing_error":          "credits",
+	"authentication_failed":  "auth",
+	"oauth_org_not_allowed":  "auth",
+	"account_on_hold":        "auth",
+	"verification_required":  "auth",
+	"cloud_credential_error": "auth",
+	"overloaded":             "transient",
+	"server_error":           "transient",
 }
 
 // now is the clock a Stop's one-shot timers count from.
@@ -41,8 +63,8 @@ func strp(s string) *string { return &s }
 // details of the harness dialog that waits for an answer (src/db.ts pendingDialog), asked only for the tool events.
 //
 // Ported: every event's activity, detail, session and turn end, the waits the hooks keep (background jobs and session
-// crons), and the dialogs a PermissionRequest or a permission Notification reports. Not yet: the cost signals of
-// StopFailure and the account probe, and the cold-cache mark after a compaction.
+// crons), the dialogs a PermissionRequest or a permission Notification reports, and StopFailure's cost signal. Not yet:
+// the account probe's turn, and the cold-cache mark after a compaction.
 func OnHook(a db.Agent, p *jsjson.Object, pendingDialog func() (string, bool)) HookResult {
 	event, _ := get(p, "hook_event_name").(string)
 	switch event {
@@ -54,9 +76,15 @@ func OnHook(a db.Agent, p *jsjson.Object, pendingDialog func() (string, bool)) H
 		if a.Activity == "starting" && a.ActivityDetail != nil && *a.ActivityDetail == "with prompt" {
 			return r
 		}
+		// S-3250: a launch's SessionStart that lands late (it retried while the daemon restarted), after reconcile
+		// settled the agent and a turn began, doesn't end that turn.
+		src := get(p, "source")
+		if (src == "startup" || src == "resume") && (a.Activity == "working" || a.Activity == "blocked") {
+			return r
+		}
 		source := "start"
-		if v := get(p, "source"); v != nil {
-			source = JSString(v)
+		if src != nil {
+			source = JSString(src)
 		}
 		r.Activity, r.Detail, r.SetDetail = "idle", strp("session "+source), true
 		return r
@@ -81,11 +109,13 @@ func OnHook(a db.Agent, p *jsjson.Object, pendingDialog func() (string, bool)) H
 		r.AfterTool = true
 		return r
 	case "PermissionRequest":
+		action, state := "Claude Code asks to allow "+tmpl(p, "tool_name"), "permission "+tmpl(p, "tool_name")
+		// A question's dialog is an ask too: its card shows the question and options, and the human's choice is typed back
+		// (S-3978). Auto mode still shows some dialogs, such as a read outside the working directories.
 		if get(p, "tool_name") == "AskUserQuestion" {
-			return set("blocked", strp("question"))
+			action, state = "Claude Code asks a question", "question"
 		}
-		// Auto mode still shows some dialogs, such as a read outside the working directories.
-		r := set("blocked", strp("permission "+tmpl(p, "tool_name")))
+		r := set("blocked", strp(state))
 		input := get(p, "tool_input")
 		if input == nil {
 			input = jsjson.NewObject()
@@ -94,7 +124,7 @@ func OnHook(a db.Agent, p *jsjson.Object, pendingDialog func() (string, bool)) H
 		if _, ok := p.Get("tool_name"); !ok {
 			details = jsjson.NewObject("input", input, "session", hookSession(a, p))
 		}
-		r.Dialog = &Dialog{Action: "Claude Code asks to allow " + tmpl(p, "tool_name"), Details: jsjson.Stringify(details, ""), Replaces: true}
+		r.Dialog = &Dialog{Action: action, Details: jsjson.Stringify(details, ""), Replaces: true}
 		return r
 	case "Notification":
 		kind := get(p, "notification_type")
@@ -127,7 +157,14 @@ func OnHook(a db.Agent, p *jsjson.Object, pendingDialog func() (string, bool)) H
 		if v := get(p, "error"); v != nil {
 			e = JSString(v)
 		}
-		return set("errored", strp(e))
+		r := set("errored", strp(e))
+		// CLAUDE_ERROR_CLASS[String(p.error)]: an absent or null error has no class.
+		if v := get(p, "error"); v != nil {
+			if cls := errorClass[JSString(v)]; cls != "" {
+				r.CostSignal = &CostSignal{Class: cls, Error: JSString(v)}
+			}
+		}
+		return r
 	case "SessionEnd":
 		// SessionEnd also fires on /clear, which starts a new session in the same harness, and a harness stam takes down
 		// itself keeps the state stam gave it. Any other reason ends the harness.

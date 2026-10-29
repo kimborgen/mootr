@@ -20,17 +20,18 @@ import { grantedPaths } from '../workspace-share.ts';
 import { secretPaths } from '../secret-files.ts';
 import { loadOwned, itsaPrompt } from '../itsa-owners.ts';
 import { prompt as requirementsPrompt } from '../requirements.ts';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync, mkdirSync } from 'node:fs';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { agentExec, agentKillMatching } from '../agent-exec.ts';
 import WebSocket from 'ws';
 import { STAM_BIN, STAM_HOME, agentDir } from '../config.ts';
 import { settings } from '../settings.ts';
 import { isReviewerType } from '../agent-types.ts';
 import * as db from '../db.ts';
 import { signal as costSignal } from '../rules.ts';
-import type { Agent, Activity } from '../db.ts';
+import type { Agent, Activity, PermissionRequest } from '../db.ts';
 import type { Adapter, ErrorClass, HookResult, LaunchSpec } from './types.ts';
 import * as tmux from '../tmux.ts';
 import { render, humanMailPrompt } from '../templates.ts';
@@ -42,6 +43,9 @@ import { replaceHookWaits, clearHookWaits, type HookWait } from './hook-waits.ts
 import { onContext } from '../context.ts';
 import { report, reportSubscription } from '../usage.ts';
 import { envVar, withMootrTwins } from '../env.ts';
+import { dialogClosed, dialogShown } from '../permissions.ts';
+import { codexAsk, codexReply, codexRequestOf, isCodexAsk, requestKey, type CodexDialogRequest } from './codex-dialog.ts';
+import { randomUUID } from 'node:crypto';
 
 const BIN = envVar('CODEX_BIN') ?? (existsSync(join(homedir(), '.local/bin/codex')) ? join(homedir(), '.local/bin/codex') : 'codex');
 const HOOK_COMMAND = `${STAM_BIN} hook codex`;
@@ -107,7 +111,7 @@ async function hookTrust(): Promise<Record<string, { trusted_hash: string }>> {
 
 function probeHooks(): Promise<{ key: string; command: string; currentHash: string }[]> {
   return new Promise((resolve, reject) => {
-    const p = spawn(BIN, ['app-server', '--listen', 'stdio://', ...hookArgs()], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const p = agentExec([BIN, 'app-server', '--listen', 'stdio://', ...hookArgs()], {}, { mode: 'spawn', stdio: ['pipe', 'pipe', 'ignore'] });
     const timer = setTimeout(() => {
       p.kill();
       reject(new Error('Codex hook probe timed out'));
@@ -179,12 +183,33 @@ export function reviewerSandbox(agent: Agent): { network: boolean; writable: str
   return { network: true, writable: [root] };
 }
 
+// The path a sandbox entry names, as bwrap must bind it: the real spelling, with no symlink on the way
+// (S-3861: after the S-2890 move ~/.local/share/stam is a symlink, and bwrap can't bind over a path
+// through one). A path that doesn't exist yet takes the real spelling of its deepest existing
+// ancestor, then the rest. Any error other than not-found keeps the path as given, so its entry
+// stays (a deny is never dropped).
+export function sandboxPath(p: string): string {
+  const rest: string[] = [];
+  let cur = p;
+  for (;;) {
+    try {
+      return join(realpathSync(cur), ...rest.reverse());
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(cur) === cur) return p;
+      rest.push(basename(cur));
+      cur = dirname(cur);
+    }
+  }
+}
+
 // The profile STAM_PROFILE for a default or auto agent (S-1888): it extends `:workspace`, Codex's
 // workspace-write policy (its workspace, /tmp and read-only .git stay as they were, checked with
 // 0.162.1), adds the reviewer's network and writable roots (reviewerSandbox) and the agent's own
 // workspace and the ones shared with it for writing (S-896), and denies every secret file for reads
 // and writes. Codex takes these as app-server config, so they apply to the whole agent, TUI turns
-// included. Bypass has no sandbox and so no profile: Codex can't deny reads there.
+// included. Bypass has no sandbox and so no profile: Codex can't deny reads there. Every entry is
+// its real path (sandboxPath), so bwrap never binds through a symlink; the secret files are listed
+// under both spellings of a symlinked home, and they dedupe to one real entry each.
 export function agentSandbox(agent: Agent): Record<string, unknown> {
   const reviewer = reviewerSandbox(agent);
   if (agent.permission_mode === 'bypass') return {};
@@ -192,8 +217,8 @@ export function agentSandbox(agent: Agent): Record<string, unknown> {
   return {
     'permissions.stam.extends': ':workspace',
     'permissions.stam.filesystem': {
-      ...Object.fromEntries(write.map((p) => [p, 'write'])),
-      ...Object.fromEntries(secretPaths().map((p) => [p, 'none'])),
+      ...Object.fromEntries(write.map((p) => [sandboxPath(p), 'write'])),
+      ...Object.fromEntries(secretPaths().map((p) => [sandboxPath(p), 'none'])),
     },
     ...(reviewer.network ? { 'permissions.stam.network.enabled': true } : {}),
   };
@@ -206,7 +231,7 @@ async function stopStale(sock: string): Promise<void> {
   const pattern = `unix://${sock}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (let i = 0; i < 20; i++) {
     const signal = i < 10 ? 'TERM' : 'KILL';
-    if (spawnSync('pkill', [`-${signal}`, '-f', pattern]).status !== 0) return;
+    if (!agentKillMatching(pattern, signal)) return;
     await sleep(300);
   }
 }
@@ -228,7 +253,8 @@ export function codexMcpServers(): { overrides: Record<string, unknown>; env: Re
   for (const [name, s] of Object.entries(extraMcpServers())) {
     if (s.auth) {
       // The token lives in the daemon, so the proxy gets it at call time from the app-server's
-      // environment, as stam's own server does; nothing secret rides on this command line.
+      // environment, as stam's own server does; nothing secret rides on this command line. Both names go (S-3345): the
+      // agent env sets each MOOTR_ twin to its STAM_ value, so readers that prefer MOOTR_ meet the value stam set (S-3204).
       overrides[`mcp_servers.${name}`] = { command: STAM_BIN, args: ['mcp-proxy', name], env_vars: withMootrTwins(['STAM_AGENT_ID', 'STAM_URL', 'STAM_TOKEN']) };
     } else if (s.url) {
       const o: Record<string, unknown> = { url: s.url };
@@ -255,6 +281,9 @@ export function codexMcpServers(): { overrides: Record<string, unknown>; env: Re
 
 interface Conn {
   ws: WebSocket;
+  // Names the connection the daemon opened, so a dialog answer goes only to the connection its request came on. Unique
+  // across daemon restarts: a process's own nonce, then a count (S-3979).
+  connId: string;
   ready: Promise<void>;
   next: number;
   pending: Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>;
@@ -274,6 +303,9 @@ interface Conn {
 }
 
 const conns = new Map<string, Conn>();
+// A new process's connections never share an id with an earlier process's, so a dialog from before a restart can't match one.
+const processNonce = randomUUID();
+let connections = 0;
 
 // Listeners of an agent's app-server traffic, for stam's own agent view (codex-view.ts):
 // every notification, and every server request (an approval), as it arrives. They share
@@ -314,6 +346,13 @@ export function answerRequest(agentId: string, id: string | number, result: unkn
   return true;
 }
 
+// The open request a dialog was raised for, if it is still open on the connection that raised it (S-3979).
+function openRequestOn(agentId: string, dialog: CodexDialogRequest) {
+  if (conns.get(agentId)?.connId !== dialog.conn) return undefined;
+  const q = openRequests(agentId).find((x) => x.id === dialog.id);
+  return q && q.method === dialog.method ? q : undefined;
+}
+
 // The agent's thread, for the view: the agent's session, or the thread the app-server loaded.
 export async function threadOf(agentId: string): Promise<string | undefined> {
   return threadId(agentId, await ready(agentId));
@@ -351,7 +390,7 @@ function connect(agentId: string): Conn | undefined {
     sock = realpathSync(sock);
   } catch {}
   const ws = new WebSocket(`ws+unix://${sock}:/`);
-  const c: Conn = { ws, ready: Promise.resolve(), next: 0, pending: new Map(), subscribed: false, ephemeral: new Set(), jobs: new Map(), ended: new Set(), reconciling: 0 };
+  const c: Conn = { ws, connId: `${processNonce}.${++connections}`, ready: Promise.resolve(), next: 0, pending: new Map(), subscribed: false, ephemeral: new Set(), jobs: new Map(), ended: new Set(), reconciling: 0 };
   conns.set(agentId, c);
   c.ready = new Promise((resolve, reject) => {
     ws.on('open', async () => {
@@ -382,7 +421,7 @@ function connect(agentId: string): Conn | undefined {
       else p?.resolve(msg.result);
     } else if (msg.method) {
       // Requests such as approvals are left to the TUI, which gets them too; the view hears
-      // them through its listeners (see listen).
+      // them through its listeners (see listen), and the agent's own ones are asks (raiseDialog).
       if (msg.id === undefined) onNotification(agentId, c, msg.method, msg.params ?? {});
       else {
         // Open until serverRequest/resolved (any client answering counts).
@@ -390,12 +429,16 @@ function connect(agentId: string): Conn | undefined {
         if (!open) requests.set(agentId, (open = new Map()));
         open.set(msg.id, { method: msg.method, params: msg.params ?? {} });
         for (const l of listeners.get(agentId) ?? []) l.request(msg.id, msg.method, msg.params ?? {});
+        raiseDialog(agentId, c, msg.id, msg.method, msg.params ?? {});
       }
     }
   });
   ws.on('close', () => {
-    requests.delete(agentId);
-    if (conns.get(agentId) === c) conns.delete(agentId);
+    // A connection already replaced keeps no say over the requests of its successor (S-3979).
+    if (conns.get(agentId) === c) {
+      conns.delete(agentId);
+      requests.delete(agentId);
+    }
     for (const p of c.pending.values()) p.reject(new Error('Codex app-server connection closed'));
     if (!c.closing) keepConnected(agentId);
   });
@@ -656,8 +699,70 @@ async function reconcileJobs(agentId: string, c: Conn): Promise<void> {
   }
 }
 
+// The asks the adapter makes, one agent at a time (S-3979): a request's ask waits for the one before it, so two
+// requests' rows are never written side by side. `queued` holds the requests whose ask isn't done; a request answered
+// or superseded in that window is in `dropped`: its ask is not made, or, when it was already being made, closed once made.
+const asking = new Map<string, Promise<void>>();
+const queued = new Map<string, Set<string>>();
+const dropped = new Set<string>();
+// The permission request an ask makes (dialogShown), behind a seam so a test can hold one while it's being made.
+export const dialogAsk = { show: dialogShown };
+
+// An approval or question the agent's own thread waits on is a harness dialog (S-3979): an ask to the agent's parent
+// first, then the human, answered by the reply to this request (answerDialog). Answered in the TUI or elsewhere, the
+// app-server resolves it, and resolveDialog closes the ask.
+function raiseDialog(agentId: string, c: Conn, id: string | number, method: string, params: any): void {
+  const a = db.getAgent(agentId);
+  if (!a || !isCodexAsk(method) || (a.session_id && params.threadId !== a.session_id)) return;
+  const ask = codexAsk(method, params, { id, method, conn: c.connId });
+  if (!ask) return;
+  const key = requestKey({ id, conn: c.connId });
+  const waiting = queued.get(agentId) ?? new Set<string>();
+  queued.set(agentId, waiting);
+  // A newer request replaces the older ones still waiting, as its dialog replaces their rows.
+  for (const k of waiting) dropped.add(k);
+  waiting.add(key);
+  const next = (asking.get(agentId) ?? Promise.resolve())
+    .then(() => makeAsk(agentId, key, ask.action, ask.details))
+    .catch((e) => db.addEvent(agentId, 'permission-error', String(e)));
+  asking.set(agentId, next);
+}
+
+async function makeAsk(agentId: string, key: string, action: string, details: string): Promise<void> {
+  try {
+    if (dropped.has(key)) return;
+    const a = db.getAgent(agentId);
+    if (!a) return;
+    await dialogAsk.show(a, action, details, true);
+    // Answered or superseded while its ask was made: the row it made is closed, unless it was replaced (then it's gone).
+    if (dropped.has(key)) {
+      const r = db.pendingDialog(agentId);
+      if (r && rowKey(r.details) === key) dialogClosed(db.getAgent(agentId)!);
+    }
+  } finally {
+    dropped.delete(key);
+    queued.get(agentId)?.delete(key);
+  }
+}
+
+// The key of the request a dialog's details name.
+const rowKey = (details: string) => {
+  const r = codexRequestOf(details);
+  return r && requestKey(r);
+};
+
+function resolveDialog(agentId: string, c: Conn, id: string | number): void {
+  const key = requestKey({ id, conn: c.connId });
+  if (queued.get(agentId)?.has(key)) dropped.add(key);
+  const r = db.pendingDialog(agentId);
+  if (r && rowKey(r.details) === key) dialogClosed(db.getAgent(agentId)!);
+}
+
 export function onNotification(agentId: string, c: Conn, method: string, p: any): void {
-  if (method === 'serverRequest/resolved') requests.get(agentId)?.delete(p.requestId);
+  if (method === 'serverRequest/resolved') {
+    requests.get(agentId)?.delete(p.requestId);
+    resolveDialog(agentId, c, p.requestId);
+  }
   for (const l of listeners.get(agentId) ?? []) l.notify(method, p);
   const a = db.getAgent(agentId);
   if (!a) return;
@@ -883,7 +988,7 @@ export function recordRateLimitsRead(r: Record<string, any>): void {
 export const codex: Adapter = {
   name: 'codex',
   upgradeCommand: `${BIN} update`,
-  version: () => execFileSync(BIN, ['--version'], { encoding: 'utf8' }).trim(),
+  version: () => agentExec([BIN, '--version'], {}, { mode: 'fileSync' }).trim(),
   classifyError: classifyCodexError,
 
   async start() {
@@ -941,7 +1046,8 @@ export const codex: Adapter = {
         // settings.mcpServers, beside stam's own server.
         ...mcp.overrides,
         // Codex passes MCP servers only an allowlist of variables; env_vars adds stam's.
-        'mcp_servers.stam': { command: STAM_BIN, args: ['mcp'], env_vars: withMootrTwins(['STAM_AGENT_ID', 'STAM_URL', 'STAM_TOKEN']), default_tools_approval_mode: 'approve' },
+        // Codex's default tool timeout is 60 s, but pr_review and pr_view wait up to 190 s for the ITSA home (S-3596).
+        'mcp_servers.stam': { command: STAM_BIN, args: ['mcp'], env_vars: withMootrTwins(['STAM_AGENT_ID', 'STAM_URL', 'STAM_TOKEN']), default_tools_approval_mode: 'approve', tool_timeout_sec: 240 },
         'hooks.state': await hookTrust(),
       }),
       ...hookArgs(),
@@ -1093,6 +1199,19 @@ ${q(tui)}
       await sleep(250);
     }
     return false;
+  },
+
+  // Answers the dialog's own request with the app-server's reply (S-3979), not by typing into the TUI: the reply goes to
+  // the JSON-RPC id the request came with, on the connection it came on, so a stale or other request is never answered.
+  // 'gone' when that request is no longer open (answered elsewhere, a restart, a dropped connection) and nothing is sent.
+  // 'unsafe' when the answer can't be given safely (a yes to a question with no single choice), and nothing is sent.
+  answerDialog(agent: Agent, request: PermissionRequest, approve: boolean, choice?: string): 'typed' | 'gone' | 'unsafe' {
+    const dialog = codexRequestOf(request.details);
+    const open = dialog && openRequestOn(agent.id, dialog);
+    if (!dialog || !open) return 'gone';
+    const reply = codexReply(open.method, open.params, approve, choice);
+    if (!reply) return 'unsafe';
+    return answerRequest(agent.id, open.id, reply) ? 'typed' : 'gone';
   },
 
   // thread/compact/start takes no instructions, so they go into the history first as a

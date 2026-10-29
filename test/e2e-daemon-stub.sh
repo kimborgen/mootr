@@ -48,9 +48,13 @@ for SIG in TERM KILL LIFE; do
       case "$dpid" in '' | *[!0-9]*) ;; *) kill "$dpid" 2>/dev/null ;; esac
       pids=$(tmux -L "$STAM_TMUX_SOCKET" list-panes -a -F '#{pane_pid}' 2>/dev/null)
       tmux -L "$STAM_TMUX_SOCKET" kill-server 2>/dev/null
+      # The file goes only once the server is down: kill-server worked, or tmux says no server runs.
+      if tmux -L "$STAM_TMUX_SOCKET" kill-server 2>/dev/null || timeout 5 tmux -L "$STAM_TMUX_SOCKET" ls 2>&1 | grep -q "no server running"; then
+        rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$STAM_TMUX_SOCKET"
+      fi
       for p in $pids; do kill -s TERM -- "-$p" 2>/dev/null; done
       echo "$pids" >"$WORK/panes"
-      rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$STAM_TMUX_SOCKET" ) || true
+      : ) || true
     rm -rf "$FOLDER"
   fi
   [ ! -e "$FOLDER" ] || { echo "FAIL: $FOLDER left behind after the $SIG run"; exit 1; }

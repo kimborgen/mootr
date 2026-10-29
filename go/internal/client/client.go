@@ -65,7 +65,12 @@ func Home(getenv func(string) string) string {
 	if err != nil {
 		return filepath.Join(".local", "share", "stam")
 	}
-	return filepath.Join(userHome, ".local", "share", "stam")
+	// src/default-home.ts: a real stam folder, else mootr (config.DefaultHome). A folder that can't be inspected is a path that fails to read.
+	h, err := config.DefaultHome(userHome)
+	if err != nil {
+		return filepath.Join(userHome, ".local", "share", "mootr")
+	}
+	return h
 }
 
 // ReadToken is src/config.ts readToken: STAM_TOKEN, else the home's token file trimmed, else empty.

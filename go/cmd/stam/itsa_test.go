@@ -9,7 +9,7 @@ import (
 )
 
 var itsaRoutes = map[string]func(int) (int, string){
-	"GET /api/itsas":     fixed(200, `[{"key":"S-1","status":"in_progress","owner":"worker","title":"Alpha é"},{"key":"S-12345","status":"waiting","owner":null,"title":"Beta"},{"key":"S-2","status":"backlog","title":"Gamma"}]`),
+	"GET /api/itsas":     fixed(200, `[{"key":"S-1","status":"in_progress","owner":"worker","title":"Alpha é","created_at":"2026-10-21T08:00:00.000Z"},{"key":"S-12345","status":"waiting","owner":null,"title":"Beta","created_at":"2026-10-22T09:30:00.000Z"},{"key":"S-2","status":"backlog","title":"Gamma"}]`),
 	"GET /api/itsas/S-1": fixed(200, `{"id":"i1","key":"S-1","title":"Alpha","owner":null,"links":[],"fields":{"n":1.5}}`),
 	"POST /api/itsas": func(n int) (int, string) {
 		if n == 3 {
@@ -20,6 +20,7 @@ var itsaRoutes = map[string]func(int) (int, string){
 	"PATCH /api/itsas/S-1":           fixed(200, `{"itsa":{"key":"S-1"},"changes":{"status":{"from":"backlog","to":"in_progress"},"owner":{"from":null,"to":"worker"},"participants":{"from":["a","b"],"to":[]}}}`),
 	"PATCH /api/itsas/S-2":           fixed(200, `{"itsa":{"key":"S-2"},"changes":{}}`),
 	"PATCH /api/itsas/S-3":           fixed(200, `{"itsa":{"key":"S-3"},"changes":{"status":{"from":"waiting","to":"done"}},"retro_offer":"Run the retro?"}`),
+	"PATCH /api/itsas/S-5":           fixed(200, `{"itsa":{"key":"S-5"},"changes":{"fields":{"from":{"stage":"plan","gone":"x","o":{"a":1}},"to":{"stage":"code","gone":null,"n":2}}}}`),
 	"PATCH /api/itsas/S-4":           fixed(409, `{"error":"status changed"}`),
 	"GET /api/itsas/fields":          fixed(200, `[{"id":"f1","key":"stage","type":"choice","label":"Stage","options":[{"value":"plan","label":"Plan","tone":"info"},{"value":"code"}],"description":"the step"},{"id":"f2","key":"n","type":"number","label":"Count"},{"id":"f3","key":"ok","type":"check","label":"Okay","options":[]},{"id":"f4","key":"averyverylongkey","type":"text","label":"L"}]`),
 	"POST /api/itsas/fields":         fixed(200, `{"id":"f9","key":"prio","type":"choice","label":"Priority","options":[{"value":"hi"}]}`),
@@ -50,6 +51,10 @@ func TestItsaCLIMatchesTS(t *testing.T) {
 		args  []string
 	}{
 		{"", []string{"itsa", "ls"}},
+		{"", []string{"itsa", "ls", "--json"}},
+		{"", []string{"itsa", "ls", "--since", "2d", "--owner", "worker", "--json"}},
+		{"", []string{"itsa", "ls", "--since", "2026-10-21T08:00:00+02:00", "text"}},
+		{"", []string{"itsa", "ls", "--since", ""}},
 		{"", []string{"itsa", "ls", "--status", "waiting", "--owner", "a b", "--parent", "root", "--participant", "x", "--participant", "y", "some", "text*~é&"}},
 		{"", []string{"itsa", "ls", "--category", "active", "--kind", "issue", "--subtree", "S-1", "--status", ""}},
 		{"", []string{"itsa", "show", "S-1"}},
@@ -63,8 +68,10 @@ func TestItsaCLIMatchesTS(t *testing.T) {
 		{"a1", []string{"itsa", "new", "By agent"}},
 		{"", []string{"itsa", "new", "Bad", "--parent", "nope"}},
 		{"", []string{"itsa", "new"}},
+		{"", []string{"itsa", "new", "Broken PR 9", "--parent", "S-1", "--status", "todo", "--system", "full-suite"}},
 		{"", []string{"itsa", "set", "S-1", "--status", "in_progress", "--owner", "worker", "--participant", "a"}},
 		{"a1", []string{"itsa", "set", "S-1", "--title", "T", "--system", "deploy-watch"}},
+		{"", []string{"itsa", "set", "S-1", "--status", "todo", "--if-status", "done", "--system", "full-suite"}},
 		{"", []string{"itsa", "set", "S-1", "--field", "n=12", "--field", "ok=true", "--field", "stage=code", "--field", "gone=", "--field", "unknown=x"}},
 		{"", []string{"itsa", "set", "S-1", "--field", "n=0x10", "--field", "stage= padded "}},
 		{"", []string{"itsa", "set", "S-1", "--field", "n= 7 "}},
@@ -78,6 +85,7 @@ func TestItsaCLIMatchesTS(t *testing.T) {
 		{"", []string{"itsa", "set", "S-2", "--title", "same"}},
 		{"", []string{"itsa", "set", "S-3", "--status", "done"}},
 		{"", []string{"itsa", "set", "S-4", "--status", "done"}},
+		{"", []string{"itsa", "set", "S-5", "--field", "stage=code"}},
 		{"", []string{"itsa", "set", "S-1"}},
 		{"", []string{"itsa", "set", "--status", "done"}},
 		{"", []string{"itsa", "set", "S-1", "--status", "done", "--summary", ""}},

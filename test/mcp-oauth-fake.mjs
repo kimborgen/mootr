@@ -8,13 +8,16 @@
 //                   notification, refresh
 //   GOOD_TOKEN      the only accepted bearer
 //   REFRESH_TOKEN   the refresh_token /token accepts
+//   EXPIRES_IN      the expires_in /token answers with, in seconds (default 3600)
+//   HOLD_FILE       while this file exists, a refresh is held: logged as `held`, and answered once the file is gone
 import { createServer } from 'node:http';
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 
 const PORT = Number(process.env.FAKE_PORT);
 const GOOD = process.env.GOOD_TOKEN;
 const REFRESH = process.env.REFRESH_TOKEN;
 const log = (w) => appendFileSync(process.env.FAKE_LOG, w + '\n');
+const held = () => new Promise((resolve) => { const t = setInterval(() => { if (!existsSync(process.env.HOLD_FILE)) { clearInterval(t); resolve(); } }, 20); });
 const readBody = (req) => new Promise((resolve) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => resolve(b)); });
 
 const server = createServer(async (req, res) => {
@@ -62,8 +65,12 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/token') {
     const form = new URLSearchParams(await readBody(req));
     if (form.get('grant_type') !== 'refresh_token' || form.get('refresh_token') !== REFRESH) return json(400, { error: 'invalid_grant' });
+    if (process.env.HOLD_FILE && existsSync(process.env.HOLD_FILE)) {
+      log('held');
+      await held();
+    }
     log('refresh');
-    return json(200, { access_token: GOOD, refresh_token: REFRESH, expires_in: 3600 });
+    return json(200, { access_token: GOOD, refresh_token: REFRESH, expires_in: Number(process.env.EXPIRES_IN || 3600) });
   }
   json(404, { error: 'not found' });
 });

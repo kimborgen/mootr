@@ -6,10 +6,11 @@
 set -e
 if [ "$1" = --child ]; then
   # Pretend to run inside a live stam agent.
-  export STAM_URL=http://127.0.0.1:7878 STAM_TOKEN=leaked STAM_AGENT_ID=aleak STAM_HOME="$HOME/.local/share/stam" STAM_TMUX_SOCKET=stam
+  export STAM_URL=http://127.0.0.1:7878 MOOTR_URL=http://127.0.0.1:7878 STAM_PORT=7878 MOOTR_PORT=7878 STAM_TOKEN=leaked MOOTR_TOKEN=leaked STAM_AGENT_ID=aleak STAM_HOME="$HOME/.local/share/stam" MOOTR_HOME="$HOME/.local/share/stam" STAM_TMUX_SOCKET=stam MOOTR_TMUX_SOCKET=stam
   . "$(dirname "$(readlink -f "$0")")/lib.sh"
   fail() { echo "FAIL: $1"; exit 1; }
   [ -z "$STAM_AGENT_ID" ] && [ -z "$STAM_TOKEN" ] || fail "inherited agent variables kept"
+  [ -z "$MOOTR_HOME" ] && [ -z "$MOOTR_TOKEN" ] || fail "inherited MOOTR_ variables kept"
   # The folder names its owner, the calling agent, and its owner file says so.
   case "$TEST_TMP" in "$STAM_TEST_TMPDIR"/stam-test.aleak.*) ;; *) fail "folder $TEST_TMP doesn't name its owner" ;; esac
   grep -qx "agent=aleak" "$TEST_TMP/owner" && grep -qx "pid=$$" "$TEST_TMP/owner" || fail "owner file: $(cat "$TEST_TMP/owner")"
@@ -18,6 +19,7 @@ if [ "$1" = --child ]; then
   daemon_up twin
   case "$STAM_URL" in *:7878) fail "main daemon on the live port" ;; esac
   [ "$STAM_TMUX_SOCKET" != stam ] && [ "$STAM_HOME" != "$HOME/.local/share/stam" ] || fail "live socket or home"
+  [ "$MOOTR_HOME" = "$STAM_HOME" ] && [ "$MOOTR_PORT" = "$STAM_PORT" ] && [ "$MOOTR_MACHINE" = "$STAM_MACHINE" ] || fail "the MOOTR_ twins differ from the STAM_ names"
   "$STAM" daemon status | grep -q "machine: 'main'" || fail "main daemon"
   on twin "$STAM" daemon status | grep -q "machine: 'twin'" || fail "twin daemon"
   TWIN_URL=$(on twin sh -c 'echo $STAM_URL')

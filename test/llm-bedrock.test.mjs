@@ -121,7 +121,9 @@ test('bedrock: Converse URL, bearer API key, body without temperature, parsed an
   assert.deepEqual(req.body, { messages: [{ role: 'user', content: [{ text: 'hello' }, { text: 'again' }] }], system: [{ text: 'be brief' }], inferenceConfig: { maxTokens: 20 } });
   assert.equal(r.model, 'anthropic.claude-3-haiku-20240307-v1:0');
   assert.deepEqual(r.usage, { inputTokens: 31, outputTokens: 5 });
-  assert.equal(r.costUsd, undefined);
+  // The adapter reports no cost; complete prices it from its tokens (S-3245), here at the fallback for a model the registry does not price.
+  assert.equal(r.priced, 'fallback');
+  assert.ok(r.costUsd > 0);
   assert.equal(typeof r.text, 'string');
   setKey('');
 });

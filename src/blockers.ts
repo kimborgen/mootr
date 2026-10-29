@@ -13,6 +13,10 @@ import { blockerChanged } from './cost-notices.ts';
 export type BlockerKind = 'window' | 'paid-forbidden' | 'budget' | 'credits-out' | 'billing-unknown' | 'error' | 'taken-over' | 'manual';
 export const BLOCKER_KINDS: BlockerKind[] = ['window', 'paid-forbidden', 'budget', 'credits-out', 'billing-unknown', 'error', 'taken-over', 'manual'];
 
+// Blockers that mean the provider is unusable: a running turn only fails and retries, so it is
+// interrupted. Budgets, paid-forbidden, manual (cost_pause) and the rest let the turn finish.
+const PROVIDER_DOWN: BlockerKind[] = ['window', 'credits-out', 'error'];
+
 export interface Blocker {
   agent_id: string;
   kind: BlockerKind;
@@ -84,7 +88,11 @@ export function addBlocker(
       if (b.clears) db.recordWindowClears(account, b.clears.names, b.clears.at);
     });
     db.addEvent(a.id, 'blocker:add', { kind: b.kind, account, reason: b.reason });
-    if (db.getAgent(a.id)!.lifecycle === 'active') await lifecycle.pauseNow(a.id, null);
+    // A blocker whose provider can't take another turn also stops a running one (S-3631).
+    const stop = PROVIDER_DOWN.includes(b.kind);
+    const lc = db.getAgent(a.id)!.lifecycle;
+    if (lc === 'active') await lifecycle.pauseNow(a.id, null, stop);
+    else if (lc === 'paused' && stop) await lifecycle.stopRunningTurn(a.id);
     const result = blockers(a.id).find((x) => x.kind === b.kind && x.account === account)!;
     if (!existed) blockerChanged(a.id, b.kind, account, 'set', b.reason, result.since);
     return result;
@@ -112,7 +120,9 @@ export function clearBlocker(agent: string | db.Agent, kind: BlockerKind, accoun
     if (!db.blockerRows(a.id).length) schedulePush(a.id);
     const now = db.getAgent(a.id)!;
     if (now.lifecycle !== 'paused' || lifecycle.isHeld(now)) return false;
-    await lifecycle.resumeNow(a.id, render('cost-resumed', { blocker: account ? `${kind} on ${account}` : kind, reason: gone.reason, cleared: cleared || 'its condition cleared' }));
+    const missed = lifecycle.missedPause(a.id);
+    await lifecycle.resumeNow(a.id, render('cost-resumed', { blocker: account ? `${kind} on ${account}` : kind, reason: gone.reason, cleared: cleared || 'its condition cleared', missed }));
+    lifecycle.markMissedGiven(a.id, missed);
     return true;
   });
 }

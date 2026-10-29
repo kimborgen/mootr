@@ -69,3 +69,32 @@ test('scrubAgents cleans rows anywhere in a reply: lists, nested, and spread ext
   assert.deepEqual(back.other, { id: 'x', name: 'n' });
   assert.equal(back.n, 3);
 });
+
+test('a list row sends first_prompt as null and keeps every other public key (S-3808)', () => {
+  const id = seed('epsilon');
+  db.updateAgent(id, { first_prompt: 'the whole spawn brief' });
+  const row = db.getAgent(id);
+  const listed = pub.listedAgent(row);
+  assert.equal(listed.first_prompt, null);
+  assert.deepEqual(Object.keys(listed), Object.keys(pub.publicAgent(row)));
+  assert.ok(!('token_hash' in listed));
+  assert.equal(pub.publicAgent(row).first_prompt, 'the whole spawn brief', 'the detail shape keeps it');
+});
+
+test('the list keeps live agents by default; state and ids ask for others (S-3816)', () => {
+  const rows = [
+    { id: 'a', name: 'act', lifecycle: 'active' },
+    { id: 'p', name: 'pau', lifecycle: 'paused' },
+    { id: 's', name: 'stop', lifecycle: 'shut_down' },
+    { id: 'x', name: 'arch', lifecycle: 'archived' },
+  ];
+  const ids = (state, want) => rows.filter(pub.listFilter(state, want)).map((r) => r.id);
+  assert.deepEqual(ids(null, null), ['a', 'p']);
+  assert.deepEqual(ids('stopped', null), ['s']);
+  assert.deepEqual(ids('live,archived', null), ['a', 'p', 'x']);
+  assert.deepEqual(ids('all', null), ['a', 'p', 's', 'x']);
+  assert.deepEqual(ids(null, 'x,stop'), ['s', 'x'], 'ids alone lists only those, by id or name, in any state');
+  assert.deepEqual(ids('live', 'x'), ['a', 'p', 'x'], 'ids add to a state');
+  assert.deepEqual(ids('', null), ['a', 'p'], 'an empty state is the default');
+  assert.equal(pub.listFilter('gone', null), null);
+});

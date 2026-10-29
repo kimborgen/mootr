@@ -38,7 +38,7 @@ import { randomBytes } from 'node:crypto';
 import * as db from './db.ts';
 import { decide, noul } from './decide.ts';
 import { humanMailAllows } from './settings.ts';
-import { HUMAN, onMailToHuman, sendFromStam } from './mail.ts';
+import { HUMAN, onMailToHuman, sendFromSystem } from './mail.ts';
 import * as itsa from './itsa.ts';
 import * as reqCheck from './req-check.ts';
 
@@ -294,8 +294,7 @@ async function runEvent(step: Step, subject: Subject): Promise<void> {
     if (!humanMailAllows('important')) action = 'none';
     else {
       const body = `Step **${step.name}** answered yes (p ${r.p.toFixed(2)}) on ${subject.ref}.\n\nQuestion: ${step.question}\n\nBy: ${subject.actor.name}${subject.actor.role ? ` (${subject.actor.role})` : ''}`;
-      action = (await sendFromStam([HUMAN], `[stam] Step ${step.name}: ${subject.ref}`, body).catch((e) => ((error = String(e?.message ?? e)), false))) ? 'notified' : 'none';
-      if (action === 'none' && !error) error = 'no running agent to send stam mail';
+      action = (await sendFromSystem('steps', [HUMAN], `[stam] Step ${step.name}: ${subject.ref}`, body).catch((e) => ((error = String(e?.message ?? e)), false))) ? 'notified' : 'none';
     }
   } else if (step.action === 'annotate') {
     action = 'annotated';

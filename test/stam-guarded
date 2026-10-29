@@ -1,0 +1,22 @@
+#!/bin/sh
+# stam-guarded: $STAM in a non-smoke test (test/lib.sh, S-4237). It judges STAM_OPENCODE_BIN as it is now, not as it was when
+# lib.sh was sourced, so a test that changes or unsets it later and then runs `"$STAM" daemon start` can't reach the real
+# OpenCode. An unset value gets the fake, as lib.sh's default does. Then it runs STAM_GUARDED_CLI, the CLI lib.sh chose
+# (bin/stam, or go/bin/stam under STAM_DAEMON=go), which the guard's own test (test/opencode-guard.test.mjs) points at a
+# stand-in so it starts no daemon. Without it (a script a daemon runs with an env of its own) the choice is made again.
+ROOT="$(dirname "$(dirname "$(readlink -f "$0")")")"
+. "$ROOT/test/opencode-guard.sh"
+# A reader takes MOOTR_ before STAM_ (src/env.ts): only the STAM_ name is judged, so the MOOTR_ one goes.
+unset MOOTR_OPENCODE_BIN
+if [ -z "$STAM_TEST_SMOKE" ]; then
+  export STAM_OPENCODE_BIN="${STAM_OPENCODE_BIN:-$ROOT/test/fake-opencode/opencode}"
+fi
+opencode_bin_guard || { echo "FAIL: stam $* not run" >&2; exit 1; }
+if [ -n "$STAM_GUARDED_CLI" ]; then
+  cli=$STAM_GUARDED_CLI
+elif [ "$STAM_DAEMON" = go ]; then
+  cli="$ROOT/go/bin/stam"
+else
+  cli="$ROOT/bin/stam"
+fi
+exec "$cli" "$@"

@@ -32,7 +32,7 @@ describe('card items', () => {
   it('lists the card-only items beside the columns and no others', () => {
     const colIds = WORK_COLUMNS.map((c) => c.id)
     for (const i of CARD_ONLY) expect(colIds).not.toContain(i.id)
-    expect(CARD_ONLY.map((i) => i.id)).toEqual(['kind', 'parent', 'rollup', 'needs', 'owner', 'harness', 'name', 'model', 'treecost', 'activity', 'context', 'mail', 'machine', 'state'])
+    expect(CARD_ONLY.map((i) => i.id)).toEqual(['kind', 'parent', 'rollup', 'needs', 'owner', 'links', 'issue', 'mark', 'harness', 'name', 'model', 'treecost', 'activity', 'context', 'mail', 'machine', 'state'])
   })
 
   it('splits the items by where they may go', () => {
@@ -50,7 +50,7 @@ describe('card items', () => {
 
   it('locks the key and title of an issue and an agent name', () => {
     const locked = cardItems([]).filter((i) => i.locked).map((i) => i.id).sort()
-    expect(locked).toEqual(['name', 'work'])
+    expect(locked).toEqual(['mark', 'name', 'work'])
   })
 
   it('draws nothing for an empty card, in either form', () => {

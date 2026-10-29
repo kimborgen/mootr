@@ -2,10 +2,12 @@
 // stepping through the images that were staged when it opened. The tab's images live here, not in
 // the key (they are `data:` urls of this page), and the layout is shared with the human's other
 // devices, so each page numbers its tabs under its own random PAGE: a tab of another page, or of
-// this one before a reload, has nothing to show here and is hidden (`foreignImage`), never closed.
+// this one before a reload, has nothing to show here and is hidden (`foreignImage`). The daemon closes
+// the tabs of a page whose layout stream has been gone for a minute (src/layout.ts), so they don't linger.
 import { useSyncExternalStore } from 'react'
 import { openImage } from './ImageViewer'
 import { targetKey } from './composer-target'
+import { PAGE } from './page'
 import * as shell from './shell/layout'
 
 export interface TabImage { src: string; alt: string }
@@ -16,7 +18,6 @@ const listeners = new Set<() => void>()
 let version = 0
 const bump = () => { version++; for (const fn of listeners) fn() }
 let n = 0
-const PAGE = Math.random().toString(36).slice(2, 8)
 // An `image:` tab this page has no images for: another device's, or this one's from before a reload.
 export const foreignImage = (key: string) => key.startsWith('image:') && !sets.has(key.slice(6))
 

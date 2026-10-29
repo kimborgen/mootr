@@ -1142,6 +1142,63 @@ describe('ConfigView MCP section', () => {
     expect(host.querySelector('.mcp-row[data-server=local]')?.textContent).toContain('env API_KEY')
     expect(host.textContent).not.toContain('sekret')
   })
+  it('a peer shows the home\u2019s login state with no Log in button (S-3178)', async () => {
+    stubFetch({ '/api/mcp/status': { servers: [
+      { name: 'remote', type: 'oauth', logged_in: true, expires_at: null, leased_from: 'home-box' },
+      { name: 'slack', type: 'oauth', logged_in: false, expires_at: null, local_grant: true },
+    ], home: { name: 'home-box', reachable: true } } })
+    localStorage.setItem('stam/settings-section', 'mcp')
+    await mount(<ConfigView />)
+    const remote = host.querySelector('.mcp-row[data-server=remote]')!
+    expect(remote.textContent).toContain('Logged in on home-box')
+    expect([...remote.querySelectorAll('button')].some((b) => b.textContent?.includes('Log in'))).toBe(false)
+    expect(host.querySelector('.mcp-row[data-server=slack]')?.textContent).toContain('Not shared by home-box')
+    // Only the peer's own old grant gets a logout, under its own name.
+    expect([...host.querySelectorAll<HTMLButtonElement>('.mcp-row[data-server=slack] button')].some((b) => b.textContent === 'Remove local login')).toBe(true)
+    expect([...remote.querySelectorAll<HTMLButtonElement>('button')].some((b) => b.textContent === 'Remove local login')).toBe(false)
+  })
+  it('a peer whose home is down shows the home unreachable, not a stale logged in', async () => {
+    stubFetch({ '/api/mcp/status': { servers: [], home: { name: 'home-box', reachable: false, error: 'the home home-box is unreachable' } } })
+    localStorage.setItem('stam/settings-section', 'mcp')
+    await mount(<ConfigView />)
+    const remote = host.querySelector('.mcp-row[data-server=remote]')!
+    expect(remote.textContent).toContain('home-box unreachable')
+    expect(remote.textContent).not.toContain('Logged in on home-box')
+    expect(host.textContent).toContain('the home home-box is unreachable')
+    expect([...remote.querySelectorAll('button')].some((b) => b.textContent?.includes('Log in'))).toBe(false)
+  })
+  it('a peer whose home is down shows the home error once, above the list, not under each row (S-3178)', async () => {
+    stubFetch({ '/api/mcp/status': { servers: [], home: { name: 'home-box', reachable: false, error: 'the home home-box is unreachable' } } })
+    localStorage.setItem('stam/settings-section', 'mcp')
+    await mount(<ConfigView />)
+    const rows = [...host.querySelectorAll('.mcp-row[data-server]')].filter((r) => r.textContent?.includes('unreachable'))
+    expect(rows.length).toBeGreaterThan(1)
+    expect(host.textContent?.split('the home home-box is unreachable').length - 1).toBe(1)
+    expect(rows.every((r) => !r.textContent?.includes('the home home-box is unreachable'))).toBe(true)
+  })
+  it('a peer edit form has no Share with peers box (the home form keeps it, see the save test) (S-3178)', async () => {
+    stubFetch({ '/api/mcp/status': { servers: [], home: { name: 'home-box', reachable: true } } })
+    localStorage.setItem('stam/settings-section', 'mcp')
+    await mount(<ConfigView />)
+    await act(async () => { [...host.querySelectorAll<HTMLButtonElement>('.mcp-row[data-server=remote] button')].find((b) => b.textContent === 'Edit')!.click() })
+    await flush()
+    expect([...host.querySelectorAll<HTMLElement>('.set-row')].some((r) => r.textContent?.includes('Share with peers'))).toBe(false)
+  })
+  it('the Share with peers box saves shareWithPeers through the settings save (S-3178)', async () => {
+    localStorage.setItem('stam/settings-section', 'mcp')
+    await mount(<ConfigView />)
+    await act(async () => { [...host.querySelectorAll<HTMLButtonElement>('.mcp-row[data-server=remote] button')].find((b) => b.textContent === 'Edit')!.click() })
+    await flush()
+    const box = [...host.querySelectorAll<HTMLElement>('.set-row')].find((r) => r.textContent?.includes('Share with peers'))!.querySelector<HTMLInputElement>('input[type=checkbox]')!
+    expect(box.checked).toBe(false)
+    await act(async () => { box.click() })
+    await act(async () => { host.querySelector<HTMLButtonElement>('.mcp-form button[type=submit]')!.click() })
+    await flush()
+    const post = calls.find((c) => c.method === 'PATCH' && c.path === '/api/config/settings')!
+    const saved = (post.body as { patch: Record<string, any> }).patch
+    expect(saved.mcpServers.remote.shareWithPeers).toBe(true)
+    expect(saved.mcpServers.slack.shareWithPeers).toBeUndefined()
+  })
   it('asks for a Slack app\u2019s client ID under a Slack URL, and not once it has one', async () => {
     localStorage.setItem('stam/settings-section', 'mcp')
     await mount(<ConfigView />)
@@ -1400,17 +1457,33 @@ describe('WorkColumnsSettings', () => {
     el.dispatchEvent(new Event('input', { bubbles: true }))
   }
   const rowIds = () => [...host.querySelectorAll('.wcol-row')].map((r) => r.getAttribute('data-col'))
+  // The Table tab, where the show, hide and order rows are; the section opens on Fields.
+  const toTable = async () => { await act(async () => { [...host.querySelectorAll<HTMLButtonElement>('.wcol-tabs [role=tab]')].find((b) => b.textContent === 'Table')!.click() }) }
+
+  it('opens on the Fields tab, with the tabs as a tab list and the other three hidden', async () => {
+    stubFetch({ '/api/itsas/fields': FIELDS })
+    await mount(<WorkColumnsSettings cos="boss" />)
+    expect(location.hash).not.toContain('cfg')
+    expect([...host.querySelectorAll('.wcol-tabs [role=tab]')].map((b) => b.textContent)).toEqual(['Fields', 'Table', 'Issue card', 'Agent card'])
+    expect(host.querySelector('[role=tab][aria-selected=true]')?.textContent).toBe('Fields')
+    expect(host.textContent).toContain('Agents define fields through @boss.')
+    expect(host.querySelectorAll('.fld-row').length).toBe(2)
+    expect(host.querySelector('.fld-row')?.textContent).toContain('Applies to: All kinds')
+    expect(host.querySelector('.fld-row')?.textContent).toContain('Shown in:')
+    expect(host.querySelector('.wcol-row')).toBeNull()
+  })
 
   it('lists built-in and custom columns in one order, with the chief of staff note and tones', async () => {
     stubFetch({ '/api/itsas/fields': FIELDS })
     await mount(<WorkColumnsSettings cos="boss" />)
-    expect(host.textContent).toContain('Columns are shared by every agent and every view.')
-    expect(host.textContent).toContain('Only you and the chief of staff (boss) can add or remove columns; other agents ask boss.')
+    await toTable()
+    expect(host.textContent).toContain("Show, hide and order the Work page's columns.")
+    expect(host.textContent).not.toContain('chief of staff')
     const ids = rowIds()
     expect(ids[0]).toBe('work')
     expect(ids.slice(-2)).toEqual(['field:f1', 'field:f2'])
     expect(host.querySelector('[data-col=work] input')).toBeNull()
-    expect(host.querySelector('[data-col=status] .wcol-edit')).toBeNull()
+    expect(host.querySelector('.wcol-edit')).toBeNull()
     expect([...host.querySelectorAll('[data-col="field:f1"] .wcol-opts .badge')].map((b) => b.className)).toEqual(['badge progress', 'badge warn'])
     expect(host.querySelector('.wcol-empty')).toBeNull()
   })
@@ -1418,6 +1491,7 @@ describe('WorkColumnsSettings', () => {
   it('moves a custom column past another and writes the fields order', async () => {
     stubFetch({ '/api/itsas/fields': FIELDS, '/api/itsas/fields/order': [{ ...FIELDS[1], position: 0 }, { ...FIELDS[0], position: 1 }] })
     await mount(<WorkColumnsSettings cos={null} />)
+    await toTable()
     expect(host.textContent).not.toContain('chief of staff')
     await act(async () => { host.querySelector<HTMLButtonElement>('[aria-label="Move Due up"]')!.click() })
     await flush()
@@ -1428,6 +1502,7 @@ describe('WorkColumnsSettings', () => {
   it('keeps focus on the other arrow when the pressed one disables', async () => {
     stubFetch({ '/api/itsas/fields': FIELDS, '/api/itsas/fields/order': FIELDS })
     await mount(<WorkColumnsSettings cos={null} />)
+    await toTable()
     const up = host.querySelector<HTMLButtonElement>('[aria-label="Move Agents up"]')!
     up.focus()
     await act(async () => { up.click() })
@@ -1456,7 +1531,7 @@ describe('WorkColumnsSettings', () => {
     await act(async () => { host.querySelector<HTMLFormElement>('.wcol-form')!.requestSubmit() })
     await flush()
     expect(host.querySelector('.wcol-error')?.textContent).toContain('home daemon unreachable')
-    expect(host.querySelectorAll('.wcol-row').length).toBeGreaterThan(3)
+    expect(host.querySelectorAll('.fld-row').length).toBe(2)
     fail = false
     const retry = [...host.querySelectorAll<HTMLButtonElement>('.wcol-error button')].find((b) => b.textContent === 'Retry')!
     await act(async () => { retry.click() })
@@ -1464,11 +1539,11 @@ describe('WorkColumnsSettings', () => {
     expect(host.querySelector('.wcol-error')).toBeNull()
   })
 
-  it('shows one line and the Add button with no custom columns, and adds one with a derived key', async () => {
+  it('shows one line and the Add button with no fields, and adds one with a derived key', async () => {
     stubFetch({ '/api/itsas/fields': [] })
     await mount(<WorkColumnsSettings cos={null} />)
-    expect(host.querySelector('.wcol-empty')?.textContent).toContain('No custom columns yet.')
-    await act(async () => { host.querySelector<HTMLButtonElement>('#add-column')!.click() })
+    expect(host.querySelector('.wcol-empty')?.textContent).toContain('No fields yet.')
+    await act(async () => { host.querySelector<HTMLButtonElement>('#add-field')!.click() })
     await act(async () => { setValue(host.querySelector<HTMLInputElement>('input[name=label]')!, 'Due date') })
     const date = [...host.querySelectorAll<HTMLButtonElement>('.seg button')].find((b) => b.textContent === 'Date')!
     await act(async () => { date.click() })
@@ -1476,8 +1551,46 @@ describe('WorkColumnsSettings', () => {
     await act(async () => { host.querySelector<HTMLFormElement>('.wcol-form')!.requestSubmit() })
     await flush()
     expect(calls.find((c) => c.method === 'POST' && c.path === '/api/itsas/fields')?.body).toEqual({
-      key: 'due-date', label: 'Due date', type: 'date', options: null, description: 'When it is due', hint: null, width: 'm', align: 'start', card: 'meta',
+      key: 'due-date', label: 'Due date', type: 'date', options: null, description: 'When it is due', hint: null, width: 'm', align: 'start', kinds: null, card: 'meta',
     })
+  })
+
+  it('says any agent may define fields when no chief of staff is set', async () => {
+    stubFetch({ '/api/itsas/fields': [] })
+    await mount(<WorkColumnsSettings cos={null} />)
+    expect(host.textContent).toContain('No chief of staff is set, so any agent may define fields.')
+  })
+
+  it('ticks an offered kind typed in another case, under its own spelling', async () => {
+    stubFetch({ '/api/itsas/fields': [] })
+    await mount(<WorkColumnsSettings cos={null} />)
+    await act(async () => { host.querySelector<HTMLButtonElement>('#add-field')!.click() })
+    const add = async (kind: string) => {
+      await act(async () => { setValue(host.querySelector<HTMLInputElement>('input[name=kind-add]')!, kind) })
+      await act(async () => { host.querySelector<HTMLButtonElement>('.wcol-kind-add .btn')!.click() })
+    }
+    await add('issue')
+    await act(async () => { host.querySelector<HTMLInputElement>('input[name="kind-issue"]')!.click() })
+    expect(host.querySelector<HTMLInputElement>('input[name="kind-issue"]')!.checked).toBe(false)
+    await add('ISSUE')
+    expect(host.querySelectorAll('input[name="kind-issue"]').length).toBe(1)
+    expect(host.querySelector<HTMLInputElement>('input[name="kind-issue"]')!.checked).toBe(true)
+  })
+
+  it('limits a field to the kinds picked, from the kinds in use or typed in', async () => {
+    stubFetch({ '/api/itsas/fields': [] })
+    await mount(<WorkColumnsSettings cos={null} />)
+    await act(async () => { host.querySelector<HTMLButtonElement>('#add-field')!.click() })
+    await act(async () => { setValue(host.querySelector<HTMLInputElement>('input[name=label]')!, 'Stage') })
+    await act(async () => { setValue(host.querySelector<HTMLInputElement>('input[name=kind-add]')!, 'project') })
+    await act(async () => { host.querySelector<HTMLButtonElement>('.wcol-kind-add .btn')!.click() })
+    expect(host.querySelector<HTMLInputElement>('input[name="kind-project"]')!.checked).toBe(true)
+    await act(async () => { host.querySelector<HTMLInputElement>('input[name="kind-project"]')!.click() })
+    expect(host.querySelector<HTMLInputElement>('input[name="kind-all"]')!.checked).toBe(true)
+    await act(async () => { host.querySelector<HTMLInputElement>('input[name="kind-project"]')!.click() })
+    await act(async () => { host.querySelector<HTMLFormElement>('.wcol-form')!.requestSubmit() })
+    await flush()
+    expect(calls.find((c) => c.method === 'POST' && c.path === '/api/itsas/fields')?.body).toMatchObject({ label: 'Stage', kinds: ['project'] })
   })
 
   it("shows the daemon's refusal inline", async () => {
@@ -1493,6 +1606,37 @@ describe('WorkColumnsSettings', () => {
     await act(async () => { host.querySelector<HTMLFormElement>('.wcol-form')!.requestSubmit() })
     await flush()
     expect(host.querySelector('.wcol-form .sp-error')?.textContent).toBe('field due (number): expected a number')
+  })
+})
+
+describe('WorkColumnsSettings Issue card tab', () => {
+  // The phone breakpoint, as the page's usePhone reads it: `phone` answers the (max-width) query.
+  const viewport = (phone: boolean) => {
+    window.matchMedia = ((q: string) => ({ matches: phone, media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof matchMedia
+  }
+  afterEach(() => { delete (window as { matchMedia?: unknown }).matchMedia })
+  const selected = () => host.querySelector('[role=tab][aria-selected=true]')?.textContent
+  const tabNames = () => [...host.querySelectorAll('.wcol-tabs [role=tab]')].map((b) => b.textContent)
+
+  it('opens on the Issue card tab on a desktop, as the #cfg=fields/issue link asks', async () => {
+    viewport(false)
+    localStorage.setItem('stam/fields-tab', 'issue')
+    stubFetch({ '/api/itsas/fields': [] })
+    await mount(<WorkColumnsSettings cos={null} />)
+    expect(tabNames()).toEqual(['Fields', 'Table', 'Issue card', 'Agent card'])
+    expect(selected()).toBe('Issue card')
+    expect(host.querySelector('.ice')).not.toBeNull()
+  })
+
+  it('opens the touch editor on a phone, with the same tabs', async () => {
+    viewport(true)
+    localStorage.setItem('stam/fields-tab', 'issue')
+    stubFetch({ '/api/itsas/fields': [] })
+    await mount(<WorkColumnsSettings cos={null} />)
+    expect(tabNames()).toEqual(['Fields', 'Table', 'Issue card', 'Agent card'])
+    expect(selected()).toBe('Issue card')
+    expect(host.querySelector('.ipe')).not.toBeNull()
+    expect(host.querySelector('.ice')).toBeNull()
   })
 })
 

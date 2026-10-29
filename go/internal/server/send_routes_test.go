@@ -58,6 +58,7 @@ func TestSendRefusals(t *testing.T) {
 		{"an agent as another", agentTok, nil, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","new_thread":true}`, 403, "agent child can't act as aboss"},
 		{"an agent as the human", agentTok, nil, `{"from":"human","to":["aboss"],"subject":"s","body":"b","new_thread":true}`, 403, "agent child can't act as human"},
 		{"an agent setting a stam field", agentTok, nil, `{"to":["aboss"],"subject":"s","body":"b","itsa_id":"x"}`, 403, "itsa_id is set only by stam, not in an agent's mail"},
+		{"an agent sending a sealed note", agentTok, nil, `{"to":["human"],"subject":"[stam] Input for child: typed","body":"b","kind":"ask-note"}`, 403, "kind is set only by stam, not in an agent's mail"},
 		{"an agent setting two", agentTok, nil, `{"to":["aboss"],"subject":"s","body":"b","kind":"ask","thread_id":"m1"}`, 403, "thread_id, kind are set only by stam"},
 		{"an agent as a system sender", agentTok, nil, `{"to":["aboss"],"subject":"s","body":"b","system":"deploy-watch"}`, 403, "system is set only by stam"},
 		{"the OpenCode server naming no one", serverTok, nil, `{"to":["aboss"],"subject":"s","body":"b"}`, 403, "the OpenCode server's request must name its agent (by, from, or self)"},
@@ -71,10 +72,16 @@ func TestSendRefusals(t *testing.T) {
 		{"a system sender from the shared token", sharedTok, nil, `{"system":"deploy-watch","to":["aboss"],"subject":"s","body":"b","new_thread":true}`, 200, ""},
 		{"another system sender from the shared token", sharedTok, nil, `{"system":"somebody","to":["aboss"],"subject":"s","body":"b"}`, 403, "only the human mails as a system sender"},
 		{"from_stam", sharedTok, human, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","from_stam":true}`, 403, "from_stam is set only by stam"},
-		{"forwarded mail", sharedTok, human, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","forwarded":{"from_name":"x"}}`, 501, "forwarded mail is not ported"},
-		{"a peer's mail", peerTok, map[string]string{"X-Stam-Local": "1"}, `{"from":"aboss","to":["agone"],"subject":"s","body":"b"}`, 501, "mail forwarded by a peer is not ported"},
-		{"attachments", sharedTok, human, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","attachments":[{"name":"a","content":"x"}]}`, 501, "attachments are not ported"},
-		{"an ITSA", sharedTok, human, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","itsa":"S-1"}`, 501, "itsa is not ported"},
+		{"a kind from the shared token", sharedTok, human, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","new_thread":true,"kind":"comment"}`, 200, ""},
+		{"a sealed note from the shared token", sharedTok, human, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","new_thread":true,"kind":"ask-note"}`, 501, "kind is not ported to the Go daemon yet"},
+		{"a sealed ask link from the human", sharedTok, human, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","new_thread":true,"kind":"ask-link"}`, 501, "kind is not ported to the Go daemon yet"},
+		{"a sealed reply from a peer's own mail", peerTok, map[string]string{"X-Stam-Local": "1"}, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","new_thread":true,"kind":"ask-reply"}`, 501, "kind is not ported to the Go daemon yet"},
+		// Forwarded and relayed mail come only from a peer (mail_peers_test.go, send_relay_test.go).
+		{"relayed forwarded mail", sharedTok, human, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","forwarded":{"from_name":"x"},"relay":true}`, 403, "forwarded mail comes only from a peer"},
+		{"a peer's mail", peerTok, map[string]string{"X-Stam-Local": "1"}, `{"from":"aboss","to":["agone"],"subject":"s","body":"b"}`, 200, ""},
+		{"a peer's own notice", peerTok, map[string]string{"X-Stam-Local": "1"}, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","from_stam":true}`, 200, ""},
+		{"attachments", sharedTok, human, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","attachments":[{"name":"a","content":"x"}]}`, 200, ""},
+		{"an unknown ITSA", sharedTok, human, `{"from":"aboss","to":["agone"],"subject":"s","body":"b","itsa":"S-1"}`, 500, "no ITSA S-1"},
 		{"supersedes", agentTok, nil, `{"to":["aboss"],"subject":"s","body":"b","supersedes":"m1"}`, 501, "supersedes is not ported"},
 		{"an embed block", sharedTok, human, "{\"from\":\"aboss\",\"to\":[\"agone\"],\"subject\":\"s\",\"body\":\"```image\\nx\\n```\"}", 501, "embedded files"},
 		{"no text", agentTok, nil, `{"to":["aboss"],"subject":"s"}`, 400, "body is required: the mail's text"},
@@ -84,7 +91,7 @@ func TestSendRefusals(t *testing.T) {
 		{"an empty list", agentTok, nil, `{"to":[],"subject":"s","body":"b","new_thread":true}`, 400, "no recipients"},
 		{"nobody", agentTok, nil, `{"to":["nobody"],"subject":"s","body":"b","new_thread":true}`, 400, "no agent nobody"},
 		{"no subject", agentTok, nil, `{"to":["aboss"],"body":"b","new_thread":true}`, 500, "subject is required for a new thread"},
-		{"an array body", agentTok, nil, `[1]`, 400, "the body must be a JSON object"},
+		{"an array body", agentTok, nil, `[1]`, 400, "the request body must be a JSON object"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := f.post(tc.token, tc.header, tc.body)
@@ -101,9 +108,9 @@ func TestSendRefusals(t *testing.T) {
 			}
 		})
 	}
-	// Only the sends that answered 200 stored a mail (the seed holds three): 8 in the table, 1 more as the notice.
-	if n := f.count("SELECT COUNT(*) FROM mail WHERE id NOT IN ('m1', 'm2', 'm3')"); n != 8 {
-		t.Errorf("%d mails stored by the table's sends, want 8", n)
+	// Only the sends that answered 200 stored a mail (the seed holds three): 12 in the table, 1 more as the notice.
+	if n := f.count("SELECT COUNT(*) FROM mail WHERE id NOT IN ('m1', 'm2', 'm3')"); n != 12 {
+		t.Errorf("%d mails stored by the table's sends, want 12", n)
 	}
 }
 
@@ -418,5 +425,26 @@ func TestSendRerouteAndGate(t *testing.T) {
 	// Mail between agents is not gated.
 	if rec := f.post(agentTok, nil, `{"to":["aboss"],"subject":"Q4","body":"b","new_thread":true}`); rec.Code != 200 {
 		t.Errorf("agent mail: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Under auth.humanStrict the human's proof beside the shared token mails as the human, as the web UI's own token does
+// (src/daemon.ts owned); the shared token's x-stam-human alone, and an agent's token with the proof, don't.
+func TestSendAsHumanStrict(t *testing.T) {
+	f := newFixture(t, map[string]string{"STAM_TEST_HUMAN_KEY": humanKey})
+	writeFile(t, f.home+"/settings.json", `{"auth":{"humanStrict":true}}`)
+	mail := `{"from":"human","to":["aboss"],"subject":"s","body":"b","new_thread":true}`
+	for _, tc := range []struct {
+		name, token string
+		header      map[string]string
+		status      int
+	}{
+		{"the shared token with the proof", sharedTok, map[string]string{"X-Stam-Test-Human": humanKey, "X-Stam-Human": "1"}, 200},
+		{"the shared token's x-stam-human", sharedTok, map[string]string{"X-Stam-Human": "1"}, 403},
+		{"an agent's token with the proof", agentTok, map[string]string{"X-Stam-Test-Human": humanKey, "X-Stam-Human": "1"}, 403},
+	} {
+		if rec := f.post(tc.token, tc.header, mail); rec.Code != tc.status || strings.Contains(rec.Body.String(), humanKey) {
+			t.Errorf("%s: %d %s", tc.name, rec.Code, rec.Body.String())
+		}
 	}
 }

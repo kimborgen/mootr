@@ -21,8 +21,8 @@ import (
 // Settings is the part of settings.json (src/settings.ts) the ported routes read, with the TS defaults. Each later
 // module adds the keys it needs, parsed the way src/settings.ts parses them.
 //
-// Not yet ported: the shared-settings cache a non-home daemon reads (settings.shared.json), and every key no Go route
-// reads.
+// A non-home daemon reads every key but its machine-local ones from the home's shared cache (settings_shared.go). Not
+// yet ported: every key no Go route reads.
 type Settings struct {
 	// Home is the settings home (homeOf): `home`, else `itsa.home`, else this machine.
 	Home string
@@ -40,10 +40,26 @@ type Settings struct {
 	// matches covering one harness and model. TS keeps the last valid cost config on a bad one and refuses to save
 	// one; here bad accounts read as none.
 	CostProblem string
+	// CostOnError is cost.onError, the action for an error blocker on an account without its own: soft-stop by default,
+	// nil when the file sets it to null or to something that isn't an action.
+	CostOnError *CostAction
+	// CostInstructions is cost.instructions, the user's free-text cost instructions; "" when unset or not a string.
+	CostInstructions string
+	// CostFallbackMinutes is cost.fallbackMinutes: how long a cost notice waits for its manager before the fallback
+	// runs, a number, else 15.
+	CostFallbackMinutes float64
+	// CostSoftStopMinutes is cost.softStopMinutes: how long cost_switch lets a working agent finish its step before the
+	// interrupt, a number, else 10.
+	CostSoftStopMinutes float64
 	// MailGate is decisions.mailGate: an agent's mail to the human is checked by the decision model (S-983). On unless
 	// the file says false.
 	MailGate  bool
 	HumanMail HumanMailSettings
+	// Tiny are the tiny-step models' keys (settings_tiny.go).
+	Tiny TinySettings
+	// SearchOff is search.embedder 'off': search by keyword only (src/embed.ts provider). Any other value is the local
+	// embedder, the default.
+	SearchOff bool
 	// RequirementsEnabled is requirements.enabled: the requirement checks run on ITSA changes. Off unless the file says true.
 	RequirementsEnabled bool
 	// Requirements are the rest of settings.requirements (src/settings.ts), with its defaults.
@@ -52,13 +68,48 @@ type Settings struct {
 	DecisionsModel string
 	// ProviderIDs are the keys of settings.providers: the configured providers a model name may start with.
 	ProviderIDs []string
-	// SystemBudget is whether cost.accounts.openrouter-system has a budget, which holds stam's own model calls once spent.
-	SystemBudget bool
+	// ProviderNames are every key of settings.providers, parsed or not (Object.hasOwn(settings().providers, id)), sorted:
+	// an OpenCode account whose match.model is `ID/...` for one of them is billed by it (src/accounts.ts
+	// payPerTokenProvider).
+	ProviderNames []string
+	// ProviderKeySecrets is each provider's apiKey reference, settings.providers[id].apiKey.secret, by id: the secret a
+	// key test of that provider uses (src/llm/index.ts testTargets).
+	ProviderKeySecrets map[string]string
+	// Providers is settings.providers as the file holds it, an object, else nil: the model layer builds its adapters from
+	// it (src/llm/index.ts sync).
+	Providers map[string]any
+	// ProviderOrder is Providers' keys in the file's order, as Object.entries reads them: the OpenCode adapter writes its
+	// provider blocks in it (src/adapters/opencode-providers.ts).
+	ProviderOrder []string
+	// GlobalBudget is cost.global.budget, the budget over all paid spend; nil when unset.
+	GlobalBudget *CostBudget
+	// GlobalOnExhausted is cost.global.onExhausted, the fallback action for the global budget's blocker; "" when unset
+	// or not a string.
+	GlobalOnExhausted string
+	// OpenRouterWarnUSD is cost.openrouterWarnUsd, the OpenRouter balance below which the human hears once per top-up
+	// (src/credits.ts): 2 by default, 0 for never (null, or a value that isn't a number).
+	OpenRouterWarnUSD float64
+	// OpenRouterSystemReserveUSD is cost.openrouterSystemReserveUsd, the dollars of the shared OpenRouter credit kept for
+	// stam's own calls when openrouter-system has no budget (src/budgets.ts systemReserve): 1 unless a number.
+	OpenRouterSystemReserveUSD float64
+	// SubscriptionWarnPercent is cost.subscriptionWarnPercent, the window percentages that warn the managers and the
+	// human once per window and reset (src/usage.ts reportSubscription): [80, 95] by default. Entries that aren't numbers
+	// are dropped, and a value that isn't an array warns at none (TS would throw out of the report, or compare a string).
+	SubscriptionWarnPercent []float64
+	// DailyWarnUSD is cost.dailyWarnUsd, today's agent spend that mails the human once a day (src/usage.ts
+	// checkDailySpend): 0 for never, the default, and for a value that isn't a number (TS would compare a string).
+	DailyWarnUSD float64
 	// McpServers is settings.mcpServers as the file holds it, in its key order (an object, or an array, which TS's
 	// Object.entries reads by index); nil when it is missing or not an object (src/settings.ts).
 	McpServers jsjson.Value
+	Diff       DiffSettings
+	// FilesRoots is files.roots: the folders the human's Files API may read on this machine (S-1525, src/files.ts), the
+	// non-blank strings of the array; nil when the file sets none, which means the default roots.
+	FilesRoots []string
 	// ChildNotices is what a new agent hears of its children: turn, tree-idle or none, else tree-idle.
 	ChildNotices string
+	// DeveloperCap is settings.developerCap: how many developers run on a machine at once, 0 for no cap, else 6.
+	DeveloperCap int
 	// PermissionModes is settings.permissionModes: the mode per harness (claude, codex and opencode auto by default) and
 	// per agent type, each default, auto or bypass; any other value is dropped.
 	PermissionModes PermissionModes
@@ -67,11 +118,17 @@ type Settings struct {
 	// StartingTimeoutMinutes is how long an agent may stay starting with no harness process before it is marked
 	// stopped: a positive number, else 10.
 	StartingTimeoutMinutes float64
+	// StuckStartMinutes is settings.stuckStartMinutes (S-3250): an agent still starting with a live harness this many
+	// minutes after its launch never reached a turn, so it is restarted once, then errored. A number from 0 (off), else 15.
+	StuckStartMinutes float64
 	// Peers is settings.peers: the other machines' daemons (src/peers.ts).
 	Peers []Peer
 	// StaleWorkingMinutes is how long a working agent at its prompt may go without a hook before its turn is taken to
 	// have ended: a positive number, else 10.
 	StaleWorkingMinutes float64
+	// Banners is settings.banners: harness menus that pop up over an idle agent's input and block delivery, and the keys
+	// that dismiss one. A list replaces the default; an entry without a string harness and match is dropped.
+	Banners []Banner
 	// DialogEscalateMinutes is how long a harness dialog waits on the agent's parent and the chief of staff before it
 	// goes to the human (src/permissions.ts escalateStaleDialogs): a number of at least 0, else 10.
 	DialogEscalateMinutes float64
@@ -80,11 +137,18 @@ type Settings struct {
 	FinalRoundMinutes float64
 	// RetroReminders is settings.retro.reminders.enabled: on unless the file says false.
 	RetroReminders bool
+	// RetroLessons is settings.retro.lessons (S-725): the k retro items nearest an agent's task, at spawn and after a
+	// compaction. On unless the file says false; k an integer clamped to 1-8, else 4.
+	RetroLessons   RetroLessons
 	Context        ContextSettings
 	IdleCompaction IdleCompactionSettings
 	ExitRecovery   ExitRecoverySettings
 	// Process is settings.process (S-946): what a stage entry does.
 	Process ProcessSettings
+	// CostShape is cost.accounts' order and match objects and cost.display.prices (costshape.go).
+	CostShape CostShape
+	// ResourceWarn is settings.resourceWarn (resourcewarn.go).
+	ResourceWarn ResourceWarn
 }
 
 // ProcessSettings is settings.process: Run is off, dry-run or on, else dry-run; MaxSpawnsPerHour is an integer of at least 0,
@@ -95,12 +159,86 @@ type ProcessSettings struct {
 }
 
 // CostAccount is one cost account: the harness, and the model prefix when it names one, it matches; paid (nil unless
-// the file gives a boolean); and the provider it names, nil for none.
+// the file gives a boolean); the provider it names, nil for none; lowCreditsUsd, the balance a credits-out clears at
+// (nil unless the file gives a number); and the actions its fields name (onSubExhausted, onBudgetExhausted,
+// onCreditsOut, onBillingUnknown, onError), by field.
 type CostAccount struct {
-	Harness  string
-	Model    *string
-	Paid     *bool
-	Provider *string
+	Harness       string
+	Model         *string
+	Paid          *bool
+	Provider      *string
+	LowCreditsUSD *float64
+	Actions       map[string]CostAction
+	// Budget is the account's budget, nil when unset.
+	Budget *CostBudget
+}
+
+// CostBudget is src/settings.ts CostBudget: paid dollars per period (day, week or month in UTC, or cap for all time).
+// TS doesn't check a budget: USD is NaN when the file's usd isn't a number, which no spend reaches, and Per is "" when
+// per isn't a string, which counts by the day as periodStart does. RaiseSteps keeps the numbers of raiseSteps.
+type CostBudget struct {
+	USD        float64
+	Per        string
+	RaiseSteps []float64
+}
+
+// parseBudget reads a budget: an object, else none. TS takes any value that isn't null; one that isn't an object has
+// no usd, so it never counts as spent there, and it counts as none here.
+func parseBudget(v any) *CostBudget {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	b := &CostBudget{USD: math.NaN()}
+	if usd, ok := m["usd"].(float64); ok {
+		b.USD = usd
+	}
+	b.Per, _ = m["per"].(string)
+	steps, _ := m["raiseSteps"].([]any)
+	for _, x := range steps {
+		if n, ok := x.(float64); ok {
+			b.RaiseSteps = append(b.RaiseSteps, n)
+		}
+	}
+	return b
+}
+
+// CostAction is src/settings.ts CostAction: an action name, or an object with its take-over targets and the action
+// after them. A bare name has no targets and else wait. The names aren't checked here (src/accounts.ts validate does,
+// and refuses the file); an unknown one works as wait where it runs.
+type CostAction struct {
+	Action string
+	To     []string
+	Else   string
+}
+
+// costActionFields is src/accounts.ts ACTION_FIELDS.
+var costActionFields = []string{"onSubExhausted", "onBudgetExhausted", "onCreditsOut", "onBillingUnknown", "onError"}
+
+// parseAction reads one action field: a string, or an object with a string action. Anything else, null included, is
+// none.
+func parseAction(v any) (CostAction, bool) {
+	switch a := v.(type) {
+	case string:
+		return CostAction{Action: a, Else: "wait"}, true
+	case map[string]any:
+		name, ok := a["action"].(string)
+		if !ok {
+			return CostAction{}, false
+		}
+		out := CostAction{Action: name, Else: "wait"}
+		if e, ok := a["else"].(string); ok {
+			out.Else = e
+		}
+		to, _ := a["to"].([]any)
+		for _, t := range to {
+			if s, ok := t.(string); ok {
+				out.To = append(out.To, s)
+			}
+		}
+		return out, true
+	}
+	return CostAction{}, false
 }
 
 // Matches is src/accounts.ts matchAccount's test for one account, and the prefix length it matched by (0 for a
@@ -176,6 +314,18 @@ func parseAccounts(v any) (map[string]CostAccount, string) {
 		if paid, ok := acct["paid"].(bool); ok {
 			a.Paid = &paid
 		}
+		if low, ok := acct["lowCreditsUsd"].(float64); ok {
+			a.LowCreditsUSD = &low
+		}
+		a.Budget = parseBudget(acct["budget"])
+		for _, field := range costActionFields {
+			if action, ok := parseAction(acct[field]); ok {
+				if a.Actions == nil {
+					a.Actions = map[string]CostAction{}
+				}
+				a.Actions[field] = action
+			}
+		}
 		out[name] = a
 	}
 	for i, x := range names {
@@ -203,8 +353,9 @@ func overlaps(a, b CostAccount) bool {
 type Peer struct {
 	Name, URL string
 	// Token is the shared token of the peer's daemon; PeerToken the one it accepts from daemons (its STAM_HOME/peer-token,
-	// S-545), which wins when set.
-	Token, PeerToken Secret
+	// S-545), which wins when set. LeaseToken is the value of the peer's STAM_HOME/mcp-lease-token, the only bearer its
+	// MCP lease routes accept (S-3176); a machine that leases from that peer holds it.
+	Token, PeerToken, LeaseToken Secret
 	// Start is a shell command that starts the machine when it is down; Deploy one that deploys a release to it (S-236).
 	Start, Deploy string
 }
@@ -238,6 +389,54 @@ type ExitRecoverySettings struct {
 type PermissionModes struct {
 	Harness map[string]string
 	Types   map[string]string
+	// HarnessKeys and TypeKeys are the maps' keys in JavaScript's order: the defaults first, then the file's.
+	HarnessKeys, TypeKeys []string
+}
+
+// JSON is the modes as src/settings.ts permissionModesOf gives them, {harness, types}, in its key order.
+func (p PermissionModes) JSON() *jsjson.Object {
+	h, t := jsjson.NewObject(), jsjson.NewObject()
+	for _, k := range p.HarnessKeys {
+		h.Set(k, p.Harness[k])
+	}
+	for _, k := range p.TypeKeys {
+		t.Set(k, p.Types[k])
+	}
+	return jsjson.NewObject("harness", h, "types", t)
+}
+
+// parsePermissionModes is src/settings.ts permissionModesOf: only known modes survive; a harness keeps its default
+// for a missing or unknown one, and a type with an unknown one inherits.
+func parsePermissionModes(data []byte) PermissionModes {
+	p := PermissionModes{
+		Harness:     map[string]string{"claude": "auto", "codex": "auto", "opencode": "auto"},
+		Types:       map[string]string{},
+		HarnessKeys: []string{"claude", "codex", "opencode"},
+	}
+	root, _ := jsjson.Parse(data)
+	pm, _ := member(root, "permissionModes")
+	// The objects keep JavaScript's key order, a number-like name first.
+	h, t := jsjson.NewObject(), jsjson.NewObject()
+	for _, k := range p.HarnessKeys {
+		h.Set(k, "auto")
+	}
+	for _, f := range []struct {
+		key  string
+		into *jsjson.Object
+		m    map[string]string
+	}{{"harness", h, p.Harness}, {"types", t, p.Types}} {
+		v, _ := member(pm, f.key)
+		src := obj(v)
+		for _, k := range src.Keys() {
+			v, _ := src.Get(k)
+			if m, _ := v.(string); IsPermissionMode(m) {
+				f.into.Set(k, m)
+				f.m[k] = m
+			}
+		}
+	}
+	p.HarnessKeys, p.TypeKeys = h.Keys(), t.Keys()
+	return p
 }
 
 // EffectiveMode is src/permission-modes.ts effectiveMode: the type's mode, else the harness's, else auto.
@@ -286,6 +485,12 @@ type AuthSettings struct {
 	LocalHuman        bool
 }
 
+// RetroLessons is settings.retro.lessons.
+type RetroLessons struct {
+	Enabled bool
+	K       int
+}
+
 // ItsaSettings is settings.itsa.
 type ItsaSettings struct {
 	// Home is the ITSA home: homeOf, the same as Settings.Home (src/settings.ts), so `home` wins over `itsa.home`.
@@ -307,6 +512,8 @@ type ItsaSettings struct {
 	// PrOpenRepo is itsa.prOpen.repo: the name in Repos the pull requests are opened from; PrOpenOrigin the remote (origin) and
 	// PrOpenGh the gh program (gh).
 	PrOpenRepo, PrOpenOrigin, PrOpenGh string
+	// PrOpenStorage is itsa.prOpen.storage: the remote a checkout's PR branches live on besides origin, "" when unset.
+	PrOpenStorage string
 	// MainBranch is itsa.mainBranch: the branch a diff is taken against.
 	MainBranch string
 	// OwnerNotices is itsa.ownerNotices: a child that is blocked, closed or waits on the human tells its parent's owner. On
@@ -383,10 +590,11 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 			Repos      any `json:"repos"`
 			MainBranch any `json:"mainBranch"`
 			PrOpen     struct {
-				Github any `json:"github"`
-				Repo   any `json:"repo"`
-				Origin any `json:"origin"`
-				Gh     any `json:"gh"`
+				Github  any `json:"github"`
+				Repo    any `json:"repo"`
+				Origin  any `json:"origin"`
+				Gh      any `json:"gh"`
+				Storage any `json:"storage"`
 			} `json:"prOpen"`
 			// OwnerNotices is on unless the file says "off".
 			OwnerNotices any `json:"ownerNotices"`
@@ -405,22 +613,42 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 				Mode any `json:"mode"`
 			} `json:"display"`
 			Accounts any `json:"accounts"`
+			Global   struct {
+				Budget      any `json:"budget"`
+				OnExhausted any `json:"onExhausted"`
+			} `json:"global"`
+			OnError                    any `json:"onError"`
+			Instructions               any `json:"instructions"`
+			FallbackMinutes            any `json:"fallbackMinutes"`
+			SoftStopMinutes            any `json:"softStopMinutes"`
+			OpenrouterWarnUsd          any `json:"openrouterWarnUsd"`
+			OpenrouterSystemReserveUsd any `json:"openrouterSystemReserveUsd"`
+			SubscriptionWarnPercent    any `json:"subscriptionWarnPercent"`
+			DailyWarnUsd               any `json:"dailyWarnUsd"`
 		} `json:"cost"`
 		Providers any `json:"providers"`
 		HumanMail struct {
 			When   any `json:"when"`
 			Models any `json:"models"`
 		} `json:"humanMail"`
+		Files struct {
+			Roots any `json:"roots"`
+		} `json:"files"`
+		// Diff is type-checked by key, as TS reads it, so a wrong type there costs only its own defaults.
+		Diff any `json:"diff"`
 		ChildNotices    any `json:"childNotices"`
+		DeveloperCap    any `json:"developerCap"`
 		PermissionModes struct {
 			Harness any `json:"harness"`
 			Types   any `json:"types"`
 		} `json:"permissionModes"`
 		SpawnDefaults          map[string]any `json:"spawnDefaults"`
 		StartingTimeoutMinutes any            `json:"startingTimeoutMinutes"`
+		StuckStartMinutes      any            `json:"stuckStartMinutes"`
 		Peers                  any            `json:"peers"`
 		StaleWorkingMinutes    any            `json:"staleWorkingMinutes"`
 		DialogEscalateMinutes  any            `json:"dialogEscalateMinutes"`
+		Banners                any            `json:"banners"`
 		Archive                struct {
 			FinalRoundMinutes any `json:"finalRoundMinutes"`
 		} `json:"archive"`
@@ -428,6 +656,10 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 			Reminders struct {
 				Enabled any `json:"enabled"`
 			} `json:"reminders"`
+			Lessons struct {
+				Enabled any `json:"enabled"`
+				K       any `json:"k"`
+			} `json:"lessons"`
 		} `json:"retro"`
 		Process struct {
 			Run              any `json:"run"`
@@ -440,6 +672,9 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 			Model    any `json:"model"`
 			MailGate any `json:"mailGate"`
 		} `json:"decisions"`
+		Search struct {
+			Embedder any `json:"embedder"`
+		} `json:"search"`
 	}
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, &user); err != nil {
@@ -454,34 +689,95 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 			HumanStrict:       user.Auth.HumanStrict == true,
 			LocalHuman:        user.Auth.LocalHuman == true,
 		},
-		Itsa:     ItsaSettings{Required: user.Itsa.Required != false, KeyPrefix: or(str(user.Itsa.KeyPrefix), "S"), Statuses: itsaStatuses(user.Itsa.Statuses), Actions: itsaActions(user.Itsa.Actions), Repos: itsaRepos(user.Itsa.Repos), MainBranch: or(str(user.Itsa.MainBranch), "main"), PrOpenGithub: str(user.Itsa.PrOpen.Github), PrOpenRepo: str(user.Itsa.PrOpen.Repo), PrOpenOrigin: or(str(user.Itsa.PrOpen.Origin), "origin"), PrOpenGh: or(str(user.Itsa.PrOpen.Gh), "gh"), OwnerNotices: user.Itsa.OwnerNotices != "off"},
-		CostMode: "api",
-		MailGate: user.Decisions.MailGate != false,
+		Itsa:      ItsaSettings{Required: user.Itsa.Required != false, KeyPrefix: or(str(user.Itsa.KeyPrefix), "S"), Statuses: itsaStatuses(user.Itsa.Statuses), Actions: itsaActions(user.Itsa.Actions), Repos: itsaRepos(user.Itsa.Repos), MainBranch: or(str(user.Itsa.MainBranch), "main"), PrOpenGithub: str(user.Itsa.PrOpen.Github), PrOpenRepo: str(user.Itsa.PrOpen.Repo), PrOpenOrigin: or(str(user.Itsa.PrOpen.Origin), "origin"), PrOpenGh: or(str(user.Itsa.PrOpen.Gh), "gh"), PrOpenStorage: str(user.Itsa.PrOpen.Storage), OwnerNotices: user.Itsa.OwnerNotices != "off"},
+		CostMode:  "api",
+		MailGate:  user.Decisions.MailGate != false,
+		SearchOff: user.Search.Embedder == "off",
 
 		RequirementsEnabled: user.Requirements.Enabled == true,
 		Requirements:        requirementsSettings(user.Requirements.Approval, user.Requirements.KeyPrefix, user.Requirements.DemoteMinFlags, user.Requirements.DefaultThreshold, user.Requirements.DefaultMode, user.Requirements.DailyCapUsd),
 		DecisionsModel:      or(str(user.Decisions.Model), "microsoft/microsoft-decision-1"),
 	}
 	if m, ok := user.Providers.(map[string]any); ok {
+		s.Providers = m
 		for id, v := range m {
-			if providerParses(v) {
+			if ProviderParses(v) {
 				s.ProviderIDs = append(s.ProviderIDs, id)
 			}
 		}
 	}
 	sort.Strings(s.ProviderIDs)
-	if accounts, ok := user.Cost.Accounts.(map[string]any); ok {
-		if acct, ok := accounts["openrouter-system"].(map[string]any); ok {
-			// `budget ?? null`: a budget that is set and not null.
-			s.SystemBudget = acct["budget"] != nil
+	if m, ok := user.Providers.(map[string]any); ok {
+		for id, v := range m {
+			s.ProviderNames = append(s.ProviderNames, id)
+			if p, ok := v.(map[string]any); ok {
+				if k, ok := p["apiKey"].(map[string]any); ok {
+					if name, ok := k["secret"].(string); ok {
+						if s.ProviderKeySecrets == nil {
+							s.ProviderKeySecrets = map[string]string{}
+						}
+						s.ProviderKeySecrets[id] = name
+					}
+				}
+			}
 		}
 	}
+	sort.Strings(s.ProviderNames)
+	s.GlobalBudget = parseBudget(user.Cost.Global.Budget)
+	s.GlobalOnExhausted = str(user.Cost.Global.OnExhausted)
+	s.ResourceWarn = parseResourceWarn(data)
+	s.Tiny = parseTiny(data)
 	s.Home = or(str(user.Home), or(str(user.Itsa.Home), machine))
 	s.Itsa.Home = s.Home
 	if m := str(user.Cost.Display.Mode); costModes[m] {
 		s.CostMode = m
 	}
 	s.CostAccounts, s.CostProblem = parseAccounts(user.Cost.Accounts)
+	s.CostShape = parseCostShape(data, s.CostAccounts)
+	// `{ ...DEFAULTS.cost, ...user.cost }`: onError is soft-stop unless the file names the key, even as null.
+	soft := CostAction{Action: "soft-stop", Else: "wait"}
+	s.CostOnError = &soft
+	var keys struct {
+		Cost map[string]json.RawMessage `json:"cost"`
+	}
+	if len(data) > 0 && json.Unmarshal(data, &keys) == nil {
+		if _, named := keys.Cost["onError"]; named {
+			s.CostOnError = nil
+			if action, ok := parseAction(user.Cost.OnError); ok {
+				s.CostOnError = &action
+			}
+		}
+	}
+	s.CostInstructions = str(user.Cost.Instructions)
+	// `{ ...DEFAULTS.cost, ...user.cost }` keeps 2 unless the file names the key; credits.ts warns only on a truthy
+	// threshold, so null is never. A value that isn't a number counts as never here (TS would compare a string).
+	s.OpenRouterWarnUSD = 2
+	if _, named := keys.Cost["openrouterWarnUsd"]; named {
+		s.OpenRouterWarnUSD, _ = user.Cost.OpenrouterWarnUsd.(float64)
+	}
+	s.OpenRouterSystemReserveUSD = 1
+	if r, ok := user.Cost.OpenrouterSystemReserveUsd.(float64); ok {
+		s.OpenRouterSystemReserveUSD = r
+	}
+	s.SubscriptionWarnPercent = []float64{80, 95}
+	if _, named := keys.Cost["subscriptionWarnPercent"]; named {
+		s.SubscriptionWarnPercent = nil
+		list, _ := user.Cost.SubscriptionWarnPercent.([]any)
+		for _, v := range list {
+			if n, ok := v.(float64); ok {
+				s.SubscriptionWarnPercent = append(s.SubscriptionWarnPercent, n)
+			}
+		}
+	}
+	s.DailyWarnUSD, _ = user.Cost.DailyWarnUsd.(float64)
+	s.CostFallbackMinutes = 15
+	if m, ok := user.Cost.FallbackMinutes.(float64); ok {
+		s.CostFallbackMinutes = m
+	}
+	s.CostSoftStopMinutes = 10
+	if m, ok := user.Cost.SoftStopMinutes.(float64); ok {
+		s.CostSoftStopMinutes = m
+	}
 	s.HumanMail = HumanMailSettings{When: "necessary", Models: map[string]bool{"claude-haiku-5-5": false}}
 	if w := str(user.HumanMail.When); w == "necessary" || w == "important" || w == "everything" {
 		s.HumanMail.When = w
@@ -494,25 +790,25 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 			}
 		}
 	}
+	s.Diff = parseDiff(user.Diff)
+	if roots, ok := user.Files.Roots.([]any); ok {
+		s.FilesRoots = []string{}
+		for _, r := range roots {
+			if r, ok := r.(string); ok && strings.TrimSpace(r) != "" {
+				s.FilesRoots = append(s.FilesRoots, r)
+			}
+		}
+	}
 	s.ChildNotices = "tree-idle"
 	if c := str(user.ChildNotices); c == "turn" || c == "tree-idle" || c == "none" {
 		s.ChildNotices = c
 	}
-	s.PermissionModes = PermissionModes{
-		Harness: map[string]string{"claude": "auto", "codex": "auto", "opencode": "auto"},
-		Types:   map[string]string{},
+	// Number.isInteger(n) && n >= 0, else the default.
+	s.DeveloperCap = 6
+	if n, ok := user.DeveloperCap.(float64); ok && n >= 0 && n == math.Trunc(n) && n <= math.MaxInt32 {
+		s.DeveloperCap = int(n)
 	}
-	for _, f := range []struct {
-		v   any
-		out map[string]string
-	}{{user.PermissionModes.Harness, s.PermissionModes.Harness}, {user.PermissionModes.Types, s.PermissionModes.Types}} {
-		m, _ := f.v.(map[string]any)
-		for k, v := range m {
-			if mode := str(v); IsPermissionMode(mode) {
-				f.out[k] = mode
-			}
-		}
-	}
+	s.PermissionModes = parsePermissionModes(data)
 	// `{ ...DEFAULTS.spawnDefaults, ...user.spawnDefaults }`: a key the file sets wins, whatever its value; only a
 	// string is used here, anything else reads as null.
 	preset, cwd := "standard", "~"
@@ -530,7 +826,7 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 	if list, ok := user.Peers.([]any); ok {
 		for _, e := range list {
 			if m, ok := e.(map[string]any); ok {
-				s.Peers = append(s.Peers, Peer{Name: str(m["name"]), URL: str(m["url"]), Token: Secret(str(m["token"])), PeerToken: Secret(str(m["peerToken"])), Start: str(m["start"]), Deploy: str(m["deploy"])})
+				s.Peers = append(s.Peers, Peer{Name: str(m["name"]), URL: str(m["url"]), Token: Secret(str(m["token"])), PeerToken: Secret(str(m["peerToken"])), LeaseToken: Secret(str(m["leaseToken"])), Start: str(m["start"]), Deploy: str(m["deploy"])})
 			}
 		}
 	}
@@ -538,10 +834,15 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 	if n, ok := user.StartingTimeoutMinutes.(float64); ok && n > 0 {
 		s.StartingTimeoutMinutes = n
 	}
+	s.StuckStartMinutes = 15
+	if n, ok := user.StuckStartMinutes.(float64); ok && n >= 0 {
+		s.StuckStartMinutes = n
+	}
 	s.StaleWorkingMinutes = 10
 	if n, ok := user.StaleWorkingMinutes.(float64); ok && n > 0 {
 		s.StaleWorkingMinutes = n
 	}
+	s.Banners = parseBanners(user.Banners)
 	s.DialogEscalateMinutes = 10
 	if n, ok := user.DialogEscalateMinutes.(float64); ok && n >= 0 {
 		s.DialogEscalateMinutes = n
@@ -551,6 +852,10 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 		s.FinalRoundMinutes = n
 	}
 	s.RetroReminders = user.Retro.Reminders.Enabled != false
+	s.RetroLessons = RetroLessons{Enabled: user.Retro.Lessons.Enabled != false, K: 4}
+	if k, ok := user.Retro.Lessons.K.(float64); ok && k == math.Trunc(k) && !math.IsInf(k, 0) {
+		s.RetroLessons.K = int(math.Min(8, math.Max(1, k)))
+	}
 	// `{ ...DEFAULTS.x, ...user.x }`: a key the file sets wins. Only a number is used here; TS would carry another
 	// value through and compare with it, which no valid file does.
 	num := func(m map[string]any, k string, def float64) float64 {
@@ -585,6 +890,11 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 			switch v, _ := o.Get("mcpServers"); v.(type) {
 			case *jsjson.Object, []jsjson.Value:
 				s.McpServers = v
+			}
+			if p, ok := o.Get("providers"); ok {
+				if po, ok := p.(*jsjson.Object); ok && s.Providers != nil {
+					s.ProviderOrder = po.Keys()
+				}
 			}
 		}
 	}
@@ -677,13 +987,27 @@ type SettingsFile struct {
 	path    string
 	machine string
 
-	mu   sync.Mutex
-	key  fileKey
-	good Settings
-	ok   bool
+	// wmu makes each write one read-modify-write (Update): two writers never interleave, so none loses another's change.
+	wmu sync.Mutex
+	mu  sync.Mutex
+	// key and sharedKey are the stat of settings.json and of the shared cache good was read from.
+	key       fileKey
+	sharedKey fileKey
+	good      Settings
+	ok        bool
 	// costWarned is the cost.accounts problem last logged, so each distinct problem is logged once.
 	costWarned string
+	// listeners are told after a write (OnChange); reloaded after each read of a changed file (OnReload).
+	listeners []func()
+	reloaded  []func(Settings)
+	// reload orders the reads: a Get that read a changed file runs its OnReload hooks before any later Get returns, so
+	// none acts on a newer state (local login back on) before an earlier one's hooks (sessions ended) have run. Lock
+	// order: wmu, reload, mu. A hook never reaches back into the settings: it would wait for itself.
+	reload sync.Mutex
 }
+
+// ReloadPause, when set, runs in a Get between reading a changed file and its OnReload hooks: a test holds a read there.
+var ReloadPause func()
 
 type fileKey struct {
 	size  int64
@@ -695,35 +1019,82 @@ func NewSettingsFile(home, machine string) *SettingsFile {
 	return &SettingsFile{path: filepath.Join(home, "settings.json"), machine: machine}
 }
 
-// Get returns the current settings.
+// Get returns the current settings. When it read them again from a changed file, the OnReload listeners are told
+// before it, or any later Get, returns (reload).
 func (f *SettingsFile) Get() Settings {
+	f.reload.Lock()
+	defer f.reload.Unlock()
+	s, fresh := f.get()
+	if fresh {
+		if ReloadPause != nil {
+			ReloadPause()
+		}
+		f.mu.Lock()
+		reloaded := append([]func(Settings){}, f.reloaded...)
+		f.mu.Unlock()
+		for _, fn := range reloaded {
+			fn(s)
+		}
+	}
+	return s
+}
+
+// OnReload calls fn with the settings each time Get reads them again from a changed file: a hand edit is seen at the
+// next read, a write here too. fn runs under the reload lock and must not read or write the settings.
+func (f *SettingsFile) OnReload(fn func(Settings)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	info, err := os.Stat(f.path)
-	var key fileKey
-	if err == nil {
-		key = fileKey{size: info.Size(), mtime: info.ModTime()}
-	}
-	if f.ok && key == f.key {
-		return f.good
+	f.reloaded = append(f.reloaded, fn)
+}
+
+// get is Get's read: the settings, and whether they were read again from the file.
+func (f *SettingsFile) get() (Settings, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key, sharedKey := statKey(f.path), statKey(f.SharedPath())
+	if f.ok && key == f.key && sharedKey == f.sharedKey {
+		return f.good, false
 	}
 	data, err := os.ReadFile(f.path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		slog.Warn("settings.json unreadable; keeping the last good settings", "err", err)
-		return f.fallback()
+		return f.fallback(), false
+	}
+	// A file that is there but empty is not valid JSON, as TS reads it: most often one caught mid-rewrite, whose
+	// defaults would turn auth.localHuman off and end every login.
+	if err == nil && len(data) == 0 {
+		slog.Warn("settings.json is not valid JSON; keeping the last good settings")
+		return f.fallback(), false
+	}
+	// A non-home daemon reads shared keys from the cache, with only its local keys from the file. No cache yet: the file
+	// whole, so nothing changes until a cache is written.
+	if user, perr := jsjson.Parse(data); len(data) > 0 && perr == nil && homeOf(user, f.machine) != f.machine {
+		if cached, cerr := os.ReadFile(f.SharedPath()); cerr == nil {
+			cache := parseSharedCache(cached)
+			// A corrupt cache keeps the last good value if it was for this home, kept under the current stat key so it
+			// isn't read again on every call.
+			if cache == nil && f.ok && f.good.Home == homeOf(user, f.machine) {
+				slog.Warn("settings.shared.json is not valid JSON; keeping the last good settings")
+				f.key, f.sharedKey = key, sharedKey
+				return f.good, false
+			}
+			if cache != nil {
+				data = []byte(Text(merged(cache.Settings, user)))
+			}
+		}
 	}
 	s, err := ParseSettings(data, f.machine)
 	if err != nil {
 		// The parse error can quote the file, which holds peers' tokens: log only that it failed.
 		slog.Warn("settings.json is not valid JSON; keeping the last good settings")
-		return f.fallback()
+		return f.fallback(), false
 	}
-	f.key, f.good, f.ok = key, s, true
+	f.key, f.sharedKey, f.good, f.ok = key, sharedKey, s, true
 	if s.CostProblem != f.costWarned && s.CostProblem != "" {
 		slog.Warn("settings.json cost.accounts is invalid; no agent bills to an account", "problem", s.CostProblem)
 	}
 	f.costWarned = s.CostProblem
-	return s
+	return s, true
 }
 
 func (f *SettingsFile) fallback() Settings {
@@ -734,10 +1105,10 @@ func (f *SettingsFile) fallback() Settings {
 	return s
 }
 
-// providerParses is whether src/llm/index.ts registers a settings.providers entry: parseProviderConfig (src/llm/openai.ts) or
+// ProviderParses is whether src/llm/index.ts registers a settings.providers entry: parseProviderConfig (src/llm/openai.ts) or
 // parseBedrockConfig (src/llm/bedrock.ts) accepts it. An entry neither accepts is skipped, so a model naming it is not a
 // provider's.
-func providerParses(v any) bool {
+func ProviderParses(v any) bool {
 	o, ok := v.(map[string]any)
 	if !ok {
 		return false
@@ -769,15 +1140,29 @@ func providerParses(v any) bool {
 // endpointOrigin is whether src/llm/bedrock.ts endpointOrigin gives an origin: https with no userinfo, path, query or
 // fragment (plain http only on the loopback).
 func endpointOrigin(v string) bool {
+	_, ok := EndpointOrigin(v)
+	return ok
+}
+
+// EndpointOrigin is src/llm/bedrock.ts endpointOrigin: an endpoint as an origin, https with no userinfo, path, query or
+// fragment (plain http only on the loopback). The origin is the URL's: its host lowercased and a default port dropped.
+func EndpointOrigin(v string) (string, bool) {
 	u, err := url.Parse(v)
 	if err != nil || u.Host == "" {
-		return false
+		return "", false
 	}
 	loopback := u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1"
 	if !(u.Scheme == "https" || (u.Scheme == "http" && loopback)) {
-		return false
+		return "", false
 	}
-	return u.User == nil && (u.Path == "" || u.Path == "/") && u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" && !strings.Contains(v, "#")
+	if !(u.User == nil && (u.Path == "" || u.Path == "/") && u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" && !strings.Contains(v, "#")) {
+		return "", false
+	}
+	host := strings.ToLower(u.Host)
+	if p := u.Port(); (u.Scheme == "https" && p == "443") || (u.Scheme == "http" && p == "80") {
+		host = strings.TrimSuffix(host, ":"+p)
+	}
+	return u.Scheme + "://" + host, true
 }
 
 // RequirementsSettings is settings.requirements besides `enabled`.
@@ -817,4 +1202,100 @@ func requirementsSettings(approval, prefix, minFlags, threshold, mode, cap any) 
 		r.DefaultMode = m
 	}
 	return r
+}
+
+// Banner is one entry of settings.banners: on an idle agent of the harness whose screen matches Match (a regular
+// expression), stam sends Keys. Match is Go's RE2, where \s is ASCII whitespace only: it misses the no-break space
+// Claude Code draws after its marks, which JavaScript's \s matches, so such a pattern never matches here (it fails
+// closed: no keys are sent). Write [\s\x{00a0}] where a no-break space may come.
+type Banner struct {
+	Harness string   `json:"harness"`
+	Match   string   `json:"match"`
+	Keys    []string `json:"keys"`
+}
+
+// defaultBanners is src/settings.ts DEFAULTS.banners. Escape cancels a menu without touching a draft.
+var defaultBanners = []Banner{{Harness: "claude", Match: `Teach auto mode about your environment\?`, Keys: []string{"Escape"}}}
+
+// parseBanners is `Array.isArray(user.banners) ? user.banners : DEFAULTS.banners`, keeping only entries this daemon can
+// act on: a string harness and match, and the string keys.
+func parseBanners(v any) []Banner {
+	list, ok := v.([]any)
+	if !ok {
+		return defaultBanners
+	}
+	out := []Banner{}
+	for _, e := range list {
+		o, _ := e.(map[string]any)
+		h, hok := o["harness"].(string)
+		m, mok := o["match"].(string)
+		if !hok || !mok {
+			continue
+		}
+		b := Banner{Harness: h, Match: m, Keys: []string{}}
+		keys, _ := o["keys"].([]any)
+		for _, k := range keys {
+			if k, ok := k.(string); ok {
+				b.Keys = append(b.Keys, k)
+			}
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// DiffSettings is settings.diff, the PR diff API (S-1530, src/diff.ts), with src/settings.ts's defaults.
+type DiffSettings struct {
+	// Classes are the file patterns per class (tests, lockfiles, generated, docs), which the viewer's "meat" mode hides. A
+	// class the file gives as an array takes its non-blank strings; any other class keeps its default.
+	Classes map[string][]string
+	// FetchSeconds is the longest a git fetch of a PR may run: a number over 0, else 60.
+	FetchSeconds float64
+	// RefreshSeconds is how long a fetched head is reused: a number from 0, else 20.
+	RefreshSeconds float64
+	// MaxPrRefs is how many PRs the cache repo keeps: a number from 1, floored, else 100.
+	MaxPrRefs int
+}
+
+// DiffClassDefaults are src/settings.ts DEFAULTS.diff.classes.
+var DiffClassDefaults = map[string][]string{
+	"tests":     {"test/", "tests/", "__tests__/", "fixtures/", "__snapshots__/", "*.test.*", "*.spec.*", "*.snap"},
+	"lockfiles": {"package-lock.json", "pnpm-lock.yaml", "yarn.lock", "npm-shrinkwrap.json", "bun.lock", "bun.lockb", "Cargo.lock", "poetry.lock", "Pipfile.lock", "uv.lock", "go.sum", "Gemfile.lock", "composer.lock"},
+	"generated": {"dist/", "build/", "vendor/", "node_modules/", "*.min.*", "*.map"},
+	"docs":      {"docs/", "*.md"},
+}
+
+// parseDiff is src/settings.ts's diff: each key type-checked alone, so a wrong type there (`diff: []`, `classes: "x"`)
+// costs only its own defaults, and a null refreshSeconds (0) is told from a missing one (the default).
+func parseDiff(raw any) DiffSettings {
+	d := DiffSettings{Classes: map[string][]string{}, FetchSeconds: 60, RefreshSeconds: 20, MaxPrRefs: 100}
+	user, _ := raw.(map[string]any)
+	classes, _ := user["classes"].(map[string]any)
+	fetch, maxRefs := user["fetchSeconds"], user["maxPrRefs"]
+	refresh, hasRefresh := user["refreshSeconds"]
+	for k, def := range DiffClassDefaults {
+		list, ok := classes[k].([]any)
+		if !ok {
+			d.Classes[k] = def
+			continue
+		}
+		d.Classes[k] = []string{}
+		for _, x := range list {
+			if x, ok := x.(string); ok && jsjson.Trim(x) != "" {
+				d.Classes[k] = append(d.Classes[k], x)
+			}
+		}
+	}
+	if n := jsjson.ToNumber(fetch); n > 0 {
+		d.FetchSeconds = n
+	}
+	if hasRefresh {
+		if n := jsjson.ToNumber(refresh); n >= 0 {
+			d.RefreshSeconds = n
+		}
+	}
+	if n := jsjson.ToNumber(maxRefs); n >= 1 {
+		d.MaxPrRefs = int(math.Min(math.Floor(n), math.MaxInt32))
+	}
+	return d
 }

@@ -45,6 +45,9 @@ func TestHookMatchesTS(t *testing.T) {
 		{idle, json.RawMessage(`{"hook_event_name":"PreToolUse","tool_name":null}`)},
 		{working, json.RawMessage(`{"hook_event_name":"PostToolUse","tool_name":"Bash"}`)},
 		{working, json.RawMessage(`{"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion"}`)},
+		{working, json.RawMessage(`{"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which colour?","options":[{"label":"Red"},{"label":"Blue"}]}]},"session_id":"s-7"}`)},
+		{idle, json.RawMessage(`{"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Pick?","multiSelect":true,"options":[{"label":"A"}]}]},"session_id":null}`)},
+		{working, json.RawMessage(`{"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":null}`)},
 		{working, json.RawMessage(`{"hook_event_name":"PermissionRequest","tool_name":"Read","tool_input":{"file_path":"/x"}}`)},
 		{working, json.RawMessage(`{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"m"}`)},
 		{working, json.RawMessage(`{"hook_event_name":"Notification","notification_type":"permission_prompt","session_id":"s-9"}`)},
@@ -168,5 +171,33 @@ func TestHookPendingDialog(t *testing.T) {
 	OnHook(a, parse(`{"hook_event_name":"Stop"}`), pending)
 	if asked != 4 {
 		t.Errorf("the dialog was asked about %d times, want 4", asked)
+	}
+}
+
+// TestStopFailureSignal: StopFailure's cost signal by its error, as src/adapters/claude.ts CLAUDE_ERROR_CLASS classes
+// it; an error no class covers, a null one and none are no signal.
+func TestStopFailureSignal(t *testing.T) {
+	for payload, want := range map[string]string{
+		`{"hook_event_name":"StopFailure","error":"rate_limit"}`:            "limit:rate_limit",
+		`{"hook_event_name":"StopFailure","error":"billing_error"}`:         "credits:billing_error",
+		`{"hook_event_name":"StopFailure","error":"oauth_org_not_allowed"}`: "auth:oauth_org_not_allowed",
+		`{"hook_event_name":"StopFailure","error":"server_error"}`:          "transient:server_error",
+		`{"hook_event_name":"StopFailure","error":"max_output_tokens"}`:     "",
+		`{"hook_event_name":"StopFailure","error":null}`:                    "",
+		`{"hook_event_name":"StopFailure"}`:                                 "",
+		`{"hook_event_name":"Stop","error":"rate_limit"}`:                   "",
+	} {
+		v, err := jsjson.Parse([]byte(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := OnHook(db.Agent{}, v.(*jsjson.Object), func() (string, bool) { return "", false })
+		got := ""
+		if r.CostSignal != nil {
+			got = r.CostSignal.Class + ":" + r.CostSignal.Error
+		}
+		if got != want {
+			t.Errorf("%s: %q, want %q", payload, got, want)
+		}
 	}
 }

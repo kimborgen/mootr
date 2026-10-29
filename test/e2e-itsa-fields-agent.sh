@@ -39,9 +39,9 @@ echo "-- CLI as the human"
 "$STAM" itsa field set pr --label "PR link" | grep -q "PR link" || fail "field set"
 "$STAM" itsa field order pr stage | head -1 | grep -q "^pr " || fail "field order"
 K=$("$STAM" itsa ls "Fielded e2e" | awk '{print $1; exit}')
-"$STAM" itsa set "$K" --field pr=https://example.com/pr/1 --field stage=live | grep -q "fields" || fail "set --field"
+"$STAM" itsa set "$K" --field pr=https://example.com/pr/1 --field stage=live | grep -q "fields: .* -> pr=https://example.com/pr/1 stage=live$" || fail "set --field reply isn't key=value pairs (S-2786)"
 "$STAM" itsa show "$K" | python3 -c "import json,sys; d=json.load(sys.stdin)['fields']; assert d=={'pr':'https://example.com/pr/1','stage':'live'}, d" || fail "values not stored"
-"$STAM" itsa set "$K" --field stage= >/dev/null
+"$STAM" itsa set "$K" --field stage= | grep -q "fields: stage=live -> stage=(none)$" || fail "a cleared field reply isn't stage=(none) (S-2786)"
 "$STAM" itsa show "$K" | python3 -c "import json,sys; d=json.load(sys.stdin)['fields']; assert 'stage' not in d, d" || fail "key= didn't clear"
 echo "-- values are typed by the field: a text field keeps 007 as a string, a number field takes a number"
 "$STAM" itsa field new ver Version --type text >/dev/null

@@ -237,14 +237,14 @@ test('oauth > a server with no login throws', async () => {
 
 test('gh > the token comes from `gh auth token`', async () => {
   assert.equal(await mcpAuth.token('github'), 'GH-TOKEN-1');
-  const rows = await mcpAuth.status();
+  const { servers: rows } = await mcpAuth.status();
   assert.deepEqual(rows.find((r) => r.name === 'github'), { name: 'github', type: 'gh', logged_in: true, expires_at: null });
 });
 
 test('logout > forgets the stored tokens', async () => {
   mcpAuth.logout('linear');
   assert.equal(mcpAuth.store().linear, undefined);
-  const rows = await mcpAuth.status();
+  const { servers: rows } = await mcpAuth.status();
   assert.equal(rows.find((r) => r.name === 'linear').logged_in, false);
 });
 
@@ -436,11 +436,53 @@ test('oauth > a client secret naming an untagged store entry is refused before a
   await refusesRef('untagged-key', '', 'UNTAGGED-KEY-LEAK-1');
 });
 
-test('oauth > a peer that holds no secret says to log in on the home machine', async () => {
+test('oauth > a peer refuses a login and names the home that keeps the logins', async () => {
   const settingsFile = join(home, 'settings.json');
   const s = JSON.parse(readFileSync(settingsFile, 'utf8'));
   s.home = 'some-other-machine';
   s.mcpServers.peer = { url: `${origin}/mcp`, auth: { type: 'oauth', client_id: 'peer-id', client_secret: { secret: 'mcp-peer-client' } } };
   writeFileSync(settingsFile, JSON.stringify(s));
-  await assert.rejects(() => mcpAuth.startLogin('peer', `${origin}/oauth/callback`), /log in on the home machine/);
+  await assert.rejects(() => mcpAuth.startLogin('peer', `${origin}/oauth/callback`), /log in on some-other-machine, which keeps the MCP logins/);
+  assert.throws(() => mcpAuth.logout('peer'), /some-other-machine/);
+});
+
+// A provider's `error` is echoed only when it is one of the OAuth and Slack codes (Go's providerCodes, S-3503). A token
+// in any other error, or in a non-string one, never reaches the error or the log.
+test('tokenResponse > only an allowlisted provider code is echoed; a token-shaped error never reaches the error or the log (S-3503)', () => {
+  const leak = 'Sentinel0Tk9Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3Lk4';
+  const logged = [];
+  const saved = ['log', 'warn', 'error', 'info'].map((k) => [k, console[k]]);
+  for (const [k] of saved) console[k] = (...a) => logged.push(a.map(String).join(' '));
+  try {
+    const refused = (tok) => {
+      try {
+        mcpAuth.tokenResponse(tok);
+      } catch (e) {
+        return e.message;
+      }
+      assert.fail('tokenResponse answered an ok:false');
+    };
+    const codes = ['invalid_request', 'invalid_client', 'invalid_grant', 'unauthorized_client', 'unsupported_grant_type', 'invalid_scope', 'access_denied', 'server_error', 'temporarily_unavailable', 'invalid_code', 'invalid_refresh_token', 'token_revoked', 'not_authed'];
+    for (const code of codes) assert.equal(refused({ ok: false, error: code }), `the token endpoint refused: ${code}`);
+    const fixed = 'the token endpoint refused: unknown error';
+    assert.equal(refused({ ok: false, error: leak }), fixed);
+    assert.equal(refused({ ok: false, error: `invalid_grant ${leak}` }), fixed);
+    assert.equal(refused({ ok: false, error: `${leak}${'x'.repeat(200)}` }), fixed);
+    assert.equal(refused({ ok: false, error: { detail: leak } }), fixed);
+    assert.equal(refused({ ok: false, error: ['invalid_grant', leak] }), fixed);
+    assert.equal(refused({ ok: false, error: leak, access_token: leak }), fixed);
+    assert.equal(refused({ ok: false }), fixed);
+    assert.ok(!logged.some((line) => line.includes(leak)), 'no log line carries the token');
+  } finally {
+    for (const [k, fn] of saved) console[k] = fn;
+  }
+});
+
+// The allowlist is kept in step with Go's providerCodes (S-3503): a code added to only one list fails here, both ways.
+test('tokenResponse > the provider code list is the same set as Go’s providerCodes (S-3503)', () => {
+  const goSrc = readFileSync(new URL('../go/internal/mcpauth/mcpauth.go', import.meta.url), 'utf8');
+  const block = goSrc.slice(goSrc.indexOf('var providerCodes = map[string]bool{'), goSrc.indexOf('\n}\n', goSrc.indexOf('var providerCodes')));
+  const goCodes = [...block.matchAll(/"([a-z_]+)": true/g)].map((m) => m[1]).sort();
+  assert.ok(goCodes.length > 40, 'the Go list was read');
+  assert.deepEqual([...mcpAuth.providerCodes].sort(), goCodes);
 });

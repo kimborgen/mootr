@@ -117,7 +117,7 @@ test('agent_control carries discard for an archive (S-1043)', async () => {
 test('the peer-forwarding transport carries force through unchanged', async () => {
   calls.length = 0;
   const { peerCall } = await import('../src/peers.ts');
-  const peer = { name: 'twin', url, token: 't', peerToken: 'pt' };
+  const peer = { name: 'twin', url, token: 'test-peer-token', peerToken: 'pt' };
   // The daemon forwards a remote agent's request through peerCall with the route's body as it is.
   const r = await peerCall(peer, 'POST', '/api/agents/x/archive', { by: self, force: true });
   assert.equal(r.status, 200);

@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	neturl "net/url"
+	"strconv"
 	"strings"
 
 	"stam/internal/auth"
 	"stam/internal/db"
 	"stam/internal/jsfmt"
+	"stam/internal/peers"
 )
 
 // POST /api/itsas/:ref/post (src/daemon.ts over src/itsa.ts post, S-2849 PR 3b): a comment or update in the ITSA's mail
@@ -16,9 +19,9 @@ import (
 // makes the sender a participant. The mail interrupts a working recipient only when it names them as `@name`, comes from the
 // human, or comes from the ITSA's owner; the rest arrives with the idle batch.
 //
-// Stam's own post (`from_stam`) and the ask mail (kind ask) stand in as the oldest active agent. Answered 501, before
-// anything is stored: a sender, owner or participant on a peer; attachments; and the shapes of `to`, `only`, `inferred` and
-// `subject` that TS would coerce.
+// Stam's own post (`from_stam`) and the ask mail (kind ask) stand in as the oldest active agent. A sender on a peer's post
+// is relayed (forwarded with relay): sent from here as that agent. Answered 501, before anything is stored: the shapes of
+// `to`, `only`, `inferred` and `subject` that TS would coerce.
 
 var healths = []string{"on_track", "at_risk", "off_track"}
 
@@ -55,9 +58,6 @@ func (s *Server) itsaPostRoute(r *http.Request, c auth.Resolved) (any, error) {
 	}
 	body, err := jsonBody(r)
 	if err != nil {
-		return nil, err
-	}
-	if err := s.resolveItsaActors(ctx, c, &body); err != nil {
 		return nil, err
 	}
 	human := s.isHuman(r, c)
@@ -99,6 +99,13 @@ func (s *Server) itsaPostRoute(r *http.Request, c auth.Resolved) (any, error) {
 
 // post is src/itsa.ts post on the home daemon: in is the request's body (by already resolved to the actor).
 func (s *Server) post(ctx context.Context, ref string, in jsfmt.Value, ask bool) (jsfmt.Value, error) {
+	return s.postShown(ctx, ref, in, ask, "", "")
+}
+
+// postShown is post with src/itsa.ts post's opts.shown: the ITSA text the body renders and its revision (shownText). The
+// revision is recorded for the mail once it is sent (S-2998), and only if the stored body is the body sent, uncut. A rev
+// of "" records nothing.
+func (s *Server) postShown(ctx context.Context, ref string, in jsfmt.Value, ask bool, shownText, shownRev string) (jsfmt.Value, error) {
 	// Stam's own post stands in as the oldest active agent and never joins the ITSA as a participant.
 	asStam := false
 	if v, ok := in.Get("from_stam"); ok && v.Truthy() {
@@ -183,8 +190,9 @@ func (s *Server) post(ctx context.Context, ref string, in jsfmt.Value, ask bool)
 			extra = append(extra, p)
 		}
 	}
-	if v, ok := in.Get("attachments"); ok && v.Truthy() {
-		return jsfmt.Value{}, Errorf(http.StatusNotImplemented, "attachments are not ported to the Go daemon yet")
+	var attachments []jsfmt.Value
+	if v, ok := in.Get("attachments"); ok && v.Kind == jsfmt.Array {
+		attachments = v.Items
 	}
 	subject, hasSubject, err := optString(in, "subject")
 	if err != nil {
@@ -289,6 +297,9 @@ func (s *Server) post(ctx context.Context, ref string, in jsfmt.Value, ask bool)
 			names = []string{r, ""}
 			if a, err := s.db.GetAgent(ctx, r); err == nil {
 				names[1] = a.Name
+			} else if known, ok, _ := s.db.PeerAgentByID(ctx, r); ok {
+				// A peer's recipient was looked up, and remembered, when it was found deliverable or named: no second ask.
+				names[1] = known.Name
 			}
 		}
 		if mentions(body, names) {
@@ -296,10 +307,35 @@ func (s *Server) post(ctx context.Context, ref string, in jsfmt.Value, ask bool)
 		}
 	}
 
+	// only_to is the people the sender's daemon checked a reach-limited agent's post against (reachRefusal): one the post
+	// would reach outside it (a participant added since, or the successor one forwards its mail to) refuses the post before
+	// anything is stored or sent. send checks the final recipients again, and a peer its own. It only narrows delivery, so
+	// it counts from any caller.
+	var onlyTo []string
+	hasOnlyTo := false
+	if v, ok := in.Get("only_to"); ok && v.Kind != jsfmt.Null {
+		var err error
+		if onlyTo, err = stringList(in, "only_to"); err != nil {
+			return jsfmt.Value{}, err
+		}
+		hasOnlyTo = true
+		for _, r := range recipients {
+			target, err := s.db.ForwardTarget(ctx, r)
+			if err != nil {
+				return jsfmt.Value{}, err
+			}
+			for _, id := range []string{r, target} {
+				if !contains(onlyTo, id) {
+					return jsfmt.Value{}, Errorf(http.StatusConflict, "the ITSA's people changed since the post was checked (%s is new to it); try again", s.agentLabel(ctx, id))
+				}
+			}
+		}
+	}
+
 	// What send would answer 501 comes first, so a post that is not ported leaves the thread and the sender's place in it as
 	// they were (a refusal TS itself makes still follows the allocation, as in TS).
 	override = sliceUnits(strings.TrimSpace(override), 500)
-	if err := s.sendNotPorted(ctx, by, body, kind, override, recipients, asStam); err != nil {
+	if err := s.sendNotPorted(ctx, by, body, kind, override, recipients, asStam, itsaID); err != nil {
 		return jsfmt.Value{}, err
 	}
 
@@ -307,11 +343,6 @@ func (s *Server) post(ctx context.Context, ref string, in jsfmt.Value, ask bool)
 	threadID, first, err := s.db.AllocateItsaThread(ctx, itsaID)
 	if err != nil {
 		return jsfmt.Value{}, err
-	}
-	if sys == "" && !asStam && !ask {
-		if err := s.db.EnsureItsaParticipant(ctx, itsaID, by); err != nil {
-			return jsfmt.Value{}, err
-		}
 	}
 	root := x.Text("key") + " " + x.Text("title")
 	if !hasSubject || subject == "" {
@@ -329,14 +360,190 @@ func (s *Server) post(ctx context.Context, ref string, in jsfmt.Value, ask bool)
 	mailIn := &sendIn{
 		from: by, fromShown: by, to: recipients, subject: subject, body: body, replyTo: replyTo, inferred: inferred,
 		override: override, system: sys, hasSystem: sys != "", fromStam: asStam,
-		itsa: &itsaMail{id: itsaID, threadID: threadID, kind: kind, health: health, interrupt: interrupt},
+		itsa: &itsaMail{id: itsaID, threadID: threadID, kind: kind, health: health, interrupt: interrupt}, attachments: attachments,
+		onlyTo: onlyTo, hasOnlyTo: hasOnlyTo,
 	}
-	return s.send(ctx, mailIn)
+	// The sender of a remote agent's post is relayed: its id isn't in this registry (itsa.ts post remoteName).
+	if remoteName, ok, err := s.remoteSenderName(ctx, by, sys, asStam); err != nil {
+		return jsfmt.Value{}, err
+	} else if ok {
+		mailIn.forwarded, mailIn.relay, mailIn.fwdFromName, mailIn.fwdThreadID = true, true, remoteName, threadID
+		mailIn.relayRoute = parseRelayRoute(in)
+	}
+	sent, err := s.send(ctx, mailIn)
+	// The sender joins once its mail is sent: a refused post (S-4163) leaves the ITSA's people as they were.
+	if err == nil && sys == "" && !asStam && !ask {
+		if err := s.db.EnsureItsaParticipant(ctx, itsaID, by); err != nil {
+			return jsfmt.Value{}, err
+		}
+	}
+	if err != nil || shownRev == "" {
+		return sent, err
+	}
+	// Only an uncut body counts: the mail cap may cut it, and a copy of the text elsewhere in it doesn't.
+	stored, ok, err := s.db.GetMail(ctx, sent.Text("id"))
+	if err != nil || !ok || !strings.Contains(body, shownText) || stored.Text("body") != body {
+		return sent, err
+	}
+	return sent, s.recordShownRev(ctx, sent.Text("id"), itsaID, shownRev, body, shownText)
+}
+
+// postOnHome is itsa.ts postRouted off the home: an answer in an ITSA's thread is posted on the home, as the agent `from`
+// (via), which the home checks; the human's carries the human as relayHuman allows. A 403 is the home's refusal, with its
+// message; any other failure names the home, never its URL or a token. Files attached by path go as their content.
+func (s *Server) postOnHome(ctx context.Context, ref string, req jsfmt.Value, from, cos string) (jsfmt.Value, error) {
+	home := s.settings.Get().Itsa.Home
+	peer, ok := s.homePeer()
+	if !ok {
+		return jsfmt.Value{}, errors.New("ITSA home '" + home + "' is not a configured peer")
+	}
+	to, err := stringList(req, "to")
+	if err != nil {
+		return jsfmt.Value{}, err
+	}
+	checked, err := s.reachRefusal(ctx, from, ref, to)
+	if err != nil {
+		return jsfmt.Value{}, err
+	}
+	if checked != nil {
+		req.Set("only_to", jsfmt.ArrayValue(stringValues(checked)))
+	}
+	if v, ok := req.Get("attachments"); ok && v.Kind == jsfmt.Array {
+		atts, err := attachmentsB64(v.Items)
+		if err != nil {
+			return jsfmt.Value{}, err
+		}
+		req.Set("attachments", jsfmt.ArrayValue(atts))
+	}
+	var via *peers.Via
+	if from != humanBox && !strings.HasPrefix(from, "system:") {
+		via = &peers.Via{Agent: from, Boss: from == cos || s.isAssistant(ctx, from)}
+	}
+	carry, err := s.relayHuman(peer, from == humanBox, true, "POST /api/itsas/:id/post", true)
+	if err != nil {
+		return jsfmt.Value{}, err
+	}
+	// The routing facts of this daemon's agent, for the home to apply the S-548 rule to a relayed original (S-4163).
+	if facts, ok, err := s.relayRouteOf(ctx, from); err != nil {
+		return jsfmt.Value{}, err
+	} else if ok {
+		req.Set("relay_route", facts.value())
+	}
+	r, err := s.peers.Call(ctx, peer, http.MethodPost, "/api/itsas/"+neturl.PathEscape(ref)+"/post", req, itsaHomeTimeout, carry, via)
+	if err != nil {
+		return jsfmt.Value{}, Errorf(http.StatusServiceUnavailable, "%s (the ITSA home) is unreachable", home)
+	}
+	if r.Status != http.StatusOK {
+		why := r.Data.Text("error")
+		if why == "" {
+			why = home + ": HTTP " + strconv.Itoa(r.Status)
+		}
+		why = s.scrubPeerURLs(s.peers.RedactText(peer, why))
+		// A 409 on a checked post is the home finding the ITSA's people changed since the check: refused, never sent unchecked.
+		if r.Status == http.StatusForbidden || (checked != nil && r.Status == http.StatusConflict) {
+			return jsfmt.Value{}, Errorf(http.StatusForbidden, "%s", why)
+		}
+		return jsfmt.Value{}, errors.New(why)
+	}
+	return r.Data, nil
+}
+
+// reachRefusal is the check the home can't make for a post off the home by an agent here whose parent limited whom it may
+// reach (visibility reach parent or tree): the home sends the post to the ITSA's participants and has no row for the
+// sender. The participants are read from the home, as the agent; the post is refused (403) when one of them other than
+// the sender, or a recipient it names in to, is outside the limit, and when the home doesn't answer (503), never sent
+// unchecked. TS doesn't check it at all (S-4100 2c-3 review). An agent with no limit, or none here, isn't checked.
+//
+// It returns the people it checked (nil when it checked nothing): the post carries them as only_to, so the home refuses
+// it if the participants changed between this read and the post (409), which the caller answers 403.
+func (s *Server) reachRefusal(ctx context.Context, id, ref string, to []string) ([]string, error) {
+	a, err := s.db.GetAgent(ctx, id)
+	if errors.Is(err, db.ErrNotFound) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	allowed, limited, err := s.reachable(ctx, a)
+	if err != nil || !limited {
+		return nil, err
+	}
+	x, err := s.toHome(ctx, http.MethodGet, "/api/itsas/"+neturl.PathEscape(ref), nil, homeTimeout, &itsaVia{agent: a.ID})
+	switch {
+	case isHomeRefusal(err):
+		return nil, err
+	case err != nil:
+		return nil, Errorf(http.StatusServiceUnavailable, "%s, so %s's post can't be checked against the limit its parent set; try again", err.Error(), a.Name)
+	}
+	var people []string
+	if v, ok := x.Get("participants"); ok && v.Kind == jsfmt.Array {
+		for _, p := range v.Items {
+			people = append(people, anyString(p))
+		}
+	}
+	cos := s.chiefOfStaffID(ctx)
+	which := "its tree"
+	if a.VisibilityOf().Reach == "parent" {
+		which = "its parents"
+	}
+	checked := []string{a.ID}
+	for _, ref := range append(people, to...) {
+		p, err := s.recipientID(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		if p == humanBox || p == a.ID || p == cos || allowed[p] {
+			checked = append(checked, p)
+			continue
+		}
+		return nil, Errorf(http.StatusForbidden, "%s may not post on this ITSA: its parent limited it to %s, and the post would reach %s. Mail your parent instead", a.Name, which, s.agentLabel(ctx, p))
+	}
+	return checked, nil
+}
+
+// recipientID is the id of a recipient as a post names it: the human, an agent here, or one a peer has (remembered, else
+// asked); a name nobody has stays as it is, and so is outside every limit.
+func (s *Server) recipientID(ctx context.Context, ref string) (string, error) {
+	if ref == humanBox || strings.ToLower(strings.TrimSpace(ref)) == "the human" {
+		return humanBox, nil
+	}
+	if a, err := s.db.GetAgent(ctx, ref); err == nil {
+		return a.ID, nil
+	} else if !errors.Is(err, db.ErrNotFound) {
+		return "", err
+	}
+	if known, ok, err := s.db.FindPeerAgent(ctx, ref); err != nil || ok {
+		return known.ID, err
+	}
+	if hit, found, err := s.peers.Locate(ctx, s.db, ref); err == nil && found == peers.Found {
+		return hit.Agent.ID, nil
+	}
+	return ref, nil
+}
+
+// remoteSenderName is the name of a post's sender that is an agent of another machine, as its peer answers for it, else
+// its id; ok is false for the human, a system sender, stam's own post and an agent here.
+func (s *Server) remoteSenderName(ctx context.Context, by, sys string, asStam bool) (string, bool, error) {
+	if by == humanBox || sys != "" || asStam {
+		return "", false, nil
+	}
+	if _, err := s.db.GetAgent(ctx, by); err == nil {
+		return "", false, nil
+	} else if !errors.Is(err, db.ErrNotFound) {
+		return "", false, err
+	}
+	hit, found, err := s.peers.Locate(ctx, s.db, by)
+	if err != nil {
+		return "", false, ambiguous(err)
+	}
+	if found == peers.Found {
+		return hit.Agent.Name, true, nil
+	}
+	return by, true, nil
 }
 
 // sendNotPorted is the 501s send makes for a mail to recipients from `by` (the embed, the mail gate and the observers of a
-// stored mail), asked before a post writes anything.
-func (s *Server) sendNotPorted(ctx context.Context, by, body, kind, override string, recipients []string, fromStam bool) error {
+// stored mail), asked before a post writes anything. itsaID is the ITSA the post is in ("" for none).
+func (s *Server) sendNotPorted(ctx context.Context, by, body, kind, override string, recipients []string, fromStam bool, itsaID string) error {
 	if err := embedRefusal(body); err != nil {
 		return err
 	}
@@ -347,7 +554,11 @@ func (s *Server) sendNotPorted(ctx context.Context, by, body, kind, override str
 	toHuman := contains(recipients, humanBox)
 	if sender, err := s.db.GetAgent(ctx, by); err == nil {
 		if toHuman {
-			if _, ok, err := s.humanReroute(ctx, sender, s.chiefOfStaffID(ctx)); err != nil {
+			var itsas []string
+			if itsaID != "" {
+				itsas = []string{itsaID}
+			}
+			if _, ok, err := s.humanReroute(ctx, sender, s.chiefOfStaffID(ctx), itsas); err != nil {
 				return err
 			} else if ok {
 				toHuman = false
@@ -356,6 +567,11 @@ func (s *Server) sendNotPorted(ctx context.Context, by, body, kind, override str
 	} else if !errors.Is(err, db.ErrNotFound) {
 		return err
 	}
+	return s.humanRefusals(ctx, by, kind, override, toHuman)
+}
+
+// humanRefusals is the gate and the observers' refusals of a mail from by, given whether it reaches the human directly.
+func (s *Server) humanRefusals(ctx context.Context, by, kind, override string, toHuman bool) error {
 	if toHuman && by != humanBox && !strings.HasPrefix(by, "system:") && override == "" {
 		if err := s.gateRefusal(kind == "ask"); err != nil {
 			return err
@@ -364,8 +580,8 @@ func (s *Server) sendNotPorted(ctx context.Context, by, body, kind, override str
 	return s.mailObserverRefusal(ctx, by, toHuman)
 }
 
-// deliverable is itsa.ts deliverable for a participant: the human always, a local agent unless archived. An agent this
-// daemon remembers from a peer would be asked of that peer, which this daemon cannot do yet.
+// deliverable is itsa.ts deliverable for a participant: the human always, an agent here unless archived, and an agent of
+// another machine as its peer answers for it; when no peer answers, the lifecycle last seen of it (S-281).
 func (s *Server) deliverable(ctx context.Context, id string) (bool, error) {
 	if id == humanBox {
 		return true, nil
@@ -377,15 +593,21 @@ func (s *Server) deliverable(ctx context.Context, id string) (bool, error) {
 	if !errors.Is(err, db.ErrNotFound) {
 		return false, err
 	}
-	if peer, err := s.db.HasPeerAgent(ctx, id); err != nil {
-		return false, err
-	} else if peer {
-		return false, Errorf(http.StatusNotImplemented, "%s is an agent of a peer machine, and posting to a peer's agent is not ported to the Go daemon yet", id)
+	hit, found, err := s.peers.Locate(ctx, s.db, id)
+	switch {
+	case err != nil:
+		return false, ambiguous(err)
+	case found == peers.Found:
+		return hit.Agent.Lifecycle != "archived", nil
+	case found == peers.Unreachable:
+		lifecycle, _, err := s.db.PeerAgentLifecycle(ctx, id)
+		return err == nil && lifecycle != "archived", err
 	}
 	return false, nil
 }
 
-// inferredPerson is itsa.ts inferredPerson: the id of a recipient the sender didn't name, or "" when nobody has it any more.
+// inferredPerson is itsa.ts inferredPerson: the id of a recipient the sender didn't name, or "" when nobody has it any
+// more. Unlike person, an agent this daemon remembers from a peer that doesn't answer still counts (S-603).
 func (s *Server) inferredPerson(ctx context.Context, ref string) (string, error) {
 	if ref == humanBox {
 		return humanBox, nil
@@ -393,12 +615,17 @@ func (s *Server) inferredPerson(ctx context.Context, ref string) (string, error)
 	if a, err := s.db.GetAgent(ctx, ref); err == nil {
 		return a.ID, nil
 	}
-	if peer, err := s.db.HasPeerAgent(ctx, ref); err != nil {
+	if known, ok, err := s.db.FindPeerAgent(ctx, ref); err != nil {
 		return "", err
-	} else if peer {
-		return "", Errorf(http.StatusNotImplemented, "%s is an agent of a peer machine, and posting to a peer's agent is not ported to the Go daemon yet", ref)
+	} else if ok {
+		return known.ID, nil
 	}
-	return "", nil
+	// person(ref).catch(() => null): any failure is no one.
+	id, err := s.person(ctx, jsfmt.StringValue(ref), true)
+	if err != nil {
+		return "", nil
+	}
+	return id, nil
 }
 
 // stringList reads a body member that is a list of strings; a missing or null one is empty. Anything else TS would coerce.

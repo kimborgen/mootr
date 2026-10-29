@@ -111,15 +111,50 @@ test('runs when started through a symlink to the script', () => {
   assert.match(r.stdout, /would remove .*stam-budgets-zzzzzz/);
 });
 
+test('--install keeps the stam-sweep-test-homes name when that timer is installed (S-3349)', () => {
+  const dir = join(base, 'units-keep');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'stam-sweep-test-homes.timer'), 'LIVE\n');
+  const fakeHome = join(base, 'home-keep');
+  mkdirSync(fakeHome);
+  const r = spawnSync(process.execPath, [SCRIPT, '--install'], { encoding: 'utf8', env: { ...process.env, HOME: fakeHome, STAM_HOME: join(fakeHome, '.local/share/mootr'), STAM_SWEEP_UNIT_DIR: dir } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(join(dir, 'stam-sweep-test-homes.service')));
+  assert.ok(!existsSync(join(dir, 'mootr-sweep-test-homes.service')) && !existsSync(join(dir, 'mootr-sweep-test-homes.timer')));
+});
+
+test('--install under a real stam home writes the stam name on a clean dir, and a mootr name never carries a stam path (S-3349)', () => {
+  const fakeHome = join(base, 'home-legacy');
+  const legacy = join(fakeHome, '.local/share/stam');
+  mkdirSync(join(legacy, 'releases/current/scripts'), { recursive: true });
+  writeFileSync(join(legacy, 'releases/current/scripts/sweep-test-homes.mjs'), '');
+  const dir = join(base, 'units-legacy');
+  const r = spawnSync(process.execPath, [SCRIPT, '--install'], { encoding: 'utf8', env: { ...process.env, HOME: fakeHome, STAM_HOME: legacy, STAM_SWEEP_UNIT_DIR: dir } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(join(dir, 'stam-sweep-test-homes.timer')) && !existsSync(join(dir, 'mootr-sweep-test-homes.timer')));
+  assert.ok(readFileSync(join(dir, 'stam-sweep-test-homes.service'), 'utf8').includes(`${legacy}/releases/current/`));
+  // After the move: a mootr home, and the stam folder a symlink to it.
+  const moved = join(base, 'home-moved');
+  const mootr = join(moved, '.local/share/mootr');
+  mkdirSync(join(mootr, 'releases/current/scripts'), { recursive: true });
+  writeFileSync(join(mootr, 'releases/current/scripts/sweep-test-homes.mjs'), '');
+  symlinkSync('mootr', join(moved, '.local/share/stam'));
+  const dir2 = join(base, 'units-moved');
+  const r2 = spawnSync(process.execPath, [SCRIPT, '--install'], { encoding: 'utf8', env: { ...process.env, HOME: moved, STAM_HOME: mootr, STAM_SWEEP_UNIT_DIR: dir2 } });
+  assert.equal(r2.status, 0, r2.stderr);
+  const text = readFileSync(join(dir2, 'mootr-sweep-test-homes.service'), 'utf8');
+  assert.ok(text.includes(`${mootr}/releases/current/`) && !text.includes(`${join(moved, '.local/share/stam')}/`), text);
+});
+
 test('--install writes the unit files (and, outside a test dir, enables the timer)', () => {
   const dir = join(base, 'units');
   const fakeHome = join(base, 'home');
   mkdirSync(fakeHome);
-  const install = () => spawnSync(process.execPath, [SCRIPT, '--install'], { encoding: 'utf8', env: { ...process.env, HOME: fakeHome, STAM_SWEEP_UNIT_DIR: dir } });
-  const service = () => readFileSync(join(dir, 'stam-sweep-test-homes.service'), 'utf8');
+  const install = () => spawnSync(process.execPath, [SCRIPT, '--install'], { encoding: 'utf8', env: { ...process.env, HOME: fakeHome, STAM_HOME: join(fakeHome, '.local/share/mootr'), STAM_SWEEP_UNIT_DIR: dir } });
+  const service = () => readFileSync(join(dir, 'mootr-sweep-test-homes.service'), 'utf8');
   const r = install();
   assert.equal(r.status, 0, r.stderr);
-  assert.match(readFileSync(join(dir, 'stam-sweep-test-homes.timer'), 'utf8'), /OnCalendar=hourly/);
+  assert.match(readFileSync(join(dir, 'mootr-sweep-test-homes.timer'), 'utf8'), /OnCalendar=hourly/);
   // No deployed copy: the unit runs this script. A user unit's PATH lacks node and ~/.local/bin (where stam is).
   assert.match(service(), new RegExp(`ExecStart=.* ${SCRIPT.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
   const pathLine = service().split('\n').find((l) => l.startsWith('Environment=PATH='));
@@ -130,7 +165,7 @@ test('--install writes the unit files (and, outside a test dir, enables the time
   writeFileSync(join(main, 'sweep-test-homes.mjs'), '');
   install();
   assert.ok(service().includes(`${join(main, 'sweep-test-homes.mjs')}\n`), service());
-  const rel = join(fakeHome, '.local/share/stam/releases/current/scripts');
+  const rel = join(fakeHome, '.local/share/mootr/releases/current/scripts');
   mkdirSync(rel, { recursive: true });
   writeFileSync(join(rel, 'sweep-test-homes.mjs'), '');
   install();

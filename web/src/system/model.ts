@@ -2,7 +2,7 @@
 // and Work column badges, and the header's counts. Pure, so it tests without a browser.
 import { STATE_COLOR, stateOf, treeAgents } from '../format'
 import type { Field } from '../itsa/fields'
-import { cardFields } from '../work/field-columns'
+import { isEmpty, valueOf } from '../work/field-columns'
 import { linkKind, reviewOf, testsOf } from '../work/links'
 import type { Agent, Itsa, ItsaStatus } from '../types'
 import type { TreeIn } from './layout'
@@ -61,14 +61,12 @@ export type Badge =
   | { kind: 'word'; id: string; word: string; tone: Tone; title: string }
   | { kind: 'field'; id: string; f: Field; v: unknown }
 
-// The Work columns a card shows as badges, in the Work layout's order (`cols`, the column ids
-// the human shows): health when it isn't on track, the branch's review and tests, and each field
-// whose `card` setting is chip and that has a value. The other columns are the side panel's.
-// With `anyField`, a field shows whatever its `card` setting, as the sidebar's picked columns do.
-export function cardBadges(it: Itsa, cols: string[], fields: Field[], anyField = false): Badge[] {
+// The Work columns a card shows as badges, in the given order (`cols`, the column ids a card's layout places in its
+// badges): health when it isn't on track, the branch's review and tests, and each field that has a value. A column the
+// list leaves out, or one this doesn't draw, is left out. Field.card is not read: the layout places the field.
+export function cardBadges(it: Itsa, cols: string[], fields: Field[]): Badge[] {
   const branch = it.links?.find((l) => linkKind(l) === 'branch')
-  const { chips, meta } = cardFields(it, fields)
-  if (anyField) chips.push(...meta)
+  const chips = fields.map((f) => ({ f, v: valueOf(it, f) })).filter((x) => !isEmpty(x.v))
   const out: Badge[] = []
   for (const id of cols) {
     if (id === 'health' && it.health && it.health !== 'on_track') {

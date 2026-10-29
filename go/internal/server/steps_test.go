@@ -337,7 +337,7 @@ func TestStepsCheckOnANonHomeDaemon(t *testing.T) {
 		}
 	}))
 	f := newFixture(t, nil)
-	writeFile(t, filepath.Join(f.home, "settings.json"), `{"requirements":{"enabled":true},"home":"farhome","peers":[{"name":"farhome","url":"`+home.URL+`","token":"t"}]}`)
+	writeFile(t, filepath.Join(f.home, "settings.json"), `{"requirements":{"enabled":true},"home":"farhome","peers":[{"name":"farhome","url":"`+home.URL+`","token":"test-peer-token"}]}`)
 	edit := `{"agent":"aboss","tool":"Edit"}`
 	// No copy of the index yet: the call goes through, and the copy is fetched.
 	if rec := f.check(sharedTok, edit); rec.Code != 200 || rec.Body.String() != `{"allow":true}` {

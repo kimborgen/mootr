@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"stam/internal/agentenv"
 	"stam/internal/jsjson"
 	"stam/internal/proctree"
 )
@@ -125,6 +126,21 @@ func (e Env) Set(key, value string) Env {
 	return append(e, EnvVar{key, value})
 }
 
+// WithTwins is e with a MOOTR_X variable, of the same value, after each STAM_X whose twin is not in e (S-3345; src/env.ts
+// withTwins). Twins go last, in the order of their STAM_ names, as the TS writer appends them.
+func (e Env) WithTwins() Env {
+	out := append(Env{}, e...)
+	for _, v := range e {
+		if !strings.HasPrefix(v.Key, "STAM_") {
+			continue
+		}
+		if _, ok := e.Get("MOOTR_" + strings.TrimPrefix(v.Key, "STAM_")); !ok {
+			out = append(out, EnvVar{"MOOTR_" + strings.TrimPrefix(v.Key, "STAM_"), v.Value})
+		}
+	}
+	return out
+}
+
 // Get returns key's value and whether it is set.
 func (e Env) Get(key string) (string, bool) {
 	for _, v := range e {
@@ -135,11 +151,29 @@ func (e Env) Get(key string) (string, bool) {
 	return "", false
 }
 
+// identityScrub is the `-u` words that drop each agent identity name env doesn't set, under both names: the pane inherits
+// the daemon's environment, and readers prefer MOOTR_ over STAM_ (S-2889, S-3229, S-3329). A name env sets is kept.
+func identityScrub(env Env) []string {
+	var words []string
+	for _, name := range agentenv.Names() {
+		if _, ok := env.Get(name); ok {
+			continue
+		}
+		words = append(words, "-u", name)
+	}
+	return words
+}
+
 // SessionConf is the new-session.conf line NewSession has tmux source: the command with every word quoted.
 func SessionConf(name, cwd string, env Env, argv []string) string {
+	env = env.WithTwins()
 	cmd := []string{"new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", cwd}
 	for _, v := range env {
 		cmd = append(cmd, "-e", v.Key+"="+v.Value)
+	}
+	// Prefixed with env only when there is something to scrub (S-3229).
+	if scrub := identityScrub(env); len(scrub) > 0 {
+		argv = append(append([]string{"/usr/bin/env"}, scrub...), argv...)
 	}
 	words := make([]string, len(argv))
 	for i, a := range argv {
@@ -150,6 +184,43 @@ func SessionConf(name, cwd string, env Env, argv []string) string {
 		cmd[i] = tmuxQuote(w)
 	}
 	return strings.Join(cmd, " ") + "\n"
+}
+
+// A server with no sessions left exits on its own, so a start right after the last session was killed can connect to
+// one that is still exiting and fail with exitingServer. Under load that exit can last past 200 ms, so a start retries
+// that error only, every startBackoff, until startDeadline has passed (S-3618).
+const (
+	exitingServer = "server exited unexpectedly"
+	startDeadline = 2 * time.Second
+	startBackoff  = 50 * time.Millisecond
+)
+
+// retryExiting runs attempt until it succeeds, fails with an error other than exitingServer in its stderr, or
+// startDeadline has passed. attempt returns its stderr and its error (nil on success).
+func retryExiting(ctx context.Context, attempt func() (string, error)) error {
+	end := time.Now().Add(startDeadline)
+	for {
+		stderr, err := attempt()
+		if err == nil || !strings.Contains(stderr, exitingServer) || time.Now().After(end) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(startBackoff):
+		}
+	}
+}
+
+// startServer runs start-server with file sourced in the same client, retrying as retryExiting does.
+func (c *Client) startServer(ctx context.Context, file string) error {
+	return retryExiting(ctx, func() (string, error) {
+		r := c.Run(ctx, nil, "start-server", ";", "source-file", file)
+		if r.Status == 0 {
+			return "", nil
+		}
+		return r.Stderr, fmt.Errorf("tmux start-server failed (status %d): %s", r.Status, strings.TrimSpace(r.Stderr))
+	})
 }
 
 // NewSession starts argv in a new detached session name, in cwd, with env. The env holds the agent's token, so it never
@@ -167,7 +238,7 @@ func (c *Client) NewSession(ctx context.Context, name, cwd string, env Env, argv
 		return err
 	}
 	// source-file alone doesn't start a server.
-	if _, err := c.call(ctx, nil, "start-server", ";", "source-file", file); err != nil {
+	if err := c.startServer(ctx, file); err != nil {
 		return err
 	}
 	// Keep the pane after the harness exits, so its last output stays visible.
@@ -251,6 +322,33 @@ func (c *Client) ServerID(ctx context.Context) (string, bool) {
 	}
 	return strings.TrimSpace(r.Stdout), true
 }
+
+// PanePID is the pid of the live process in the session's pane; false when tmux says the session or its server isn't
+// there, or the pane is dead (a dead pane's pid may belong to another process by now). Only those answers count as
+// gone: a timeout, a refused connection or any other failure is an error, so a caller never reads it as gone.
+func (c *Client) PanePID(ctx context.Context, name string) (int, bool, error) {
+	r := c.Run(ctx, nil, "list-panes", "-t", "="+name+":", "-F", "#{pane_pid} #{pane_dead}")
+	if r.Status != 0 {
+		if r.Status == 1 && absent.MatchString(r.Stderr) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("tmux list-panes %s failed (status %d): %s", name, r.Status, strings.TrimSpace(r.Stderr))
+	}
+	first, _, _ := strings.Cut(strings.TrimSpace(r.Stdout), "\n")
+	f := strings.Fields(first)
+	if len(f) != 2 {
+		return 0, false, fmt.Errorf("tmux list-panes %s: unexpected %q", name, first)
+	}
+	pid, err := strconv.Atoi(f[0])
+	if err != nil || pid <= 1 {
+		return 0, false, fmt.Errorf("tmux list-panes %s: unexpected %q", name, first)
+	}
+	return pid, f[1] == "0", nil
+}
+
+// absent is tmux's own word that a session isn't there: no such session, or no server on the socket (tmux 3.x says the
+// socket file isn't there; older ones, no server running). A refused connection, a stale socket's, is not among them.
+var absent = regexp.MustCompile(`(?m)^(can't find session|no server running on |error connecting to .* \(No such file or directory\)$)`)
 
 // IsDead is whether the session's pane is dead, or the session is gone.
 func (c *Client) IsDead(ctx context.Context, name string) bool {
@@ -336,7 +434,16 @@ func (c *Client) PaneWidth(ctx context.Context, name string) (int, error) {
 
 // Cursor is the cursor's column and row in the agent's pane (0-based), and false when tmux doesn't say.
 func (c *Client) Cursor(ctx context.Context, name string) (x, y int, ok bool, err error) {
-	out, err := c.call(ctx, nil, "display-message", "-p", "-t", "="+name+":", "#{cursor_x} #{cursor_y}")
+	return c.cursor(ctx, "="+name+":")
+}
+
+// CursorOfPane is Cursor for one pane by its %N id.
+func (c *Client) CursorOfPane(ctx context.Context, pane string) (x, y int, ok bool, err error) {
+	return c.cursor(ctx, pane)
+}
+
+func (c *Client) cursor(ctx context.Context, target string) (x, y int, ok bool, err error) {
+	out, err := c.call(ctx, nil, "display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y}")
 	if err != nil {
 		return 0, 0, false, err
 	}
@@ -411,6 +518,9 @@ func (c *Client) ResizeWindow(ctx context.Context, name string, cols, rows int) 
 	c.Run(ctx, nil, "resize-window", "-t", "="+name+":", "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
 }
 
+// Binary is the tmux binary this client runs.
+func (c *Client) Binary() string { return c.bin() }
+
 // AttachArgs is the tmux argv (after the binary) that attaches to the agent's session.
 func (c *Client) AttachArgs(name string) []string {
 	return []string{"-L", c.Socket, "attach-session", "-t", "=" + name}
@@ -424,26 +534,39 @@ type Shell struct {
 }
 
 // NewShell starts the human's own terminal: a login shell in tmux, named sh-XXXXX, kept until it exits. It gets this
-// process's env without the STAM_AGENT* variables, with TERM=xterm-256color.
+// process's env without the STAM_AGENT* and MOOTR_AGENT* variables and the agent identity (agentenv.Names, S-3406), with TERM=xterm-256color.
 func (c *Client) NewShell(ctx context.Context, cwd, machine string) (Shell, error) {
 	id := "sh-" + randomBase36(5)
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "bash"
 	}
+	identity := make(map[string]bool)
+	for _, name := range agentenv.Names() {
+		identity[name] = true
+	}
 	var env []string
 	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "STAM_AGENT") && !strings.HasPrefix(kv, "TERM=") {
+		name, _, _ := strings.Cut(kv, "=")
+		if !strings.HasPrefix(kv, "STAM_AGENT") && !strings.HasPrefix(kv, "MOOTR_AGENT") && !identity[name] && !strings.HasPrefix(kv, "TERM=") {
 			env = append(env, kv)
 		}
 	}
-	tctx, cancel := context.WithTimeout(ctx, Timeout)
-	defer cancel()
-	cmd := exec.CommandContext(tctx, c.bin(), "-L", c.Socket, "new-session", "-d", "-s", id, "-x", "120", "-y", "40", "-c", cwd, shell, "-l")
-	cmd.Env = append(env, "TERM=xterm-256color")
-	cmd.WaitDelay = time.Second
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return Shell{}, fmt.Errorf("tmux new-session: %v: %s", err, strings.TrimSpace(string(out)))
+	err := retryExiting(ctx, func() (string, error) {
+		tctx, cancel := context.WithTimeout(ctx, Timeout)
+		defer cancel()
+		cmd := exec.CommandContext(tctx, c.bin(), "-L", c.Socket, "new-session", "-d", "-s", id, "-x", "120", "-y", "40", "-c", cwd, shell, "-l")
+		cmd.Env = append(env, "TERM=xterm-256color")
+		cmd.WaitDelay = time.Second
+		out, err := cmd.CombinedOutput()
+		msg := strings.TrimSpace(string(out))
+		if err != nil {
+			return msg, fmt.Errorf("tmux new-session: %v: %s", err, msg)
+		}
+		return "", nil
+	})
+	if err != nil {
+		return Shell{}, err
 	}
 	if _, err := c.call(ctx, nil, "set-option", "-t", id, "status", "off"); err != nil {
 		return Shell{}, err

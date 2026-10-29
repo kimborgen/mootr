@@ -5,6 +5,7 @@
 // or the home can't make skips the agent. Throwaway STAM_HOME and tmux socket, no daemon, no models:
 // `node --test test/idle-shutdown-archive.test.mjs`.
 import { test, before, after } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync, execFileSync } from 'node:child_process';
@@ -28,7 +29,7 @@ before(async () => {
   ({ createWorkspace } = await import('../src/workspace.ts'));
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 

@@ -2,10 +2,9 @@
 // Build step 2 is config only: matching and validation, no gating or stops. An agent that
 // matches no account is unmanaged and keeps today's behaviour.
 import { registry } from './registry.ts';
-import * as db from './db.ts';
 import { render } from './templates.ts';
 import { displayProblem } from './cost-display.ts';
-import { sendMail, HUMAN } from './mail.ts';
+import { sendFromSystemMail, HUMAN } from './mail.ts';
 import { settings, SYSTEM_ACCOUNT, type CostAccount, type CostConfig } from './settings.ts';
 
 // The actions a policy may name (docs/cost-policy.md), strictest first.
@@ -224,11 +223,9 @@ export function retryNotices(): void {
 
 function deliver(): void {
   if (!pending || inFlight) return;
-  const sender = db.listAgents().find((a) => a.lifecycle === 'active');
-  if (!sender) return;
   const error = pending;
   inFlight = true;
-  sendMail({ from: sender.id, to: [HUMAN], subject: '[stam] Cost config rejected', body: render('cost-config-rejected', { error }), new_thread: true, from_stam: true })
+  sendFromSystemMail('cost', [HUMAN], '[stam] Cost config rejected', render('cost-config-rejected', { error }))
     .then(() => {
       inFlight = false;
       if (pending === error) {

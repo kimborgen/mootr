@@ -271,11 +271,11 @@ func TestTokensStayOutOfErrors(t *testing.T) {
 			t.Errorf("the error quotes a token: %v", err)
 		}
 	}
-	e := scrub(p, io.ErrUnexpectedEOF)
+	e := c.scrub(p, io.ErrUnexpectedEOF)
 	if e != io.ErrUnexpectedEOF {
 		t.Error("an error without a token changed")
 	}
-	if got := scrub(p, &quoting{"echo " + peerTok + " and " + sharedTok}).Error(); strings.Contains(got, peerTok) || strings.Contains(got, sharedTok) || !strings.Contains(got, "[redacted]") {
+	if got := c.scrub(p, &quoting{"echo " + peerTok + " and " + sharedTok}).Error(); strings.Contains(got, peerTok) || strings.Contains(got, sharedTok) || !strings.Contains(got, "[redacted]") {
 		t.Errorf("scrub = %q", got)
 	}
 	if s := p.Token.String(); strings.Contains(s, sharedTok) {
@@ -690,5 +690,243 @@ func TestEmptyFanOutAndReviewHeaders(t *testing.T) {
 	(&Via{Agent: "a1", OwnBranches: []string{"x"}}).headers(h)
 	if h.Get("x-stam-review-role") != "" || h.Get("x-stam-own-branches") != "" {
 		t.Errorf("branches without a role: %v", h)
+	}
+}
+
+// TestRefusalRedacted: a peer's or a proxy's refusal that echoes a token reaches no caller with it (S-3994): the target
+// peer's shared, peer and lease tokens and this daemon's own shared, peer and lease tokens each read [redacted], in the
+// error text and anywhere else in the body, keys included, through Call and Poll. The rest of the text, and a
+// success's body, are left as the peer sent them.
+func TestRefusalRedacted(t *testing.T) {
+	kinds := map[string]string{
+		"the peer's shared token": sharedTok, "the peer's peer token": peerTok, "the peer's lease token": "peer-lease-secret-token",
+		"our shared token": "own-shared-secret-token", "our peer token": "own-peer-secret-token", "our lease token": "own-lease-secret-token",
+	}
+	var echo atomic.Value
+	status := atomic.Int32{}
+	f := newPeer(t, func(w http.ResponseWriter, r *http.Request) {
+		tok := echo.Load().(string)
+		w.WriteHeader(int(status.Load()))
+		io.WriteString(w, `{"error":"denied: Bearer `+tok+` is not ours","detail":{"seen":["`+tok+`"],"`+tok+`":1}}`)
+	})
+	p := peerOf(f, "far")
+	p.LeaseToken = config.Secret(kinds["the peer's lease token"])
+	c := New(Options{
+		Settings: func() config.Settings { return config.Settings{Peers: []config.Peer{p}} },
+		Machine:  "here",
+		Own: func() []string {
+			return []string{kinds["our shared token"], kinds["our peer token"], kinds["our lease token"]}
+		},
+	})
+	for name, tok := range kinds {
+		echo.Store(tok)
+		for _, code := range []int32{403, 500, 302} {
+			status.Store(code)
+			for _, how := range []string{"call", "poll"} {
+				var r Reply
+				var err error
+				if how == "call" {
+					r, err = c.Call(context.Background(), p, "GET", "/api/x", nil, time.Second, false, nil)
+				} else {
+					r, err = c.Poll(context.Background(), p, "/api/x", time.Second)
+				}
+				if err != nil {
+					t.Fatalf("%s %s %d: %v", name, how, code, err)
+				}
+				body := jsfmt.Compact(r.Data)
+				if r.Status != int(code) || strings.Contains(body, tok) || r.Data.Text("error") != "denied: Bearer [redacted] is not ours" ||
+					body != `{"error":"denied: Bearer [redacted] is not ours","detail":{"seen":["[redacted]"],"[redacted]":1}}` {
+					t.Errorf("%s, %s %d: %d %s", name, how, code, r.Status, body)
+				}
+			}
+		}
+		// A success is the peer's protocol: left as it came.
+		status.Store(200)
+		if r, _ := c.Call(context.Background(), p, "GET", "/api/x", nil, time.Second, false, nil); !strings.Contains(r.Data.Text("error"), tok) {
+			t.Errorf("%s: a success's body changed: %s", name, jsfmt.Compact(r.Data))
+		}
+	}
+	// Redact itself covers the lease token too.
+	if got := Redact(p, "x "+kinds["the peer's lease token"]); got != "x [redacted]" {
+		t.Errorf("Redact = %q", got)
+	}
+	// Config accepts a token of any length, so a short one is redacted too.
+	if got := Redact(config.Peer{Token: "q", PeerToken: "short"}, "a quick short note"); got != "a [redacted]uick [redacted] note" {
+		t.Errorf("a short token: Redact = %q", got)
+	}
+}
+
+// TestRawRefusalRedacted: a refusal that Raw or Stream relays (a file, a diff, a declaration lookup, an agent's view) is
+// buffered and redacted, with its length recomputed (S-3994); a success's bytes pass as they came.
+func TestRawRefusalRedacted(t *testing.T) {
+	own := "own-lease-secret-token"
+	var echo atomic.Value
+	status := atomic.Int32{}
+	f := newPeer(t, func(w http.ResponseWriter, r *http.Request) {
+		body := `{"error":"denied: Bearer ` + echo.Load().(string) + ` is not ours"}`
+		w.Header().Set("content-type", "application/json")
+		w.Header().Set("content-length", strconv.Itoa(len(body)))
+		w.WriteHeader(int(status.Load()))
+		io.WriteString(w, body)
+	})
+	p := peerOf(f, "far")
+	c := New(Options{
+		Settings: func() config.Settings { return config.Settings{Peers: []config.Peer{p}} },
+		Machine:  "here",
+		Own:      func() []string { return []string{own} },
+	})
+	const want = `{"error":"denied: Bearer [redacted] is not ours"}`
+	for _, tok := range []string{sharedTok, peerTok, own} {
+		echo.Store(tok)
+		for _, code := range []int32{403, 502} {
+			status.Store(code)
+			res := c.Raw(context.Background(), p, "/api/decl", nil, true)
+			if res == nil {
+				t.Fatalf("%s %d: no answer", tok, code)
+			}
+			body, _ := io.ReadAll(res.Body)
+			res.Body.Close()
+			if res.StatusCode != int(code) || string(body) != want || res.Header.Get("content-length") != strconv.Itoa(len(want)) || res.ContentLength != int64(len(want)) {
+				t.Errorf("raw %s %d: %d %q length %q", tok, code, res.StatusCode, body, res.Header.Get("content-length"))
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/api/agents/x/view", nil)
+			if err := c.Stream(req, p, "/api/agents/x/view", rec, nil); err != nil || rec.Code != int(code) || rec.Body.String() != want {
+				t.Errorf("stream %s %d: %v %d %q", tok, code, err, rec.Code, rec.Body.String())
+			}
+		}
+		status.Store(200)
+		res := c.Raw(context.Background(), p, "/api/files/read", nil, true)
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if !strings.Contains(string(body), tok) {
+			t.Errorf("raw %s: a success's bytes changed: %q", tok, body)
+		}
+	}
+}
+
+// TestRawRefusalEscaped: a JSON refusal whose token is escaped in the text (`\u0070eer-...`) is decoded, redacted and
+// written again by Raw and Stream, so the caller that decodes it (the declaration relay) gets no token (S-3994).
+func TestRawRefusalEscaped(t *testing.T) {
+	f := newPeer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(403)
+		io.WriteString(w, `{"error":"denied: \u0070`+peerTok[1:]+`","\u0070`+peerTok[1:]+`":[1]}`)
+	})
+	p := peerOf(f, "far")
+	c := newClient(t, p)
+	const want = `{"error":"denied: [redacted]","[redacted]":[1]}`
+	res := c.Raw(context.Background(), p, "/api/decl", nil, true)
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if string(body) != want {
+		t.Errorf("raw: %q", body)
+	}
+	rec := httptest.NewRecorder()
+	if c.Stream(httptest.NewRequest("GET", "/x", nil), p, "/api/agents/x/view", rec, nil); rec.Body.String() != want {
+		t.Errorf("stream: %q", rec.Body.String())
+	}
+}
+
+// TestRawRefusalDeep: a JSON refusal with an escaped token and 20,000 nested arrays is decoded and redacted whole (Go's
+// stack grows; TS answers the fixed refusal), never redacted as text, where the escaped token would survive (S-3994).
+func TestRawRefusalDeep(t *testing.T) {
+	f := newPeer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		io.WriteString(w, `{"error":"denied: \u0070`+peerTok[1:]+`","n":`+strings.Repeat("[", 20000)+strings.Repeat("]", 20000)+`}`)
+	})
+	p := peerOf(f, "far")
+	c := newClient(t, p)
+	safe := func(body string) bool {
+		return strings.HasPrefix(body, `{"error":"denied: [redacted]","n":[[`) && !strings.Contains(body, peerTok[1:])
+	}
+	res := c.Raw(context.Background(), p, "/api/decl", nil, true)
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if !safe(string(body)) {
+		t.Errorf("raw: %.200q", body)
+	}
+	rec := httptest.NewRecorder()
+	if c.Stream(httptest.NewRequest("GET", "/x", nil), p, "/api/agents/x/view", rec, nil); !safe(rec.Body.String()) {
+		t.Errorf("stream: %.200q", rec.Body.String())
+	}
+}
+
+// TestRefusalBounded: a refusal body over the cap, or one that never ends, is not redacted (a cut could leave a token's
+// start in it) but replaced by a fixed refusal with its status, through Raw and Stream, and the call returns (S-3994).
+// The cap and the wait are injected small.
+func TestRefusalBounded(t *testing.T) {
+	release := make(chan struct{})
+	f := newPeer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		if strings.HasSuffix(r.URL.Path, "/big") {
+			io.WriteString(w, `{"error":"`+strings.Repeat("x", 200)+peerTok+`"}`)
+			return
+		}
+		// Never ends: a start of the token, then nothing until the test is over.
+		io.WriteString(w, `{"error":"`+peerTok[:6])
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	defer close(release)
+	p := peerOf(f, "far")
+	c := newClient(t, p)
+	c.refusalMax = 100
+	c.refusalWait = 50 * time.Millisecond
+	const want = `{"error":"far refused with 403; its answer was too long or too slow to show safely"}`
+	for _, path := range []string{"/api/big", "/api/endless"} {
+		res := c.Raw(context.Background(), p, path, nil, true)
+		if res == nil {
+			t.Fatalf("raw %s: no answer", path)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != 403 || string(body) != want || res.Header.Get("content-length") != strconv.Itoa(len(want)) {
+			t.Errorf("raw %s: %d %q", path, res.StatusCode, body)
+		}
+		rec := httptest.NewRecorder()
+		if err := c.Stream(httptest.NewRequest("GET", "/x", nil), p, path, rec, nil); err != nil || rec.Code != 403 || rec.Body.String() != want {
+			t.Errorf("stream %s: %v %d %q", path, err, rec.Code, rec.Body.String())
+		}
+	}
+	if !c.Up("far") {
+		t.Error("a slow refusal marked the peer down")
+	}
+}
+
+// TestRefusalBoundsPositive: a refusal wait or cap that isn't a positive number is the default, not a bound that refuses
+// every answer.
+func TestRefusalBoundsPositive(t *testing.T) {
+	for _, v := range []string{"-5", "0", "x"} {
+		c := New(Options{Getenv: func(k string) string {
+			return map[string]string{"STAM_PEER_REFUSAL_MS": v, "STAM_PEER_REFUSAL_MAX_BYTES": v}[k]
+		}})
+		if c.refusalWait != 4*time.Second || c.refusalMax != RefusalMax {
+			t.Errorf("%q: wait %v cap %d", v, c.refusalWait, c.refusalMax)
+		}
+	}
+}
+
+// TestRotatedTokenRedacted: Own is read at each answer, so a lease token rotated after the client was made is redacted
+// at once (S-3994).
+func TestRotatedTokenRedacted(t *testing.T) {
+	var lease atomic.Value
+	lease.Store("old-lease-secret-token")
+	f := newPeer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		io.WriteString(w, `{"error":"denied: `+lease.Load().(string)+`"}`)
+	})
+	p := peerOf(f, "far")
+	c := New(Options{
+		Settings: func() config.Settings { return config.Settings{Peers: []config.Peer{p}} },
+		Machine:  "here",
+		Own:      func() []string { return []string{lease.Load().(string)} },
+	})
+	lease.Store("new-lease-secret-token")
+	if r, err := c.Call(context.Background(), p, "GET", "/api/x", nil, time.Second, false, nil); err != nil || r.Data.Text("error") != "denied: [redacted]" {
+		t.Errorf("after a rotation: %v %s", err, jsfmt.Compact(r.Data))
 	}
 }

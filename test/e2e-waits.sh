@@ -96,7 +96,7 @@ hook "$K" '{"hook_event_name":"UserPromptSubmit","prompt":"wake up"}'
 
 echo "-- the next Stop's lists replace the hook waits; empty lists go idle"
 hook "$K" '{"hook_event_name":"Stop","last_assistant_message":"x","background_tasks":[],"session_crons":[{"id":"c2","schedule":"*/30 * * * *","recurring":true,"prompt":"tick"}]}'
-[ "$(detail "$K")" = "waiting for cron */30 * * * *" ] || fail "detail: $(detail "$K")"
+[ "$(detail "$K")" = "waiting for harness cron */30 * * * *" ] || fail "detail: $(detail "$K")"
 work "$K"; hook "$K" '{"hook_event_name":"Stop","last_assistant_message":"x","background_tasks":[],"session_crons":[]}'
 [ "$(state "$K")" = idle ] || fail "nothing open at Stop, but agent is $(state "$K")"
 

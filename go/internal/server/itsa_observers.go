@@ -22,10 +22,12 @@ import (
 //	retro-loop           the gate and closeAnswered (retroGate), proposals (kind refused); a process proposal's gate is ported (proposal_gate.go)
 //	process-proposal     ported (process_proposal.go); req-approval: requirement-approvals (kind refused)
 //	stageGuard, onStage  a stage field write: guarded and recorded (process_run.go); what the runner would do live is refused there
-//	watch.syncItsa       links to followed subjects (refused in db/itsa_links.go)
+//	watch.syncItsa       links to followed subjects: carried (events.go syncItsaSubscriptions, after a create, set, link add and remove)
 //
-// Left out without an error, because nothing observable depends on it: the search index (itsa-vectors queues the ITSAs its
-// periodic scan finds unindexed anyway) and the nudges of the auto-archive and notices sweeps, which also run on a timer.
+// The search index (itsa-vectors) is carried: a created or edited ITSA is queued (search.go indexItsa).
+//
+// Left out without an error, because nothing observable depends on it: the nudges of the auto-archive and notices sweeps,
+// which also run on a timer.
 
 // observed is a create or a set, as the observers see it after it is made.
 type observed struct {

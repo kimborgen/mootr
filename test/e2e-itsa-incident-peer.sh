@@ -63,6 +63,8 @@ patch() { curl -s -o /dev/null -w '%{http_code}' -X PATCH -H "authorization: Bea
 patch_body() { curl -s -X PATCH -H "authorization: Bearer $2" -H 'content-type: application/json' -d "$3" "$1/api/itsas/$K"; }
 # mark: the home's incident flag for the ITSA.
 mark() { api "$HOME_URL" "$HOME_TOKEN" GET "/api/itsas/$K" | python3 -c 'import json, sys; print(json.load(sys.stdin)["incident"])'; }
+# incident URL TOKEN: the incident route's answer for the ITSA (S-3324).
+incident() { api "$1" "$2" GET "/api/itsas/$K/incident"; }
 started() { api "$STORE_URL" "$STORE_TOKEN" GET /api/agents | grep -q "\"name\":\"$1\""; }
 # spawn NAME: an incident spawn on store by the manager's own token, naming the ITSA; prints the reply and the status.
 spawn() { curl -s -m 30 -w '\n%{http_code}' -X POST -H "authorization: Bearer $MT" -H 'content-type: application/json' "$STORE_URL/api/agents" -d "{\"name\":\"$1\",\"type\":\"developer\",\"urgent\":\"incident\",\"itsa\":\"$K\",\"cwd\":\"$REPO\",\"by\":\"$MT_ID\"}"; }
@@ -89,11 +91,18 @@ echo "-- 2b. with the mark standing, an incident spawn on store starts"
 R=$(spawn inc1)
 printf %s "$R" | grep -q '"name":"inc1"' || fail "a marked incident spawn on store was refused: $R"
 
+echo "-- 2c. the incident route (S-3324) says marked on the home and, by asking the home, on store; the CLI says the same"
+incident "$HOME_URL" "$HOME_TOKEN" | grep -q '"marked":true' || fail "the home's incident route didn't say marked"
+incident "$STORE_URL" "$STORE_TOKEN" | grep -q '"marked":true' || fail "store's incident route didn't say marked"
+on home "$ROOT/bin/stam" itsa incident "$K" | grep -q '"marked":true' || fail "stam itsa incident didn't say marked"
+
 echo "-- 3. an unmarked ITSA refuses an incident spawn on store"
 [ "$(patch "$HOME_URL" "$CT" '{"incident":false}')" = 200 ] || fail "the chief of staff couldn't clear the mark for step 3"
 [ "$(mark)" = 0 ] || fail "the mark didn't clear for step 3"
 R=$(spawn inc2)
 [ "$(printf %s "$R" | tail -1)" = 403 ] || fail "an unmarked incident spawn on store started: $R"
+incident "$HOME_URL" "$HOME_TOKEN" | grep -q '"marked":false' || fail "the incident route said marked for a cleared mark"
+on home "$ROOT/bin/stam" itsa incident "$K" | grep -q '"marked":false' || fail "stam itsa incident said marked for a cleared mark"
 printf %s "$R" | grep -q 'ITSA home did not answer yes' || fail "the refusal doesn't say why: $R"
 started inc2 && fail "inc2 started"
 
@@ -103,4 +112,5 @@ daemon_stop home
 R=$(spawn inc3)
 [ "$(printf %s "$R" | tail -1)" = 403 ] || fail "an incident spawn started with the home unreachable: $R"
 started inc3 && fail "inc3 started"
+! incident "$STORE_URL" "$STORE_TOKEN" | grep -q '"marked":true' || fail "store's incident route said marked with the home unreachable (S-3324 fails closed)"
 echo "PASS"

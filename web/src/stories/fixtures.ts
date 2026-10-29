@@ -43,6 +43,8 @@ const ROUTES: Record<string, unknown> = {
   'POST /api/tool-summaries': { enabled: false, summaries: {}, pending: [] },
   // The secret store's listing (Settings › Model providers, S-2115): empty unless a state sets it.
   'GET /api/secrets': { secrets: [] },
+  // The Needs you list (S-3831): empty unless a state sets its asks (NeedsYouList.stories.tsx has a long one).
+  'GET /api/asks': [],
 }
 
 export interface StoriesDebug { apiCalls: string[] }

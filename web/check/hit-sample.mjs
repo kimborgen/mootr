@@ -7,7 +7,10 @@
 // Fail-closed: a sample is exempt only for a declared state, never a guess.
 //   - the target is `[inert]` or `[aria-hidden=true]`;
 //   - the point is covered by a declared overlay (OVERLAYS) the target isn't in;
-//   - the point is off the screen, or scrolled out of a scroller the target is in;
+//   - the point is off the screen (or, with `edge`, within that many px of its right or bottom edge: WebKit's elementFromPoint returns
+//     the scroller, not the button, for a point on the last half pixel row of a clipped button), or scrolled out of a scroller the target is in
+//     (with `edge`, also within that many px of the scroller's bottom or right edge: a button the scroller clips at its centre line hits the
+//     fixed bar below that edge in WebKit, S-3461; the same position scrolls clear);
 //   - a fixed or sticky coverer, when the target's scroller can scroll the covered part clear of it.
 // Anything else that covers a target is a hit; known ones go on the S-2249 allow-list in phone.mjs.
 
@@ -32,7 +35,7 @@ export const OVERLAYS = [
   '[data-overlay]', // any other layer that marks itself as one
 ];
 
-export const sampleTargets = ({ selector, exclude, overlays, inset }) => {
+export const sampleTargets = ({ selector, exclude, overlays, inset, edge: screenEdge = 0 }) => {
   const W = innerWidth, H = innerHeight;
   const vis = (el) => { const s = getComputedStyle(el); const b = el.getBoundingClientRect(); return b.width > 0 && b.height > 0 && s.visibility !== 'hidden' && s.opacity !== '0' && !el.closest('[hidden]'); };
   // Fully transparent anywhere up the tree: shown only on hover or focus, not a target a finger can see.
@@ -78,7 +81,7 @@ export const sampleTargets = ({ selector, exclude, overlays, inset }) => {
 
   // Covered by a declared overlay the target isn't inside (the drawer holds the tree: its own rows are in it).
   const overlaid = (el, h) => { for (let a = h.closest(OV); a; a = a.parentElement?.closest(OV)) if (!a.contains(el)) return true; return false; };
-  const clipped = (el, x, y) => { for (let a = el.parentElement; a; a = a.parentElement) { if (getComputedStyle(a).overflowY === 'visible') continue; const r = a.getBoundingClientRect(); if (y < r.top || y >= r.bottom || x < r.left || x >= r.right) return true; } return false; };
+  const clipped = (el, x, y) => { for (let a = el.parentElement; a; a = a.parentElement) { if (getComputedStyle(a).overflowY === 'visible') continue; const r = a.getBoundingClientRect(); if (y < r.top || y >= r.bottom - screenEdge || x < r.left || x >= r.right - screenEdge) return true; } return false; };
   // The fixed or sticky bar that holds `h`, when the target isn't inside it.
   const bar = (el, h) => { for (let a = h; a; a = a.parentElement) { const pos = getComputedStyle(a).position; if ((pos === 'fixed' || pos === 'sticky') && !a.contains(el)) return a; } return null; };
   // A pinned cover is a scroll position, not a slip, only if the target's scroller can scroll the
@@ -107,7 +110,7 @@ export const sampleTargets = ({ selector, exclude, overlays, inset }) => {
       const pts = [['centre', cx, cy], ['top', cx, b.top + inset], ['bottom', cx, b.bottom - inset], ['left', b.left + inset, cy], ['right', b.right - inset, cy]];
       const targetInert = !!el.closest('[inert], [aria-hidden=true]');
       for (const [edge, x, y] of pts) {
-        if (x < 0 || y < 0 || x >= W || y >= H) { out.samples.push({ edge, offscreen: true, inside: true }); continue; }
+        if (x < 0 || y < 0 || x >= W - screenEdge || y >= H - screenEdge) { out.samples.push({ edge, offscreen: true, inside: true }); continue; }
         const hit = document.elementFromPoint(x, y);
         if (!hit) { out.samples.push({ edge, offscreen: true, inside: true }); continue; }
         const inside = el.contains(hit);

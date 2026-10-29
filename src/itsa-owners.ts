@@ -13,9 +13,10 @@ import { render } from './templates.ts';
 import { tellAnywhere, HUMAN } from './mail.ts';
 import { MACHINE } from './config.ts';
 import { findAgentPeer, locateAgent, peerByName, peerCall, type Via } from './peers.ts';
-import { itsaRefusal, mayEditItsa } from './mail-visibility.ts';
+import { itsaRefusal, mayEditItsa, mayReadItsaThreads } from './mail-visibility.ts';
 import { chainMarked, homeSaysMarked } from './developer-cap.ts';
 import { envVar } from './env.ts';
+import { subjectsForUrl } from './watch.ts';
 
 const log = (what: string, e: unknown) => console.error(`ITSA owners: ${what}: ${e instanceof Error ? e.message : e}`);
 const isHome = () => settings().itsa.home === MACHINE;
@@ -33,6 +34,9 @@ const isFinal = (e: unknown) => e instanceof itsa.ForbiddenError;
 
 // The wait before the next try after `fails` failures in a row: doubles from `every`, capped at an hour.
 export const retryDelay = (every: number, fails: number) => Math.min(every * 2 ** Math.max(0, fails - 1), 3_600_000);
+
+// The ITSA home runs a release from before asks had homes (S-3827): an ask then has no ITSA home, never a refusal.
+export class OldHome extends Error {}
 
 async function toHome(method: string, path: string, body?: unknown, timeoutMs = 8000, via?: Via): Promise<any> {
   const r = await peerCall(homePeer(), method, path, body, timeoutMs, false, via);
@@ -194,6 +198,36 @@ export async function openOwnedItsas(agentId: string): Promise<itsa.Itsa[] | nul
   }
 }
 
+// The ITSA an ask belongs to (S-3827, ask-home.ts): the one the agent names, which it must be able to read (a
+// ForbiddenError says who may), else the one ITSA it owns whose status is in the active category; none with several.
+// Its thread is allocated here on the home if it has none yet, so the ask can join it. Read from the home off it.
+export type AskItsa = { id: string; key: string; title: string; thread_id: string };
+export async function askItsa(agentId: string, ref?: string, timeoutMs = 8000): Promise<AskItsa | null> {
+  // A daemon with no home set is its own home, as itsa.ts reads it.
+  if ((settings().itsa.home ?? MACHINE) !== MACHINE) {
+    const r = await peerCall(homePeer(), 'POST', '/api/itsas/ask-home', { itsa: ref ?? null }, timeoutMs, false, { agent: agentId, boss: false });
+    // A home from before S-3827 has no such route (`no route POST …`); a missing ITSA is `no ITSA …`, also a 404.
+    if (r.status === 404 && /^no route /.test(String(r.data?.error ?? ''))) throw new OldHome(`the ITSA home ${settings().itsa.home} can't place asks yet`);
+    if (r.status === 403) throw new itsa.ForbiddenError(`the ITSA home ${settings().itsa.home} refused: ${r.data?.error ?? r.status}`);
+    if (r.status >= 300) throw new Error(`the ITSA home ${settings().itsa.home} refused: ${r.data?.error ?? r.status}`);
+    return r.data as AskItsa | null;
+  }
+  return askItsaHere(agentId, ref);
+}
+
+export async function askItsaHere(agentId: string, ref?: string): Promise<AskItsa | null> {
+  let x: itsa.Itsa;
+  if (ref) {
+    x = itsa.must(ref);
+    if (!mayReadItsaThreads(agentId, x.id)) throw new itsa.ForbiddenError(itsaRefusal(agentId, x.id, 'ask in the thread of'));
+  } else {
+    const active = (await itsa.list({ owner: agentId })).filter((y) => itsa.statusOf(y.status)?.category === 'active');
+    if (active.length !== 1) return null;
+    x = itsa.must(active[0].id);
+  }
+  return { id: x.id, key: x.key, title: x.title, thread_id: itsa.ensureThread(x.id) };
+}
+
 // The ITSAs an agent owns that are not closed, for its system prompt. Rebuilt on every
 // start and resume, so the list stays true after a restart.
 export function ownedPrompt(agentId: string): string {
@@ -222,7 +256,8 @@ export function fieldsPrompt(): string {
     if (!list.length) return '';
     const rows = list.map((f) => {
       const opts = f.type === 'choice' && f.options ? ` (${f.options.map((o) => o.value).join(' | ')})` : '';
-      return `- \`${f.key}\` · ${f.label} · ${f.type}${opts}${f.description ? `: ${f.description}` : ''}`;
+      const kinds = f.kinds ? ` · only for kind ${f.kinds.join(' or ')}` : '';
+      return `- \`${f.key}\` · ${f.label} · ${f.type}${opts}${kinds}${f.description ? `: ${f.description}` : ''}`;
     });
     return `Work page columns (ITSA fields) you fill with \`itsa_set\` \`fields\`:\n${rows.join('\n')}`;
   } catch (e) {
@@ -418,6 +453,10 @@ export function watchOwnerStops(): void {
   const every = Number(envVar('ITSA_RETRY_MS')) || 30_000;
   retryPendingUnowns().catch((e) => log('retry', e));
   setInterval(() => retryPendingUnowns().catch((e) => log('retry', e)), every).unref();
+  // A switch's hand-off to the home that failed before a restart, or fails now, is asked again (S-3636).
+  seedSwitchedItsas();
+  retrySwitchedItsas().catch((e) => log('retry switch', e));
+  setInterval(() => retrySwitchedItsas().catch((e) => log('retry switch', e)), every).unref();
   db.onLifecycleChange((_before, after) => {
     if (after.lifecycle !== 'shut_down' || after.activity === 'errored') return;
     if (/^(restarting|archiving)/.test(after.activity_detail ?? '')) return;
@@ -439,15 +478,55 @@ const unowning = new Map<string, Promise<unknown>>();
 
 // S-3015: a reviewer whose approve is posted, or that is archived or forgotten, leaves the ITSAs it joined: each
 // row is marked left (a soft leave, so spend and reviewer counts keep it), with a participant event. An ITSA it still
-// owns keeps it as a member. `branch` limits it to the ITSAs whose branch link is that branch (a verdict's PR).
-// Runs on the home, where the rows are. The caller checks the agent is a reviewer.
-export async function releaseReviewer(agentId: string, by: string, branch?: string): Promise<number> {
+// owns keeps it as a member. `scope` limits it to the ITSAs whose branch link names that branch in that repo (a
+// verdict's PR, S-3161): a branch of the same name in another repo is not touched. Runs on the home, where the rows
+// are. The caller checks the agent is a reviewer.
+export async function releaseReviewer(agentId: string, by: string, scope?: { branch: string; repo: string; subject?: string }): Promise<number> {
   const notOwned = '(i.owner IS NULL OR i.owner <> ?)';
-  const rows = branch === undefined
-    ? db.open().prepare(`SELECT p.itsa_id FROM itsa_participants p JOIN itsas i ON i.id = p.itsa_id WHERE p.agent_id = ? AND p.left_at IS NULL AND ${notOwned}`).all(agentId, agentId) as { itsa_id: string }[]
-    : db.open().prepare(`SELECT p.itsa_id FROM itsa_participants p JOIN itsas i ON i.id = p.itsa_id WHERE p.agent_id = ? AND p.left_at IS NULL AND ${notOwned} AND p.itsa_id IN (SELECT itsa_id FROM itsa_links WHERE system = 'branch' AND external_id = ?)`).all(agentId, agentId, branch) as { itsa_id: string }[];
+  const mine = db.open().prepare(`SELECT p.itsa_id FROM itsa_participants p JOIN itsas i ON i.id = p.itsa_id WHERE p.agent_id = ? AND p.left_at IS NULL AND ${notOwned}`).all(agentId, agentId) as { itsa_id: string }[];
+  // A verdict's scope (S-3161, S-3508): the ITSAs whose branch link names the branch in that repo, or whose github link names the PR.
+  const rows = scope === undefined ? mine : mine.filter((r) => prScopeIds(scope).has(r.itsa_id));
   for (const r of rows) await itsa.leaveParticipant(r.itsa_id, agentId, by);
   return rows.length;
+}
+
+// The ITSAs a verdict's scope names: a branch link in its repo, or a github link to its PR (S-3508).
+function prScopeIds(scope: { branch: string; repo: string; subject?: string }): Set<string> {
+  const ids = new Set((db.open().prepare("SELECT itsa_id FROM itsa_links WHERE system = 'branch' AND external_id = ? AND json_extract(meta, '$.repo') = ?").all(scope.branch, scope.repo) as { itsa_id: string }[]).map((r) => r.itsa_id));
+  if (scope.subject) for (const id of linkIdsForSubject(scope.subject)) ids.add(id);
+  return ids;
+}
+
+// The ITSAs with a github link that names the PR or issue `subject` (`github:OWNER/REPO#N`), a link's URL read as watch.ts's
+// subjectsForUrl reads it.
+function linkIdsForSubject(subject: string): string[] {
+  const links = db.open().prepare("SELECT itsa_id, url FROM itsa_links WHERE url LIKE '%github.com/%'").all() as { itsa_id: string; url: string }[];
+  return [...new Set(links.filter((l) => subjectsForUrl(l.url) === subject).map((l) => l.itsa_id))];
+}
+
+// S-3508: a reviewer that watches a PR joins each open ITSA the PR is linked to, as a participant with the owner unchanged,
+// so it can reply in their threads until its verdict (a verdict's approve leaves them, releaseReviewer). Only a reviewer
+// type joins; any other agent is left alone. The agent is local (its watch is), and the join is made on the home.
+export async function joinPrReviewer(agentId: string, subject: string, by: string): Promise<string[]> {
+  const a = db.getAgent(agentId);
+  if (!a?.type || !isReviewerType(a.type) || !subject.startsWith('github:')) return [];
+  if (isHome()) return joinPrItsas(agentId, subject, by);
+  const r = await toHome('POST', '/api/itsas/join-pr-reviewer', { agent: agentId, subject, by }, 8000);
+  return (r?.keys as string[]) ?? [];
+}
+
+// Runs on the home, where the links are: joins the agent to each open ITSA whose link names the PR `subject`.
+// Returns the keys it joined.
+export async function joinPrItsas(agentId: string, subject: string, by: string): Promise<string[]> {
+  const ids = linkIdsForSubject(subject);
+  const keys: string[] = [];
+  for (const id of ids) {
+    const x = itsa.find(id);
+    if (!x || itsa.isClosedStatus(x.status)) continue;
+    await itsa.addParticipant(x.id, agentId, by);
+    keys.push(x.key);
+  }
+  return keys;
 }
 
 // On the home: the owner is gone. Each open ITSA goes to its heir (the parent, else the nearest
@@ -615,5 +694,108 @@ export async function guardPeerReport<T>(local: boolean, id: string, lifecycles:
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new HolderRefusal(e instanceof itsa.ForbiddenError ? 403 : 503, msg);
+  }
+}
+
+// --- A switch's ITSAs (S-3636) -------------------------------------------------------------
+
+// On the home: a peer ran a cost_switch, so the predecessor's open ITSAs go to its successor. The proof is the holder's own
+// word: a peer must hold `from` with forwarded_to naming `to`, and hold `to` too, so a crafted call can't take an agent's
+// ITSAs. Only open ITSAs move, each by compare-and-set on the owner, so a repeat (a retry, a restart) moves what is left
+// and nothing twice. 403 (final) when no peer shows the switch; 503 (try again) when a peer that may hold them didn't answer.
+export async function moveSwitchedItsas(local: boolean, from: string, to: string): Promise<{ moved: string[] }> {
+  const mine = db.getAgent(from);
+  if (!local || !from || !to || from === to || (mine && (!mine.machine || mine.machine === MACHINE))) throw new HolderRefusal(403, 'only a peer holding a switched agent can move its ITSAs');
+  const [a, b] = await Promise.all([locateAgent(from), locateAgent(to)]);
+  if (a === 'unreachable' || b === 'unreachable') throw new HolderRefusal(503, `no peer answered about ${from}; try again`);
+  if (a === 'absent' || b === 'absent' || a.agent.id !== from || b.agent.id !== to || a.peer.name !== b.peer.name || a.agent.forwarded_to !== to)
+    throw new HolderRefusal(403, 'only a peer holding a switched agent can move its ITSAs');
+  // Final: ITSAs never land on an archived successor. A shut-down one can be resumed, so it takes them, as in a local switch.
+  if (b.agent.lifecycle === 'archived') throw new HolderRefusal(403, `${b.agent.name} is archived, so it can't take ITSAs`);
+  const moved: string[] = [];
+  try {
+    for (const x of ownedBy(from)) {
+      if (itsa.statusOf(x.status)?.category === 'closed') continue;
+      try {
+        await itsa.set(x.id, { owner: to, ifOwner: from }, from);
+      } catch (e) {
+        if (/owner changed/.test(e instanceof Error ? e.message : String(e))) continue;
+        throw e;
+      }
+      await itsa.addParticipant(x.id, to, from).catch((e) => log(`couldn't add ${to} to ${x.key}`, e));
+      itsa.addEvent(x.id, from, 'handoff', `Owner @${a.agent.name} was switched; ownership passed to @${b.agent.name}.`);
+      moved.push(x.key);
+    }
+    // The open ITSAs the predecessor only took part in: the successor joins them, as the local switch does.
+    for (const x of participatedBy(from)) {
+      if (itsa.statusOf(x.status)?.category === 'closed' || x.owner === from) continue;
+      await itsa.addParticipant(x.id, to, from).catch((e) => log(`couldn't add ${to} to ${x.key}`, e));
+    }
+  } catch (e) {
+    throw new HolderRefusal(e instanceof itsa.ForbiddenError ? 403 : 503, e instanceof Error ? e.message : String(e));
+  }
+  return { moved };
+}
+
+// On the machine that ran the switch: asks the ITSA home to pass the predecessor's open ITSAs to the successor. On the home
+// the switch's own transaction did it. Soft: a home that is down or older than this route is logged, never fails the switch;
+// the event it leaves lets retrySwitchedItsas ask again. Messages carry no URL or token (peerCall's errors may).
+export async function handOffSwitchedItsas(from: Who, to: Who): Promise<void> {
+  if ((settings().itsa.home ?? MACHINE) === MACHINE) return;
+  try {
+    const r = await toHome('POST', '/api/itsas/switch-owner', { from: from.id, to: to.id }, 15_000);
+    pendingSwitched.delete(from.id);
+    switchBackoff.delete(from.id);
+    db.addEvent(from.id, 'cost:switch', { step: 'itsa-owner', to: to.name, itsas: (r?.moved as string[] | undefined)?.length ?? 0 });
+  } catch (e) {
+    const msg = e instanceof Error && e.message.startsWith('the ITSA home') ? e.message : 'the ITSA home did not answer';
+    log(`couldn't move ${from.name}'s ITSAs to ${to.name}`, new Error(msg));
+    if (isFinal(e)) {
+      // The home's final answer (a 403): asking again can't change it. The event keeps a restart from seeding it again.
+      pendingSwitched.delete(from.id);
+      switchBackoff.delete(from.id);
+      db.addEvent(from.id, 'cost:switch', { step: 'itsa-owner-refused', to: to.name, error: msg });
+      return;
+    }
+    // One event per outage: the retry interval doesn't write another while the home stays down.
+    if (!pendingSwitched.has(from.id)) db.addEvent(from.id, 'cost:switch', { step: 'itsa-owner-failed', to: to.name, error: msg });
+    pendingSwitched.add(from.id);
+    const fails = (switchBackoff.get(from.id)?.fails ?? 0) + 1;
+    switchBackoff.set(from.id, { fails, next: Date.now() + retryDelay(Number(envVar('ITSA_RETRY_MS')) || 30_000, fails) });
+  }
+}
+
+// Predecessors whose hand-off to the home failed and isn't done: seeded from the events at start, so a restart keeps them.
+const pendingSwitched = new Set<string>();
+// Per predecessor: failures in a row and when to ask again. In memory only; a restart asks at once.
+const switchBackoff = new Map<string, { fails: number; next: number }>();
+let retryingSwitched = false;
+// How many retry passes finished, for a test to wait on (GET /api/test/switch-retries).
+export let switchRetryPasses = 0;
+
+function seedSwitchedItsas(): void {
+  for (const a of db.listAgents()) {
+    if (!a.forwarded_to) continue;
+    const last = db.listEvents(a.id, 500).filter((e) => e.type === 'cost:switch' && /"step":"itsa-owner/.test(e.data ?? '')).at(-1);
+    if (last && /"step":"itsa-owner-failed"/.test(last.data ?? '')) pendingSwitched.add(a.id);
+  }
+}
+
+// Asks the home again for each pending switch (the home's move is idempotent). Runs from the retry interval.
+export async function retrySwitchedItsas(): Promise<void> {
+  if (retryingSwitched) return;
+  retryingSwitched = true;
+  try {
+    for (const id of [...pendingSwitched]) {
+      const a = db.getAgent(id);
+      const s = a?.forwarded_to ? db.getAgent(a.forwarded_to) : undefined;
+      if (!a || !s) {
+        pendingSwitched.delete(id);
+        switchBackoff.delete(id);
+      } else if (Date.now() >= (switchBackoff.get(id)?.next ?? 0)) await handOffSwitchedItsas(a, s);
+    }
+  } finally {
+    retryingSwitched = false;
+    switchRetryPasses++;
   }
 }

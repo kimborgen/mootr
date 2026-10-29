@@ -34,6 +34,9 @@ export interface Place {
   section: string | null
   // The Usage page's tab, period, measure and drill scope, encoded, while Usage is the world.
   usage?: string | null
+  // The phone Agents list's select mode (S-3282). Optional: entries recorded before it existed have none. An overlay, so
+  // a back press leaves it and the entry it pushed is taken back.
+  select?: boolean
 }
 
 // The sidebar history (S-1456): the places seen by thing, on the browser's own history. `pos` is the
@@ -88,9 +91,10 @@ const place = (): Place => ({
   viewer: getUi().viewer?.src ?? null,
   section: shell.currentWorld() === 'w:config' ? settingsSection() : null,
   usage: shell.currentWorld() === 'w:usage' ? encodeUsage(getUsageState()) : null,
+  select: !!getUi().agentSelect && shell.currentWorld() === 'w:agents' && !shell.phoneShows(),
 })
-const eq = (a: Place, b: Place) => a.current === b.current && a.mobile === b.mobile && a.search === b.search && !!a.suggest === !!b.suggest && a.top === b.top && a.menu === b.menu && a.viewer === b.viewer && a.section === b.section && (a.usage ?? null) === (b.usage ?? null)
-const anyOverlay = (p: Place) => p.search || !!p.suggest || p.top || p.menu || p.viewer !== null
+const eq = (a: Place, b: Place) => a.current === b.current && a.mobile === b.mobile && a.search === b.search && !!a.suggest === !!b.suggest && a.top === b.top && a.menu === b.menu && a.viewer === b.viewer && a.section === b.section && (a.usage ?? null) === (b.usage ?? null) && !!a.select === !!b.select
+const anyOverlay = (p: Place) => p.search || !!p.suggest || p.top || p.menu || p.viewer !== null || !!p.select
 // The address a place shows. Usage's state is in the hash, `#view=usage&tab=...`, so a copied link
 // opens the same view; any other place drops a hash that was Usage's and leaves the rest alone.
 const urlOf = (p: Place): string | undefined => {
@@ -116,7 +120,7 @@ function apply(t: Place) {
   }
   if (t.current !== shell.currentWorld()) shell.showAgentWorld(t.current)
   if (t.mobile !== shell.phoneShows()) shell.phoneShow(t.mobile)
-  setUi({ searchOpen: t.search, suggestOpen: !!t.suggest, topOpen: t.top, viewer: t.viewer ? { src: t.viewer, alt: '' } : null })
+  setUi({ searchOpen: t.search, suggestOpen: !!t.suggest, topOpen: t.top, viewer: t.viewer ? { src: t.viewer, alt: '' } : null, agentSelect: !!t.select })
   if (t.current === 'w:usage' && t.usage) restoreUsage(t.usage)
   // Focus returns to where it was before the menu opened, as Esc and Close do.
   hideMenu(true)
@@ -206,7 +210,9 @@ function onPop(e: PopStateEvent) {
 
 export function init() {
   const saved = (history.state as { stam?: unknown } | null)?.stam
-  cur = isPlace(saved) ? saved : place()
+  // The UI state starts with every overlay closed (ui/state.ts), so the entry kept over a reload
+  // records them closed too; else the first change reads as a dismiss and steps back (S-4107).
+  cur = isPlace(saved) ? { ...saved, search: false, suggest: false, top: false, menu: false, viewer: null, select: false } : place()
   const n = (history.state as { n?: unknown } | null)?.n
   pos = typeof n === 'number' ? n : 0
   hist = emptyHistory()
@@ -216,6 +222,9 @@ export function init() {
   if (cur.current === 'w:usage' && cur.usage) restoreUsage(cur.usage)
   history.replaceState({ stam: cur, n: pos }, '', urlOf(cur))
   shell.onChange(schedule)
+  // The shell keeps a world alive after the human leaves it, so the list may stay mounted: a move off the Agents world ends
+  // select mode here, not in the list's unmount (S-3282).
+  shell.onChange(() => { if (getUi().agentSelect && (shell.currentWorld() !== 'w:agents' || shell.phoneShows() !== null)) setUi({ agentSelect: false }) })
   onUiChange(schedule)
   onMenuChange(schedule)
   onSpawnPanelChange(schedule)

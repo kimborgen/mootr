@@ -7,6 +7,7 @@
 // socket and two fake harnesses on two accounts; no daemon, no network, no models:
 // `node --test test/cost-switch.test.mjs`.
 import { test, before, after, beforeEach } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { spawnSync, execFileSync } from 'node:child_process';
@@ -88,7 +89,7 @@ before(async () => {
   adapters.fake2 = fake('fake2');
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -110,7 +111,7 @@ beforeEach(() => {
   costNotices.notices(0); // creates the cost_notices table before it is cleared
   const d = db.open();
   for (const t of ['cost_notices', 'blockers', 'agent_parents', 'agents', 'mail_recipients', 'mail', 'events', 'itsas', 'itsa_participants', 'waits']) d.exec(`DELETE FROM ${t}`);
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   failLaunch = false;
   mode = {};
   interrupts.length = 0;
@@ -645,4 +646,27 @@ test('a ring turn queued before the switch reaches the successor exactly once (S
   await sleep(100);
   assert.equal((prompts.get(s.id) ?? []).filter((t) => t.includes(topic)).length, 1, 'the successor is prompted once');
   assert.ok(!(prompts.get(x.id) ?? []).some((t) => t.includes(topic)), 'the predecessor is never prompted');
+});
+
+// S-923: the successor holds the predecessor's worktree and branch, and pr_open and a branch link must pass for it.
+test("the successor's branch scope is its own tree's, while an unrelated agent still gets foreign", async () => {
+  const { localScope } = await import('../src/branch-scope.ts');
+  const branch = 'stam/worker-dev';
+  const x = agent('worker', mgr.id);
+  db.updateAgent(x.id, { workspace: JSON.stringify({ worktree: { branch, path: x.cwd } }) });
+  const stranger = agent('stranger', cos.id);
+  assert.equal(localScope(x.id, branch), 'tree');
+  assert.equal(localScope(stranger.id, branch), 'foreign');
+
+  const r = await costSwitch.costSwitch({ agent: x.name, preset: 'cheap', by: mgr.id, softStopMinutes: 1 });
+  const s = byName(r.to);
+  assert.equal(get(x).lifecycle !== 'archived', true, 'the stopped predecessor still holds its branch');
+  assert.equal(localScope(s.id, branch), 'tree', "the successor's pr_open scope passes");
+  assert.equal(localScope(stranger.id, branch), 'foreign', 'an unrelated agent is still refused');
+  // A hand-made successor in the same worktree is not handed anything.
+  const hand = agent('hand-made', mgr.id, { cwd: x.cwd });
+  db.updateAgent(hand.id, { workspace: get(x).workspace });
+  assert.equal(localScope(hand.id, branch), 'foreign');
+  // The handover is in the database: it survives a reopen of it.
+  assert.equal(get(x).forwarded_to, s.id);
 });

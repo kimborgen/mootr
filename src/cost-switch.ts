@@ -17,6 +17,8 @@
 //                it, and mail to the predecessor forwards to it (agents.forwarded_to).
 //   5. launch    the successor starts with takeover.md: the original spawn prompt, HANDOVER.md,
 //                the predecessor's transcript path, its last compaction summary, the threads.
+//      On a machine that isn't the ITSA home, the home is then asked to move the open ITSAs' owner (itsa-owners.ts,
+//      moveSwitchedItsas); a home that is down or older is logged and retried after a restart.
 //   6. tell      the successor's parents hear it (cost-notices.switched), and the
 //                predecessor's open cost notices are acknowledged. Its queued ring turns move
 //                to the successor after the launch, once (mail.moveRingNotices, S-2490).
@@ -41,8 +43,9 @@ import * as tmux from './tmux.ts';
 import { syncChildrenWaits } from './org.ts';
 import { adapters } from './adapters/index.ts';
 import { admitSpawn } from './admission.ts';
-import { assertMayManageTree } from './cost-auth.ts';
+import { assertMayManageTree, type RemoteManager } from './cost-auth.ts';
 import { copyGrants } from './workspace-share.ts';
+import { handOffSwitchedItsas } from './itsa-owners.ts';
 import { preset as presetOf, capabilitiesFor } from './registry.ts';
 import { render } from './templates.ts';
 import { queueNotice, dropNotice, moveRingNotices, HUMAN } from './mail.ts';
@@ -65,6 +68,8 @@ export interface SwitchOptions {
   toType?: string;
   // The manager: an agent id, or 'human'.
   by: string;
+  // `by` runs on another machine and was vouched for by that machine's daemon (a forwarded call).
+  remote?: RemoteManager;
   // Overrides settings.cost.softStopMinutes.
   softStopMinutes?: number;
   // How often the quiesce checks for the end of the turn; tests shorten it.
@@ -142,7 +147,7 @@ export function successorName(name: string): string {
 export function check(opts: SwitchOptions, again = false): SwitchPlan {
   const a = db.getAgent(opts.agent);
   if (!a) throw new Error(`no agent ${opts.agent}`);
-  assertMayManageTree(opts.by, a);
+  assertMayManageTree(opts.by, a, opts.remote);
   if (a.lifecycle === 'archived') throw new Error(`${a.name} is archived`);
   if (a.forwarded_to) throw new Error(`${a.name} was already taken over by ${db.getAgent(a.forwarded_to)?.name ?? a.forwarded_to}`);
   if (!again && switching.has(a.id)) throw new Error(`${a.name} is already being switched`);
@@ -459,6 +464,8 @@ export async function costSwitch(opts: SwitchOptions, plan: SwitchPlan = check(o
       await launch(s, text, opts);
       // The ring turns queued to the predecessor are the successor's now, once (S-2490).
       moveRingNotices(a.id, s.id);
+      // The ITSAs live on the ITSA home; on another machine it moves their owner too (S-3636). Soft: it never fails the switch.
+      await handOffSwitchedItsas(db.getAgent(a.id)!, s);
       await blockers.addBlocker(a.id, { kind: TAKEN_OVER, reason: `taken over by ${s.name} on preset ${plan.preset}` });
       acked.push(...ackOpen());
       costNotices.switched(db.getAgent(a.id)!, db.getAgent(s.id)!, plan.preset, plan.by);

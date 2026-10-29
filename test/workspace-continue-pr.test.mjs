@@ -144,11 +144,11 @@ test('an explicit branch, or "new", stacks a new branch on the PR instead', () =
   assert.equal(cont('s4', { branch: 'new' }, pr).worktree.branch, 'stam/s4');
 });
 
-test('no base, or a non-stam base, keeps the plain default and its reuse refusal (S-1419)', () => {
+test('no base, or a non-stam base, keeps the plain default, and a taken name gets a suffix (S-1419, S-3486)', () => {
   assert.equal(createWorkspace({ kind: 'worktree', repo }, 'plain').worktree.branch, 'stam/plain');
   assert.equal(createWorkspace({ kind: 'worktree', repo, base: 'origin/main' }, 'plain2').worktree.branch, 'stam/plain2');
   git(repo, ['branch', 'stam/taken', 'origin/main']);
-  assert.throws(() => createWorkspace({ kind: 'worktree', repo, base: 'origin/main' }, 'taken'), /already exists/);
+  assert.equal(createWorkspace({ kind: 'worktree', repo, base: 'origin/main' }, 'taken').worktree.branch, 'stam/taken-2');
 });
 
 test('archive never deletes the PR branch, even when the agent added nothing; a later ancestry check still works', () => {

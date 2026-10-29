@@ -34,6 +34,11 @@ before(async () => {
         res.end(JSON.stringify(obj));
       };
       if (req.url !== '/token') return json({ ok: false, error: 'not_found' });
+      if (form.get('refresh_token') === 'r-html') {
+        // A 200 that isn't JSON, and starts with a token-shaped string (S-3503).
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        return res.end('Bearer NONJSON-LEAK-7f3a9c1e5b2d8g4h6j0k2m4n6p8q1r3s5t7u9v rest of the body');
+      }
       if (form.get('refresh_token') === 'r-ok') {
         return json({ ok: true, token_type: 'bearer', authed_user: { id: 'U1', access_token: 'xoxe.xoxp-new', refresh_token: 'r-2', expires_in: 43200, token_type: 'user' } });
       }
@@ -78,6 +83,11 @@ test('refresh: the client secret goes in the form body (client_secret_post)', ()
   const last = seen.filter((f) => f.grant_type === 'refresh_token').at(-1);
   assert.equal(last.client_secret, 'sec');
   assert.equal(last.client_id, 'cid');
+});
+
+test('refresh: a 200 that is not JSON gives a fixed message, never the body (S-3503)', async () => {
+  seed('r-html');
+  await assert.rejects(mcpAuth.token('slack', { refresh: true }), (e) => e.message === `an OAuth endpoint answered non-JSON from ${origin}/token` && !/LEAK|Bearer/.test(e.message));
 });
 
 test('refresh: a refused refresh names Slack’s error, never the refresh token', async () => {

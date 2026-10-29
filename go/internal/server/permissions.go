@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,9 +28,8 @@ import (
 // permMu runs one answer, escalation, dialog report or timeout at a time, so the check before a write and the keys typed
 // into a dialog belong to the answer that wins.
 //
-// Not ported, each answered 501 before anything is written: suggested input (kind input) and settings changes (a
-// payload), a delegate ask whose live reviewer runs on another machine (its mail would go through the peer), and an
-// answer to a request another machine holds.
+// A delegate ask whose live reviewer runs on another machine mails it through its peer, and an answer to a request another
+// machine holds is relayed there (permission_relay.go).
 
 // reviewers is src/permissions.ts reviewers: the agent's parent (here or remembered from a peer) and the chief of staff.
 func (s *Server) reviewers(ctx context.Context, a db.Agent) ([]string, error) {
@@ -59,6 +59,9 @@ func (s *Server) reviewers(ctx context.Context, a db.Agent) ([]string, error) {
 // liveReviewers is src/permissions.ts liveReviewers: the reviewers that can decide now, a local one active, one on
 // another machine unless its last known lifecycle says otherwise.
 func (s *Server) liveReviewers(ctx context.Context, a db.Agent) ([]string, error) {
+	if s.liveReviewersHook != nil {
+		return s.liveReviewersHook(ctx, a)
+	}
 	all, err := s.reviewers(ctx, a)
 	if err != nil {
 		return nil, err
@@ -194,8 +197,16 @@ func (s *Server) dialogMail(ctx context.Context, requester string, told []string
 			break
 		}
 	}
+	// A question dialog shows its question and options, numbered as the choice is typed (S-3978).
+	q, isQuestion := "", false
+	var options []string
+	if tool == "AskUserQuestion" {
+		q, options, isQuestion = claude.DialogQuestion(inputObj)
+	}
 	line := "wants to use " + tool + "."
 	switch {
+	case isQuestion:
+		line = "asks a question, with these options."
 	case tool == "Bash":
 		line = "wants to run a shell command."
 	case target != "":
@@ -205,15 +216,25 @@ func (s *Server) dialogMail(ctx context.Context, requester string, told []string
 	if target != "" {
 		shown = fenced(target, "bash")
 	}
+	if isQuestion {
+		lines := []string{q, ""}
+		for i, o := range options {
+			lines = append(lines, strconv.Itoa(i+1)+". "+o)
+		}
+		shown = fenced(strings.Join(lines, "\n"), "")
+	}
 	why := "Claude Code gave no reason with this dialog; ask the agent, or read its last message in its terminal."
 	if d, ok := get(inputObj, "description").(string); ok && jsjson.Trim(d) != "" {
 		why = jsjson.Trim(d)
 	}
 	subject := requester + " asks to use " + tool
-	if tool == "Bash" && target != "" {
+	switch {
+	case isQuestion:
+		subject = requester + " asks: " + anySpace.ReplaceAllString(q, " ")
+	case tool == "Bash" && target != "":
 		subject = requester + " wants to run"
 	}
-	if target != "" {
+	if target != "" && !isQuestion {
 		subject += ": " + anySpace.ReplaceAllString(target, " ")
 	}
 	if utf16Len(subject) > 90 {
@@ -244,6 +265,25 @@ func (s *Server) queueNotice(ctx context.Context, id, text string) {
 		s.noticeHook(id, text)
 	} else if s.life != nil {
 		s.life.QueueNotice(ctx, id, text, false)
+	}
+}
+
+// queueAnswerNotice is queueNotice for an answer's notice (S-3923): the lifecycle also stores it until the agent is handed
+// it, so a restart before then delivers it once. src/permissions.ts queues these with { answer: true }.
+func (s *Server) queueAnswerNotice(ctx context.Context, id, text string) {
+	if s.noticeHook != nil {
+		s.noticeHook(id, text)
+	} else if s.life != nil {
+		s.life.QueueAnswerNotice(ctx, id, text)
+	}
+}
+
+// queueAnswerRow queues an answer's notice whose answer_notices row was written with the answer (S-3923), 0 for none.
+func (s *Server) queueAnswerRow(ctx context.Context, id, text string, row int64) {
+	if s.noticeHook != nil {
+		s.noticeHook(id, text)
+	} else if s.life != nil {
+		s.life.QueueAnswerRow(ctx, id, text, row)
 	}
 }
 
@@ -289,40 +329,116 @@ func (s *Server) publicRequest(ctx context.Context, id string) (jsfmt.Value, err
 	return s.db.PublicRequest(ctx, r, s.cfg.Machine)
 }
 
-// unportedAsk is the 501 an ask gets before anything is written: no templates, or a delegate ask whose live reviewer
-// runs on another machine (its mail would go through the peer). Else the live reviewers.
-func (s *Server) unportedAsk(ctx context.Context, a db.Agent, audience string) ([]string, error) {
+// unportedAsk refuses an ask before anything is written: with no templates (501), or a delegate ask whose live reviewer is
+// on a machine that isn't a configured peer (503), which no mail can reach. A reviewer on a configured peer gets the
+// request's mail through it, like any mail to an agent there (mail_peers.go).
+func (s *Server) unportedAsk(ctx context.Context, a db.Agent, audience string, live []string) error {
 	if s.tpl == nil {
-		return nil, unported("permission requests need the templates, which this server has not loaded")
+		return unported("permission requests need the templates, which this server has not loaded")
 	}
-	live, err := s.liveReviewers(ctx, a)
-	if err != nil || audience != "delegate" {
-		return live, err
+	if audience != "delegate" {
+		return nil
 	}
 	for _, id := range live {
-		if _, err := s.db.GetAgent(ctx, id); err != nil {
-			return nil, unported("%s's reviewer %s runs on another machine, and sending it the request is not ported to the Go daemon yet", a.Name, s.agentLabel(ctx, id))
+		_, err := s.db.GetAgent(ctx, id)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, db.ErrNotFound) {
+			return err
+		}
+		p, known, err := s.db.FindPeerAgent(ctx, id)
+		if err != nil {
+			return err
+		}
+		if _, ok := s.peers.ByName(p.Machine); !known || !ok {
+			return Errorf(http.StatusServiceUnavailable, "%s's reviewer %s runs on %s, which isn't a configured peer, so the request can't reach it", a.Name, s.agentLabel(ctx, id), orUnknown(p.Machine))
 		}
 	}
-	return live, nil
+	return nil
+}
+
+func orUnknown(machine string) string {
+	if machine == "" {
+		return "a machine this daemon doesn't know"
+	}
+	return machine
+}
+
+// routesToHuman is the routing rule of an ask (src/permissions.ts refusalFor): a delegate ask with a live reviewer goes
+// to that reviewer, and any other ask reaches the human. requestPermission routes with it too, so the refusal and the
+// routing can't drift.
+func routesToHuman(audience string, live []string) bool {
+	return audience != "delegate" || len(live) == 0
+}
+
+// askRefusalMsg is src/permissions.ts askRefusal: why a request can't be sent, or "" when it can (S-3203). A blank action
+// is refused at any audience, a blank reason where the request reaches the human.
+func askRefusalMsg(action, reason string, toHuman bool) string {
+	if jsjson.Trim(action) == "" {
+		return "request_permission: `action` is required (what you need to do, in one line; put the exact command in `details`)"
+	}
+	if toHuman && jsjson.Trim(reason) == "" {
+		return "request_permission: `reason` is required when the request reaches your user (why only your user's consent unblocks it)"
+	}
+	return ""
+}
+
+// askRefusalFor is src/permissions.ts refusalFor for an ask, given the live reviewers that requestPermission routes it by
+// (live, and the error of that lookup). A failed lookup counts as reaching the human, so the reason is required (fail
+// closed). Nothing is logged here: the action and reason can hold what the agent is about to run.
+func askRefusalFor(action, reason, audience string, live []string, lookupErr error) string {
+	toHuman := lookupErr != nil || routesToHuman(audience, live)
+	return askRefusalMsg(action, reason, toHuman)
 }
 
 // requestPermission is src/permissions.ts requestPermission for a request or a dialog: the request and its wait, the
 // children waits above the agent, the request's mail in a thread of its own, the reviewers' notice of a human ask, and
-// the permission:requested event.
+// the permission:requested event. The refusal and the routing both read the one lookup of the live reviewers, so a
+// reviewer that pauses meanwhile can't change the answer between them.
 func (s *Server) requestPermission(ctx context.Context, a db.Agent, action, reason, details string, dialog bool, audience string) (jsfmt.Value, error) {
-	live, err := s.unportedAsk(ctx, a, audience)
-	if err != nil {
+	return s.requestPermissionWith(ctx, a, action, reason, details, dialog, audience, permExtra{})
+}
+
+// permExtra is src/permissions.ts requestPermission's extra: a settings change's payload, which makes the ask the
+// human's whatever its audience, and the fence the details are shown in.
+type permExtra struct {
+	payload *string
+	fence   string
+}
+
+// requestPermissionWith is requestPermission with extra.
+func (s *Server) requestPermissionWith(ctx context.Context, a db.Agent, action, reason, details string, dialog bool, audience string, extra permExtra) (jsfmt.Value, error) {
+	if extra.payload != nil {
+		audience = "human"
+	}
+	live, lookupErr := s.liveReviewers(ctx, a)
+	if msg := askRefusalFor(action, reason, audience, live, lookupErr); msg != "" {
+		return jsfmt.Value{}, Errorf(http.StatusBadRequest, "%s", msg)
+	}
+	if lookupErr != nil {
+		return jsfmt.Value{}, lookupErr
+	}
+	if err := s.unportedAsk(ctx, a, audience, live); err != nil {
 		return jsfmt.Value{}, err
 	}
-	delegate := audience == "delegate" && len(live) > 0
+	delegate := !routesToHuman(audience, live)
 	noDelegate := audience == "delegate" && !delegate && !dialog
-	n := db.NewRequest{AgentID: a.ID, Action: action, Reason: reason, Details: details, Dialog: dialog}
+	n := db.NewRequest{AgentID: a.ID, Action: action, Reason: reason, Details: details, Dialog: dialog, Payload: extra.payload}
 	if delegate {
 		n.Reviewer = live[0]
 	}
 	r, err := s.db.CreatePermissionRequest(ctx, n)
 	if err != nil {
+		return jsfmt.Value{}, err
+	}
+	// undo drops the request this call made, and its waits, when its mail can't be made or reaches no one, so the agent
+	// isn't left waiting on an ask nobody holds and has no id for.
+	undo := func(err error) (jsfmt.Value, error) {
+		if drop := s.db.DropPermissionRequest(context.WithoutCancel(ctx), a.ID, r.ID); drop != nil {
+			return jsfmt.Value{}, errors.Join(err, drop)
+		}
+		s.orgResync(ctx, a.ID)
 		return jsfmt.Value{}, err
 	}
 	s.orgResync(ctx, a.ID)
@@ -347,17 +463,31 @@ func (s *Server) requestPermission(ctx context.Context, a db.Agent, action, reas
 		subject = d["subject"]
 		body, err = s.render("permission-dialog", d)
 	} else {
-		body, err = s.render("permission-request", map[string]string{"requester": a.Name, "action": action, "reason": reason, "details": fenced(details, ""), "id": r.ID, "why": why, "footer": footer})
+		body, err = s.render("permission-request", map[string]string{"requester": a.Name, "action": action, "reason": reason, "details": fenced(details, extra.fence), "id": r.ID, "why": why, "footer": footer})
 	}
 	if err != nil {
-		return jsfmt.Value{}, err
+		return undo(err)
 	}
 	to := []string{humanBox}
 	if delegate {
 		to = live
 	}
+	if s.askMailHook != nil {
+		s.askMailHook(r.ID)
+	}
 	if _, err := s.send(ctx, &sendIn{from: a.ID, to: to, subject: sliceUnits(subject, 200), body: body, permissionID: r.ID, newThread: true, inferred: map[string]bool{}}); err != nil {
+		// Its mail reached no one: a reviewer on a peer that is down or refused it.
+		return undo(err)
+	}
+	// Closed while its mail was being stored (S-3979): the mail is withdrawn at once, as the close would have pulled it had it been there.
+	if cur, ok, err := s.db.PermissionRequestByID(ctx, r.ID); err != nil {
 		return jsfmt.Value{}, err
+	} else if ok && cur.Status != "pending" {
+		ids, err := s.db.PermissionMailIDs(ctx, r.ID)
+		if err != nil {
+			return jsfmt.Value{}, err
+		}
+		s.withdrawQuietly(ctx, ids, "stam", "Withdrawn: closed while it was being sent")
 	}
 	// A paused reviewer hears of a human ask too, when it next takes a turn.
 	if !delegate {
@@ -586,32 +716,39 @@ func (s *Server) escalateStale(ctx context.Context, r db.PermissionRequest, limi
 	return s.db.AddEvent(ctx, a.ID, "permission:escalated", escalatedEvent{ID: r.ID, By: "stam", Why: why, Waited: &waited})
 }
 
-// StartPermissions runs escalateStaleDialogs every 5 s until ctx ends, in the daemon's background work.
+// StartPermissions runs escalateStaleDialogs and, apart, retryHeldInputs every 5 s until ctx ends, in the daemon's
+// background work.
 func (s *Server) StartPermissions(ctx context.Context) {
 	if s.life == nil {
 		return
 	}
-	s.life.Go(func(lctx context.Context) {
-		t := time.NewTicker(5 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-lctx.Done():
-				return
-			case <-t.C:
-				if err := s.escalateStaleDialogs(ctx); err != nil {
-					slog.Error("dialog timeout", "err", err)
+	every := func(run func(context.Context)) {
+		s.life.Go(func(lctx context.Context) {
+			t := time.NewTicker(5 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-lctx.Done():
+					return
+				case <-t.C:
+					run(ctx)
 				}
 			}
+		})
+	}
+	every(func(ctx context.Context) {
+		if err := s.escalateStaleDialogs(ctx); err != nil {
+			slog.Error("dialog timeout", "err", err)
 		}
 	})
+	every(s.retryHeldInputs)
 }
 
 // DialogShown is src/permissions.ts dialogShown, for the lifecycle's hook: a harness dialog becomes a delegate ask. A
 // hook that names its dialog (replaces) withdraws a pending request for another one; the same dialog reported again
-// keeps its request.
+// keeps its request. A dialog that chooses (Choose) names the dialog to show first, under the same hold, or none.
 //
 // A dialog the Go daemon can't route (no templates, or a live reviewer on another machine) is refused 501 before
 // anything is written: an earlier dialog's request stays as it was, the hook records a permission-error event, and
@@ -623,19 +760,30 @@ func (s *Server) DialogShown(ctx context.Context, a db.Agent, d claude.Dialog) e
 	if err != nil {
 		return err
 	}
+	if d.Choose != nil {
+		if d = d.Choose(); d.Details == "" {
+			return nil
+		}
+	}
 	if ok && (!d.Replaces || (pending.Action == d.Action && pending.Details == d.Details)) {
 		return nil
 	}
-	if _, err := s.unportedAsk(ctx, a, "delegate"); err != nil {
+	live, err := s.liveReviewers(ctx, a)
+	if err != nil {
+		return err
+	}
+	if err := s.unportedAsk(ctx, a, "delegate", live); err != nil {
+		return err
+	}
+	// The earlier dialog's request is withdrawn only once the newer one reached its reviewer, so a reviewer that can't be
+	// reached leaves the earlier request as it was.
+	if _, err := s.requestPermission(ctx, a, d.Action, "its harness shows a dialog that blocks it", d.Details, true, "delegate"); err != nil {
 		return err
 	}
 	if ok {
-		if err := s.withdrawDialog(ctx, a, pending, "a newer dialog replaced it"); err != nil {
-			return err
-		}
+		return s.withdrawDialog(ctx, a, pending, "a newer dialog replaced it")
 	}
-	_, err = s.requestPermission(ctx, a, d.Action, "its harness shows a dialog that blocks it", d.Details, true, "delegate")
-	return err
+	return nil
 }
 
 // DialogClosed is src/permissions.ts dialogClosed: the agent moved on, so its dialog needs no answer through stam.
@@ -644,6 +792,18 @@ func (s *Server) DialogClosed(ctx context.Context, a db.Agent) error {
 	defer s.permMu.Unlock()
 	r, ok, err := s.db.PendingDialog(ctx, a.ID)
 	if err != nil || !ok {
+		return err
+	}
+	return s.withdrawDialog(ctx, a, r, "closed outside stam")
+}
+
+// DialogClosedIf is DialogClosed for the pending dialog whose details match accepts, read and withdrawn under one hold
+// of permMu (src/adapters/opencode.ts checks the row's permission id before dialogClosed).
+func (s *Server) DialogClosedIf(ctx context.Context, a db.Agent, match func(details string) bool) error {
+	s.permMu.Lock()
+	defer s.permMu.Unlock()
+	r, ok, err := s.db.PendingDialog(ctx, a.ID)
+	if err != nil || !ok || !match(r.Details) {
 		return err
 	}
 	return s.withdrawDialog(ctx, a, r, "closed outside stam")
@@ -775,17 +935,18 @@ func (s *Server) answer(ctx context.Context, id string, approve bool, by, note s
 		}
 		who = name + ", " + role
 	}
-	switch {
-	case r.Kind == "input":
-		return jsfmt.Value{}, unported("answering suggested input is not ported to the Go daemon yet")
-	case r.Payload != nil:
-		return jsfmt.Value{}, unported("answering a settings change is not ported to the Go daemon yet")
-	}
 	if s.tpl == nil {
 		return jsfmt.Value{}, unported("permission requests need the templates, which this server has not loaded")
 	}
+	if r.Payload != nil {
+		return s.answerSettings(ctx, r, a, approve, by, text, who)
+	}
 	if r.Dialog {
-		return s.answerDialog(ctx, r, a, approve, by, text, who)
+		// A question dialog's choice is the note: the option the human picked. Empty when none was given.
+		return s.answerDialog(ctx, r, a, approve, by, text, who, note)
+	}
+	if r.Kind == "input" {
+		return s.denyInput(ctx, r, a, approve, by, text, who)
 	}
 	// The audience is checked again in the decision's transaction: an escalation between the two can't let an agent's
 	// yes through.
@@ -798,15 +959,20 @@ func (s *Server) answer(ctx context.Context, id string, approve bool, by, note s
 	if err := agentsYes(r); err != nil {
 		return jsfmt.Value{}, err
 	}
-	decided, err := s.db.DecidePermissionRequest(ctx, id, approve, by, text, agentsYes)
+	n, err := s.answeredNotice(id, r.Action, approve, who, text)
+	if err != nil {
+		return jsfmt.Value{}, err
+	}
+	// The decision and its notice's row commit together (S-3923): no answer exists without its row.
+	decided, row, err := s.db.DecidePermissionRequestNoticed(ctx, id, approve, by, text, agentsYes, &db.NewAnswerNotice{AgentID: a.ID, Text: n})
 	if err != nil {
 		return jsfmt.Value{}, err
 	}
 	if !decided {
 		return jsfmt.Value{}, s.notPending(ctx, id)
 	}
-	// The human's approval is typed into the agent's input when that's safe, since auto mode takes only typed input as
-	// the user's consent. Agents' answers stay notices.
+	// The human's approval is typed into the agent's input when that's safe, since auto mode takes only typed input as the
+	// user's consent. Agents' answers stay notices.
 	typed := false
 	if approve && by == humanBox && s.life != nil {
 		s.life.AdmitHuman(ctx, a.ID)
@@ -816,12 +982,14 @@ func (s *Server) answer(ctx context.Context, id string, approve bool, by, note s
 		}
 		typed = s.life.TypeHumanInput(ctx, a, line)
 	}
-	if !typed {
-		n, err := s.answeredNotice(id, r.Action, approve, who, text)
-		if err != nil {
-			return jsfmt.Value{}, err
+	if typed {
+		if row != 0 {
+			if err := s.db.DeleteAnswerNotice(ctx, row); err != nil {
+				return jsfmt.Value{}, err
+			}
 		}
-		s.queueNotice(ctx, a.ID, n)
+	} else {
+		s.queueAnswerRow(ctx, a.ID, n, row)
 	}
 	if err := s.db.AddEvent(ctx, a.ID, "permission:answered", answeredEvent{ID: id, Approve: approve, By: by, Typed: typed}); err != nil {
 		return jsfmt.Value{}, err
@@ -847,7 +1015,7 @@ func (s *Server) notPending(ctx context.Context, id string) error {
 // approval is a yes; anyone reviewing can deny it. A dialog no longer on screen closes the request instead; an answer
 // that can't be tied to the request's dialog types nothing and leaves it pending (a no too, unlike TS, so it never lands
 // on a dialog that replaced it). What the screen shows instead never closes it, as in TS.
-func (s *Server) answerDialog(ctx context.Context, r db.PermissionRequest, a db.Agent, approve bool, by, text, who string) (jsfmt.Value, error) {
+func (s *Server) answerDialog(ctx context.Context, r db.PermissionRequest, a db.Agent, approve bool, by, text, who, choice string) (jsfmt.Value, error) {
 	if approve && by != humanBox {
 		then := "leave it to the human"
 		if r.Audience == "delegate" {
@@ -861,22 +1029,44 @@ func (s *Server) answerDialog(ctx context.Context, r db.PermissionRequest, a db.
 		if err != nil {
 			return jsfmt.Value{}, err
 		}
-		done = s.life.AnswerDialog(ctx, fresh, r.Details, approve)
+		done = s.life.AnswerDialog(ctx, fresh, r.Details, approve, choice)
+	}
+	// The human can look at the terminal; a reviewing agent can't, and escalates instead.
+	then := "look at its terminal, then try again or answer it there"
+	switch {
+	case by != humanBox && r.Audience == "delegate":
+		then = "escalate it to the human with a one-line reason, who can answer it in the terminal"
+	case by != humanBox:
+		then = "leave it to the human, who can answer it in the terminal"
+	}
+	if done == "failed" && a.Harness == "opencode" {
+		return jsfmt.Value{}, fmt.Errorf("stam couldn't answer %s's OpenCode permission (a call to the server failed or timed out, or the agent ran again meanwhile), so it may not have been answered and request %s stays pending; %s", a.Name, r.ID, then)
 	}
 	switch done {
 	case "failed":
-		return jsfmt.Value{}, fmt.Errorf("stam couldn't type into %s's dialog (a tmux call failed or timed out, or its session changed meanwhile), so the key may not have been typed and request %s stays pending; look at its terminal, then try again or answer it there", a.Name, r.ID)
+		return jsfmt.Value{}, fmt.Errorf("stam couldn't type into %s's dialog (a tmux call failed or timed out, or its session changed meanwhile), so the key may not have been typed and request %s stays pending; %s", a.Name, r.ID, then)
 	case "unsure":
-		return jsfmt.Value{}, fmt.Errorf("stam can't confirm that %s's screen shows this request's dialog (it may show another one), so nothing was typed and request %s stays pending; look at its terminal and answer it there", a.Name, r.ID)
+		return jsfmt.Value{}, fmt.Errorf("stam can't confirm that %s's screen shows this request's dialog (it may show another one), so nothing was typed and request %s stays pending; %s", a.Name, r.ID, then)
 	case "unsafe":
-		return jsfmt.Value{}, fmt.Errorf("%s's dialog on screen doesn't show exactly this request's action with a one-time Yes, so nothing was typed; deny it, or answer it in the terminal", a.Name)
+		return jsfmt.Value{}, fmt.Errorf("%s's dialog on screen doesn't show exactly this request's action or question with the answer given, so nothing was typed; deny it, or answer it in the terminal", a.Name)
 	case "gone":
 		if err := s.withdrawDialog(ctx, a, r, "no dialog on screen"); err != nil {
 			return jsfmt.Value{}, err
 		}
 		return jsfmt.Value{}, fmt.Errorf("%s no longer shows this dialog, so request %s is closed and nothing was typed", a.Name, r.ID)
 	}
-	decided, err := s.db.DecidePermissionRequest(ctx, r.ID, approve, by, text, nil)
+	// A bare approval says nothing more than the key typed; one with a comment says it in the same notice (S-3829). The
+	// notice is written with the decision (S-3923).
+	var notice *db.NewAnswerNotice
+	var noticeText string
+	if !approve || commentOf(text) != "" {
+		n, err := s.answeredNotice(r.ID, r.Action, approve, who, text)
+		if err != nil {
+			return jsfmt.Value{}, err
+		}
+		noticeText, notice = n, &db.NewAnswerNotice{AgentID: a.ID, Text: n}
+	}
+	decided, row, err := s.db.DecidePermissionRequestNoticed(ctx, r.ID, approve, by, text, nil, notice)
 	if err != nil {
 		return jsfmt.Value{}, err
 	}
@@ -887,26 +1077,36 @@ func (s *Server) answerDialog(ctx context.Context, r db.PermissionRequest, a db.
 		return jsfmt.Value{}, err
 	}
 	// Claude Code reads Esc as an interrupt, which runs no hook: the agent is idle now, and the notice saying why starts
-	// its next turn.
-	if !approve {
+	// its next turn. OpenCode carries on after a rejected permission, or ends the turn, and its events say which (S-4237):
+	// nothing is written for it here, so a launch since never has its state overwritten.
+	if !approve && a.Harness != "opencode" {
 		if err := s.db.UpdateAgent(ctx, a.ID, db.Field{Col: "activity", Val: "idle"}, db.Field{Col: "activity_detail", Val: "dialog denied"}); err != nil {
 			return jsfmt.Value{}, err
 		}
-		n, err := s.answeredNotice(r.ID, r.Action, false, who, text)
-		if err != nil {
-			return jsfmt.Value{}, err
-		}
-		s.queueNotice(ctx, a.ID, n)
+	}
+	if notice != nil {
+		s.queueAnswerRow(ctx, a.ID, noticeText, row)
 	}
 	s.orgResync(ctx, a.ID)
 	out, err := s.publicRequest(ctx, r.ID)
 	return withTyped(out, true), err
 }
 
+// commentOf is src/permissions.ts commentOf: the human's comment on an answer, unless it is the default a bare Approve or
+// Deny sends (S-3829).
+func commentOf(note string) string {
+	kept := jsjson.Trim(note)
+	if kept == "" || strings.ToLower(kept) == "i authorize" || kept == "Denied" {
+		return ""
+	}
+	return kept
+}
+
 func (s *Server) permissionRoutes() {
 	s.handle("GET /api/permissions", s.listPermissions)
 	s.handle("POST /api/permissions", s.postPermission)
 	s.handle("POST /api/permissions/{id}/answer", s.answerRoute)
+	s.handle("POST /api/suggest-input", s.suggestInputRoute)
 }
 
 // textOf is `String(body[k] ?? "")`.
@@ -1017,13 +1217,18 @@ func (s *Server) answerRoute(r *http.Request, c auth.Resolved) (any, error) {
 	}
 	ctx := context.WithoutCancel(r.Context())
 	id := r.PathValue("id")
-	_, held, err := s.db.PermissionRequestByID(ctx, id)
+	pr, held, err := s.db.PermissionRequestByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	if held && pr.Kind == "input" && jsjson.Truthy(get(w.body, "approve")) {
+		return s.approveInputRoute(ctx, w, c, id)
+	}
 	// A request from an agent on another machine is answered by the daemon that owns it.
-	if !w.local && !held && textOf(w.body, "machine") != s.cfg.Machine && (get(w.body, "machine") != nil || len(s.settings.Get().Peers) > 0) {
-		return nil, unported("answering a permission request another machine holds is not ported to the Go daemon yet")
+	if !w.local && !held && textOf(w.body, "machine") != s.cfg.Machine {
+		if out, done, err := s.relayAnswer(ctx, r, c, w); done {
+			return out, err
+		}
 	}
 	// A daemon that doesn't hold the request says so before any auth check, so a probe finds the holder.
 	if w.local && !held {
@@ -1050,7 +1255,7 @@ func (s *Server) answerRoute(r *http.Request, c auth.Resolved) (any, error) {
 		by = humanBox
 	}
 	if by == "" {
-		return nil, Errorf(http.StatusForbidden, "an answer must come from the human or a reviewing agent; the human answers %s", s.humanWays())
+		return nil, Errorf(http.StatusForbidden, "an answer must come from the human or a reviewing agent; the human answers %s", s.humanWays("stam"))
 	}
 	var peer *peerVouch
 	if peerAgent {

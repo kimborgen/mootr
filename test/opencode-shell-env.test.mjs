@@ -11,9 +11,10 @@ import { createServer } from 'node:http';
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { tempDir } from './tmphome.mjs';
+import { callerOpencodeBin, tempDir } from './tmphome.mjs';
 
-const BIN = process.env.STAM_OPENCODE_BIN ?? join(homedir(), '.opencode/bin/opencode');
+// The binary this run was started with, not tmphome.mjs's fake default: this test needs a real OpenCode server.
+const BIN = callerOpencodeBin ?? join(homedir(), '.opencode/bin/opencode');
 const KEY = `sk-stub-${process.pid}-secret`;
 const dir = tempDir('stam-oc-shell-env-');
 const procs = [];

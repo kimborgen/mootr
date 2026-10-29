@@ -14,7 +14,12 @@ set -e
 . "$(dirname "$(readlink -f "$0")")/openrouter-credit.sh"
 # A live test: it calls OpenRouter, so it gets the real key (lib.sh).
 STAM_TEST_REAL_KEY=1
-isolate
+daemon_home main; use main
+# The agents mail the human, so this home lets Claude Haiku and Codex's model do it: the defaults keep Haiku
+# from mailing the human (settings.humanMail.models, src/mail.ts humanMailBlock), and the mail gate would
+# check each mail. Written before the daemon starts, in the test home only.
+printf '{ "peers": [], "humanMail": { "when": "necessary", "models": { "claude-haiku-5-5": true, "gpt-6-luna": true } }, "decisions": { "mailGate": false } }\n' >"$STAM_HOME/settings.json"
+daemon_up main
 OPENCODE=1
 # An OpenCode server that outlived the killed tmux server names only its port.
 trap 'stam_test_cleanup; [ -n "$KEEP" ] || [ -z "$OPENCODE" ] || pkill -f "serve --hostname 127.0.0.1 --port $STAM_OPENCODE_PORT" 2>/dev/null' EXIT

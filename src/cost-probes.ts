@@ -31,7 +31,7 @@ import * as blockers from './blockers.ts';
 import { settings, humanMailAllows, type CostAccount } from './settings.ts';
 import { accountFor } from './accounts.ts';
 import { render } from './templates.ts';
-import { sendFromStam, HUMAN } from './mail.ts';
+import { sendFromSystem, HUMAN } from './mail.ts';
 import * as rules from './rules.ts';
 import { probeKey } from './credits.ts';
 import { probeRateLimits } from './adapters/codex.ts';
@@ -155,7 +155,7 @@ function tellHuman(account: string, source: string): boolean {
   if (!humanMailAllows('necessary')) return false;
   const agents = db.listAgents().filter((x) => db.isLive(x) && accountFor(x) === account).map((x) => x.name);
   const body = render('cost-error-human', { account, source, agents: agents.join(', ') || '(none)' });
-  void sendFromStam([HUMAN], `[stam] ${account}: authentication error stops its agents`, body).catch(() => {});
+  void sendFromSystem('cost', [HUMAN], `[stam] ${account}: authentication error stops its agents`, body).catch(() => {});
   return true;
 }
 

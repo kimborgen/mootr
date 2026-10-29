@@ -127,6 +127,11 @@ func (s *Server) stopped(ctx context.Context, id, name, what string) error {
 	if err != nil {
 		return err
 	}
+	return s.stoppedOnly(ctx, id, name, what, owned)
+}
+
+// stoppedOnly is stopped about these ITSAs only (TS's `only`): the rows an unown changed, as they were before it.
+func (s *Server) stoppedOnly(ctx context.Context, id, name, what string, owned []jsfmt.Value) error {
 	type group struct {
 		parent jsfmt.Value
 		kids   []string

@@ -10,6 +10,8 @@ cd "$(dirname "$(readlink -f "$0")")/../.." || exit 1
 if [ "$1" = --remote ]; then
   [ -n "$2" ] && [ -n "$3" ] || { echo "usage: web/check/run.sh --remote SERVER CHECK [ARGS...]"; exit 2; }
   server=$2; shift 2
+  # The check runs on SERVER, so its run log's path (printed below on a FAIL) names a file there, not here.
+  echo "--remote $server: the full log path below is on $server"
   exec sh test/remote.sh "$server" web/check/run.sh "$@"
 fi
 # One of the machine's test slots (scripts/test-slot.sh, S-692); the Chromium lock nests inside it.
@@ -75,7 +77,18 @@ for _i in $(seq 1 180); do grep -q '^URL=' "$LOG" && break; kill -0 $DAEMON 2>/d
 # A failed web build (daemon.sh's BUILD_FAILED=1) reads as a build failure, with its output last (S-2162).
 grep -q '^URL=' "$LOG" || { sed '/^BUILD_FAILED=1$/d' "$LOG"; grep -q '^BUILD_FAILED=1$' "$LOG" && echo "FAIL: the web build failed (see the error above)" || echo "FAIL: the check daemon didn't start"; exit 1; }
 echo "screenshots: $OUT"
+# The check's full output goes to RUNLOG, not the terminal: a long output hid the one FAIL line behind a tail (S-3442).
+# The summary names every FAIL step, then the log's path, so the detail is one open away.
+RUNLOG="$(mktemp "$STAM_TEST_TMPDIR/stam-check-run.XXXXXX")"
 rc=0
-node "web/check/$CHECK.mjs" "$(sed -n 's/^URL=//p' "$LOG")" "$OUT" "$@" || rc=$?
+node "web/check/$CHECK.mjs" "$(sed -n 's/^URL=//p' "$LOG")" "$OUT" "$@" >"$RUNLOG" 2>&1 || rc=$?
+fails=$(grep -c '^FAIL' "$RUNLOG")
+echo "$CHECK: $(grep -c '^ok ' "$RUNLOG") ok, $fails FAIL, exit $rc"
+# The FAIL lines stay at column 0: the full suite's parseChecks reads them that way (test/full-suite-unit.test.mjs).
+grep '^FAIL' "$RUNLOG"
+# A check that failed without a FAIL line (a crash) shows the end of its log.
+[ "$rc" = 0 ] || [ "$fails" -gt 0 ] || tail -20 "$RUNLOG" | sed 's/^/  /'
+# The log is kept only on a failure; a pass deletes it.
+if [ "$rc" = 0 ]; then rm -f "$RUNLOG"; else echo "full log: $RUNLOG"; fi
 [ "$rc" = 0 ] && [ -n "$AUTO" ] && [ -z "$KEEP" ] && rm -rf "$OUT" || echo "screenshots kept: $OUT"
 exit $rc

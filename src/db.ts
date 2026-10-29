@@ -19,6 +19,8 @@ export const SESSION_ENDED = 'session ended';
 // usage_samples and window_readings older than this are pruned (usage.ts), so nothing older
 // than now minus it can be counted on to be there.
 export const SAMPLE_RETENTION_MS = 35 * 86_400_000;
+// comms_events older than this are pruned with the usage samples (usage.ts pruneSamples).
+export const COMMS_EVENT_RETENTION_MS = 60 * 86_400_000;
 
 export const BUSY_ACTIVITIES: readonly Activity[] = ['starting', 'working', 'waiting', 'blocked'];
 
@@ -87,6 +89,11 @@ export interface Agent {
   // The successor's id once cost_switch moved this agent's work to it: mail to this agent
   // goes there instead. See cost-switch.ts.
   forwarded_to: string | null;
+  // When the harness was first started (a spawn), and when it was last started again (a resume, a
+  // restart, a wake from rest). ISO times; null on rows from before the columns. Set only in
+  // lifecycle.ts startHarness, the one place a harness starts; mootr-move.sh Step 0 reads them.
+  launched_at: string | null;
+  resumed_at: string | null;
   // sha256 of the agent's launch token (agent-token.ts); the token itself is never stored.
   token_hash: string | null;
   created_at: string;
@@ -133,6 +140,15 @@ CREATE TABLE IF NOT EXISTS window_clears (
 -- usage_info's cold-turn and cache-window reads (S-2236): partial, so other events pay nothing.
 CREATE INDEX IF NOT EXISTS events_cache_cold ON events(ts) WHERE type = 'cache:cold';
 CREATE INDEX IF NOT EXISTS events_cache_ttl ON events(agent_id) WHERE type = 'cache:ttl';
+-- An answer's notice (a permission or input answer, S-3923) until its agent is handed it: the rendered text only, so a
+-- daemon restart before then still delivers it, once. Go's db.EnsureAnswerNotices makes the same table.
+CREATE TABLE IF NOT EXISTS answer_notices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS answer_notices_agent ON answer_notices(agent_id, id);
 CREATE TABLE IF NOT EXISTS mail (
   id TEXT PRIMARY KEY,
   from_id TEXT NOT NULL,
@@ -162,6 +178,9 @@ CREATE TABLE IF NOT EXISTS mail_itsas (
   source TEXT NOT NULL,
   PRIMARY KEY (mail_id, itsa_id)
 );
+-- The ITSA revision a mail showed the human (S-2998), and where in its stored body that text is: at and len in
+-- UTF-16 units, as the web cuts the body; null on a row recorded before they were.
+CREATE TABLE IF NOT EXISTS itsa_shown_revs (mail_id TEXT PRIMARY KEY, itsa_id TEXT NOT NULL, rev TEXT NOT NULL, at INTEGER, len INTEGER);
 -- Threads a spawner opened whole to the agent it spawned by citing them in its brief (S-1107).
 CREATE TABLE IF NOT EXISTS thread_readers (
   thread_id TEXT NOT NULL,
@@ -183,6 +202,19 @@ CREATE TABLE IF NOT EXISTS decision_mails (
   thread_id TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS decision_mails_thread ON decision_mails (thread_id);
+-- When the human's side of a conversation settled (S-3828), append-only, for the comms stats (src/comms-stats.ts):
+-- a wait on the human closed, a decision mail settled, a permission ask escalated. Ids, kinds, times and durations
+-- only: never a mail body or subject, a permission action or its details. Pruned after COMMS_EVENT_RETENTION_MS.
+CREATE TABLE IF NOT EXISTS comms_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  label TEXT,
+  duration_ms INTEGER,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS comms_events_at ON comms_events (created_at);
 -- A thread the human deferred: their latest mail in it answers only with deferrals (src/decision-mail.ts).
 -- Its ask or decision mail stays open but leaves the waiting list. A mail from anyone else clears it (S-353).
 CREATE TABLE IF NOT EXISTS thread_deferred (
@@ -759,6 +791,11 @@ export function open(): DatabaseSync {
   try {
     db.exec('ALTER TABLE mail ADD COLUMN from_name TEXT');
   } catch {}
+  for (const col of ['at INTEGER', 'len INTEGER']) {
+    try {
+      db.exec(`ALTER TABLE itsa_shown_revs ADD COLUMN ${col}`);
+    } catch {}
+  }
   try {
     db.exec('ALTER TABLE peer_agents ADD COLUMN lifecycle TEXT');
   } catch {}
@@ -771,7 +808,7 @@ export function open(): DatabaseSync {
   try {
     db.exec('ALTER TABLE peer_agents ADD COLUMN busy_at TEXT');
   } catch {}
-  for (const col of ['workspace TEXT', 'personal_workspace TEXT', 'standing INTEGER NOT NULL DEFAULT 0', 'pending_action TEXT', 'idle_since TEXT', 'context_level INTEGER NOT NULL DEFAULT 0', 'tokens_after_compaction INTEGER', 'capabilities TEXT', "permission_mode TEXT NOT NULL DEFAULT 'auto'", 'visibility TEXT', 'child_notices TEXT', 'last_message TEXT', 'usage_last TEXT', 'kind TEXT', 'first_prompt TEXT', 'type TEXT', 'forwarded_to TEXT', 'token_hash TEXT', 'permission_source TEXT']) {
+  for (const col of ['workspace TEXT', 'personal_workspace TEXT', 'standing INTEGER NOT NULL DEFAULT 0', 'pending_action TEXT', 'idle_since TEXT', 'context_level INTEGER NOT NULL DEFAULT 0', 'tokens_after_compaction INTEGER', 'capabilities TEXT', "permission_mode TEXT NOT NULL DEFAULT 'auto'", 'visibility TEXT', 'child_notices TEXT', 'last_message TEXT', 'usage_last TEXT', 'kind TEXT', 'first_prompt TEXT', 'type TEXT', 'forwarded_to TEXT', 'token_hash TEXT', 'permission_source TEXT', 'launched_at TEXT', 'resumed_at TEXT']) {
     try {
       db.exec(`ALTER TABLE agents ADD COLUMN ${col}`);
     } catch {}
@@ -939,6 +976,9 @@ export function open(): DatabaseSync {
   try {
     db.exec('ALTER TABLE itsas ADD COLUMN rank REAL');
   } catch {}
+  // The ITSA kinds a field applies to (S-3180), as JSON; null, the default for every row already there, is every kind.
+  if (!(db.prepare('PRAGMA table_info(itsa_fields)').all() as { name: string }[]).some((c) => c.name === 'kinds'))
+    db.exec('ALTER TABLE itsa_fields ADD COLUMN kinds TEXT');
   // The incident mark (S-2406): 1 while the chief of staff or the human marks the ITSA; closing clears it.
   try {
     db.exec('ALTER TABLE itsas ADD COLUMN incident INTEGER NOT NULL DEFAULT 0');
@@ -959,6 +999,12 @@ export function open(): DatabaseSync {
       db.exec(`ALTER TABLE permission_requests ADD COLUMN ${col}`);
     } catch {}
   db.exec("UPDATE permission_requests SET kind = CASE WHEN dialog = 1 THEN 'dialog' ELSE 'settings' END WHERE kind = 'request' AND (dialog = 1 OR payload IS NOT NULL)");
+  // The ask's home (S-3827): the thread its mail to the human joined, the ITSA that thread or its link line
+  // belongs to, and the agent's reason for a new thread when it has no home. Null on older requests: their mail started a thread.
+  for (const col of ['home_thread TEXT', 'home_itsa TEXT', 'home_override TEXT'])
+    try {
+      db.exec(`ALTER TABLE permission_requests ADD COLUMN ${col}`);
+    } catch {}
   // Who may decide the request (S-432): 'human' (only the human approves) or 'delegate' (the parent
   // or the chief of staff decides, and may escalate it to the human). Older rows were the human's.
   // The column is added only if missing, and the first time a copy of the database is kept; a copy
@@ -1179,6 +1225,26 @@ export function clearWindowClears(): void {
   open().prepare('DELETE FROM window_clears').run();
 }
 
+// Answer notices (S-3923): written with the answer that makes them, deleted once the agent has been handed the text.
+// A row is written only for an agent that exists and isn't archived: an answer to an agent gone by then writes none, and 0
+// comes back.
+export function addAnswerNotice(agentId: string, text: string): number {
+  const r = open()
+    .prepare("INSERT INTO answer_notices (agent_id, text, created_at) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM agents WHERE id = ? AND lifecycle != 'archived')")
+    .run(agentId, text, new Date().toISOString(), agentId);
+  return r.changes ? Number(r.lastInsertRowid) : 0;
+}
+export function deleteAnswerNotice(id: number): void {
+  open().prepare('DELETE FROM answer_notices WHERE id = ?').run(id);
+}
+// An archived or forgotten agent's rows go with it (S-3923).
+export function deleteAnswerNoticesOf(agentId: string): void {
+  open().prepare('DELETE FROM answer_notices WHERE agent_id = ?').run(agentId);
+}
+export function answerNotices(): { id: number; agent_id: string; text: string }[] {
+  return open().prepare('SELECT id, agent_id, text FROM answer_notices ORDER BY id').all() as { id: number; agent_id: string; text: string }[];
+}
+
 // The oldest active agent, as listAgents().find would give it, without reading every row (stamSender runs
 // per cost notice, so a fleet-wide pause read the archived rows once per agent, S-2369).
 export function firstActiveAgent(): Agent | undefined {
@@ -1196,6 +1262,14 @@ export function listAgents(): Agent[] {
 // WHERE terms match the partial indexes above, so only these rows are visited.
 export function listLiveAgents(): Agent[] {
   return open().prepare("SELECT * FROM agents WHERE lifecycle != 'archived' ORDER BY created_at").all() as unknown as Agent[];
+}
+
+// The agents GET /api/agents lists when archived ones aren't asked for (S-3840): every non-archived agent, plus the
+// archived ones named by `ids` (ids or names). Reads only those rows, so 40 live agents among 3,600 cost 40 rows.
+export function listAgentsExceptArchived(ids: string[] = []): Agent[] {
+  if (!ids.length) return listLiveAgents();
+  const marks = ids.map(() => '?').join(',');
+  return open().prepare(`SELECT * FROM agents WHERE lifecycle != 'archived' OR id IN (${marks}) OR name IN (${marks}) ORDER BY created_at`).all(...ids, ...ids) as unknown as Agent[];
 }
 
 // The agents with a pending action (a stop, a compaction, a recovery), archived or not.
@@ -1348,6 +1422,12 @@ export function lastEventAt(agentId: string, types: string[]): string | null {
   return r?.ts ?? null;
 }
 
+// The agent's latest event of any of these types (its data as stored, JSON or null), or null.
+export function lastEvent(agentId: string, types: string[]): { type: string; ts: string; data: string | null } | null {
+  const r = open().prepare(`SELECT type, ts, data FROM events WHERE agent_id = ? AND type IN (${types.map(() => '?').join(', ')}) ORDER BY id DESC LIMIT 1`).get(agentId, ...types) as { type: string; ts: string; data: string | null } | undefined;
+  return r ?? null;
+}
+
 // The times of an agent's events of one type since `since` (an ISO time), oldest first.
 export function eventTimes(agentId: string, type: string, since: string): string[] {
   const rows = open().prepare('SELECT ts FROM events WHERE agent_id = ? AND type = ? AND ts >= ? ORDER BY id').all(agentId, type, since) as { ts: string }[];
@@ -1390,6 +1470,8 @@ export interface Mail {
   health?: string | null;
   // The ITSA this mail is about: what the sender named, else the ITSA of its thread.
   about_itsa?: string | null;
+  // Where the body holds the ITSA text it showed the human (S-2998), in UTF-16 units; absent when it showed none.
+  shown?: { at: number; len: number };
   // The id of the mail its sender named as replacing this one (S-1304); null when none did.
   superseded_by?: string | null;
   // The system note the recipient reads after the body (S-1462): "routing uncertain" on mail the human sent without picking a recipient.
@@ -1504,13 +1586,31 @@ export function addDecisionMail(mailId: string, threadId: string): void {
   open().prepare('INSERT OR IGNORE INTO decision_mails (mail_id, thread_id) VALUES (?, ?)').run(mailId, threadId);
 }
 
-export function clearDecisionMails(threadId: string): void {
-  open().prepare('DELETE FROM decision_mails WHERE thread_id = ?').run(threadId);
+// Appends one comms event (S-3828). Never throws: recording must not change what it records.
+export type CommsEventKind = 'wait' | 'decision' | 'escalation';
+export function recordCommsEvent(kind: CommsEventKind, ref: string, outcome: string, startedAt: string | null, label: string | null = null): void {
+  try {
+    const at = now();
+    const ms = startedAt ? Date.parse(at) - Date.parse(startedAt) : NaN;
+    open().prepare('INSERT INTO comms_events (kind, ref, outcome, label, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(kind, ref, outcome, label, Number.isFinite(ms) && ms >= 0 ? ms : null, at);
+  } catch {}
 }
 
-// A decision mail that no longer waits on the human, by its sender's withdrawal (withdraw.ts).
-export function removeDecisionMail(mailId: string): void {
-  open().prepare('DELETE FROM decision_mails WHERE mail_id = ?').run(mailId);
+// How long ago a mail was stored: only for the few rows a settle returns, so no query runs when none was open.
+const mailStarted = (mailId: string): string | null => (open().prepare('SELECT created_at FROM mail WHERE id = ?').get(mailId) as { created_at: string } | undefined)?.created_at ?? null;
+
+// Records each decision mail a settle removed. `label` is the option the human chose, when their reply says so.
+function settledDecisions(rows: { mail_id: string }[], outcome: string, label: string | null = null): void {
+  for (const r of rows) recordCommsEvent('decision', r.mail_id, outcome, mailStarted(r.mail_id), label);
+}
+
+export function clearDecisionMails(threadId: string, label: string | null = null): void {
+  settledDecisions(open().prepare('DELETE FROM decision_mails WHERE thread_id = ? RETURNING mail_id').all(threadId) as { mail_id: string }[], 'answered', label);
+}
+
+// A decision mail that no longer waits on the human, by its sender's withdrawal (withdraw.ts) or a superseding mail.
+export function removeDecisionMail(mailId: string, outcome = 'superseded'): void {
+  settledDecisions(open().prepare('DELETE FROM decision_mails WHERE mail_id = ? RETURNING mail_id').all(mailId) as { mail_id: string }[], outcome);
 }
 
 export function decisionMailOpen(mailId: string): boolean {
@@ -1524,6 +1624,9 @@ export function isThreadDeferred(threadId: string): boolean {
 
 // A thread the human deferred (S-353), and the threads that are not.
 export function setThreadDeferred(threadId: string, mailId: string): void {
+  // One event per decision mail the deferral leaves open (a deferral is rare: the human's own mail); a thread
+  // already deferred records none, so the counts are decisions, not repeats.
+  if (!isThreadDeferred(threadId)) settledDecisions(open().prepare('SELECT mail_id FROM decision_mails WHERE thread_id = ?').all(threadId) as { mail_id: string }[], 'deferred');
   open().prepare('INSERT OR REPLACE INTO thread_deferred (thread_id, mail_id) VALUES (?, ?)').run(threadId, mailId);
 }
 
@@ -1757,6 +1860,8 @@ export function foldMails(mails: ThreadMail[]): ThreadMail[] {
     // Likewise a title, set on the daemon that stored the mail first.
     if (have.title == null && m.title != null) have.title = m.title;
     if (have.summary == null && m.summary != null) have.summary = m.summary;
+    // Only the ITSA home records where an ask holds its snapshot (S-2998); a forwarded copy of the same body takes it.
+    if (!have.shown && m.shown && m.body === have.body) have.shown = m.shown;
   }
   return [...byId.values()];
 }
@@ -1871,10 +1976,12 @@ export interface ThreadMail extends Mail {
   permission?: PublicRequest;
 }
 
-function withItsas(id: string): { itsas?: LinkedItsa[]; agents?: string[] } {
+function withItsas(id: string): { itsas?: LinkedItsa[]; agents?: string[]; shown?: { at: number; len: number } } {
   const l = mailItsaLinks([id]).get(id);
   const a = mailAgentIds(id);
-  return { ...(l ? { itsas: l } : {}), ...(a.length ? { agents: a } : {}) };
+  // Where the body holds the ITSA text it showed (S-2998): the web draws that part above the rest.
+  const s = open().prepare('SELECT at, len FROM itsa_shown_revs WHERE mail_id = ? AND at IS NOT NULL AND len IS NOT NULL').get(id) as { at: number; len: number } | undefined;
+  return { ...(l ? { itsas: l } : {}), ...(a.length ? { agents: a } : {}), ...(s ? { shown: { at: s.at, len: s.len } } : {}) };
 }
 
 function withRecipients(d: DatabaseSync, m: Mail): ThreadMail {
@@ -2329,27 +2436,33 @@ export function searchMailText(q: string, box: string, limit: number, threads: s
     .all(like, like, box, box, threadsJson, limit) as unknown as Mail[];
 }
 
-// The threads a mailbox takes part in, sending or receiving.
-export function threadIdsOf(box: string): string[] {
+// A mail placed in a thread it didn't start: an ask in its home thread, its link line, a reply or note on one (S-3827, mail-visibility.ts
+// isPlacedAsk). It doesn't make its holders part of the thread, so it opens the thread to nobody.
+// COALESCE keeps it a plain false on ordinary mail, whose NULL kind would make NOT of it NULL and drop the row.
+const PLACED_ASK = "COALESCE((m.permission_id IS NOT NULL OR m.kind IN ('ask-link', 'ask-reply', 'ask-note')) AND m.thread_id IS NOT NULL AND m.thread_id != m.id, 0)";
+
+// The threads a mailbox takes part in, sending or receiving. `skipPlaced` leaves out the threads it is in only by a
+// placed ask, for the reads that open a thread to its people's children (mail-search.ts sharedThreads).
+export function threadIdsOf(box: string, skipPlaced = false): string[] {
   const rows = open()
-    .prepare('SELECT DISTINCT m.thread_id AS t FROM mail m WHERE m.from_id = ? OR EXISTS (SELECT 1 FROM mail_recipients r WHERE r.mail_id = m.id AND r.agent_id = ?)')
+    .prepare(`SELECT DISTINCT m.thread_id AS t FROM mail m WHERE (m.from_id = ? OR EXISTS (SELECT 1 FROM mail_recipients r WHERE r.mail_id = m.id AND r.agent_id = ?))${skipPlaced ? ` AND NOT ${PLACED_ASK}` : ''}`)
     .all(box, box) as { t: string }[];
   return rows.map((r) => r.t);
 }
 
-// The threads the human takes part in.
-export function humanThreadIds(): string[] {
-  return threadIdsOf('human');
+// The threads the human takes part in; `skipPlaced` as threadIdsOf.
+export function humanThreadIds(skipPlaced = false): string[] {
+  return threadIdsOf('human', skipPlaced);
 }
 
 // The mail a mailbox may read: its own, and the threads it may read beyond them (see mail-search.ts).
-export function mailScope(box: string, threads: string[]): { id: string; thread: string }[] {
+export function mailScope(box: string, threads: string[]): { id: string; thread: string; placed: number }[] {
   return open()
     .prepare(
-      `SELECT m.id, COALESCE(m.thread_id, m.id) AS thread FROM mail m
+      `SELECT m.id, COALESCE(m.thread_id, m.id) AS thread, ${PLACED_ASK} AS placed FROM mail m
        WHERE m.from_id = ? OR EXISTS (SELECT 1 FROM mail_recipients r WHERE r.mail_id = m.id AND r.agent_id = ?) OR m.thread_id IN (SELECT value FROM json_each(?))`,
     )
-    .all(box, box, JSON.stringify(threads)) as { id: string; thread: string }[];
+    .all(box, box, JSON.stringify(threads)) as { id: string; thread: string; placed: number }[];
 }
 
 export interface EmbeddingRow {
@@ -2601,10 +2714,11 @@ export function addWait(w: Pick<Wait, 'agent_id' | 'kind' | 'source'> & Partial<
 }
 
 // Clears one wait by id; returns whether it existed.
-export function clearWait(id: string): boolean {
-  const w = open().prepare('SELECT agent_id FROM waits WHERE id = ?').get(id) as { agent_id: string } | undefined;
+export function clearWait(id: string, how = 'cleared'): boolean {
+  const w = open().prepare('SELECT agent_id, kind, since FROM waits WHERE id = ?').get(id) as { agent_id: string; kind: string; since: string } | undefined;
   if (!w) return false;
   open().prepare('DELETE FROM waits WHERE id = ?').run(id);
+  if (w.kind === 'human') recordCommsEvent('wait', id, how, w.since);
   syncWaits(w.agent_id);
   return true;
 }
@@ -2612,9 +2726,10 @@ export function clearWait(id: string): boolean {
 // Clears an agent's waits of one kind on one target (null matches waits without one);
 // returns how many.
 export function clearWaits(agentId: string, kind: string, target: string | null): number {
-  const r = open().prepare('DELETE FROM waits WHERE agent_id = ? AND kind = ? AND target IS ?').run(agentId, kind, target);
-  if (r.changes) syncWaits(agentId);
-  return Number(r.changes);
+  const rows = open().prepare('DELETE FROM waits WHERE agent_id = ? AND kind = ? AND target IS ? RETURNING id, kind, since').all(agentId, kind, target) as { id: string; kind: string; since: string }[];
+  if (rows.length) syncWaits(agentId);
+  for (const w of rows) if (w.kind === 'human') recordCommsEvent('wait', w.id, 'cleared', w.since);
+  return rows.length;
 }
 
 // Updates one wait's short detail, such as a 'children' wait's count; the wait stays open,
@@ -2641,6 +2756,15 @@ export function dueWaits(nowIso: string): Wait[] {
 // Moves a repeating timer's next fire time.
 export function setWaitUntil(id: string, until: string): void {
   open().prepare('UPDATE waits SET until = ? WHERE id = ?').run(until, id);
+}
+
+// Rewrites one wait's timing: its until and its data (a re-declared wait takes a new timeout). Syncs the agent as
+// addWait does, so the web view and the agent's activity show the new until.
+export function setWaitTiming(id: string, until: string | null, data: string): void {
+  const w = open().prepare('SELECT agent_id FROM waits WHERE id = ?').get(id) as { agent_id: string } | undefined;
+  if (!w) return;
+  open().prepare('UPDATE waits SET until = ?, data = ? WHERE id = ?').run(until, data, id);
+  syncWaits(w.agent_id);
 }
 
 let restingWaitsObserver: ((id: string) => void) | undefined;
@@ -2827,7 +2951,7 @@ export interface PermissionRequest {
   reason: string;
   details: string;
   // An input suggestion (S-422) adds: held (approved, waiting for the agent's box to be free),
-  // expired (not approved, or not typed, by expires_at), and failed (typed, but the box didn't show it).
+  // expired (an approval not typed by its TTL, which starts at approval), and failed (not typed: the box or an admission refused it).
   status: 'pending' | 'approved' | 'denied' | 'withdrawn' | 'held' | 'expired' | 'failed';
   // request (request_permission), dialog (a harness dialog), settings (S-362), or input (suggest_input, S-422).
   kind: 'request' | 'dialog' | 'settings' | 'input';
@@ -2842,6 +2966,10 @@ export interface PermissionRequest {
   sha256: string | null;
   expires_at: string | null;
   session_id: string | null;
+  // The ask's home (S-3827, ask-home.ts): the thread its mail joined, the ITSA it belongs to, and an override reason.
+  home_thread: string | null;
+  home_itsa: string | null;
+  home_override: string | null;
   decided_by: string | null;
   note: string | null;
   created_at: string;
@@ -2851,13 +2979,18 @@ export interface PermissionRequest {
 // A request as agents and the web UI see it, with its agent's name and machine.
 export type PublicRequest = Omit<PermissionRequest, 'payload'> & { agent_name: string | null; machine: string; with?: string[]; subject?: string };
 
-export function createPermissionRequest(agentId: string, action: string, reason: string, details: string, dialog = false, payload: string | null = null, audience: 'human' | 'delegate' = 'human', input?: { text: string; sha256: string; expires_at: string }): PermissionRequest {
+export function createPermissionRequest(agentId: string, action: string, reason: string, details: string, dialog = false, payload: string | null = null, audience: 'human' | 'delegate' = 'human', input?: { text: string; sha256: string; expires_at: string | null }): PermissionRequest {
   const id = 'p' + randomBytes(4).toString('hex').slice(0, 6);
   const kind = input ? 'input' : dialog ? 'dialog' : payload ? 'settings' : 'request';
   open()
     .prepare('INSERT INTO permission_requests (id, agent_id, action, reason, details, dialog, payload, audience, kind, text, sha256, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .run(id, agentId, action, reason, details, dialog ? 1 : 0, payload, audience, kind, input?.text ?? null, input?.sha256 ?? null, input?.expires_at ?? null, now());
   return getPermissionRequest(id)!;
+}
+
+// Records where an ask lives (S-3827): set before its mail is sent, so an escalation later uses the same home.
+export function setRequestHome(id: string, home: { thread?: string | null; itsa?: string | null; override?: string | null }): void {
+  open().prepare('UPDATE permission_requests SET home_thread = ?, home_itsa = ?, home_override = ? WHERE id = ?').run(home.thread ?? null, home.itsa ?? null, home.override ?? null, id);
 }
 
 export function getPermissionRequest(id: string): PermissionRequest | undefined {
@@ -2980,7 +3113,9 @@ export function listPermissionRequests(status?: string): PublicRequest[] {
 // A delegate ask the reviewers escalated, or nobody answered in time: from now on it is the human's.
 // Returns whether this call moved it, so an escalation, the timeout, and an answer never both win.
 export function escalatePermissionRequest(id: string): boolean {
-  return open().prepare("UPDATE permission_requests SET audience = 'human' WHERE id = ? AND status = 'pending' AND audience = 'delegate'").run(id).changes > 0;
+  const moved = open().prepare("UPDATE permission_requests SET audience = 'human' WHERE id = ? AND status = 'pending' AND audience = 'delegate'").run(id).changes > 0;
+  if (moved) recordCommsEvent('escalation', id, 'escalated', (open().prepare('SELECT created_at FROM permission_requests WHERE id = ?').get(id) as { created_at: string } | undefined)?.created_at ?? null);
+  return moved;
 }
 
 // Every agent's pending harness-dialog request, oldest first (S-589).
@@ -3000,8 +3135,9 @@ export function permissionMailRecipients(requestId: string): string[] {
 // agent adds about it are one item, so they settle together. `requestId` may also name an ITSA whose
 // human status an agent waits on (S-3080): its wait_for on the human is tied to that ITSA.
 export function clearRequestWaits(agentId: string, requestId: string): void {
-  const n = open().prepare("DELETE FROM waits WHERE agent_id = ? AND ((source = 'stam' AND (target = ? OR data = ?)) OR (kind = 'human' AND target = ?))").run(agentId, requestId, requestId, requestId).changes;
-  if (n) syncWaits(agentId);
+  const rows = open().prepare("DELETE FROM waits WHERE agent_id = ? AND ((source = 'stam' AND (target = ? OR data = ?)) OR (kind = 'human' AND target = ?)) RETURNING id, kind, since").all(agentId, requestId, requestId, requestId) as { id: string; kind: string; since: string }[];
+  if (rows.length) syncWaits(agentId);
+  for (const w of rows) if (w.kind === 'human') recordCommsEvent('wait', w.id, 'settled', w.since);
   clearRequestDecisionMails(agentId, requestId);
   for (const fn of settledObservers) fn(requestId);
 }
@@ -3017,18 +3153,23 @@ export function onRequestSettled(fn: (requestId: string) => void): void {
   settledObservers.push(fn);
 }
 
-// The agent's decision mails about a request (S-609): they name it, or sit in its thread. `before`
-// keeps a later mail, a new question asked after the request settled.
+// The agent's decision mails about a request (S-609): they name it, or sit in the thread its mail started. `before`
+// keeps a later mail, a new question asked after the request settled. A thread the ask only joined (its home,
+// S-3827) holds the agent's other decisions, so sitting in it doesn't tie a decision to the request.
 export function clearRequestDecisionMails(agentId: string, requestId: string, before?: string): number {
-  return Number(open()
+  const rows = open()
     .prepare(`DELETE FROM decision_mails WHERE mail_id IN (SELECT m.id FROM decision_mails d JOIN mail m ON m.id = d.mail_id WHERE m.from_id = ? AND m.created_at <= ?
-      AND (instr(m.subject, ?) > 0 OR instr(m.body, ?) > 0 OR d.thread_id IN (SELECT COALESCE(thread_id, id) FROM mail WHERE permission_id = ?)))`)
-    .run(agentId, before ?? '9999', requestId, requestId, requestId).changes);
+      AND (instr(m.subject, ?) > 0 OR instr(m.body, ?) > 0 OR d.thread_id IN (SELECT id FROM mail WHERE permission_id = ? AND (thread_id IS NULL OR thread_id = id)))) RETURNING mail_id`)
+    .all(agentId, before ?? '9999', requestId, requestId, requestId) as { mail_id: string }[];
+  settledDecisions(rows, 'settled');
+  return rows.length;
 }
 
 // The permission request whose thread this is (its mail started it), if any.
-export function requestOfThread(threadId: string): string | undefined {
-  const r = open().prepare('SELECT permission_id FROM mail WHERE (id = ? OR thread_id = ?) AND permission_id IS NOT NULL ORDER BY created_at LIMIT 1').get(threadId, threadId) as { permission_id: string } | undefined;
+// A home thread holds many asks (S-3827): the request of the mail named (`mailId`) wins, else the thread's oldest ask
+// that started it, never one placed in it.
+export function requestOfThread(threadId: string, mailId: string = threadId): string | undefined {
+  const r = open().prepare(`SELECT m.permission_id FROM mail m WHERE m.permission_id IS NOT NULL AND (m.id = ? OR ((m.id = ? OR m.thread_id = ?) AND NOT ${PLACED_ASK})) ORDER BY m.id = ? DESC, m.created_at LIMIT 1`).get(mailId, threadId, threadId, mailId) as { permission_id: string } | undefined;
   return r?.permission_id;
 }
 
@@ -3054,14 +3195,14 @@ export function decidePermissionRequest(id: string, approve: boolean, by: string
 }
 
 // Moves an input suggestion from one status to another, only if it is still in `from` (S-422).
-// `unexpired` also requires expires_at to be in the future. Returns whether this call moved it,
-// so two answers, or an answer and the expiry sweep, never both win.
-export function moveInputRequest(id: string, from: PermissionRequest['status'], to: PermissionRequest['status'], fields: { by?: string; note?: string; unexpired?: boolean; session?: string | null } = {}): boolean {
+// `unexpired` also requires expires_at to be in the future. `expires` sets expires_at (an approval's TTL, S-3830).
+// Returns whether this call moved it, so two answers, or an answer and the expiry sweep, never both win.
+export function moveInputRequest(id: string, from: PermissionRequest['status'], to: PermissionRequest['status'], fields: { by?: string; note?: string; unexpired?: boolean; session?: string | null; expires?: string } = {}): boolean {
   const r = open()
     .prepare(
-      `UPDATE permission_requests SET status = ?, decided_by = COALESCE(?, decided_by), note = COALESCE(?, note), session_id = COALESCE(?, session_id), decided_at = COALESCE(decided_at, ?) WHERE id = ? AND kind = 'input' AND status = ?${fields.unexpired ? ' AND expires_at > ?' : ''}`,
+      `UPDATE permission_requests SET status = ?, decided_by = COALESCE(?, decided_by), note = COALESCE(?, note), session_id = COALESCE(?, session_id), expires_at = COALESCE(?, expires_at), decided_at = COALESCE(decided_at, ?) WHERE id = ? AND kind = 'input' AND status = ?${fields.unexpired ? ' AND expires_at > ?' : ''}`,
     )
-    .run(to, fields.by ?? null, fields.note ?? null, fields.session ?? null, now(), id, from, ...(fields.unexpired ? [now()] : []));
+    .run(to, fields.by ?? null, fields.note ?? null, fields.session ?? null, fields.expires ?? null, now(), id, from, ...(fields.unexpired ? [now()] : []));
   return Number(r.changes) === 1;
 }
 

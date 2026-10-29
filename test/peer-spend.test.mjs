@@ -4,6 +4,7 @@
 // settings home mails the human. The peers' totals are seeded with setForTest; no daemon, no
 // network, no sleeps: `node --test test/peer-spend.test.mjs`.
 import { test, before, after, beforeEach } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -22,7 +23,7 @@ function writeSettings(settingsHome = null) {
     join(home, 'settings.json'),
     JSON.stringify({
       home: settingsHome,
-      peers: [{ name: 'peer1', url: 'http://127.0.0.1:1', token: 't' }],
+      peers: [{ name: 'peer1', url: 'http://127.0.0.1:1', token: 'test-peer-token' }],
       chiefOfStaff: 'cos',
       cost: { subscriptionWarnPercent: [], accounts: { openrouter: { ...OR, budget: { usd: 10, per: 'day' } } } },
     }),
@@ -41,7 +42,7 @@ before(async () => {
   for (const h of ['claude', 'codex', 'opencode']) adapters[h].pushPrompt = async () => true;
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
 

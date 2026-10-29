@@ -192,12 +192,132 @@ test('pushOwnBranch pushes a worktree on the branch to its origin; not on the ho
   assert.equal(await pr.pushOwnBranch(null, 'stam/new'), false);
   assert.equal(await pr.pushOwnBranch(wt, 'stam/new'), true);
   assert.equal(remoteSha(join(d, 'storage.git'), 'refs/heads/stam/new'), head);
-  // Main, a main checkout, and a diverged origin are refused; origin stays as it was.
+  // Main and a main checkout are refused; the worktree's own push of its branch still passes (S-3495: its tracking ref moves with it).
   await assert.rejects(pr.pushOwnBranch(wt, 'main'), /won't push or open a PR from main/);
   await assert.rejects(pr.pushOwnBranch(join(d, 'dev'), B), /main checkout/);
   const head2 = commit(wt, 'more work');
   assert.equal(await pr.pushOwnBranch(wt, 'stam/new'), true);
   assert.equal(remoteSha(join(d, 'storage.git'), 'refs/heads/stam/new'), head2);
+});
+
+test('pushOwnBranchHead returns the worktree head it pushed, and an unreadable head refuses before any push (S-3486)', async () => {
+  const wt = join(d, 'wt-head');
+  git(dev, ['worktree', 'add', '-q', '-b', 'stam/headed', wt, 'main']);
+  const head = commit(wt, 'headed work');
+  assert.equal(await pr.pushOwnBranchHead(wt, 'stam/headed'), head);
+  assert.equal(await pr.pushOwnBranchHead(wt, 'stam/other'), null, 'not on that branch: nothing pushed');
+  // A git that can't read HEAD's commit: the branch is not pushed, and the call refuses rather than go on without a head.
+  const head2 = commit(wt, 'more headed work');
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  mkdirSync(join(base, 'nohead'), { recursive: true });
+  writeFileSync(join(base, 'nohead', 'git'), `#!/bin/sh\ncase "$*" in *"rev-parse --verify HEAD"*) echo broken >&2; exit 1;; esac\nexec ${realGit} "$@"\n`);
+  chmodSync(join(base, 'nohead', 'git'), 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${join(base, 'nohead')}:${path}`;
+  try {
+    await assert.rejects(pr.pushOwnBranchHead(wt, 'stam/headed'), /pushing stam\/headed to origin from the worktree failed/);
+  } finally {
+    process.env.PATH = path;
+  }
+  assert.notEqual(remoteSha(join(d, 'storage.git'), 'refs/heads/stam/headed'), head2, 'the unreadable head pushed nothing');
+});
+
+test('a rebased branch pushes over its own old head, leased to the head it read (S-3495)', async () => {
+  const wt = join(d, 'wt-rebase');
+  git(dev, ['worktree', 'add', '-q', '-b', 'stam/rebased', wt, 'main']);
+  const old = commit(wt, 'rebase work');
+  assert.equal(await pr.pushOwnBranchHead(wt, 'stam/rebased'), old);
+  // Main moves on storage, and the branch is rebased onto it: its new head is no fast-forward of the old one.
+  const up = join(d, 'main-up');
+  git(d, ['clone', '-q', join(d, 'storage.git'), 'main-up']);
+  writeFileSync(join(up, 'b.txt'), 'newer main');
+  git(up, ['add', 'b.txt']);
+  git(up, ['commit', '-qm', 'newer main']);
+  git(up, ['push', '-q', 'origin', 'main']);
+  git(wt, ['fetch', '-q', 'origin', 'main']);
+  git(wt, ['rebase', '-q', 'origin/main']);
+  const rebased = sha(wt, 'HEAD');
+  assert.notEqual(rebased, old);
+  assert.equal(await pr.pushOwnBranchHead(wt, 'stam/rebased'), rebased);
+  assert.equal(remoteSha(join(d, 'storage.git'), 'refs/heads/stam/rebased'), rebased);
+});
+
+test('another writer pushed after this worktree last fetched: the push is refused, and storage keeps that head (S-3495)', async () => {
+  const wt = join(d, 'wt-race');
+  git(dev, ['worktree', 'add', '-q', '-b', 'stam/race', wt, 'main']);
+  const first = commit(wt, 'race v1');
+  assert.equal(await pr.pushOwnBranchHead(wt, 'stam/race'), first);
+  const mine = commit(wt, 'race v2');
+  // Another writer pushes to the branch after this worktree's last push, before the push below (the hook runs after the lease is read).
+  const other = join(d, 'race-other');
+  git(d, ['clone', '-q', '-b', 'stam/race', join(d, 'storage.git'), 'race-other']);
+  let theirs = '';
+  pr.pushOwnBranchHooks.afterRead = async () => {
+    theirs = commit(other, 'other writer');
+    git(other, ['push', '-q', 'origin', 'HEAD:refs/heads/stam/race']);
+  };
+  try {
+    await assert.rejects(pr.pushOwnBranchHead(wt, 'stam/race'), /another push moved it/);
+  } finally {
+    pr.pushOwnBranchHooks.afterRead = async () => {};
+  }
+  assert.equal(remoteSha(join(d, 'storage.git'), 'refs/heads/stam/race'), theirs, 'the other writer\'s head stays on storage');
+  assert.notEqual(theirs, mine);
+});
+
+test('a fetch that moves origin without a rebase onto it is refused, and storage keeps the other writer\'s head (S-3495)', async () => {
+  const wt = join(d, 'wt-fetched');
+  git(dev, ['worktree', 'add', '-q', '-b', 'stam/fetched', wt, 'main']);
+  const first = commit(wt, 'fetched v1');
+  assert.equal(await pr.pushOwnBranchHead(wt, 'stam/fetched'), first);
+  const other = join(d, 'fetched-other');
+  git(d, ['clone', '-q', '-b', 'stam/fetched', join(d, 'storage.git'), 'fetched-other']);
+  const theirs = commit(other, 'other writer');
+  git(other, ['push', '-q', 'origin', 'HEAD:refs/heads/stam/fetched']);
+  // The worktree fetches the new head but does not rebase onto it: its lease must not pass.
+  git(wt, ['fetch', '-q', 'origin']);
+  commit(wt, 'fetched v2');
+  await assert.rejects(pr.pushOwnBranchHead(wt, 'stam/fetched'), /another push moved it.*rebase onto it/);
+  assert.equal(remoteSha(join(d, 'storage.git'), 'refs/heads/stam/fetched'), theirs, 'the other writer\'s head stays on storage');
+});
+
+test('a branch another writer created on origin, which this worktree never saw, is refused (S-3495)', async () => {
+  const wt = join(d, 'wt-foreign');
+  git(dev, ['worktree', 'add', '-q', '-b', 'stam/foreign', wt, 'main']);
+  const mine = commit(wt, 'foreign work');
+  const other = join(d, 'foreign-other');
+  git(d, ['clone', '-q', join(d, 'storage.git'), 'foreign-other']);
+  git(other, ['checkout', '-q', '-b', 'stam/foreign']);
+  const theirs = commit(other, 'someone else first');
+  git(other, ['push', '-q', 'origin', 'HEAD:refs/heads/stam/foreign']);
+  await assert.rejects(pr.pushOwnBranchHead(wt, 'stam/foreign'), /another push moved it.*fetch stam\/foreign from origin, rebase onto it/);
+  assert.equal(remoteSha(join(d, 'storage.git'), 'refs/heads/stam/foreign'), theirs, 'the other writer\'s branch stays on storage');
+  assert.notEqual(theirs, mine);
+});
+
+test('callerHead reads the worktree head on the ITSA home without pushing, and pushes then reads elsewhere (S-3486)', async () => {
+  const s = await import('../src/settings.ts');
+  const { MACHINE } = await import('../src/config.ts');
+  const wt = join(d, 'wt-home');
+  git(dev, ['worktree', 'add', '-q', '-b', 'stam/homed', wt, 'main']);
+  const head = commit(wt, 'homed work');
+  const home = s.settings().itsa.home;
+  try {
+    s.setSetting('itsa', { ...s.settings().itsa, home: MACHINE });
+    assert.equal(await pr.callerHead(wt, 'stam/homed'), head);
+    assert.equal(remoteSha(join(d, 'storage.git'), 'refs/heads/stam/homed'), '', 'the home pushes nothing');
+    assert.equal(await pr.callerHead(wt, 'stam/other'), null, 'not on that branch');
+    assert.equal(await pr.callerHead(null, 'stam/homed'), null);
+    // A cwd that is no repo, or is gone, gives no head instead of refusing (the assistant or cos opening another agent's branch).
+    mkdirSync(join(base, 'plain-dir'), { recursive: true });
+    assert.equal(await pr.callerHead(join(base, 'plain-dir'), 'stam/homed'), null);
+    assert.equal(await pr.callerHead(join(base, 'no-such-dir'), 'stam/homed'), null);
+    s.setSetting('itsa', { ...s.settings().itsa, home: `${MACHINE}-elsewhere` });
+    assert.equal(await pr.callerHead(wt, 'stam/homed'), head);
+    assert.equal(remoteSha(join(d, 'storage.git'), 'refs/heads/stam/homed'), head, 'elsewhere it pushes');
+  } finally {
+    s.setSetting('itsa', { ...s.settings().itsa, home });
+  }
 });
 
 test('the ITSA home gives the full verdict before storage moves: rule 2 links pass, no link or an unreachable home refuses (S-684)', async () => {

@@ -85,7 +85,7 @@ before(async () => {
   ({ openPrHere, prStatusHere, prStatusRouted } = await import('../src/pr-open.ts'));
   db.open();
   (await import('../src/settings.ts')).setSetting('itsa', { ...(await import('../src/settings.ts')).settings().itsa, repos: { stam2: work } });
-  cfg = { repoName: 'stam2', repo: work, storage: 'storage', origin: 'origin', gh: join(bin, 'gh'), github: 'example/stam', base: 'main' };
+  cfg = { repoName: 'stam2', repo: work, storage: 'storage', origin: 'origin', gh: join(bin, 'gh'), github: 'example/stam', base: 'main', leakGate: false };
 });
 
 after(() => rmSync(base, { recursive: true, force: true }));

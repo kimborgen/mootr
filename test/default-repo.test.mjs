@@ -67,9 +67,15 @@ test('default file roots are the folder holding the running checkout plus attach
 test('storage remote: a named setting wins; else `storage` only with a storage peer configured', () => {
   assert.equal(st.storageRemoteFallback(['origin', 'storage']), '', 'a fresh install with no storage peer');
   assert.equal(st.storageRemoteFallback(['origin']), '');
-  st.setSetting('peers', [{ name: 'storage', url: 'http://storage:7878', token: 't' }]);
+  st.setSetting('peers', [{ name: 'storage', url: 'http://peer.example.com:7878', token: 'test-peer-token' }]);
   assert.equal(st.storageRemoteFallback(['origin', 'storage']), 'storage', 'the storage peer and remote');
   assert.equal(st.storageRemoteFallback(['origin']), '');
+  // Any peer name works, and origin is never the storage remote.
+  st.setSetting('peers', [{ name: 'origin', url: 'http://o:7878', token: 'test-peer-token' }, { name: 'box2', url: 'http://box2:7878', token: 'test-peer-token' }]);
+  assert.equal(st.storageRemoteFallback(['origin', 'box2']), 'box2', 'a peer and remote under another name');
+  assert.equal(st.storageRemoteFallback(['origin', 'storage']), '', 'a remote with no peer of that name');
+  st.setSetting('peers', [{ name: 'zeta', url: 'http://z.example.com:7878', token: 'test-peer-token' }, { name: 'box2', url: 'http://box2.example.com:7878', token: 'test-peer-token' }]);
+  assert.equal(st.storageRemoteFallback(['zeta', 'box2']), 'box2', 'two matching remotes: the first by name, whatever order git lists');
   st.setSetting('itsa', { ...st.settings().itsa, prOpen: { ...st.settings().itsa.prOpen, storage: 'backup' } });
   assert.equal(st.storageRemoteFallback(['origin']), 'backup');
 });

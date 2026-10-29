@@ -20,11 +20,13 @@
 // same questions through its chat completion instead, with a JSON schema that has one object per
 // question, and the answer is parsed into the shape above (askByCompletion).
 // The cost is recorded in stam's usage under the openrouter-system account, attributed to stam
-// itself with the purpose as the model, so it shows on the Usage page. When the system budget
-// (cost.accounts.openrouter-system.budget) is spent, decide fails without a call. A failure never
+// itself with the purpose as the model, so it shows on the Usage page. A model on another provider books
+// to <provider>-system instead (S-3245). When that account's budget (cost.accounts.openrouter-system.budget for
+// OpenRouter) is spent, decide fails without a call. A failure never
 // throws into a caller's path: decide returns null and records a `decide:error` event.
 import * as db from './db.ts';
-import { ledgerChanged, systemHeld } from './budgets.ts';
+import { ledgerChanged, providerHeld } from './budgets.ts';
+import { spendTo } from './tiny-spend.ts';
 import { settings, SYSTEM_ACCOUNT } from './settings.ts';
 import { addExactPending } from './reconcile.ts';
 import { LlmHttpError, complete, resolve } from './llm/index.ts';
@@ -72,7 +74,7 @@ export async function decideWithFailure(
   // One read of the key: the call below uses this snapshot, not a second read.
   const key = adapter.apiKey();
   if (!key && !adapter.keyless) return { result: null, failure: { kind: 'other', error: 'no API key' } };
-  const held = systemHeld();
+  const held = providerHeld(adapter.id);
   if (held) return { result: null, failure: fail(opts.purpose, { kind: 'other', error: held }) };
   let data: any;
   try {
@@ -91,7 +93,7 @@ export async function decideWithFailure(
     return { result: null, failure: fail(opts.purpose, { kind: 'other', error: 'no answers in the response' }) };
   }
   const usage = data.usage ?? {};
-  recordSpend(opts.purpose, String(data.model ?? model), Number(usage.cost) || 0, Number(usage.input_tokens) || 0, Number(usage.output_tokens) || 0);
+  recordSpend(opts.purpose, String(data.model ?? model), Number(usage.cost) || 0, Number(usage.input_tokens) || 0, Number(usage.output_tokens) || 0, spendTo(adapter.id));
   return { result: { model: String(data.model ?? model), answers: data.answers, usage }, failure: null };
 }
 
@@ -174,15 +176,19 @@ function fail(purpose: string, failure: DecideFailure): DecideFailure {
 // Records one model call stam made for itself (a decide call, a mail title): the usage row and
 // a `decide` event. The tokens ride along so the Usage By model view can split stam's spend by
 // purpose from these events (usage.ts decideSpend); the usage row keeps only the last purpose.
-export function recordSpend(purpose: string, model: string, cost: number, tokensIn: number, tokensOut: number): void {
-  recordCost(purpose, cost, tokensIn, tokensOut);
-  db.addEvent('stam', 'decide', { purpose, model, cost, tokens_in: tokensIn, tokens_out: tokensOut });
+// `to` names the provider and account that served the call; the default is OpenRouter's system account
+// (S-3228: a call through another provider books there, not to the OpenRouter credit).
+export interface SpendTo { provider: string; account: string }
+export function recordSpend(purpose: string, model: string, cost: number, tokensIn: number, tokensOut: number, to?: SpendTo): void {
+  const at = to ?? { provider: 'openrouter', account: SYSTEM_ACCOUNT };
+  recordCost(purpose, cost, tokensIn, tokensOut, at);
+  db.addEvent('stam', 'decide', { purpose, model, cost, tokens_in: tokensIn, tokens_out: tokensOut, ...(to ? { provider: to.provider, account: to.account } : {}) });
 }
 
 // Stam's own spend for one decide call: a usage row for the pseudo-agent `stam` on the
 // openrouter-system account, with the purpose as the model, so the Usage view shows it under By
 // agent (stam) and By model (openrouter/<purpose>). Same-day calls for one purpose add up.
-function recordCost(purpose: string, cost: number, tokensIn: number, tokensOut: number): void {
+function recordCost(purpose: string, cost: number, tokensIn: number, tokensOut: number, to: SpendTo): void {
   db.open()
     .prepare(
       `INSERT INTO usage (agent_id, day, harness, model, account, cost_usd, tokens_in, tokens_out)
@@ -190,9 +196,9 @@ function recordCost(purpose: string, cost: number, tokensIn: number, tokensOut: 
        ON CONFLICT (agent_id, day, account) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd,
          tokens_in = tokens_in + excluded.tokens_in, tokens_out = tokens_out + excluded.tokens_out, model = excluded.model`,
     )
-    .run(new Date().toISOString().slice(0, 10), 'openrouter', purpose, SYSTEM_ACCOUNT, cost, tokensIn, tokensOut);
+    .run(new Date().toISOString().slice(0, 10), to.provider, purpose, to.account, cost, tokensIn, tokensOut);
   // The response's own cost is billed money: reconcile.ts takes it out of the bill before it scales OpenCode's.
-  addExactPending(cost);
+  if (to.provider === 'openrouter') addExactPending(cost);
   // Stam's own calls count against the global budget (and the system account's).
   if (cost > 0) ledgerChanged();
 }

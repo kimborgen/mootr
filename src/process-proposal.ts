@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { agentTypes } from './agent-types.ts';
 import * as itsa from './itsa.ts';
+import { shownText } from './itsa-human.ts';
 import * as mail from './mail.ts';
 import * as org from './org.ts';
 import { NODE_ID, parseProcess } from './process.ts';
@@ -201,7 +202,13 @@ async function proposeNow(input: ProposalInput, cfg: PrOpenConfig, deps: Deps, l
 
     await itsa.addLink(created.id, { system: 'github', url: pr.url, external_id: String(pr.number) }, by);
     await itsa.addLink(created.id, { system: 'branch', external_id: branch, repo: cfg.repoName, url: '' }, by);
-    await itsa.set(created.id, { body: proposalBody(id, summary, `#${pr.number} ${pr.url}`, diff, sha) }, WRITER);
+    const set = await itsa.set(created.id, { body: proposalBody(id, summary, `#${pr.number} ${pr.url}`, diff, sha) }, WRITER);
+    // An agent's proposal was asked about with its opening body: the human is shown the final one,
+    // whose revision a thread's Approve then carries (S-2998).
+    if (by && by !== mail.HUMAN) {
+      const shown = shownText(set.itsa);
+      await itsa.post(created.id, { by: WRITER, to: [mail.HUMAN], body: `The proposal now links its PR. This is what you approve:\n\n${shown.text}` }, { shown });
+    }
     return { key: created.key, id: created.id, pr, branch };
   } catch (e) {
     // Nothing half-made stays: the proposal is cancelled and the pushed branch deleted.

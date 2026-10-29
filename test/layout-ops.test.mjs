@@ -5,7 +5,7 @@
 // daemon, no network. Run with `node --test test/layout-ops.test.mjs`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { apply, defaultWorld, emptyLayout, leaves, validLayout } from '../src/layout-ops.ts';
+import { apply, deadImageTabOps, defaultWorld, emptyLayout, leaves, validLayout } from '../src/layout-ops.ts';
 
 // Pane ids come from a counter, so each test reads the same ids every run.
 function ids() {
@@ -421,4 +421,48 @@ test('swap moves a with open elsewhere in the world, so it never shows twice', (
   assert.deepEqual(main(l).root.tabs, ['view:x']);
   assert.throws(() => apply(l, { op: 'swap', world: 'main', key: 'agent:zzz', with: 'view:zzz' }), /no tab agent:zzz/);
   assert.throws(() => apply(l, { op: 'swap', world: 'main', key: 'view:x' }), /swap needs a tab key/);
+});
+
+// S-1475: an `image:PAGE.N` tab belongs to the page that opened it. The daemon closes the ones whose page
+// isn't live, on any device, and leaves every other tab and pane alone.
+test('deadImageTabOps closes the image tabs of dead pages only, and a pane left empty closes', () => {
+  const l = {
+    version: 1,
+    current: 'a1',
+    agentWorlds: {
+      a1: {
+        root: { id: 's', split: 'row', sizes: [1, 1], children: [
+          { id: 'p1', tabs: ['agent:a1', 'image:live1.1', 'image:dead1.1'], active: 'image:dead1.1' },
+          { id: 'p2', tabs: ['image:dead2.4'], active: 'image:dead2.4' },
+        ] },
+        focused: 'p1',
+      },
+    },
+    worlds: {},
+  };
+  const ops = deadImageTabOps(l, (page) => page === 'live1');
+  assert.deepEqual(ops, [
+    { op: 'close', world: 'a1', key: 'image:dead1.1' },
+    { op: 'close', world: 'a1', key: 'image:dead2.4' },
+  ]);
+  const after = ops.reduce((x, op) => apply(x, op), l);
+  assert.ok(validLayout(after));
+  assert.deepEqual(tabsOf(main(after)), [['agent:a1', 'image:live1.1']]);
+  assert.deepEqual(leaves(main(after).root).map((x) => x.id), ['p1']);
+  assert.deepEqual(deadImageTabOps(after, (page) => page === 'live1'), []);
+});
+
+test('deadImageTabOps reads the named worlds too, and nothing when every page is live', () => {
+  const l = {
+    version: 1,
+    current: null,
+    agentWorlds: {},
+    worlds: { files: { root: { id: 'p9', tabs: ['image:gone.9', 'files'], active: 'image:gone.9' }, focused: 'p9' } },
+  };
+  const ops = deadImageTabOps(l, () => false);
+  assert.deepEqual(ops, [{ op: 'close', world: 'files', key: 'image:gone.9' }]);
+  const after = apply(l, ops[0]);
+  assert.ok(validLayout(after));
+  assert.deepEqual(tabsOf(after.worlds.files), [['files']]);
+  assert.deepEqual(deadImageTabOps(l, () => true), []);
 });

@@ -1,0 +1,18 @@
+[
+  { "sql": "UPDATE agents SET lifecycle = 'active' WHERE id IN ('aboss', 'achild', 'aorphan')" },
+  { "name": "blank action to the human", "agent": "achild", "action": "", "reason": "why", "audience": "human" },
+  { "name": "whitespace action to a delegate with a live parent", "agent": "achild", "action": " \n\t", "reason": "why", "audience": "delegate" },
+  { "name": "blank action with no audience", "agent": "achild", "action": " ", "reason": "why", "audience": "" },
+  { "name": "blank action with no parent", "agent": "aorphan", "action": "", "reason": "why", "audience": "delegate" },
+  { "name": "blank reason to the human", "agent": "achild", "action": "git push", "reason": "", "audience": "human" },
+  { "name": "blank reason to a delegate with no parent", "agent": "aorphan", "action": "git push", "reason": "  ", "audience": "delegate" },
+  { "name": "blank reason to a delegate with a live parent", "agent": "achild", "action": "git push", "reason": "", "audience": "delegate" },
+  { "name": "whitespace reason to a delegate with a live parent", "agent": "achild", "action": "git push", "reason": " \t", "audience": "delegate" },
+  { "name": "byte-order mark as the action", "agent": "achild", "action": "\ufeff", "reason": "why", "audience": "human" },
+  { "name": "next-line character as the action", "agent": "achild", "action": "\u0085", "reason": "why", "audience": "human" },
+  { "name": "byte-order mark as the reason to the human", "agent": "achild", "action": "git push", "reason": "\ufeff", "audience": "human" },
+  { "name": "complete ask to the human", "agent": "aorphan", "action": "git push origin HEAD", "reason": "auto mode blocks it", "audience": "human" },
+  { "sql": "UPDATE agents SET lifecycle = 'paused' WHERE id = 'aboss'" },
+  { "name": "blank reason to a delegate whose parent is paused", "agent": "achild", "action": "git push", "reason": "", "audience": "delegate" },
+  { "name": "complete ask to a delegate whose parent is paused", "agent": "achild", "action": "git push", "reason": "auto mode blocks it", "audience": "delegate" }
+]

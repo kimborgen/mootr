@@ -7,6 +7,7 @@
 // throwaway STAM_HOME with its own tmux socket and fake harnesses; no daemon, no network, no
 // models: `node --test test/cost-fallback.test.mjs`.
 import { test, before, after, beforeEach } from 'node:test';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -20,7 +21,7 @@ const socket = `cost-fallback-test-${process.pid}`;
 process.env.STAM_HOME = home;
 process.env.STAM_TMUX_SOCKET = socket;
 // The private tmux server goes with the process on every exit, even when after() never runs (a signal, a crash).
-process.on('exit', () => spawnSync('tmux', ['-L', socket, 'kill-server']));
+process.on('exit', () => killTmuxServer(socket));
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => process.exit(130));
 for (const k of ['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT']) delete process.env[k];
 writeFileSync(
@@ -69,15 +70,18 @@ before(async () => {
     afterLaunch: async (a, prompt) => {
       db.updateAgent(a.id, prompt ? { activity: 'working', activity_detail: null } : { activity: 'idle', activity_detail: 'session startup' });
     },
-    interrupt: async () => true,
+    // Stops the turn as a real adapter does, when a test asks for it; else the turn lingers.
+    interrupt: async (a) => (idleOnInterrupt && db.updateAgent(a.id, { activity: 'idle' }), true),
     stop: async () => {},
   });
   for (const n of ['fake', 'fake2', 'fake3']) adapters[n] = fake(n);
 });
 after(() => {
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   rmSync(home, { recursive: true, force: true });
 });
+
+let idleOnInterrupt = false;
 
 function agent(name, parent_id = null, fields = {}) {
   const id = db.newAgentId();
@@ -107,7 +111,7 @@ beforeEach(() => {
   fallback.row('none'); // and cost_fallbacks
   const d = db.open();
   for (const t of ['cost_notices', 'cost_fallbacks', 'blockers', 'agent_parents', 'agents', 'mail_recipients', 'mail', 'events', 'itsas', 'itsa_participants', 'waits']) d.exec(`DELETE FROM ${t}`);
-  spawnSync('tmux', ['-L', socket, 'kill-server']);
+  killTmuxServer(socket);
   cos = agent('cos');
   mgr = agent('mgr', cos.id);
 });
@@ -285,11 +289,28 @@ test('when the chief of staff is blocked, the human gets the fallback', async ()
   assert.match(human[0].body, /The chief of staff is unavailable or blocked, so this reaches you instead/);
 });
 
+test('a window blocker stops a mid-turn agent, so the later take-over has no turn to wait for and uses the generated brief (S-3631)', async () => {
+  idleOnInterrupt = true;
+  try {
+    const x = agent('cut', mgr.id, { session_id: 's-cut' });
+    db.updateAgent(x.id, { activity: 'working' });
+    const n = await block(x);
+    assert.equal(get(x).activity, 'idle', 'the blocker stopped the turn');
+    const t0 = Date.now();
+    await fallback.evaluate(Date.now() + 16 * MIN);
+    assert.ok(Date.now() - t0 < 5000, 'no soft-stop wait');
+    assert.match(fallback.row(n.id).result, /^took over: cut now continues as cut-t2/);
+    assert.ok(byName('cut-t2'), 'a successor exists');
+  } finally {
+    idleOnInterrupt = false;
+  }
+});
+
 test('a human ack or a new pause during the take-over\'s quiesce cancels it before the stop', async () => {
   for (const how of ['ack', 'pause']) {
     const x = agent(`busy-${how}`, mgr.id, { session_id: `s-${how}` });
+    db.updateAgent(x.id, { activity: 'working' }); // mid-turn before the blocker, as it really is; this fake's interrupt leaves the turn running, so the switch quiesces
     const n = await block(x);
-    db.updateAgent(x.id, { activity: 'working' }); // mid-turn, so the switch quiesces first
     const running = fallback.evaluate(Date.now() + 16 * MIN);
     await sleep(200);
     assert.equal(fallback.row(n.id).state, 'running');
@@ -529,8 +550,8 @@ test('a fallback claim re-checks the agent in the same step: an archive that lan
 test('a graceful or an immediate shut-down during a take-over\'s quiesce cancels it before the stop, no successor (S-2458)', async () => {
   for (const how of ['graceful', 'immediate']) {
     const x = agent(`quit-${how}`, mgr.id, { harness: 'fake2', type: 'reviewer', session_id: `s-quit-${how}` });
+    db.updateAgent(x.id, { activity: 'working' }); // mid-turn before the blocker, as it really is; this fake's interrupt leaves the turn running, so the switch quiesces
     const n = await block(x, 'acct-b');
-    db.updateAgent(x.id, { activity: 'working' }); // mid-turn, so the switch quiesces first
     const running = fallback.evaluate(Date.now() + 16 * MIN);
     await sleep(200);
     assert.equal(fallback.row(n.id).state, 'running', `${how}: ${fallback.row(n.id).result}`);

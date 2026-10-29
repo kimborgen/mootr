@@ -655,3 +655,18 @@ test('Coverage names the reason an archive had no final round (S-1402)', () => {
   const md = buildDigest({ items: [], rounds: [], archived: [{ name: 'x', hasRound: false, reason: 'shut_down' }, { name: 'y', hasRound: false }] }, 'W');
   assert.match(md, /2 agents archived: 0 with a final round, 2 without \(x: shut_down, y\)\./);
 });
+
+// The digest mail is from the retro system sender, not a stand-in agent (S-1239).
+test('the digest is mailed from system:retro to the chief of staff', async () => {
+  const { sendDigest } = await import('../src/retro-digest.ts');
+  const { setSetting } = await import('../src/settings.ts');
+  db.createAgent({ id: db.newAgentId(), name: 'digest-cos', role: '', machine: 'test', harness: 'fake', model: null, effort: null, cwd: home, parent_id: null, session_id: null });
+  setSetting('chiefOfStaff', 'digest-cos');
+  retroItem('S-120', { created_at: new Date().toISOString() });
+  const r = await sendDigest(new Date());
+  assert.equal(r.sent, true, r.reason);
+  const m = db.open().prepare("SELECT from_id, from_name, thread_id, reply_to FROM mail WHERE subject LIKE 'Retro digest:%'").get();
+  assert.equal(m.from_id, 'system:retro');
+  assert.equal(m.from_name, 'retro');
+  assert.equal(m.reply_to, null);
+});
