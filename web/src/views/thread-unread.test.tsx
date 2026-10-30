@@ -3,6 +3,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { humanRowsOf } from '../mail/thread-index'
 import * as store from '../store'
 import { toggleInboxUnread } from '../actions'
 import { ThreadView } from './ThreadView'
@@ -34,7 +35,7 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('760px'), media: query, onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => false }))
   vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
     const ok = (d: unknown) => ({ ok: true, status: 200, json: async () => d, text: async () => JSON.stringify(d) })
-    if (init?.method !== 'POST') return ok(String(path).startsWith('/api/threads/') ? thread() : [])
+    if (init?.method !== 'POST') return ok(String(path).startsWith('/api/threads/') ? thread() : String(path).includes('/thread-index?') ? { threads: [], next_cursor: null } : [])
     const body = JSON.parse(String(init.body ?? '{}'))
     posts.push({ path, body })
     if (path.endsWith('/unread')) server.read_at = null
@@ -42,14 +43,15 @@ beforeEach(() => {
     return ok({ marked: body.ids ?? [] })
   }))
 })
-afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals() })
+// A write's coalesced refresh lands SLOW_COALESCE ms later (S-4519): wait it out here, so it can't land in the next test.
+afterEach(async () => { await act(() => store.refreshSlow()); act(() => root.unmount()); host.remove(); vi.unstubAllGlobals() })
 
 const flush = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 const reads = () => posts.filter((p) => p.path === '/api/agents/human/read')
 
 describe('u on a thread that was already read', () => {
   it('the open thread view leaves the mail unread after the store reloads', async () => {
-    store.setData({ humanThreads: [{ thread_id: 'u1', mails: [{ id: 'm1', from_id: 'a1', subject: 'Which one', created_at: '2026-10-13T10:00:00Z', recipients: [{ id: 'human', read_at: server.read_at }] }] }], humanArchived: [], humanDeferred: [], unread: 0 } as never)
+    store.setData({ humanRows: humanRowsOf([{ thread_id: 'u1', mails: [{ id: 'm1', from_id: 'a1', subject: 'Which one', created_at: '2026-10-13T10:00:00Z', recipients: [{ id: 'human', read_at: server.read_at }] }] }] as never), unread: 0 } as never)
     await act(async () => { root.render(<ThreadView tid="u1" viewKey="thread:u1" />) })
     await flush(); await flush()
     expect(reads()).toHaveLength(0)
@@ -63,7 +65,7 @@ describe('u on a thread that was already read', () => {
   })
 
   it('opening the thread again reads its unread mail', async () => {
-    store.setData({ humanThreads: [{ thread_id: 'u2', mails: [{ id: 'm1', from_id: 'a1', subject: 'Which one', created_at: '2026-10-13T10:00:00Z', recipients: [{ id: 'human', read_at: server.read_at }] }] }], humanArchived: [], humanDeferred: [], unread: 0 } as never)
+    store.setData({ humanRows: humanRowsOf([{ thread_id: 'u2', mails: [{ id: 'm1', from_id: 'a1', subject: 'Which one', created_at: '2026-10-13T10:00:00Z', recipients: [{ id: 'human', read_at: server.read_at }] }] }] as never), unread: 0 } as never)
     await act(async () => { root.render(<ThreadView tid="u2" viewKey="thread:u2" />) })
     await flush(); await flush()
     await toggleInboxUnread('u2')

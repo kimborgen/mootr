@@ -41,9 +41,22 @@ func (d *DB) answerWrite(ctx context.Context, what string, fn func(conn *sqlite.
 	}))
 }
 
-// NewAnswerNotice is the notice an answer writes with its decision (S-3923): the agent and the rendered text.
+// NewAnswerNotice is the notice an answer writes with its decision (S-3923): the agent and the rendered text. Replaces,
+// when not 0, is an earlier row this one takes the place of, deleted in the same transaction (S-4155): an approval's own
+// notice, replaced by its outcome's.
 type NewAnswerNotice struct {
 	AgentID, Text string
+	Replaces      int64
+}
+
+// insertNewAnswerNotice writes n's row, deleting the row it replaces first.
+func insertNewAnswerNotice(conn *sqlite.Conn, n NewAnswerNotice) (int64, error) {
+	if n.Replaces != 0 {
+		if err := sqlitex.Execute(conn, "DELETE FROM answer_notices WHERE id = ?", &sqlitex.ExecOptions{Args: []any{n.Replaces}}); err != nil {
+			return 0, err
+		}
+	}
+	return insertAnswerNotice(conn, n.AgentID, n.Text)
 }
 
 // insertAnswerNotice writes a row for an agent that exists and isn't archived (src/db.ts addAnswerNotice): 0 comes back
@@ -64,6 +77,17 @@ func (d *DB) AddAnswerNotice(ctx context.Context, agentID, text string) (int64, 
 	err := d.answerWrite(ctx, "add answer notice", func(conn *sqlite.Conn) error {
 		var err error
 		id, err = insertAnswerNotice(conn, agentID, text)
+		return err
+	})
+	return id, err
+}
+
+// ReplaceAnswerNotice is AddAnswerNotice for n, with the row n replaces deleted in the same transaction (S-4155).
+func (d *DB) ReplaceAnswerNotice(ctx context.Context, n NewAnswerNotice) (int64, error) {
+	var id int64
+	err := d.answerWrite(ctx, "replace answer notice", func(conn *sqlite.Conn) error {
+		var err error
+		id, err = insertNewAnswerNotice(conn, n)
 		return err
 	})
 	return id, err

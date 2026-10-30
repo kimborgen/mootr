@@ -6,7 +6,7 @@
 set -e
 if [ "$1" = --child ]; then
   # Pretend to run inside a live stam agent.
-  export STAM_URL=http://127.0.0.1:7878 MOOTR_URL=http://127.0.0.1:7878 STAM_PORT=7878 MOOTR_PORT=7878 STAM_TOKEN=leaked MOOTR_TOKEN=leaked STAM_AGENT_ID=aleak STAM_HOME="$HOME/.local/share/stam" MOOTR_HOME="$HOME/.local/share/stam" STAM_TMUX_SOCKET=stam MOOTR_TMUX_SOCKET=stam
+  export STAM_URL=http://127.0.0.1:7878 MOOTR_URL=http://127.0.0.1:7878 STAM_PORT=7878 MOOTR_PORT=7878 STAM_TOKEN=leaked MOOTR_TOKEN=leaked STAM_AGENT_ID=aleak MOOTR_AGENT_ID=aleak STAM_HOME="$HOME/.local/share/stam" MOOTR_HOME="$HOME/.local/share/stam" STAM_TMUX_SOCKET=stam MOOTR_TMUX_SOCKET=stam
   . "$(dirname "$(readlink -f "$0")")/lib.sh"
   fail() { echo "FAIL: $1"; exit 1; }
   [ -z "$STAM_AGENT_ID" ] && [ -z "$STAM_TOKEN" ] || fail "inherited agent variables kept"

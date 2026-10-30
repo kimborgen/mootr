@@ -76,15 +76,25 @@ func (l *Lifecycle) serial(ctx context.Context, id string, fn func(ctx context.C
 	if waiting != nil {
 		waiting(id)
 	}
-	m.Lock()
+	if !m.TryLock() {
+		// Held by another: this call is queued on it (blocked, the count tests read).
+		l.mu.Lock()
+		m.blocked++
+		l.mu.Unlock()
+		m.Lock()
+		l.mu.Lock()
+		m.blocked--
+		l.mu.Unlock()
+	}
 	defer m.Unlock()
 	return fn(context.WithValue(ctx, serialKey{id}, true))
 }
 
-// serialLock is one agent's serial lock and how many hold or wait for it, under the Lifecycle's mu.
+// serialLock is one agent's serial lock, how many hold or wait for it, and how many of those are blocked on it, under the
+// Lifecycle's mu.
 type serialLock struct {
 	sync.Mutex
-	users int
+	users, blocked int
 }
 
 type pauseEvent struct {
@@ -149,7 +159,7 @@ func contains(list []string, s string) bool {
 // resumeNow is src/lifecycle.ts resumeNow, within serial, once nothing holds the agent: text is what it is told. One
 // resume at a time per agent (acquire), so two that interleave never launch it twice. An agent whose terminal went
 // down with the tmux server while it was paused is launched again on its conversation. Mail and notices that waited
-// go in after, as for any idle agent. The wake of a resting agent isn't ported.
+// go in after, as for any idle agent. A resting agent's wake comes here too (WakeResting).
 func (l *Lifecycle) resumeNow(ctx context.Context, id, text string) (string, error) {
 	a, err := l.db.GetAgent(ctx, id)
 	if err != nil {

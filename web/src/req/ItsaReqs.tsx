@@ -3,10 +3,11 @@
 import type { Itsa } from '../types'
 import { linkedTo, stateOf, STATUS_WORD, verdictWord, WAIVER_WORD } from './model'
 import { openReq, ReqGlyph } from './parts'
-import { useReq } from './store'
+import { useReq, useReqReader } from './store'
 
 export function ItsaReqs({ it }: { it: Pick<Itsa, 'id' | 'key'> }) {
   const { enabled, reqs } = useReq()
+  useReqReader()
   if (!enabled) return null
   const rows = linkedTo(it, reqs)
   if (!rows.length) return null

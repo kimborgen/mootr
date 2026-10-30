@@ -160,6 +160,7 @@ components:
         - release
         - stalls
         - memory
+        - caches
       properties:
         ok:
           type: boolean
@@ -207,6 +208,34 @@ components:
               type: integer
             external:
               type: integer
+            anon:
+              type: integer
+              description: The resident anonymous pages (RssAnon, S-4390); absent where /proc/self/status isn't there.
+            file:
+              type: integer
+              description: The resident file-backed pages (RssFile, S-4390); absent where /proc/self/status isn't there.
+        caches:
+          type: object
+          additionalProperties: false
+          description: What the daemon keeps in memory, counted, read-only (src/daemon.ts).
+          required:
+            - activityStats
+            - humanPeers
+            - dbConnections
+            - stalls
+          properties:
+            activityStats:
+              type: integer
+              description: Entries in the activity stats memo.
+            humanPeers:
+              type: integer
+              description: Entries in the human peer memo.
+            dbConnections:
+              type: integer
+              description: Open database connections, the main one and the OpenCode databases.
+            stalls:
+              type: integer
+              description: Event-loop stalls kept in memory (the same list as `stalls`).
     Agent:
       type: object
       additionalProperties: false

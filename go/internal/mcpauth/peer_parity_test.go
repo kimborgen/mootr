@@ -3,6 +3,7 @@ package mcpauth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,9 @@ type peerCase struct {
 	force   bool
 	replies []homeReply
 	down    bool
+	// tsEcho is home text that TS echoes into its message and Go leaves out, and Go's words in its place (S-4416: the
+	// home's text may quote a credential, so Go never echoes it). The rest of the answer must match.
+	tsEcho [2]string
 }
 
 // peerCases are the peer operations shared with src/mcp-auth.ts: the lease, its url refetch and its refusals, the status
@@ -45,10 +49,12 @@ func peerCases() []peerCase {
 		}},
 		{name: "two other urls", op: "token", servers: shared, replies: []homeReply{
 			{status: 200, body: lease("https://other.example/mcp", "NEVER-USED")},
-		}},
-		{name: "a refused token", op: "token", servers: shared, replies: []homeReply{{status: 401, body: `{"error":"bad token"}`}}},
+		}, tsEcho: [2]string{"for https://other.example/mcp,", "for another url,"}},
+		{name: "a refused token", op: "token", servers: shared, replies: []homeReply{{status: 403, body: `{"error":"not the lease token"}`}}},
+		{name: "a refused token with another reason", op: "token", servers: shared, replies: []homeReply{{status: 401, body: `{"error":"bad token"}`}},
+			tsEcho: [2]string{"(401: bad token)", "(401)"}},
 		{name: "a refused token without a reason", op: "token", servers: shared, replies: []homeReply{{status: 403, body: `{}`}}},
-		{name: "no lease for the server", op: "token", servers: shared, replies: []homeReply{{status: 409, body: `{"error":"not logged in on this home"}`}}},
+		{name: "no lease for the server", op: "token", servers: shared, replies: []homeReply{{status: 409, body: `{"error":"prov is not logged in on this home"}`}}},
 		{name: "a home error", op: "token", servers: shared, replies: []homeReply{{status: 500, body: ``}}},
 		{name: "a home that is down", op: "token", servers: shared, down: true},
 		{name: "the home's status", op: "status", servers: shared, replies: []homeReply{{status: 200, body: status}}},
@@ -123,7 +129,7 @@ func runTSPeer(t *testing.T, c peerCase, home string) any {
 	}
 	out, err := exec.Command("node", "--no-warnings", "testdata/peer.mjs", dir, casePath).CombinedOutput()
 	if err != nil {
-		t.Fatalf("peer.mjs: %v\n%s", err, out)
+		t.Fatalf("peer.mjs: %v\n%s", err, withoutResults(out))
 	}
 	var result string
 	for _, line := range strings.Split(string(out), "\n") {
@@ -132,13 +138,24 @@ func runTSPeer(t *testing.T, c peerCase, home string) any {
 		}
 	}
 	if result == "" {
-		t.Fatalf("peer.mjs printed no RESULT line:\n%s", out)
+		t.Fatalf("peer.mjs printed no RESULT line:\n%s", withoutResults(out))
 	}
 	var v any
 	if err := json.Unmarshal([]byte(result), &v); err != nil {
-		t.Fatal(err)
+		t.Fatal("peer.mjs's RESULT line is not JSON")
 	}
 	return v
+}
+
+// withoutResults is peer.mjs's output to print, its RESULT lines left out: they carry the bearers it got.
+func withoutResults(out []byte) string {
+	var keep []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.HasPrefix(line, "RESULT ") {
+			keep = append(keep, line)
+		}
+	}
+	return strings.Join(keep, "\n")
 }
 
 // rawOrNil is the grant as JSON, or null when there is none.
@@ -200,6 +217,29 @@ func runGoPeer(t *testing.T, c peerCase, home string) any {
 	return v
 }
 
+// hideTokens is an answer to print: each token in it is shown as its length, so a failing case prints no bearer.
+func hideTokens(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := map[string]any{}
+		for k, e := range x {
+			if s, ok := e.(string); ok && (k == "token" || strings.HasSuffix(k, "_token")) {
+				out[k] = fmt.Sprintf("<%d bytes>", len(s))
+			} else {
+				out[k] = hideTokens(e)
+			}
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = hideTokens(e)
+		}
+		return out
+	}
+	return v
+}
+
 // expiresOf is the bearer's expiry, or null when it never expires.
 func expiresOf(b Bearer) jsjson.Value {
 	if b.ExpiresAt == nil {
@@ -220,8 +260,16 @@ func TestPeerMatchesTS(t *testing.T) {
 			goHome := scriptedHome(t, c)
 			want := runTSPeer(t, c, tsHome.URL)
 			got := runGoPeer(t, c, goHome.URL)
+			if c.tsEcho[0] != "" {
+				m, _ := want.(map[string]any)
+				msg, _ := m["message"].(string)
+				if !strings.Contains(msg, c.tsEcho[0]) {
+					t.Fatalf("TS no longer echoes %q; drop tsEcho from this case", c.tsEcho[0])
+				}
+				m["message"] = strings.Replace(msg, c.tsEcho[0], c.tsEcho[1], 1)
+			}
 			if !reflect.DeepEqual(got, want) {
-				t.Errorf("Go answers %v\nTS answers %v", got, want)
+				t.Errorf("Go answers %v\nTS answers %v", hideTokens(got), hideTokens(want))
 			}
 		})
 	}

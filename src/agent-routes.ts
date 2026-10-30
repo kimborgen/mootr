@@ -31,6 +31,7 @@ export const AGENT_ROUTES: AgentRoute[] = [
   { method: 'GET', path: String.raw`\/inventory`, auth: 'acting', why: "the agent's prompt, split into blocks" },
   { method: 'GET', path: String.raw`\/inbox`, auth: 'acting', why: "the agent's mail" },
   { method: 'GET', path: String.raw`\/threads`, auth: 'acting', why: "the agent's mail threads" },
+  { method: 'GET', path: String.raw`\/thread-index`, auth: 'acting', why: "the agent's mail threads as index rows, a page at a time (S-4520)" },
   { method: 'POST', path: String.raw`\/threads\/([\w-]+)\/(archive|unarchive|defer|undefer)`, auth: 'acting', why: "changes the agent's mail threads" },
   { method: 'POST', path: String.raw`\/threads\/([\w-]+)\/unread`, auth: 'human', why: "the human marks its mail in a thread unread again (checked in the handler)" },
   { method: 'POST', path: String.raw`\/read`, auth: 'acting', why: "marks the agent's mail read" },

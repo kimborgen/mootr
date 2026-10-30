@@ -110,7 +110,8 @@ func (d *DB) MoveInputRequest(ctx context.Context, id, from, to string, f MoveIn
 }
 
 // MoveInputRequestNoticed is MoveInputRequest with the move's answer notice (S-3923) written in the same transaction:
-// the move and its answer_notices row commit together, or neither does. row is 0 when none was written.
+// the move and its answer_notices row commit together, or neither does, and the row n replaces goes with them (S-4155).
+// row is 0 when none was written.
 func (d *DB) MoveInputRequestNoticed(ctx context.Context, id, from, to string, f MoveInput, n *NewAnswerNotice) (moved bool, row int64, err error) {
 	err = d.answerWrite(ctx, "move input request", func(conn *sqlite.Conn) error {
 		moved = false
@@ -131,7 +132,7 @@ func (d *DB) MoveInputRequestNoticed(ctx context.Context, id, from, to string, f
 		if n == nil {
 			return nil
 		}
-		row, err = insertAnswerNotice(conn, n.AgentID, n.Text)
+		row, err = insertNewAnswerNotice(conn, *n)
 		return err
 	})
 	if err != nil {

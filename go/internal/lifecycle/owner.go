@@ -17,8 +17,11 @@ import (
 // The lock rule: mu is held only for the state and the db writes that must land with a check (a guarded write, a
 // stop's publication); it is never held while waiting on anything else, and whoever holds it, or a slot, or a kill in
 // flight, never takes an agent's serial or transition lock (acquire) or anything that waits on them. Callers may wait
-// for a slot or a pane (beginPane) holding serial or a transition: a slot is held for at most one stop's loop, and a kill
-// for one tmux call bounded by killTimeout, so those waits are bounded and can't cycle.
+// for a slot, a pane (beginPane) or a kill (beginKill) holding serial or a transition: a slot is held for at most one
+// stop's loop, and a kill or a launch's replace for its tmux calls, each bounded by its own deadline (tmux.Timeout, a
+// kill's process sweep tmux.Grace, the kill as a whole killTimeout), plus one token write: a replace's kill, new
+// session and, superseded, kill of what it made come to about 30-35 s at most, so those waits are bounded and can't
+// cycle.
 type owner struct {
 	mu sync.Mutex
 	// gen is the agent's launch generation (S-578): a stop takes the next one, so a launch still in flight notices it is
@@ -32,8 +35,11 @@ type owner struct {
 	// kills counts the kills of the agent's pane in flight; paneFree is signalled when it drops to 0.
 	kills    int
 	paneFree *sync.Cond
-	// paneWaits counts the launches waiting in beginPane for a kill to end.
+	// paneWaits counts the launches waiting in beginPane for a kill to end. replacing is set while a launch replaces
+	// the pane (beginPane to endPane), and killWaits counts the kills waiting in beginKill for it to end.
 	paneWaits int
+	replacing bool
+	killWaits int
 	// answering is the OpenCode permissions stam replies to (ask.go), by id: in flight, or sent since the agent's last
 	// launch, so a permission.replied for one that comes before the next launch is stam's own answer. replied is the
 	// permissions answered outside stam since that launch, so an ask raised for one is closed, or never raised. asked is
@@ -66,6 +72,12 @@ type owner struct {
 	// active or paused.
 	launchEnd int
 	launchOK  bool
+	// restops is the re-stops of each orphaned session reconcile started (restop.go), and when the next may start:
+	// one that never stops is tried again ever more rarely, not on every pass. In memory: a restart tries at once.
+	restops map[string]restopTry
+	// stopNoted is the sessions whose stop failure was reported (a stop-error and the row's note) and not confirmed
+	// since: a stop that fails again reports nothing more until one is confirmed, the agent is launched, or quit again.
+	stopNoted map[string]bool
 	// exec is the OpenCode session whose ends may end the agent's turn (startExec, endExec): one seen starting an
 	// execution under a generation, or a credit for one end whose start the stream may not have shown (a fresh owner, a
 	// reconnect).
@@ -135,6 +147,8 @@ func (o *owner) invalidate() int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.gen++
+	// A new quit's stop reports its own failure.
+	clear(o.stopNoted)
 	return o.gen
 }
 
@@ -144,6 +158,9 @@ func (o *owner) beginLaunch() int {
 	defer o.mu.Unlock()
 	o.gen++
 	o.launched = o.gen
+	// The launch runs the agent's session again: a later orphan of it is a new one (restop), and so is its failure.
+	clear(o.restops)
+	clear(o.stopNoted)
 	return o.gen
 }
 
@@ -193,10 +210,16 @@ func (o *owner) unlessLaunched(gen int, write func() (bool, error)) (bool, error
 
 // beginKill starts a kill of the agent's pane under gen, refused when a launch took a later generation: that launch's
 // pane is not this kill's. own asks more: gen must still be current (a launch killing its own failed pane). Every kill
-// begun is ended with endKill, and no pane begins while one is in flight (beginPane).
+// begun is ended with endKill, and no pane begins while one is in flight (beginPane). A kill waits for a launch's
+// replace of the pane in flight (S-4269), so it kills the pane the replace made, never the old one under it.
 func (o *owner) beginKill(gen int, own bool) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	for o.replacing {
+		o.killWaits++
+		o.paneFree.Wait()
+		o.killWaits--
+	}
 	if o.launched > gen || (own && o.gen != gen) {
 		return false
 	}
@@ -222,19 +245,52 @@ func (o *owner) tryPane(gen int) (begun, wait bool) {
 }
 
 // beginPane is a launch's right to make its pane under gen: it waits until no kill of the pane is in flight, then
-// needs gen current. A kill begun after it (a later quit's) kills that pane, as it should, and the launch's own check
-// after making it notices.
+// needs gen current. Begun, the launch's own kill and remake of the pane (its replace) counts as a kill in flight from
+// the same step (S-4269), ended with endPane once its new session is made or failed: a newer launch waits for all of
+// it, so it never has its pane killed or its token replaced by an older one, and a kill (a later quit's) waits for it
+// too, then kills the pane it made; the launch's own check after making it notices.
 func (o *owner) beginPane(gen int) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for {
 		begun, wait := o.tryPane(gen)
 		if !wait {
+			if begun {
+				o.kills++
+				o.replacing = true
+			}
 			return begun
 		}
 		o.paneWaits++
 		o.paneFree.Wait()
 		o.paneWaits--
+	}
+}
+
+// endPane ends beginPane's replace.
+func (o *owner) endPane() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.endPaneLocked()
+}
+
+// endPaneIfCurrent ends the replace only while gen is still current, in one step with that check: a superseded one
+// keeps its count, to kill what it made first (replacePane).
+func (o *owner) endPaneIfCurrent(gen int) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.gen != gen {
+		return false
+	}
+	o.endPaneLocked()
+	return true
+}
+
+func (o *owner) endPaneLocked() {
+	o.replacing = false
+	o.kills--
+	if o.kills == 0 {
+		o.paneFree.Broadcast()
 	}
 }
 
@@ -255,6 +311,49 @@ func (l *Lifecycle) killPane(ctx context.Context, id string, gen int, own bool) 
 	ctx, cancel := context.WithTimeout(ctx, killTimeout)
 	defer cancel()
 	return l.tmux.KillSession(ctx, id)
+}
+
+// replacePane is a launch's kill of the agent's old pane and make of its new one under gen, as one kill in flight
+// (beginPane): begun is false when gen was no longer current, and nothing ran. A replace superseded by the time it
+// ends kills what it made before its count ends: no later launch can have made a pane meanwhile, and one that failed
+// before its own replace (whose launch generation refuses this launch's later killPane) would never reach this one, so
+// the pane would be orphaned. It runs on a context the caller's end
+// can't cancel, so a request's disconnect never leaves the replace half done; the kill is bounded by killTimeout, and
+// make (the token and the new session) by the deadline every tmux call has.
+func (l *Lifecycle) replacePane(ctx context.Context, id string, gen int, make func(ctx context.Context) error) (begun bool, err error) {
+	o := l.ownerOf(id)
+	if !o.beginPane(gen) {
+		return false, nil
+	}
+	ended := false
+	defer func() {
+		if !ended {
+			o.endPane()
+		}
+	}()
+	ctx = context.WithoutCancel(ctx)
+	kctx, cancel := context.WithTimeout(ctx, killTimeout)
+	err = l.tmux.KillSession(kctx, id)
+	cancel()
+	if err == nil {
+		if l.paneMaking != nil {
+			l.paneMaking(id)
+		}
+		err = make(ctx)
+		if l.paneMade != nil {
+			l.paneMade(id)
+		}
+	}
+	if ended = o.endPaneIfCurrent(gen); ended {
+		return true, err
+	}
+	if l.paneKilling != nil {
+		l.paneKilling(id)
+	}
+	kctx, cancel = context.WithTimeout(ctx, killTimeout)
+	_ = l.tmux.KillSession(kctx, id)
+	cancel()
+	return true, err
 }
 
 // joinSlot registers op on sid's slot, made if it has none, under the owner's lock. Slots are never removed: one per
@@ -861,6 +960,83 @@ func (o *owner) endAnswer(pid string, sent bool) {
 func (o *owner) startStop(sid string, gen int) (e *turnStop, slot *sessionSlot, started bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	return o.startStopLocked(sid, gen)
+}
+
+// idleGen is the agent's generation now, and whether no launch is in flight under the owner's lock: every launch
+// begun (beginLaunch) has settled (settleLaunch).
+func (o *owner) idleGen() (gen int, idle bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.gen, o.launchEnd >= o.launched
+}
+
+// restopTry is the re-stops of one session so far, and the earliest the next may start.
+type restopTry struct {
+	n    int
+	next time.Time
+}
+
+// restopFirstWait and restopMaxWait bound the wait between re-stops of a session that still runs: it doubles from the
+// first to the max.
+var (
+	restopFirstWait = time.Minute
+	restopMaxWait   = 30 * time.Minute
+)
+
+// restop is startStop for a stopped agent's orphaned session (S-4254) under gen, idleGen's, read before the row was:
+// refused (nil, not started) once a launch took a generation since gen or one is in flight, in one step with the
+// listing, and before the session's wait since its last re-stop is over. A launch that begins after it takes a later
+// generation, so the stop gives up before it sends anything (keep), and the launch's release waits for the stop's slot.
+func (o *owner) restop(sid string, gen int, now time.Time) (e *turnStop, slot *sessionSlot, started bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.launched > gen || o.launchEnd < o.launched {
+		return nil, nil, false
+	}
+	try := o.restops[sid]
+	if now.Before(try.next) {
+		return nil, nil, false
+	}
+	e, slot, started = o.startStopLocked(sid, gen)
+	if started {
+		wait := restopMaxWait
+		if try.n < 5 {
+			wait = min(restopFirstWait<<try.n, restopMaxWait)
+		}
+		if o.restops == nil {
+			o.restops = map[string]restopTry{}
+		}
+		o.restops[sid] = restopTry{n: try.n + 1, next: now.Add(wait)}
+	}
+	return e, slot, started
+}
+
+// noteFailureLocked is whether a stop failure of sid is to be reported: the first since the last confirmation (stopNoted).
+// Under the owner's lock (publish's write).
+func (o *owner) noteFailureLocked(sid string) bool {
+	if o.stopNoted[sid] {
+		return false
+	}
+	if o.stopNoted == nil {
+		o.stopNoted = map[string]bool{}
+	}
+	o.stopNoted[sid] = true
+	return true
+}
+
+// confirmedLocked forgets sid's reported failure: its stop is confirmed. Under the owner's lock.
+func (o *owner) confirmedLocked(sid string) { delete(o.stopNoted, sid) }
+
+// restopped forgets sid's re-stops: the server no longer runs it, so a later orphan of it is stopped at once.
+func (o *owner) restopped(sid string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.restops, sid)
+}
+
+// startStopLocked is startStop, under the owner's lock.
+func (o *owner) startStopLocked(sid string, gen int) (e *turnStop, slot *sessionSlot, started bool) {
 	// A stop of the same or a newer generation, still in flight, is joined: an older request never replaces a newer stop.
 	live := o.stops[sid]
 	if live != nil && !live.cancelled.Load() && live.gen >= gen {

@@ -2,18 +2,27 @@
 // Unit tests for the "Your workspace" block (S-895): the index (order, cap, dotfiles, empty,
 // missing folder) and the templates carrying it. No model runs.
 // Run with `node --test test/workspace-prompt.test.mjs`.
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import './scrub-env.mjs';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+const tmp = [];
 process.env.STAM_HOME = mkdtempSync(join(tmpdir(), 'stam-ws-unit-'));
+tmp.push(process.env.STAM_HOME);
 const { workspaceIndex, workspacePrompt, WORKSPACE_INDEX_MAX_CHARS } = await import('../src/workspace-prompt.ts');
 const { render } = await import('../src/templates.ts');
 
-const dir = () => mkdtempSync(join(tmpdir(), 'stam-ws-dir-'));
+const dir = () => {
+  const d = mkdtempSync(join(tmpdir(), 'stam-ws-dir-'));
+  tmp.push(d);
+  return d;
+};
+after(() => {
+  for (const d of tmp) rmSync(d, { recursive: true, force: true });
+});
 
 test('index lists sorted files with first lines, skips dotfiles', () => {
   const d = dir();

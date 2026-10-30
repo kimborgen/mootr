@@ -76,7 +76,7 @@ export interface Adapter {
   // a dialog, or no session) and 'draft' (someone's text in the box) type nothing; 'failed' (the
   // box didn't show exactly the text, or a menu stayed under it) and 'cancelled' (proceed said no)
   // erased what it typed.
-  typeLiteralInput?(agent: Agent, text: string, proceed?: (stillTyped: () => boolean) => boolean | Promise<boolean>): Promise<'typed' | 'busy' | 'draft' | 'failed' | 'cancelled'>;
+  typeLiteralInput?(agent: Agent, text: string, proceed?: (stillTyped: () => boolean) => boolean | Promise<boolean>): Promise<'typed' | 'busy' | 'draft' | 'failed' | 'cancelled' | 'unsent'>;
   // What the agent's input box holds now (S-524), to tell the agent what blocks an approved line.
   inputText?(agent: Agent): string | undefined;
   // Answers the request's dialog on the agent's screen: yes, or no (cancel). A question dialog

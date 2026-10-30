@@ -105,14 +105,14 @@ del "/api/itsas/$A/links/1"
 WID=$(post /api/register "{\"name\":\"worker-$T\",\"role\":\"remote worker\",\"harness\":\"external\"}" | jget "d['id']")
 WK=$("$STAM" itsa new "Remote-owned $T" --owner "worker-$T" | awk '{print $1}')
 [ "$(get "/api/itsas/$WK" | jget "d['owner']")" = "$WID" ] || fail "a remote owner name didn't resolve to its id"
-STAM_AGENT_ID="$WID" "$STAM" itsa set "$WK" --status in_progress >/dev/null || fail "the remote agent couldn't edit its ITSA"
+with_agent_id "$WID" "$STAM" itsa set "$WK" --status in_progress >/dev/null || fail "the remote agent couldn't edit its ITSA"
 [ "$(get "/api/itsas/$WK" | jget "d['status']")" = in_progress ] || fail "the remote agent's change didn't stick"
-STAM_AGENT_ID="$WID" "$STAM" itsa link "$WK" "https://example.com/remote/$T" >/dev/null || fail "the remote agent couldn't add a link"
-STAM_AGENT_ID="$WID" "$STAM" itsa link "$WK" --remove 1 >/dev/null || fail "the remote agent couldn't remove a link"
+with_agent_id "$WID" "$STAM" itsa link "$WK" "https://example.com/remote/$T" >/dev/null || fail "the remote agent couldn't add a link"
+with_agent_id "$WID" "$STAM" itsa link "$WK" --remove 1 >/dev/null || fail "the remote agent couldn't remove a link"
 [ "$(get "/api/itsas/$WK" | jget "len(d['links'])")" = 0 ] || fail "the remote agent's link removal didn't stick"
 # A link's `system` is its kind, not a system sender (S-482): an agent's github link works and is the
 # agent's, and the human's github link is the human's, not system:github.
-STAM_AGENT_ID="$WID" "$STAM" itsa link "$WK" "https://example.com/gh/$T" --system github --external-id 9 >/dev/null || fail "the remote agent's github link was refused"
+with_agent_id "$WID" "$STAM" itsa link "$WK" "https://example.com/gh/$T" --system github --external-id 9 >/dev/null || fail "the remote agent's github link was refused"
 [ "$(get "/api/itsas/$WK" | jget "d['links'][0]['system']")" = github ] || fail "the remote agent's github link isn't recorded"
 [ "$(get "/api/itsas/$WK" | jget "[e['actor'] for e in d['events'] if e['type']=='link.added'][0]")" = "$WID" ] || fail "the remote agent's link isn't its own"
 HN=$("$STAM" itsa link "$L" "https://example.com/gh-human/$T" --system github --external-id 8 | awk '{print $2}' | tr -d :)

@@ -9,6 +9,7 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tempHome } from './tmphome.mjs';
+import { killTmuxServer } from '../src/tmux-socket.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const home = tempHome('stam-home-forgery-');
@@ -16,7 +17,8 @@ const TOKEN = 'ahome-forgery-token';
 const port = 19000 + Math.floor(Math.random() * 1000);
 process.env.STAM_HOME = home;
 process.env.STAM_EMBEDDER = 'stub';
-process.env.STAM_TMUX_SOCKET = `home-forgery-${process.pid}`;
+// A NAME-test-PID name, so the janitor's dead-socket sweep knows it if this run is killed before after() (S-4129).
+process.env.STAM_TMUX_SOCKET = `home-forgery-test-${process.pid}`;
 for (const k of ['STAM_URL', 'STAM_TOKEN', 'STAM_AGENT_ID', 'STAM_PORT', 'STAM_MACHINE']) delete process.env[k];
 
 let daemon;
@@ -46,8 +48,10 @@ before(async () => {
   throw new Error('the daemon never answered /api/health');
 });
 
-after(() => {
+after(async () => {
   daemon?.kill();
+  if (daemon && daemon.exitCode === null && daemon.signalCode === null) await new Promise((r) => daemon.once('exit', r));
+  killTmuxServer(process.env.STAM_TMUX_SOCKET);
   rmSync(home, { recursive: true, force: true });
 });
 

@@ -155,10 +155,11 @@ function Pane({ l, w, world, drop, setDrop, style }: { l: Leaf; w: World; world:
       if (el.parentNode !== b) b.append(el)
       el.hidden = k !== active
     }
+    shell.shownChanged()
   }, [tabs.join('\n'), active])
   useLayoutEffect(() => {
     const b = body.current!
-    return () => { for (const el of [...b.children] as HTMLElement[]) if (el.dataset.key) shell.viewStore().append(el) }
+    return () => { for (const el of [...b.children] as HTMLElement[]) if (el.dataset.key) shell.viewStore().append(el); shell.shownChanged() }
   }, [])
   // Wheel scrolls an overflowing tab strip sideways.
   useLayoutEffect(() => {

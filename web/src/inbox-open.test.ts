@@ -1,6 +1,7 @@
 // The Inbox page opens a thread in one pane to the list's right and reuses it (S-2054).
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { apply, emptyLayout, type Layout, type LayoutOp } from '../../src/layout-ops.ts'
+import { humanRowsOf } from './mail/thread-index'
 import * as shell from './shell/layout'
 
 let daemon: Layout = emptyLayout()
@@ -23,7 +24,7 @@ beforeAll(async () => {
       if (!threadReq.hold) return reply()
       return new Promise<Response>((resolve) => threadReq.held.push({ release: () => resolve(reply()) }))
     }
-    if (path.startsWith('/api/agents/human/threads?')) return new Promise<Response>(() => {})
+    if (path.startsWith('/api/agents/human/thread-index?') || path.startsWith('/api/agents/human/threads?')) return new Promise<Response>(() => {})
     if (path === '/api/layout/stream') return new Response(new ReadableStream<Uint8Array>({ start: (c) => { stream = c; push(daemon) } }))
     if (path === '/api/layout/ops' && init?.method === 'POST') {
       const ops = JSON.parse(String(init.body)).ops as LayoutOp[]
@@ -282,7 +283,7 @@ describe('Inbox page keys: step, triage, undo', () => {
     await tick()
     // b was archived in another pane after the list was shown.
     const { setData } = await import('./store')
-    setData({ humanThreads: [mail('a'), mail('c')], humanArchived: [mail('b')] } as never)
+    setData({ humanRows: humanRowsOf([mail('a'), mail('c')], [mail('b')]) } as never)
     setInboxOrder(['a', 'c'])
     expect(advanceInbox('a')).toBe(true)
     await tick()
@@ -294,7 +295,7 @@ describe('Inbox page keys: step, triage, undo', () => {
     const { setInboxOrder } = await import('./mail/inbox-order')
     const { getData, setData } = await import('./store')
     await fresh()
-    setData({ humanThreads: [mail('e1'), mail('e2'), mail('e3')], humanArchived: [], humanDeferred: [] } as never)
+    setData({ humanRows: humanRowsOf([mail('e1'), mail('e2'), mail('e3')]) } as never)
     setInboxOrder(['e1', 'e2', 'e3'])
     // Opened from above, so the one below is the next to open.
     openInboxThread('e1')
@@ -303,11 +304,11 @@ describe('Inbox page keys: step, triage, undo', () => {
     await tick()
     await triageInboxThread('e2', 'archive')
     await tick()
-    expect(getData().humanArchived.map((t) => t.thread_id)).toEqual(['e2'])
+    expect(getData().humanRows.archived.map((t) => t.thread_id)).toEqual(['e2'])
     expect(inboxThread()).toBe('e3')
     await undoInboxTriage()
     await tick()
-    expect(getData().humanArchived).toEqual([])
+    expect(getData().humanRows.archived).toEqual([])
     expect(inboxThread()).toBe('e2')
   })
   it('d defers the open thread, and z undoes it; a second z does nothing', async () => {
@@ -315,35 +316,35 @@ describe('Inbox page keys: step, triage, undo', () => {
     const { setInboxOrder } = await import('./mail/inbox-order')
     const { getData, setData } = await import('./store')
     await fresh()
-    setData({ humanThreads: [mail('d1'), mail('d2')], humanArchived: [], humanDeferred: [] } as never)
+    setData({ humanRows: humanRowsOf([mail('d1'), mail('d2')]) } as never)
     setInboxOrder(['d1', 'd2'])
     openInboxThread('d1')
     await tick()
     await triageInboxThread('d1', 'defer')
     await tick()
-    expect(getData().humanDeferred.map((t) => t.thread_id)).toEqual(['d1'])
+    expect(getData().humanRows.deferred.map((t) => t.thread_id)).toEqual(['d1'])
     expect(inboxThread()).toBe('d2')
     await undoInboxTriage()
     await tick()
-    expect(getData().humanDeferred).toEqual([])
+    expect(getData().humanRows.deferred).toEqual([])
     expect(inboxThread()).toBe('d1')
     await undoInboxTriage()
     await tick()
-    expect(getData().humanDeferred).toEqual([])
+    expect(getData().humanRows.deferred).toEqual([])
   })
   it('the last row advances to the one above, and a list of one leaves no pane open', async () => {
     const { openInboxThread, triageInboxThread, inboxThread } = await import('./actions')
     const { setInboxOrder } = await import('./mail/inbox-order')
     const { setData } = await import('./store')
     await fresh()
-    setData({ humanThreads: [mail('z1'), mail('z2')], humanArchived: [], humanDeferred: [] } as never)
+    setData({ humanRows: humanRowsOf([mail('z1'), mail('z2')]) } as never)
     setInboxOrder(['z1', 'z2'])
     openInboxThread('z2')
     await tick()
     await triageInboxThread('z2', 'archive')
     await tick()
     expect(inboxThread()).toBe('z1')
-    setData({ humanThreads: [mail('z1')], humanArchived: [] } as never)
+    setData({ humanRows: humanRowsOf([mail('z1')]) } as never)
     setInboxOrder(['z1'])
     openInboxThread('z1')
     await tick()
@@ -357,7 +358,7 @@ describe('Inbox page keys: the saved queue and undo under slow answers', () => {
   const mail = (id: string) => ({ thread_id: id, mails: [{ id: 'm-' + id, from_id: 'a1', from_name: 'fixture-dev', subject: id, created_at: new Date().toISOString(), body: 'b', recipients: [{ id: 'human', read_at: 'x' }] }] })
   const seed = async (ids: string[]) => {
     const { setData } = await import('./store')
-    setData({ humanThreads: ids.map(mail), humanArchived: [], humanDeferred: [] } as never)
+    setData({ humanRows: humanRowsOf(ids.map(mail)) } as never)
     await tick()
   }
   const fresh = async () => {
@@ -400,7 +401,7 @@ describe('Inbox page keys: the saved queue and undo under slow answers', () => {
     setInboxOrder(['p4', 'p5', 'p6'])
     openInboxThread('p4')
     await tick()
-    setData({ humanThreads: [mail('p4'), mail('p6')], humanArchived: [mail('p5')] } as never)
+    setData({ humanRows: humanRowsOf([mail('p4'), mail('p6')], [mail('p5')]) } as never)
     await tick()
     expect(advanceInbox('p4')).toBe(true)
     await tick()
@@ -426,10 +427,10 @@ describe('Inbox page keys: the saved queue and undo under slow answers', () => {
     threadReq.held[0].release()
     await first
     threadReq.hold = false
-    expect(getData().humanArchived.map((t) => t.thread_id).sort()).toEqual(['r1', 'r2'])
+    expect(getData().humanRows.archived.map((t) => t.thread_id).sort()).toEqual(['r1', 'r2'])
     await undoInboxTriage()
     await tick()
-    expect(getData().humanArchived.map((t) => t.thread_id)).toEqual(['r1'])
+    expect(getData().humanRows.archived.map((t) => t.thread_id)).toEqual(['r1'])
     expect(inboxThread()).toBe('r2')
   })
   it('z before the answer waits for the archive it undoes, then puts the thread back', async () => {
@@ -448,13 +449,13 @@ describe('Inbox page keys: the saved queue and undo under slow answers', () => {
     await tick()
     // Nothing has gone out for the undo yet, and the archive shows at once.
     expect(threadReq.paths).toEqual(['/api/agents/human/threads/s1/archive'])
-    expect(getData().humanArchived.map((t) => t.thread_id)).toEqual(['s1'])
+    expect(getData().humanRows.archived.map((t) => t.thread_id)).toEqual(['s1'])
     threadReq.hold = false
     threadReq.held.splice(0).forEach((h) => h.release())
     await sent
     await undone
     expect(threadReq.paths.at(-1)).toBe('/api/agents/human/threads/s1/unarchive')
-    expect(getData().humanArchived).toEqual([])
+    expect(getData().humanRows.archived).toEqual([])
     expect(inboxThread()).toBe('s1')
   })
   it('a triage the daemon refuses leaves nothing for z to undo', async () => {

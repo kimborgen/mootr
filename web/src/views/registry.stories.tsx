@@ -1,3 +1,4 @@
+import { humanRowsOf } from '../mail/thread-index'
 import { agentTooltip, viewMeta } from './registry'
 import { Row } from '../stories/helpers'
 import { byName } from '../stories/fixtures'
@@ -26,7 +27,7 @@ export const stories: Story[] = [{
     { name: 'Tab titles', setup: () => setRapid('fx-dev', false), render: () => <Row items={KEYS.map((k) => ({ label: k, node: tab(k) }))} /> },
     { name: 'Rapid-fire tab', setup: () => setRapid('fx-dev', true), render: () => tab('view:fx-dev') },
     // A thread's tab: its short title, and its tooltip with the full subject, the people and the count (S-2311).
-    { name: 'Thread tab', data: { humanThreads: [{ thread_id: 'tf-reg', mails: [{ id: 'tf-reg-m1', from_id: 'fx-dev', subject: 'Re: `Deploy` plan for the staging gate', body: '', created_at: '2026-10-19T09:00:00Z', title: 'Deploy plan', recipients: [{ id: 'human', read_at: null }], agents: [] }] }] } as never, render: () => <Row items={[{ label: 'thread:tf-reg', node: tab('thread:tf-reg') }]} /> },
+    { name: 'Thread tab', data: { humanRows: humanRowsOf([{ thread_id: 'tf-reg', mails: [{ id: 'tf-reg-m1', from_id: 'fx-dev', subject: 'Re: `Deploy` plan for the staging gate', body: '', created_at: '2026-10-19T09:00:00Z', title: 'Deploy plan', recipients: [{ id: 'human', read_at: null }], agents: [] }] }] as never) } as never, render: () => <Row items={[{ label: 'thread:tf-reg', node: tab('thread:tf-reg') }]} /> },
     { name: 'Agent tooltip', render: () => <pre className="code">{agentTooltip(byName('fixture-ops'))}</pre> },
     { name: 'Agent tooltip, resting', render: () => <pre className="code">{agentTooltip({ ...byName('fixture-paused'), resting: { reason: 'wait', waits: [{ id: 'rw1', kind: 'event', target: null, detail: 'PR #12', since: '2026-10-01T09:00:00.000Z', until: null }], expected_wake: new Date(Date.now() + 3 * 3600_000).toISOString() } })}</pre> },
   ],

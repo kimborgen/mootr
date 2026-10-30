@@ -18,6 +18,8 @@ export interface Change {
   settled: (polled: Data) => boolean
   // Starts the error toast; the reason follows it, as in "Couldn't archive: <reason>". Empty: no toast, the caller reports it.
   failed: string
+  // Runs once when the overlay goes: settled, failed, or timed out.
+  done?: () => void
 }
 
 // Resolves true when the request succeeded, false when it failed.
@@ -26,10 +28,12 @@ export function optimistic(c: Change): Promise<boolean> {
   setOverlay(id, c.apply)
   let off: (() => void) | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
+  let dropped = false
   const drop = () => {
     off?.(); off = undefined
     clearTimeout(timer)
     setOverlay(id, null)
+    if (!dropped) { dropped = true; c.done?.() }
   }
   return c.send().then(
     () => {

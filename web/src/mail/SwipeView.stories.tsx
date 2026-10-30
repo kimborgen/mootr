@@ -1,11 +1,14 @@
 import { SwipeView } from './SwipeView'
 import { ds, type Story } from '../stories/types'
-import { ALL_THREADS, ASK_ITSA, DECISION, mail, Pane, STATUSES, T_ASK, T_K_BLOCKER, T_K_DECISION, T_K_DONE, T_K_GENERAL, T_PLAIN, T_UNREAD } from '../stories/mailFixtures'
+import { ALL_THREADS, ASK_ITSA, DECISION, mail, Pane, STATUSES, T_ASK, T_K_BLOCKER, T_K_DECISION, T_K_DONE, T_K_GENERAL, T_PLAIN, T_UNREAD, threadRoutes } from '../stories/mailFixtures'
 import type { Data } from '../store'
+import { humanRowsOf } from './thread-index'
 import type { Thread } from '../types'
 
 const view = () => <Pane height={560}><SwipeView /></Pane>
-const inbox = (threads: Thread[], o: Partial<Data> = {}): Partial<Data> => ({ humanThreads: threads, humanArchived: [], humanDeferred: [], itsaStatuses: STATUSES, ...o })
+const lists = (threads: Thread[], o: Partial<Data> = {}): Partial<Data> => ({ humanRows: humanRowsOf(threads), itsaStatuses: STATUSES, ...o })
+// The inbox, and the thread reads its top cards make (S-4616).
+const inbox = (threads: Thread[], o: Partial<Data> = {}) => ({ data: lists(threads, o), routes: threadRoutes(...threads) })
 // Many threads, a long body on top: the stack at a realistic scale.
 const BODY = 'The nightly build ran every suite on both machines and all of them passed. '.repeat(30)
 const MANY: Thread[] = Array.from({ length: 40 }, (_, i) => ({ thread_id: 'fx-sw-' + i, mails: [mail('fm-sw-' + i, 'fx-sw-' + i, ['fx-dev', 'fx-review', 'fx-ops', 'fx-cos'][i % 4], ['human'], i === 0 ? '' : `Fixture thread number ${i}`, i === 0 ? BODY : 'Body.', { min: 3 + i * 40, read: i > 5 })] }))
@@ -15,7 +18,7 @@ const BLOCKER: Thread = { thread_id: 'fx-sw-blocker', mails: [{ ...mail('fm-sw-b
 export const stories: Story[] = [{
   name: 'Swipe view',
   group: 'Mail',
-  what: 'Your inbox as a stack of mail cards, newest on top: the threads the Mail list holds (to you, not archived, not deferred). Pull the top card left to archive its thread, right to leave it (it goes to the back; nothing changes on the server), up to defer it; tap it to open the thread. The card follows the finger, the action it would fire shows where the card leaves, and a pull short of the threshold springs back. The buttons and keys do the same: ← archive, → leave, ↑ defer, Enter opens, z undoes the last one, which the bar names with an Undo button. A thread that waits on your answer refuses archive as the inbox does, and the card stays; it can still be deferred, and its ask stays under To answer. Archiving a Decision or Blocker card asks first: the card springs back and a bar ("Archive this blocker?" with Cancel and Archive) takes the buttons\' place; Archive, Enter or ← confirms, Cancel or Escape keeps the card. Defer, leave, open and other card kinds never ask.',
+  what: 'Your inbox as a stack of mail cards, newest on top: the threads the Mail list holds (to you, not archived, not deferred). Pull the top card left to archive its thread, right to leave it (it goes to the back; nothing changes on the server), up to defer it; tap it to open the thread. The card follows the finger, the action it would fire shows where the card leaves, and a pull short of the threshold springs back. The buttons and keys do the same: ← archive, → leave, ↑ defer, Enter opens, z undoes the last one, which the bar names with an Undo button. A thread that waits on your answer refuses archive as the inbox does, and the card stays; it can still be deferred, and its ask stays under To answer. Archiving a Decision or Blocker card asks first: the card springs back and a bar ("Archive this blocker?" with Cancel and Archive) takes the buttons\' place; Archive, Enter or ← confirms, Cancel or Escape keeps the card. Defer, leave, open and other card kinds never ask. The stack is the inbox\'s rows; a card\'s whole thread is read as it reaches the top two, and again when its row says a new mail came, so a card shows loading until then and no key acts on it.',
   when: 'The `w:swipe` world: the Swipe entry in the Mail list\'s switches, or `#view=swipe`. Archiving or deferring a thread opened from it comes back to it, on the next card.',
   code: ['web/src/mail/SwipeView.tsx#SwipeView', 'web/src/mail/swipeCard.ts#dragCard', 'web/src/mail/swipeCard.ts#releaseAction', 'web/src/mail/swipeCard.ts#stackOrder', 'web/src/actions.tsx#openFromSwipe'],
   rules: [
@@ -28,15 +31,16 @@ export const stories: Story[] = [{
     'No toast for what has a place: the last action and its Undo sit in the bar; a refusal uses the one transient notice bar (' + ds('Persona rules') + ').',
   ],
   states: [
-    { name: 'A stack of cards', data: inbox([T_UNREAD, T_PLAIN, ...ALL_THREADS.filter((t) => t !== T_UNREAD && t !== T_PLAIN && t !== T_ASK)], { decisions: [DECISION] }), render: view },
-    { name: 'A blocker card (archive asks first)', data: inbox([BLOCKER, T_PLAIN]), render: view },
-    { name: 'A decision card', data: inbox([T_K_DECISION, T_PLAIN]), render: view },
-    { name: 'A blocker card, labelled sections', data: inbox([T_K_BLOCKER, T_PLAIN]), render: view },
-    { name: 'A done card', data: inbox([T_K_DONE, T_PLAIN]), render: view },
-    { name: 'A general card', data: inbox([T_K_GENERAL, T_PLAIN]), render: view },
-    { name: 'A thread waiting on you', data: inbox([T_ASK, T_PLAIN], { attention: [ASK_ITSA], itsas: [ASK_ITSA as never] }), render: view },
-    { name: 'Many threads, long body', data: inbox(MANY), render: view },
-    { name: 'Loading', data: { humanThreads: [], loaded: { agents: true, mail: false, itsas: true } }, render: view },
-    { name: 'Empty', data: inbox([]), render: view },
+    { name: 'A stack of cards', ...inbox([T_UNREAD, T_PLAIN, ...ALL_THREADS.filter((t) => t !== T_UNREAD && t !== T_PLAIN && t !== T_ASK)], { decisions: [DECISION] }), render: view },
+    { name: 'A blocker card (archive asks first)', ...inbox([BLOCKER, T_PLAIN]), render: view },
+    { name: 'A decision card', ...inbox([T_K_DECISION, T_PLAIN]), render: view },
+    { name: 'A blocker card, labelled sections', ...inbox([T_K_BLOCKER, T_PLAIN]), render: view },
+    { name: 'A done card', ...inbox([T_K_DONE, T_PLAIN]), render: view },
+    { name: 'A general card', ...inbox([T_K_GENERAL, T_PLAIN]), render: view },
+    { name: 'A thread waiting on you', ...inbox([T_ASK, T_PLAIN], { attention: [ASK_ITSA], itsas: [ASK_ITSA as never] }), render: view },
+    { name: 'Many threads, long body', ...inbox(MANY), render: view },
+    { name: 'Loading', data: { humanRows: humanRowsOf(), loaded: { agents: true, mail: false, itsas: true } }, render: view },
+    { name: 'The top card\'s thread still loading', data: lists([T_PLAIN, T_UNREAD]), render: view },
+    { name: 'Empty', ...inbox([]), render: view },
   ],
 }]

@@ -576,7 +576,7 @@ func TestStartPush(t *testing.T) {
 }
 
 // TestStartPushPaused: SessionStart doesn't push to an agent an owner paused while it started (its resume pushes); a
-// rest still takes the push (S-4168 review). Mail to a paused agent still goes in, as TestBlockerHumanPause pins.
+// rest still takes the push (S-4168 review), after the wake's own prompt (S-4332). Mail to a paused agent still goes in, as TestBlockerHumanPause pins.
 func TestStartPushPaused(t *testing.T) {
 	for _, tc := range []struct {
 		name, pausedBy string
@@ -602,6 +602,10 @@ func TestStartPushPaused(t *testing.T) {
 					t.Errorf("the notice left the queue: %v", n)
 				}
 				return
+			}
+			// A resting agent is woken (S-4332): the wake's prompt first, then the notice that woke it.
+			if p := sh.next(t); !strings.Contains(p.Content, "have been woken") {
+				t.Fatalf("the wake's prompt %q", p.Content)
 			}
 			if p := sh.next(t); !strings.Contains(p.Content, "Ring r1, round 1") {
 				t.Fatalf("prompt %q", p.Content)

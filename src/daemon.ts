@@ -24,6 +24,7 @@ import { lookingAtNote, tellAnywhere } from './mail.ts';
 import * as usageScope from './usage-scope.ts';
 import { parseAgentFilter } from './agent-class.ts';
 import * as visibility from './mail-visibility.ts';
+import * as tab from './thread-tab.ts';
 import { HomeRefused, homeOf, type HomeInput } from './ask-home.ts';
 import { AttachRefused, attachToMail, linkedThreadsFor } from './mail-itsas.ts';
 import { grantCitedThreads, isAssistant, mayReadWholeThread } from './mail-visibility.ts';
@@ -34,7 +35,7 @@ import { render, humanMailPrompt, listTemplates, saveTemplate, resetTemplate, SH
 import * as lifecycle from './lifecycle.ts';
 import * as permissionModes from './permission-modes.ts';
 import { admit, admitSpawn, heldForFallback } from './admission.ts';
-import { developerCapRefusal, isDeveloperSpawn, reserveSlot, releaseSlot, slotHolders, holderInfo, enqueueWaiter, dropWaiter, saveQueueFile, loadQueueFile, grantSlots, queuedWaiters, restoreQueue, roomRefusal, hostReadingFrom, cancelState, deliverWaiterNotice, mayCancelWaiter, findDuplicate, spawnerKey, URGENT_REASONS, incidentRefusal, mayMarkIncident, demoteRevoked, type HostReading, type UrgentReason, type Waiter } from './developer-cap.ts';
+import { developerCapRefusal, isDeveloperSpawn, reserveSlot, releaseSlot, slotHolders, holderInfo, enqueueWaiter, dropWaiter, saveQueueFile, loadQueueFile, grantSlots, queuedWaiters, restoreQueue, roomRefusal, hostReadingFrom, pinnedHostReading, cancelState, deliverWaiterNotice, mayCancelWaiter, findDuplicate, spawnerKey, URGENT_REASONS, incidentRefusal, mayMarkIncident, demoteRevoked, type HostReading, type UrgentReason, type Waiter } from './developer-cap.ts';
 import * as blockers from './blockers.ts';
 import * as context from './context.ts';
 import * as cacheCold from './cache-cold.ts';
@@ -95,7 +96,8 @@ import * as usageDrill from './usage-drill.ts';
 import { issueCosts, itsaCost } from './issue-costs.ts';
 import { costDisplay } from './cost-display.ts';
 import { displayCtx, listWithRaw, toCost, withOwnCost } from './agent-costs.ts';
-import { activityStatsCached, measuredEffort, type By } from './activity-stats.ts';
+import { activityStatsCached, activityMemoSize, measuredEffort, type By } from './activity-stats.ts';
+import { residentMemory } from './memory.ts';
 import * as activitySummaryMod from './activity-summary.ts';
 import * as credits from './credits.ts';
 import * as voice from './voice.ts';
@@ -148,8 +150,10 @@ import * as diff from './diff.ts';
 import * as commsStats from './comms-stats.ts';
 import * as digest from './digest.ts';
 import * as decl from './decl.ts';
-import { peers, peersReachable, peerByName, peerCall, peerRaw, peerStream, peerMachineOf, findAgentPeer, findAgentPeerFresh, locateAgent, fanOut, ensureUp, ensureCurrent, AmbiguousAgentError, ambiguousRefusal, refuseAmbiguousId, type Via, type Peer } from './peers.ts';
+import { peers, peersReachable, peerByName, peerCall, peerRaw, peerStream, peerMachineOf, findAgentPeer, findAgentPeerFresh, locateAgent, fanOut, fanOutParts, fanOutReport, onPeerWrite, ensureUp, ensureCurrent, AmbiguousAgentError, ambiguousRefusal, refuseAmbiguousId, type Via, type Peer } from './peers.ts';
+import { createHumanPeerMemo, HUMAN_PEER_TTL_MS } from './human-peer-memo.ts';
 import { searchMail } from './mail-search.ts';
+import { createSharedBuild, createWriteCount, countingWrites, boxThreadsKey } from './shared-build.ts';
 import { backfill } from './vectors.ts';
 import './itsa-vectors.ts';
 import './agent-vectors.ts';
@@ -715,7 +719,7 @@ async function launchWaiter(w: Waiter): Promise<void> {
 // The load and free memory the queue's guard reads (S-2120): the sampler's latest sample while it is fresh
 // (STAM_PROC_DIR can seed it for tests), else the os module's.
 function hostReading(): HostReading {
-  return hostReadingFrom(machines.latestSample(), Date.now(), 2 * machines.SAMPLE_MS, () => ({ load1: loadavg()[0], freeBytes: freemem() }));
+  return pinnedHostReading(testOnlyEnv('STAM_TEST_HOST_ROOM'), () => hostReadingFrom(machines.latestSample(), Date.now(), 2 * machines.SAMPLE_MS, () => ({ load1: loadavg()[0], freeBytes: freemem() })));
 }
 
 // Each launch runs on its own, so a slow workspace never holds the next sweep for dead waiters.
@@ -2134,20 +2138,34 @@ function withBox(path: string, box: string | undefined): string {
 // so the peers' lists join this one, deduplicated by mail id. A mail about an ITSA in a human status
 // is left out, on any home: each home reports its own waiting ITSAs. A peer's own request gets its
 // local list only, and the asking daemon does the filtering.
-async function decisionMailsAll(local: boolean, via?: Via): Promise<decisionMail.DecisionMail[]> {
+// The peers' decisions and attention, memoized per reader and dropped on any write this daemon sends a peer (S-4356,
+// src/human-peer-memo.ts). A peer that didn't answer makes a partial answer, which is not kept.
+type HumanPeers = { decisions: decisionMail.DecisionMail[]; attention: { id: string }[]; unreachable: boolean };
+const humanPeerState = createHumanPeerMemo<HumanPeers>(HUMAN_PEER_TTL_MS, (v) => !v.unreachable);
+onPeerWrite(() => humanPeerState.invalidate());
+// `fresh` skips the memo, for a check that must not act on an answer a peer may have missed (auto-archive).
+const peerHumanState = (via?: Via, fresh = false): Promise<HumanPeers> => {
+  const load = async (): Promise<HumanPeers> => {
+    const [decisions, attention] = await Promise.all([fanOutReport<decisionMail.DecisionMail>('/api/mail/decisions', via, true), fanOutReport<{ id: string }>('/api/itsas/attention', via, true)]);
+    return { decisions: decisions.rows, attention: attention.rows, unreachable: decisions.unreachable || attention.unreachable };
+  };
+  return fresh ? load() : humanPeerState.get(via ? JSON.stringify(via) : '', load);
+};
+
+async function decisionMailsAll(local: boolean, via?: Via, fresh = false): Promise<decisionMail.DecisionMail[]> {
   const mine = decisionMail.localDecisionMails();
   if (local) return mine;
-  const theirs = await fanOut<decisionMail.DecisionMail>('/api/mail/decisions', via);
-  const held = new Set([...itsaHuman.waitingIds(), ...(await fanOut<{ id: string }>('/api/itsas/attention', via)).map((x) => x.id)]);
+  const peers = await peerHumanState(via, fresh);
+  const held = new Set([...itsaHuman.waitingIds(), ...peers.attention.map((x) => x.id)]);
   const all = new Map<string, decisionMail.DecisionMail>();
-  for (const m of [...mine, ...theirs]) all.set(m.mail_id, m);
+  for (const m of [...mine, ...peers.decisions]) all.set(m.mail_id, m);
   return decisionMail.withoutHeld([...all.values()], held).sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
 // The Needs you list (S-3831): this daemon's asks and its peers', each key once, in the list's order.
 async function asksAll(local: boolean, via?: Via): Promise<asks.Ask[]> {
   if (local) return asks.localAsks(MACHINE, itsaHuman.waitingIds());
-  const held = new Set([...itsaHuman.waitingIds(), ...(await fanOut<{ id: string }>('/api/itsas/attention', via)).map((x) => x.id)]);
+  const held = new Set([...itsaHuman.waitingIds(), ...(await peerHumanState(via)).attention.map((x) => x.id)]);
   // A key that two daemons hold (a decision copy) is one row; the settled one is the newer state.
   const all = new Map<string, asks.Ask>();
   for (const a of [...asks.localAsks(MACHINE, held), ...(await fanOut<asks.Ask>('/api/asks', via))]) {
@@ -2157,35 +2175,274 @@ async function asksAll(local: boolean, via?: Via): Promise<asks.Ask[]> {
   return asks.ordered(asks.withoutHeldDecisions([...all.values()], held));
 }
 
+type ListThread = { thread_id: string; mails: db.ListMail[] };
+type FullThread = { thread_id: string; mails: db.ThreadMail[] };
+
 // A mailbox's threads as its list shows them, merged from every daemon and split by this daemon's
-// archive state. Every source is asked for the page plus the mailbox's archived threads, so
-// filtering by archive can't leave the page short of matches. `via` is how peers check the box
-// is read as; `viaDecisions` how they check the decision list (the human's mailbox only).
-async function mailboxThreads(box: string, limit: number, via?: Via, viaDecisions?: Via, withId?: string): Promise<{ active: { thread_id: string; mails: db.ThreadMail[] }[]; archived: { thread_id: string; mails: db.ThreadMail[] }[]; deferred: { thread_id: string; mails: db.ThreadMail[] }[] }> {
+// archive state, in the light form of db.ListMail: pageThreads loads the page a caller shows whole
+// (S-4520). Every source is asked for the page plus the mailbox's archived and deferred threads, so
+// filtering by archive can't leave the page short of matches; `cap` is that count. `via` is how peers
+// check the box is read as; `viaDecisions` how they check the decision list (the human's mailbox only).
+// `reader`, the request's caller, lets the reads that arrive while a build for the same reader and arguments runs
+// share it (src/shared-build.ts, S-4356); nothing is kept after. Without it (auto-archive) the lists are built alone.
+// Only the light pass is shared: each read's page differs (its list, its slice) and costs a page's mail, not the archive's.
+type BoxThreads = { active: ListThread[]; archived: ListThread[]; deferred: ListThread[]; cap: number };
+// Write requests this daemon has taken (any method but GET and HEAD), at their start and their handler's completion
+// (countingWrites around the server's handler): one forwarded to a peer writes nothing here, so the database's mark
+// alone would let a read after it join a build from before it.
+const writeRequests = createWriteCount();
+const boxThreadsBuilds = createSharedBuild<BoxThreads>(() => `${db.changeMark()}:${writeRequests.mark()}`);
+function mailboxThreads(box: string, limit: number, via?: Via, viaDecisions?: Via, withId?: string, reader?: Caller): Promise<BoxThreads> {
+  const build = () => buildMailboxThreads(box, limit, via, viaDecisions, withId);
+  return reader ? boxThreadsBuilds.get(boxThreadsKey(reader, { box, limit, withId, via, viaDecisions }), build) : build();
+}
+async function buildMailboxThreads(box: string, limit: number, via?: Via, viaDecisions?: Via, withId?: string): Promise<BoxThreads> {
   const cap = limit + db.archivedCount(box) + db.deferredCount(box);
-  const merged = new Map<string, db.ThreadMail[]>();
+  const merged = new Map<string, db.ListMail[]>();
   const withQ = withId ? `&with=${encodeURIComponent(withId)}` : '';
-  for (const t of [...db.threads(box, cap, withId), ...(await fanOut<ReturnType<typeof db.threads>[number]>(`/api/agents/${box}/threads?limit=${cap}${withQ}`, via))])
+  // A peer that predates `light` sends whole mails, which are ListMail too.
+  for (const t of [...db.threadList(box, cap, withId), ...(await fanOut<ListThread>(`/api/agents/${box}/threads?limit=${cap}&light=1${withQ}`, via))])
     merged.set(t.thread_id, [...(merged.get(t.thread_id) ?? []), ...(isBoss(box) ? t.mails : visibility.listedThread(box, t).mails)]);
   // A thread's place is its newest message the mailbox sent or received: mail between others
-  // in it doesn't move it up (S-542).
-  const last = (ms: db.ThreadMail[]) => (ms.findLast((x) => x.from_id === box || x.recipients.some((r) => r.id === box)) ?? ms.at(-1)!).created_at;
+  // in it doesn't move it up (S-542). Threads at one time go by id, so an index cursor has one place to resume.
   const all = [...merged]
-    .map(([thread_id, ms]) => ({ thread_id, mails: db.foldMails(ms).sort((a, b) => a.created_at.localeCompare(b.created_at)) }))
-    .sort((a, b) => last(b.mails).localeCompare(last(a.mails)));
+    .map(([thread_id, ms]) => ({ thread_id, mails: db.foldListMails(ms).sort((a, b) => a.created_at.localeCompare(b.created_at)) }))
+    .map((t) => ({ t, at: boxLast(box, t.mails) }))
+    .sort((a, b) => listOrder(a, b))
+    .map((x) => x.t);
   const keep = box === mail.HUMAN ? new Set([...itsaHuman.askThreadIds(), ...(await decisionThreads(false, viaDecisions))]) : undefined;
   const { active, archived } = db.splitArchived(box, all, keep);
   // An ask or a decision can be deferred too (S-1068), so `keep` (which holds them in the inbox) doesn't apply.
   const { rest, deferred } = db.splitDeferred(box, active);
-  return { active: rest, archived, deferred };
+  return { active: rest, archived, deferred, cap };
+}
+
+// The ids a peer is asked for in one request: a long page (auto-archive's whole inbox) goes in parts, so
+// the request line stays far under the peer's header limit.
+const PAGE_IDS = 100;
+
+// The peers' mail of a page's threads (S-4520): `ids` in parts of PAGE_IDS, each peer asked part by part. A peer
+// that predates `ids` answers each part with its newest `cap` threads, as it did before: its first answer that
+// holds a thread outside the part asked ends its turn, so it is asked once. `light` asks for the index fields
+// (db.threadList's `index`) instead of whole mails.
+async function peerPage<T extends ListThread>(box: string, ids: string[], cap: number, via: Via | undefined, withId: string | undefined, light: boolean): Promise<{ rows: T[]; unreachable: boolean }> {
+  const withQ = withId ? `&with=${encodeURIComponent(withId)}` : '';
+  const parts: string[][] = [];
+  for (let i = 0; i < ids.length; i += PAGE_IDS) parts.push(ids.slice(i, i + PAGE_IDS));
+  const asked = parts.map((part) => new Set(part));
+  const paths = parts.map((part) => `/api/agents/${box}/threads?ids=${encodeURIComponent(part.join(','))}${light ? '&light=1' : ''}&limit=${cap}${withQ}`);
+  return fanOutParts<T>(paths, via, (rows, i) => rows.some((t) => !asked[i].has(t.thread_id)));
+}
+
+// A page of mailboxThreads' threads whole, in its order (S-4520): this daemon's and each peer's mail of
+// them, merged as mailboxThreads merges its light pass. With `strict`, a peer that doesn't answer is an
+// error rather than a page without its mail (auto-archive judges threads only with every peer in view).
+async function pageThreads(box: string, page: ListThread[], cap: number, via?: Via, withId?: string, opts: { strict?: boolean } = {}): Promise<FullThread[]> {
+  const merged = new Map<string, db.ThreadMail[]>(page.map((t) => [t.thread_id, []]));
+  const add = (t: FullThread) => merged.get(t.thread_id)?.push(...(isBoss(box) ? t.mails : visibility.listedThread(box, t).mails));
+  const ids = [...merged.keys()];
+  for (const t of db.threadsById(box, ids, withId)) add(t);
+  const { rows, unreachable } = await peerPage<FullThread>(box, ids, cap, via, withId, false);
+  if (unreachable && opts.strict) throw new Error("a peer didn't answer for the page's mail, and auto-archive judges threads only with every peer in view");
+  for (const t of rows) add(t);
+  return [...merged]
+    .filter(([, ms]) => ms.length)
+    .map(([thread_id, ms]) => ({ thread_id, mails: db.foldMails(ms).sort((a, b) => a.created_at.localeCompare(b.created_at)) }));
+}
+
+// A row of a mailbox's thread index (GET /api/agents/:box/thread-index, S-4520): what the list shows of a thread,
+// without its bodies. The UI loads the thread whole when it opens it.
+interface IndexRow {
+  thread_id: string;
+  subject: string;
+  title: string | null;
+  kind: string | null;
+  itsa_id: string | null;
+  from_id: string;
+  from_name: string | null;
+  last_at: string;
+  mail_count: number;
+  unread: number;
+  ask: 'pending' | null;
+  snippet: string;
+  // The thread's card, as web/src/mail/MailCard.tsx draws it (S-4578): the newest mail to the box from someone
+  // else, else the last mail. Its sender (cardFrom), summary or body, title, verdict kind, ITSA and first linked ITSA.
+  card_from_id: string;
+  card_from_name: string | null;
+  card_text: string;
+  card_title: string | null;
+  // The card mail's own subject: cardText's last fallback (S-4579).
+  card_subject: string;
+  verdict_kind: string | null;
+  about_itsa: string | null;
+  itsa_chip: { key: string; title: string } | null;
+  // Who sent the mail last_at is the time of, and the last mail's own time.
+  box_last_from: string;
+  last_created_at: string;
+  // The first mail's time: when the thread started.
+  first_created_at: string;
+  // What the thread's tab reads (S-4579), each empty rather than missing: every ask's permission and whether it was
+  // placed in this thread (web isPlacedAsk), in mail order; the linked ITSAs and the about_itsa ids, once each, in the
+  // order they first appear (web threadItsas); the agents as web threadAgents orders them, the human left out; and the
+  // last mail's id.
+  perms: { id: string; placed: boolean }[];
+  itsa_links: { id: string; key: string; title: string; status: string }[];
+  about_itsas: string[];
+  agents: string[];
+  last_mail_id: string;
+}
+
+// The newest message the mailbox sent or received in a thread: its place in the list (S-542).
+const boxLastMail = (box: string, ms: db.ListMail[]) => ms.findLast((x) => x.from_id === box || x.recipients.some((r) => r.id === box)) ?? ms.at(-1)!;
+const boxLast = (box: string, ms: db.ListMail[]) => boxLastMail(box, ms).created_at;
+// A mail's sender name, as its source named it: threadList's index form and an older peer's whole mail both name a
+// sender stored without a name, as db.ts withRecipients does, so no row looks an agent up.
+const senderName = (m: db.ListMail) => m.from_name ?? m.from_id;
+// How much of a card's summary or body an index row carries (S-4578), line breaks kept.
+const CARD_CHARS = 300;
+// A mail's body as the index form carries it: an older peer's whole mail is cut as threadList's ltrim and substr cut it.
+const bodyHead = (m: db.ListMail) => m.snippet ?? Array.from((m.body ?? '').replace(/^\s+/, '').slice(0, 2 * db.SNIPPET_CHARS)).slice(0, db.SNIPPET_CHARS).join('');
+
+// The card's sender, as web cardFrom: the card mail's, else the last mail's not from the box, else the last
+// recipient who isn't the box, with no name.
+function cardFrom(box: string, card: db.ListMail | undefined, ms: db.ListMail[]): { id: string; name: string | null } {
+  const m = card ?? ms.findLast((x) => x.from_id !== box);
+  if (m) return { id: m.from_id, name: senderName(m) };
+  return { id: ms.flatMap((x) => x.recipients).findLast((x) => x.id !== box)?.id ?? box, name: null };
+}
+
+// A thread's index row from its mails, merged and oldest first. The title follows web/src/format.ts threadTitle: the
+// newest 1-3 word title of the thread's own mail; an ask placed in it doesn't rename it (S-3827).
+function indexRow(box: string, thread_id: string, ms: db.ListMail[]): IndexRow {
+  const last = ms.at(-1)!;
+  const toBox = ms.findLast((m) => m.from_id !== box && m.recipients.some((r) => r.id === box));
+  const card = toBox ?? last;
+  const from = cardFrom(box, toBox, ms);
+  const isAsk = (m: db.ListMail) => !!m.permission_id || m.kind === visibility.ASK_LINK || m.kind === visibility.ASK_REPLY || m.kind === visibility.ASK_NOTE;
+  const own = ms.filter((m) => !isAsk(m));
+  return {
+    thread_id,
+    subject: ms[0].subject ?? '',
+    title: (own.length ? own : ms).findLast((m) => m.title)?.title ?? null,
+    kind: last.kind ?? null,
+    itsa_id: ms.find((m) => m.itsa_id)?.itsa_id ?? null,
+    from_id: last.from_id,
+    from_name: senderName(last),
+    last_at: boxLast(box, ms),
+    mail_count: ms.length,
+    unread: ms.filter((m) => m.recipients.some((r) => r.id === box && !r.read_at)).length,
+    ask: ms.some((m) => m.permission?.status === 'pending') ? 'pending' : null,
+    snippet: bodyHead(last).replace(/\s+/g, ' ').trim().slice(0, 200),
+    card_from_id: from.id,
+    card_from_name: from.name,
+    card_text: Array.from(card.summary?.trim() || bodyHead(card).trim()).slice(0, CARD_CHARS).join(''),
+    card_title: card.title ?? null,
+    card_subject: card.subject ?? '',
+    verdict_kind: card.verdict?.kind ?? null,
+    about_itsa: card.about_itsa ?? card.itsa_id ?? null,
+    itsa_chip: card.itsas?.[0] ? { key: card.itsas[0].key, title: card.itsas[0].title } : null,
+    box_last_from: boxLastMail(box, ms).from_id,
+    last_created_at: last.created_at,
+    first_created_at: ms[0].created_at,
+    perms: ms.filter((m) => m.permission_id).map((m) => ({ id: m.permission_id!, placed: visibility.isPlacedAsk(m) })),
+    itsa_links: tab.itsaLinks(ms),
+    about_itsas: [...new Set(ms.flatMap((m) => (m.about_itsa ? [m.about_itsa] : [])))],
+    agents: tab.threadAgents(ms),
+    last_mail_id: last.id,
+  };
+}
+
+// The index rows of a page of mailboxThreads' threads, in its order: as pageThreads, but each source sends the
+// page's mails in db.ListMail form with the index fields (`ids` with `light=1`), never their bodies. A peer that
+// predates them answers with its newest `cap` threads whole, once (peerPage), from which the page's are kept.
+async function pageIndex(box: string, page: ListThread[], cap: number, via?: Via, withId?: string): Promise<IndexRow[]> {
+  const merged = new Map<string, db.ListMail[]>(page.map((t) => [t.thread_id, []]));
+  const add = (t: ListThread) => merged.get(t.thread_id)?.push(...(isBoss(box) ? t.mails : visibility.listedThread(box, t).mails));
+  const ids = [...merged.keys()];
+  for (const t of db.threadList(box, 0, withId, { only: ids, index: true })) add(t);
+  // A peer on an earlier release sends the index form without attached agents, and its linked ITSAs without id and
+  // status (S-4578's): those threads are asked for again whole, which carry both, from every peer.
+  const fromPeers = (await peerPage<ListThread>(box, ids, cap, via, withId, true)).rows;
+  const older = new Set(fromPeers.filter((t) => t.mails.some((m) => m.snippet !== undefined && m.agents === undefined)).map((t) => t.thread_id));
+  for (const t of fromPeers) if (!older.has(t.thread_id)) add(t);
+  if (older.size) for (const t of (await peerPage<ListThread>(box, [...older], cap, via, withId, false)).rows) add(t);
+  return [...merged]
+    .filter(([, ms]) => ms.length)
+    .map(([thread_id, ms]) => indexRow(box, thread_id, db.foldListMails(ms).sort((a, b) => a.created_at.localeCompare(b.created_at))));
+}
+
+// The most rows a cursor may have passed: a cursor past it is refused rather than read as a light pass that size.
+const MAX_CURSOR_ROWS = 100_000;
+// The threads the light pass reads for the archived and deferred lists: all of them. mailboxThreads' cap counts the
+// page as active threads, so active threads newer than every archived one would otherwise cut the list short.
+const WHOLE_LIST = 1_000_000;
+
+// An index cursor: the last row a page returned (its sort key and thread) and how many rows came before the next
+// page, so the next call reads about enough threads to reach it. Opaque to the client.
+type IndexCursor = { at: string; t: string; n: number };
+// The list's order (mailboxThreads): newest sort key first, then thread id, highest first. Both are compared by code
+// unit, so the order and a cursor's boundary agree.
+const before = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+function listOrder(a: { at: string; t: { thread_id: string } }, b: { at: string; t: { thread_id: string } }): number {
+  return before(b.at, a.at) || before(b.t.thread_id, a.t.thread_id);
+}
+const encodeCursor = (c: IndexCursor) => Buffer.from(JSON.stringify(c)).toString('base64url');
+function decodeCursor(raw: string | null): IndexCursor | undefined {
+  if (!raw) return undefined;
+  try {
+    const c = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    if (typeof c?.at === 'string' && typeof c?.t === 'string' && Number.isInteger(c?.n) && c.n >= 0 && c.n <= MAX_CURSOR_ROWS) return c;
+  } catch {}
+  throw new HttpError(400, 'cursor is not one a thread-index page returned');
+}
+
+// One page of a mailbox's thread index after `cursor` (S-4520). The page is the rows after the cursor's place in the
+// list's order: its sort key and thread, not where that thread is now, so mail that moves the thread up or archives it
+// neither repeats nor skips a row. Threads that moved above the place since aren't shown again. The list is
+// mailboxThreads' list, read up to the rows already returned plus this page; when the page may lack a source's threads
+// (newer threads came in, so a source's read stopped above the page's end), it is read again whole. `next_cursor` is null once the list ends.
+// `reader` shares the light pass with the reads that arrive while it runs, as on /threads (S-4356).
+async function threadIndex(box: string, list: 'active' | 'archived' | 'deferred', limit: number, cursor: IndexCursor | undefined, via?: Via, viaDecisions?: Via, withId?: string, reader?: Caller): Promise<{ threads: IndexRow[]; next_cursor: string | null }> {
+  const read = async (want: number) => {
+    const lists = await mailboxThreads(box, want, via, viaDecisions, withId, reader);
+    const all = lists[list];
+    const at = cursor ? all.findIndex((t) => listOrder({ at: cursor.at, t: { thread_id: cursor.t } }, { at: boxLast(box, t.mails), t }) < 0) : 0;
+    const start = at < 0 ? all.length : at;
+    // Each source read its newest `cap` threads by sort key, in any order within a tie (an older peer has no id
+    // tie-break). So a source may lack threads at or above a key only when it read `cap` of them, and the merged lists
+    // then hold at least `cap` threads there: with fewer at or above the page's last key, every source covered the page.
+    // A page short of full, from lists that were cut, may lack a source's threads too.
+    const every = [...lists.active, ...lists.archived, ...lists.deferred].map((t) => boxLast(box, t.mails));
+    const cut = every.length >= lists.cap;
+    const end = all[start + limit - 1];
+    const whole = !cut || (!!end && every.filter((x) => x >= boxLast(box, end.mails)).length < lists.cap);
+    return { lists, all, start, cut, whole };
+  };
+  // One thread past the page, so a page whose last key isn't tied with the next still has fewer than `cap` at or above it.
+  let r = await read(list === 'active' ? (cursor?.n ?? 0) + limit + 1 : WHOLE_LIST);
+  if (!r.whole) r = await read(WHOLE_LIST);
+  const { lists, all, start, cut } = r;
+  const rows = await pageIndex(box, all.slice(start, start + limit), lists.cap, via, withId);
+  // More may follow when the page is full, or when the list was cut at what this call asked for.
+  const more = rows.length > 0 && (start + limit < all.length || cut);
+  const end = rows.at(-1);
+  return { threads: rows, next_cursor: more && end ? encodeCursor({ at: end.last_at, t: end.thread_id, n: start + rows.length }) : null };
 }
 
 // Where the auto-archive pass (S-637) reads the human's inbox and its open decisions, and how it
 // archives a thread on the peers, whose archive state is their own.
 function autoArchiveSources(): autoArchive.Sources {
   return {
-    inbox: (limit = 200) => mailboxThreads(mail.HUMAN, limit),
-    openDecisions: async () => new Set((await decisionMailsAll(false)).map((m) => m.mail_id)),
+    inbox: async (limit = 200) => {
+      const { active, cap } = await mailboxThreads(mail.HUMAN, limit);
+      return pageThreads(mail.HUMAN, active, cap, undefined, undefined, { strict: true });
+    },
+    archived: async () => {
+      const { archived, cap } = await mailboxThreads(mail.HUMAN, 1_000_000);
+      return pageThreads(mail.HUMAN, archived, cap, undefined, undefined, { strict: true });
+    },
+    // Read fresh: a decision answered on a peer may still be held open by this daemon's memo (S-4356).
+    openDecisions: async () => new Set((await decisionMailsAll(false, undefined, true)).map((m) => m.mail_id)),
     humanWaits: async () => [...waits.openHumanWaits(), ...(await fanOut<HumanWait>('/api/mail/human-waits'))],
     tellPeers: async (thread_id, ids, human_ids) => {
       await Promise.all(peers().map((p) => peerCall(p, 'POST', '/api/mail/archive-resolved', { thread_id, ids, human_ids })));
@@ -2194,9 +2451,9 @@ function autoArchiveSources(): autoArchive.Sources {
   };
 }
 
-// The threads with an unanswered decision mail, which archive can't hide.
-async function decisionThreads(local: boolean, via?: Via): Promise<Set<string>> {
-  return new Set((await decisionMailsAll(local, via)).map((m) => m.thread_id));
+// The threads with an unanswered decision mail, which archive can't hide. `fresh` for the archive refusal (S-4356).
+async function decisionThreads(local: boolean, via?: Via, fresh = false): Promise<Set<string>> {
+  return new Set((await decisionMailsAll(local, via, fresh)).map((m) => m.thread_id));
 }
 
 // The mailbox a mail read looks at, named by its box query (S-259). An agent reads its own box by
@@ -3038,10 +3295,12 @@ export async function runDaemon(): Promise<void> {
   type Handler = (m: RegExpMatchArray, body: any, url: URL, res: ServerResponse, local: boolean, human: boolean, req: IncomingMessage, caller: Caller) => unknown;
   const routes: [string, RegExp, Handler][] = [
     // `stalls` is the last event-loop stalls (src/stall.ts), for finding what blocked the loop.
-    // `memory` is the daemon's heap and RSS (process.memoryUsage), to see what holds the memory.
+    // `memory` is the daemon's heap and RSS (process.memoryUsage), to see what holds the memory. `anon` and `file` split
+    // the RSS (S-4390), and `caches` counts what the daemon keeps in memory, read-only.
     ['GET', /^\/api\/health$/, () => {
       const { heapUsed, heapTotal, rss, external } = process.memoryUsage();
-      return { ok: true, machine: MACHINE, release: RELEASE, stalls: stalls.recent, memory: { heapUsed, heapTotal, rss, external } };
+      const caches = { activityStats: activityMemoSize(), humanPeers: humanPeerState.size(), dbConnections: 1 + activity.openOpenCodeDbCount(), stalls: stalls.recent.length };
+      return { ok: true, machine: MACHINE, release: RELEASE, stalls: stalls.recent, memory: { heapUsed, heapTotal, rss, external, ...residentMemory() }, caches };
     }],
     // The deploy watcher's DB sample (S-474): one SELECT 1 and one cheap read of this daemon's own DB. Local only,
     // no peer fan-out, so its time is the DB's.
@@ -3874,13 +4133,40 @@ export async function runDaemon(): Promise<void> {
         const withRef = url.searchParams.get('with');
         const withId = withRef ? boxRef(withRef) : undefined;
         // An agent's box lists its threads without the asks placed in them that it doesn't see (S-3827).
-        if (local) return db.threads(box, limit, withId).map((t) => (isBoss(box) ? t : visibility.listedThread(box, t)));
+        // A peer asks in two steps (S-4520): `light=1` for every thread in db.ListMail form, then `ids=A,B` for its page
+        // whole, or, for the thread index, `ids=A,B&light=1` for the page's index fields.
+        if (local) {
+          const listed = <T extends ListThread>(ts: T[]) => ts.map((t) => (isBoss(box) ? t : visibility.listedThread(box, t)));
+          const ids = url.searchParams.get('ids');
+          const light = url.searchParams.get('light') === '1';
+          if (ids !== null && light) return listed(db.threadList(box, 0, withId, { only: ids.split(',').filter(Boolean), index: true }));
+          if (ids !== null) return listed(db.threadsById(box, ids.split(',').filter(Boolean), withId));
+          return light ? listed(db.threadList(box, limit, withId)) : listed(db.threads(box, limit, withId));
+        }
         // The peers get the id this daemon resolved, not NAME: a peer's agent of the same name is another mailbox (S-587).
         // Ask every source for the page plus this mailbox's archived threads, so filtering
         // by archive can't leave the page short of matches. Peers check the box read as, so the
         // OpenCode server isn't answered as a daemon (S-476).
-        const { active, archived, deferred } = await mailboxThreads(box, limit, viaBox(caller, box), viaOf(caller), withId);
-        return (url.searchParams.get('archived') === '1' ? archived : url.searchParams.get('deferred') === '1' ? deferred : active).slice(0, limit);
+        const { active, archived, deferred, cap } = await mailboxThreads(box, limit, viaBox(caller, box), viaOf(caller), withId, caller);
+        const list = url.searchParams.get('archived') === '1' ? archived : url.searchParams.get('deferred') === '1' ? deferred : active;
+        return pageThreads(box, list.slice(0, limit), cap, viaBox(caller, box), withId);
+      },
+    ],
+    [
+      'GET',
+      /^\/api\/agents\/([\w-]+)\/thread-index$/,
+      // For the web UI (S-4520): the threads list as index rows (subject, title, sender, time, unread and ask state,
+      // a snippet), no bodies, a page at a time. `list` picks active (default), archived or deferred; `cursor` is
+      // the `next_cursor` of the page before; `with` as on /threads. Same order and split as /threads.
+      async (m, _b, url, _r, _local, _h, _q, caller) => {
+        const box = boxRef(m[1]);
+        const rawList = url.searchParams.get('list') ?? 'active';
+        if (rawList !== 'active' && rawList !== 'archived' && rawList !== 'deferred') throw new HttpError(400, 'list must be active, archived or deferred');
+        const rawLimit = Number(url.searchParams.get('limit') ?? 50);
+        if (!Number.isInteger(rawLimit) || rawLimit < 1) throw new HttpError(400, 'limit must be a whole number from 1');
+        const withRef = url.searchParams.get('with');
+        const withId = withRef ? boxRef(withRef) : undefined;
+        return threadIndex(box, rawList, Math.min(rawLimit, 200), decodeCursor(url.searchParams.get('cursor')), viaBox(caller, box), viaOf(caller), withId, caller);
       },
     ],
     [
@@ -3911,7 +4197,7 @@ export async function runDaemon(): Promise<void> {
           const verb = 'archiving';
           if (m[3] === 'archive' && all.some((x) => x.permission?.status === 'pending')) throw new HttpError(409, `answer the permission request in this thread before ${verb} it`);
           // Defer sets aside an ask or a decision too (S-1068): it stays listed under To answer, unanswered.
-          if (m[3] === 'archive' && box === mail.HUMAN && (await decisionThreads(local, viaOf(caller))).has(m[2])) throw new HttpError(409, `answer the decision in this thread before ${verb} it`);
+          if (m[3] === 'archive' && box === mail.HUMAN && (await decisionThreads(local, viaOf(caller), true)).has(m[2])) throw new HttpError(409, `answer the decision in this thread before ${verb} it`);
           if (m[3] === 'defer') {
             db.deferThread(box, m[2], all.map((x) => x.id));
           } else {
@@ -6641,7 +6927,7 @@ export async function runDaemon(): Promise<void> {
   ownHosts();
   const addrs = bindAddresses();
   for (const addr of addrs) {
-    const server = createServer(handler);
+    const server = createServer(countingWrites(writeRequests, handler));
     server.on('upgrade', async (req, socket, head) => {
       const url = new URL(req.url ?? '/', 'http://x');
       const m = url.pathname.match(/^\/api\/(agents|shells)\/([\w-]+)\/tty$/);

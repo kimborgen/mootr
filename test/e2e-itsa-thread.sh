@@ -62,7 +62,7 @@ KEY=$(on home "$STAM" itsa new "Thread e2e" --owner alice --participant bob --pa
 [ "$(api home GET "/api/itsas/$KEY" | jget "d['thread_id']")" = None ] || fail "a thread exists before the first post"
 
 # 1. The first post, by carol on main (proxied to the home, relayed as a remote sender).
-STAM_AGENT_ID="$CAROL" on main "$STAM" itsa post "$KEY" "first from carol" >/dev/null || fail "carol's post failed"
+with_agent_id "$CAROL" on main "$STAM" itsa post "$KEY" "first from carol" >/dev/null || fail "carol's post failed"
 TID=$(api home GET "/api/itsas/$KEY" | jget "d['thread_id']")
 [ "$TID" != None ] || fail "the first post set no thread_id"
 api home GET "/api/itsas/$KEY/thread" >"$TEST_TMP/t1.json"
@@ -82,13 +82,13 @@ api home GET "/api/itsas/$KEY" | jget "sorted(d['participants'])" | grep -q "$CA
 
 # 3. The owner's post interrupts everyone, on both daemons (the interrupt list crosses machines).
 clear
-STAM_AGENT_ID="$ALICE" on home "$STAM" itsa post "$KEY" "from the owner" >/dev/null
+with_agent_id "$ALICE" on home "$STAM" itsa post "$KEY" "from the owner" >/dev/null
 notice home "$BOB" | grep -q "unread mail" || fail "the owner's post didn't interrupt bob"
 notice main "$CAROL" | grep -q "unread mail" || fail "the owner's post didn't interrupt carol on the other machine"
 
 # 4. A plain comment from bob is quiet for alice (home) and carol (main); both still hold it unread.
 clear
-STAM_AGENT_ID="$BOB" on home "$STAM" itsa post "$KEY" "plain from bob" >/dev/null
+with_agent_id "$BOB" on home "$STAM" itsa post "$KEY" "plain from bob" >/dev/null
 [ -z "$(notice home "$ALICE")" ] || fail "bob's comment interrupted the owner"
 [ -z "$(notice main "$CAROL")" ] || fail "bob's comment interrupted carol on the other machine"
 [ "$(unread main "$CAROL")" = 1 ] || fail "carol's quiet comment isn't waiting for her idle batch"
@@ -96,7 +96,7 @@ STAM_AGENT_ID="$BOB" on home "$STAM" itsa post "$KEY" "plain from bob" >/dev/nul
 
 # 5. An @name mention interrupts only the one named, across machines.
 clear
-STAM_AGENT_ID="$BOB" on home "$STAM" itsa post "$KEY" "@carol please look at this" >/dev/null
+with_agent_id "$BOB" on home "$STAM" itsa post "$KEY" "@carol please look at this" >/dev/null
 notice main "$CAROL" | grep -q "unread mail" || fail "an @carol mention didn't interrupt carol"
 [ -z "$(notice home "$ALICE")" ] || fail "an @carol mention interrupted alice"
 
@@ -105,12 +105,12 @@ clear
 api home POST "/api/itsas/$KEY/post" '{"body":"from the human"}' human >/dev/null
 notice home "$BOB" | grep -q "unread mail" || fail "the human's comment didn't interrupt bob"
 api home GET "/api/itsas/$KEY" | jget "sorted(d['participants'])" | grep -q human || fail "the human isn't a participant after posting"
-STAM_AGENT_ID="$BOB" on home "$STAM" itsa post "$KEY" "now the human is told" >/dev/null
+with_agent_id "$BOB" on home "$STAM" itsa post "$KEY" "now the human is told" >/dev/null
 [ "$(api home GET "/api/itsas/$KEY/thread" | jget "[r['id'] for r in [i for i in d['items'] if i['type']=='mail'][-1]['mail']['recipients']].count('human')")" = 0 ] || fail "an agent's comment mailed the human"
 
 # 7. Updates: a health is required and stored; a comment can't carry one.
-STAM_AGENT_ID="$ALICE" on home "$STAM" itsa post "$KEY" "update without health" --update bogus >/dev/null 2>&1 && fail "an update with a bad health was accepted"
-STAM_AGENT_ID="$ALICE" on home "$STAM" itsa post "$KEY" "slipping" --update at_risk >/dev/null || fail "an update failed"
+with_agent_id "$ALICE" on home "$STAM" itsa post "$KEY" "update without health" --update bogus >/dev/null 2>&1 && fail "an update with a bad health was accepted"
+with_agent_id "$ALICE" on home "$STAM" itsa post "$KEY" "slipping" --update at_risk >/dev/null || fail "an update failed"
 [ "$(api home GET "/api/itsas/$KEY/thread" | jget "[i['mail'] for i in d['items'] if i['type']=='mail'][-1]['health']")" = at_risk ] || fail "the update's health isn't stored"
 [ "$(api home GET "/api/itsas/$KEY/thread" | jget "[i['mail'] for i in d['items'] if i['type']=='mail'][-1]['kind']")" = update ] || fail "the update's kind isn't update"
 
@@ -134,7 +134,7 @@ on home "$STAM" itsa set "$KEY" --status in_progress >/dev/null
 wait_until events_at_least 1
 on home "$STAM" itsa set "$KEY" --owner bob >/dev/null
 wait_until events_at_least 2
-STAM_AGENT_ID="$BOB" on home "$STAM" itsa post "$KEY" "after the changes" >/dev/null
+with_agent_id "$BOB" on home "$STAM" itsa post "$KEY" "after the changes" >/dev/null
 for d in home main; do
   api "$d" GET "/api/itsas/$KEY/thread" >"$TEST_TMP/t3.json"
   [ "$(jget "[i['type'] for i in d['items']]" <"$TEST_TMP/t3.json" | tr -d "[]',")" = "mail mail mail mail mail mail mail mail event event mail" ] || { cat "$TEST_TMP/t3.json"; fail "the thread through $d isn't the 8 earlier mails, status and owner events, then the last mail"; }
@@ -147,7 +147,7 @@ api home GET "/api/threads/$TID" | grep -q "changed status" && fail "an event wa
 
 # One mail, one id on every daemon: the plain thread API shows each post once through either
 # daemon, and two identical comments from one sender stay two entries.
-STAM_AGENT_ID="$BOB" on home "$STAM" itsa post "$KEY" "same words" >/dev/null
+with_agent_id "$BOB" on home "$STAM" itsa post "$KEY" "same words" >/dev/null
 api home POST "/api/itsas/$KEY/post" "{\"by\":\"$BOB\",\"body\":\"same words\",\"to\":[\"human\"]}" >/dev/null
 N=$(api home GET "/api/itsas/$KEY/thread" | jget "len([i for i in d['items'] if i['type']=='mail'])")
 for d in home main; do

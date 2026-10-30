@@ -36,9 +36,11 @@ import (
 	"stam/internal/decide"
 	"stam/internal/diff"
 	"stam/internal/events"
+	"stam/internal/ghpoll"
 	"stam/internal/instructions"
 	"stam/internal/layout"
 	"stam/internal/lifecycle"
+	"stam/internal/linearpoll"
 	"stam/internal/llm"
 	"stam/internal/localhuman"
 	"stam/internal/mcpauth"
@@ -112,6 +114,10 @@ type Server struct {
 	requirements *requirements.Store
 	// events stores external events and delivers them (events.go).
 	events *events.Service
+	// github is the GitHub poller (github.go), set by StartEvents.
+	github *ghpoll.Poller
+	// linear is the Linear poller (linear.go), set by StartEvents.
+	linear *linearpoll.Poller
 	// remoteIdx is the copy of the ITSA home's enforced-tools index (steps_remote.go).
 	remoteIdx remoteIndex
 	// capMu makes the daily cap notice once (requirements_observers.go).
@@ -207,6 +213,11 @@ type Server struct {
 	// tickets and terms are the terminal sockets' tickets and viewers (tty.go).
 	tickets tickets
 	terms   terminals
+
+	// senderPeerFor, set by a test, stands in for the peer token S-4127 adds: the peer that made a call (senderPeer).
+	senderPeerFor func(auth.Resolved) (string, bool)
+	// peerAgentByID, set by a test, stands in for db.PeerAgentByID in peerSent (a lookup that fails).
+	peerAgentByID func(context.Context, string) (db.PeerAgentRef, bool, error)
 }
 
 // UseTemplates gives the server the templates it renders mail texts and the system prompt's parts from, and the
@@ -333,6 +344,7 @@ func (s *Server) routes() {
 	s.searchRoutes()
 	s.itsaRoutes()
 	s.eventsRoutes()
+	s.githubRoutes()
 	s.stepsRoutes()
 	s.requirementsRoutes()
 	s.permissionRoutes()

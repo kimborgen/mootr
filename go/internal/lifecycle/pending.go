@@ -232,8 +232,9 @@ func (l *Lifecycle) runTaken(ctx context.Context, a db.Agent, p *jsjson.Object) 
 	return "", nil
 }
 
-// OnIdle is src/lifecycle.ts onIdle, run when the agent's turn ends: its pending action runs. Not ported: the rest
-// clock's turn end and MCP reconnects. It binds to the session and generation the agent has as it is called (owner.bindSignal);
+// OnIdle is src/lifecycle.ts onIdle, run when the agent's turn ends: a rest its turn asked for is timed (restTurnEnded)
+// and its pending action runs. Not ported: the rest clock's idle timing and MCP reconnects. It binds to the session and
+// generation the agent has as it is called (owner.bindSignal);
 // a turn end that dispatches it later binds where it begins (onIdleAt), so a launch in between makes the run stale.
 func (l *Lifecycle) OnIdle(ctx context.Context, id string) error {
 	sid, gen, launching := l.ownerOf(id).bindSignal(l.runningTurn(ctx, id))
@@ -245,6 +246,7 @@ func (l *Lifecycle) OnIdle(ctx context.Context, id string) error {
 // pending compaction is run only for that binding (occompact.go); the generic take never takes one, so a compaction
 // written between the two reads stays on the row for the owner-bound path.
 func (l *Lifecycle) onIdleBound(ctx context.Context, id, sid string, gen int) error {
+	l.restTurnEnded(id)
 	if a, err := l.db.GetAgent(ctx, id); err == nil && a.Harness == "opencode" {
 		l.turnAt(id, "pending-read")
 		if p := pendingOf(a); p != nil && pstr(p, "type") == "compact" {

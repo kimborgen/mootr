@@ -5,6 +5,7 @@
 // agent's decision mail is its thread's row (S-352), unless an ask or a request already has it.
 // A deferred ask or decision (S-353) leaves the rows and their count; deferredRows lists it instead.
 import { beforeAll, describe, expect, it } from 'vitest'
+import { humanRowsOf } from '../mail/thread-index'
 import { setData } from '../store'
 import { deferredRows, isPlainWait, waitingRows } from './WaitingList'
 import type { Agent, DecisionMail, ItsaAttention, Permission, Wait } from '../types'
@@ -49,7 +50,7 @@ describe('waitingRows', () => {
   it("folds a reply wait tied to a pending permission request's thread into that request's row", () => {
     const p = perm('p1', 'a2')
     // The request's thread is the one its mail is in (store.permThread).
-    setData({ humanThreads: [{ thread_id: 'tp1', mails: [{ permission_id: 'p1' }] }] } as unknown as Parameters<typeof setData>[0])
+    setData({ humanRows: humanRowsOf([{ thread_id: 'tp1', mails: [{ permission_id: 'p1' }] }] as never) } as unknown as Parameters<typeof setData>[0])
     const rows = waitingRows({ attention: [], agents: [agent('a2', [wait('w1', null, 'tp1')])], perms: [p], decisions: [] })
     expect(rows.map((r) => r.key)).toEqual(['p:p1'])
   })
@@ -74,14 +75,14 @@ describe('waitingRows', () => {
 
   it('shows no decision row for a thread that is already an ask row or a request row', () => {
     // The request's thread is the one its mail is in (store.permThread).
-    setData({ humanThreads: [{ thread_id: 'tp1', mails: [{ permission_id: 'p1' }] }] } as unknown as Parameters<typeof setData>[0])
+    setData({ humanRows: humanRowsOf([{ thread_id: 'tp1', mails: [{ permission_id: 'p1' }] }] as never) } as unknown as Parameters<typeof setData>[0])
     const rows = waitingRows({ attention: [itsa('1', 'a1')], agents: [], perms: [perm('p1', 'a2')], decisions: [dec('m1', 't-1', '10:00'), dec('m2', 'tp1', '10:00')] })
     expect(rows.map((r) => r.key)).toEqual(['i:1', 'p:p1'])
   })
 
   it("keeps another agent's decision and reply wait as rows in a thread that holds a placed ask (S-3827)", () => {
     // The request's mail joined thread th1, which another agent's mail started: the ask doesn't stand for that thread.
-    setData({ humanThreads: [{ thread_id: 'th1', mails: [{ id: 'th1' }, { id: 'mp', thread_id: 'th1', permission_id: 'p1' }] }] } as unknown as Parameters<typeof setData>[0])
+    setData({ humanRows: humanRowsOf([{ thread_id: 'th1', mails: [{ id: 'th1' }, { id: 'mp', thread_id: 'th1', permission_id: 'p1' }] }] as never) } as unknown as Parameters<typeof setData>[0])
     const rows = waitingRows({ attention: [], agents: [agent('a3', [wait('w1', null, 'th1')])], perms: [perm('p1', 'a2')], decisions: [dec('m2', 'th1', '10:00')] })
     expect(rows.map((r) => r.key).sort()).toEqual(['d:m2', 'p:p1'])
   })
@@ -142,9 +143,9 @@ const dec = (mailId: string, thread: string, time: string): DecisionMail => ({
 
 describe('a thread set aside with Defer (S-1068)', () => {
   it('moves its ask, decision and permission request from the waiting rows to the deferred rows', () => {
-    setData({ humanThreads: [], humanDeferred: [{ thread_id: 'tp1', mails: [{ permission_id: 'p1' }] }] } as unknown as Parameters<typeof setData>[0])
+    setData({ humanRows: humanRowsOf([], [], [{ thread_id: 'tp1', mails: [{ permission_id: 'p1' }] }] as never) } as unknown as Parameters<typeof setData>[0])
     const decision = { mail_id: 'm-d', thread_id: 't-d', from_id: 'a1', from_name: 'a1', subject: 'Pick', created_at: '2026-10-13T10:00:00Z', deferred: false } as unknown as DecisionMail
-    const data = { attention: [itsa('1', 'a1')], agents: [], perms: [perm('p1', 'a2')], decisions: [decision], humanDeferred: [{ thread_id: 't-1' }, { thread_id: 't-d' }, { thread_id: 'tp1' }] } as unknown as Parameters<typeof waitingRows>[0]
+    const data = { attention: [itsa('1', 'a1')], agents: [], perms: [perm('p1', 'a2')], decisions: [decision], humanRows: { deferred: [{ thread_id: 't-1' }, { thread_id: 't-d' }, { thread_id: 'tp1' }] } } as unknown as Parameters<typeof waitingRows>[0]
     expect(waitingRows(data).map((r) => r.key)).toEqual([])
     expect(deferredRows(data).map((r) => r.key).sort()).toEqual(['d:m-d', 'i:1', 'p:p1'])
   })

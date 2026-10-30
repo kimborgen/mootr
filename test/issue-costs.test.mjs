@@ -362,3 +362,119 @@ test('attributor > owner over participant, the fallback to all ITSAs, and unattr
   // E has no ITSA at all: unattributed.
   assert.deepEqual(attribute('E', Date.parse(at(45))), []);
 });
+
+// The old attribute, which read every candidate's timelines on each call: the index must answer as it did.
+function scanAttribute(attr, agent, t) {
+  const d = db.open();
+  const created = d.prepare('SELECT created_at FROM agents WHERE id = ?').get(agent)?.created_at;
+  const existed = created == null || Date.parse(created) <= t;
+  const category = new Map([['backlog', 'backlog'], ['todo', 'ready'], ['in_progress', 'active'], ['blocked', 'active'], ['in_review', 'review'], ['done', 'closed']]);
+  const last = (list) => {
+    let cur = null;
+    for (const e of list) {
+      if (e.at > t) break;
+      cur = e;
+    }
+    return cur;
+  };
+  const candidates = [...attr.items.values()].filter((x) => x.participants.has(agent) || x.owners.some((o) => o.owner === agent));
+  const active = (x) => existed && !(t < x.created) &&['active', 'review'].includes(category.get(last(x.statuses)?.to ?? x.initialStatus));
+  let split = candidates.filter((x) => last(x.owners)?.owner === agent && active(x));
+  if (!split.length) split = candidates.filter((x) => x.participants.has(agent) && active(x));
+  if (!split.length) split = candidates;
+  return split.map((x) => [x.id, 1 / split.length]).sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+test('attributor > the per-agent index answers as a scan of every candidate, at and between event times (S-4356)', () => {
+  const d = db.open();
+  for (const t of ['usage_samples', 'itsa_events', 'itsa_participants', 'itsas', 'agents']) d.exec(`DELETE FROM ${t}`);
+  let seed = 7;
+  const r = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const pick = (xs) => xs[Math.floor(r() * xs.length)];
+  const agents = ['A', 'B', 'C', 'D'];
+  makeAgent('A', HOUR_BEFORE);
+  makeAgent('B', HOUR_BEFORE);
+  makeAgent('C', at(30));
+  makeAgent('D', at(90));
+  const statuses = ['backlog', 'todo', 'in_progress', 'blocked', 'in_review', 'done'];
+  const times = new Set([-Infinity, Infinity, NaN, Date.parse(at(30)), Date.parse(at(90))]);
+  for (let i = 0; i < 40; i++) {
+    const created = T0 + Math.floor(r() * 120) * MIN;
+    times.add(created);
+    d.prepare('INSERT INTO itsas (id, key, parent_id, kind, title, status, owner, created_by, created_at, updated_at, closed_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)').run(
+      `r${i}`, `R-${i}`, 'issue', `R-${i}`, 'todo', pick(agents), 'A', iso(created), iso(created),
+    );
+    const event = (ts, type, data) => d.prepare('INSERT INTO itsa_events (itsa_id, ts, actor, type, data) VALUES (?, ?, ?, ?, ?)').run(`r${i}`, iso(ts), 'A', type, JSON.stringify(data));
+    event(created, 'created', { status: pick(statuses) });
+    // Events in id order whose times now and then go back, as a clock step can leave them.
+    for (let k = 0; k < 6; k++) {
+      const ts = created + Math.floor((r() - 0.15) * 90) * MIN;
+      times.add(ts);
+      if (r() < 0.7) event(ts, 'status', { from: pick(statuses), to: pick(statuses) });
+      else event(ts, 'owner', { from: pick(agents), to: pick([...agents, null]) });
+    }
+    for (const a of agents) if (r() < 0.3) d.prepare('INSERT INTO itsa_participants (itsa_id, agent_id) VALUES (?, ?)').run(`r${i}`, a);
+  }
+  const attr = ic.buildAttribution();
+  const shares = (list) => list.map((x) => [x.itsaId, x.share]).sort((a, b) => a[0].localeCompare(b[0]));
+  // In creation order (the cursor jumps both ways), then forward, then back.
+  const moments = [...times].flatMap((t) => [t - 1, t, t + 1]);
+  const sorted = moments.filter((t) => !Number.isNaN(t)).sort((a, b) => a - b);
+  for (const t of [...moments, ...sorted, ...sorted.reverse()]) {
+    for (const a of [...agents, 'E']) assert.deepEqual(shares(attr.attribute(a, t)), scanAttribute(attr, a, t), `${a} at ${t}`);
+  }
+});
+
+// Created at distinct times and never closed: every creation adds to the agent's owned set, so splits
+// grow to 3,000 ITSAs. The index keeps only the changes, so the first call stays short and later calls
+// in the same stretch reuse one split.
+test('attributor > an agent on 3,000 overlapping active ITSAs indexes them in well under a slice (S-4356)', () => {
+  const d = db.open();
+  for (const t of ['usage_samples', 'itsa_events', 'itsa_participants', 'itsas', 'agents']) d.exec(`DELETE FROM ${t}`);
+  makeAgent('A', HOUR_BEFORE);
+  d.exec('BEGIN');
+  for (let i = 0; i < 3000; i++) {
+    const t = T0 + i * MIN;
+    d.prepare('INSERT INTO itsas (id, key, parent_id, kind, title, status, owner, created_by, created_at, updated_at, closed_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)').run(
+      `o${i}`, `O-${i}`, 'issue', `O-${i}`, 'in_progress', 'A', 'A', iso(t), iso(t),
+    );
+    d.prepare('INSERT INTO itsa_events (itsa_id, ts, actor, type, data) VALUES (?, ?, ?, ?, ?)').run(`o${i}`, iso(t), 'A', 'created', JSON.stringify({ status: 'in_progress' }));
+  }
+  d.exec('COMMIT');
+  const attr = ic.buildAttribution();
+  const t0 = performance.now();
+  const first = attr.attribute('A', T0 + 1500 * MIN);
+  const ms = performance.now() - t0;
+  // Keeping every split cost 1 + 2 + ... + 3,000 = 4.5M share objects here, and over a second.
+  assert.ok(ms < 250, `the first call took ${Math.round(ms)} ms`);
+  assert.equal(first.length, 1501);
+  assert.equal(attr.attribute('A', T0 + 1500 * MIN + 30_000), first);
+  assert.equal(attr.attribute('A', T0 + 3000 * MIN).length, 3000);
+  assert.equal(attr.attribute('A', T0 - MIN).length, 3000, 'before any is active: the even fallback over all');
+});
+
+test('attributor > an agent on 3,000 ITSAs answers 5,000 moments in well under a slice (S-4356)', () => {
+  const d = db.open();
+  for (const t of ['usage_samples', 'itsa_events', 'itsa_participants', 'itsas', 'agents']) d.exec(`DELETE FROM ${t}`);
+  makeAgent('A', HOUR_BEFORE);
+  const span = 7 * 24 * 60 * MIN;
+  d.exec('BEGIN');
+  for (let i = 0; i < 3000; i++) {
+    const t = T0 + (i / 3000) * span;
+    d.prepare('INSERT INTO itsas (id, key, parent_id, kind, title, status, owner, created_by, created_at, updated_at, closed_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      `h${i}`, `H-${i}`, 'issue', `H-${i}`, 'done', 'A', 'A', iso(t), iso(t), iso(t + 60 * MIN),
+    );
+    const event = (ts, type, data) => d.prepare('INSERT INTO itsa_events (itsa_id, ts, actor, type, data) VALUES (?, ?, ?, ?, ?)').run(`h${i}`, iso(ts), 'A', type, JSON.stringify(data));
+    event(t, 'created', { status: 'todo' });
+    event(t + MIN, 'status', { from: 'todo', to: 'in_progress' });
+    event(t + 30 * MIN, 'status', { from: 'in_progress', to: 'in_review' });
+    event(t + 60 * MIN, 'status', { from: 'in_review', to: 'done' });
+  }
+  d.exec('COMMIT');
+  const attr = ic.buildAttribution();
+  const t0 = performance.now();
+  for (let k = 0; k < 5000; k++) attr.attribute('A', T0 + (k / 5000) * span);
+  // A scan of every candidate per moment took over a second here; the index takes a few ms.
+  const ms = performance.now() - t0;
+  assert.ok(ms < 250, `5,000 moments took ${Math.round(ms)} ms`);
+});

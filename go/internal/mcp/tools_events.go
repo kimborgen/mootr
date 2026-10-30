@@ -12,16 +12,16 @@ import (
 )
 
 // The event subscription tools of src/mcp.ts (S-4317): subscribe, unsubscribe and list_subscriptions. The daemon judges
-// who may subscribe whom; these send what the TS tools send and say what they say. watch_pr and unwatch_pr follow.
+// who may subscribe whom; these send what the TS tools send and say what they say. watch_pr and unwatch_pr are in tools_watchpr.go.
 
 func init() {
-	for _, n := range []string{"subscribe", "unsubscribe", "list_subscriptions"} {
+	for _, n := range []string{"subscribe", "unsubscribe", "list_subscriptions", "watch_pr", "unwatch_pr"} {
 		tools = append(tools, tool{name: n, listing: eventsListings[n], run: eventsRuns[n]})
 	}
 }
 
 var eventsRuns = map[string]func(context.Context, *Server, jsfmt.Value) (string, error){
-	"subscribe": subscribe, "unsubscribe": unsubscribe, "list_subscriptions": listSubscriptions,
+	"subscribe": subscribe, "unsubscribe": unsubscribe, "list_subscriptions": listSubscriptions, "watch_pr": watchPr, "unwatch_pr": unwatchPr,
 }
 
 // present is `a[key] != null`: the member is there and isn't null.

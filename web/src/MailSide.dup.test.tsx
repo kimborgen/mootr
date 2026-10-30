@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createRoot } from 'react-dom/client'
 import { act, createRef } from 'react'
+import { humanRowsOf } from './mail/thread-index'
 
 vi.mock('./api', () => ({ api: vi.fn(async () => ({})), hash: new URLSearchParams() }))
 
@@ -12,7 +13,7 @@ describe('To answer with a deferred permission thread', () => {
     const { MailSide } = await import('./MailSide')
     const pt = { thread_id: 'tp', mails: [{ id: 'm-p', from_id: 'a2', from_name: 'bob', subject: 'perm', created_at: '2026-10-13T10:00:00Z', recipients: [{ id: 'human' }], permission_id: 'p1', permission: { status: 'pending' } }] }
     const perm = { id: 'p1', agent_id: 'a2', status: 'pending', created_at: '2026-10-13T10:00:00Z', action: 'run x' }
-    store.setData({ humanThreads: [], humanArchived: [], humanDeferred: [pt], attention: [], decisions: [], perms: [perm], agents: [], delegateDialogs: [], itsaStatuses: [] } as never)
+    store.setData({ humanRows: humanRowsOf([], [], [pt] as never), attention: [], decisions: [], perms: [perm], agents: [], delegateDialogs: [], itsaStatuses: [] } as never)
     const el = document.createElement('div')
     document.body.append(el)
     await act(async () => { createRoot(el).render(<MailSide leftRef={createRef()} />) })

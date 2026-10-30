@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createRoot } from 'react-dom/client'
 import { act, createRef } from 'react'
+import { humanRowsOf } from './mail/thread-index'
 
 vi.mock('./api', () => ({ api: vi.fn(async () => ({})), hash: new URLSearchParams() }))
 
@@ -13,7 +14,7 @@ describe('MailSide awaiting list', () => {
     ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
     const store = await import('./store')
     const { MailSide } = await import('./MailSide')
-    store.setData({ humanThreads: [thread('a', 'human')], humanArchived: [thread('b', 'human')], humanDeferred: [thread('c', 'human'), thread('d', 'a1')], attention: [], decisions: [], itsaStatuses: [] } as never)
+    store.setData({ humanRows: humanRowsOf([thread('a', 'human')] as never, [thread('b', 'human')] as never, [thread('c', 'human'), thread('d', 'a1')] as never), attention: [], decisions: [], itsaStatuses: [] } as never)
     const el = document.createElement('div')
     document.body.append(el)
     await act(async () => { createRoot(el).render(<MailSide leftRef={createRef()} />) })

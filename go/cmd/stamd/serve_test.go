@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,7 +84,9 @@ func TestServeDrainsTerminals(t *testing.T) {
 		return nil
 	}
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, endLife, sse.New(sse.Keepalive), []*http.Server{srv}, func(s *http.Server) error { return s.Serve(ln) }, drain) }()
+	go func() {
+		done <- serve(ctx, endLife, sse.New(sse.Keepalive), []*http.Server{srv}, func(s *http.Server) error { return s.Serve(ln) }, drain)
+	}()
 	stop()
 	select {
 	case err := <-inDrain:
@@ -100,5 +104,65 @@ func TestServeDrainsTerminals(t *testing.T) {
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestBindBeforeBound: bound (the home's boot push) runs once every listener is bound and before any serves, so a
+// peer's fetch back made from it waits in the backlog and is answered once serve runs, rather than refused (S-4371).
+func TestBindBeforeBound(t *testing.T) {
+	srv := &http.Server{Addr: "127.0.0.1:0", Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	fetched := make(chan error, 1)
+	listen, err := bind([]*http.Server{srv}, func(addrs []net.Addr) {
+		if len(addrs) != 1 {
+			t.Fatalf("addrs %v", addrs)
+		}
+		// The connection is made here, before serve: only a bound listener takes it.
+		conn, err := net.Dial("tcp", addrs[0].String())
+		if err != nil {
+			t.Fatalf("dial before serve: %v", err)
+		}
+		go func() {
+			defer conn.Close()
+			if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")); err != nil {
+				fetched <- err
+				return
+			}
+			buf := make([]byte, 64)
+			n, err := conn.Read(buf)
+			if err == nil && !strings.HasPrefix(string(buf[:n]), "HTTP/1.1 204") {
+				err = fmt.Errorf("answer %q", buf[:n])
+			}
+			fetched <- err
+		}()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, func() {}, sse.New(sse.Keepalive), []*http.Server{srv}, listen, func(context.Context) error { return nil })
+	}()
+	if err := <-fetched; err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBindFails: a bind that fails returns its error without running bound.
+func TestBindFails(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	ran := false
+	if _, err := bind([]*http.Server{{Addr: "127.0.0.1:0"}, {Addr: taken.Addr().String()}}, func([]net.Addr) { ran = true }); err == nil || ran {
+		t.Fatalf("bind = %v, bound ran %v", err, ran)
 	}
 }

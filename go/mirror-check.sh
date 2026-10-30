@@ -8,4 +8,6 @@ PATH="$HOME/.local/go/bin:$PATH"
 export PATH
 cd "$here"
 # -count=1: the parity tests run src/ through node, and the test cache doesn't see a change there.
-go test -count=1 ./...
+# -timeout 20m: go test's default is 10 minutes a package, and internal/lifecycle came near it under load (S-4392). A net
+# for a slow machine; the fix is the package's own speed.
+go test -count=1 -timeout 20m ./...

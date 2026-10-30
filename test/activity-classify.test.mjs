@@ -175,6 +175,24 @@ test('classify > the daily cap stops calls and records one capped event per day'
   assert.equal(capped.n, 1);
 });
 
+// S-4356: the spend read goes through its partial index, so a labelling call reads today's decide
+// events, not every one ever (~110 ms live), and still sums only today's classifier calls.
+test('classify > the spend read uses its partial index and counts today only', () => {
+  const detail = db
+    .open()
+    .prepare(`EXPLAIN QUERY PLAN ${classify.SPENT_SQL}`)
+    .all('2026-01-01T00:00:00.000Z')
+    .map((r) => r.detail)
+    .join('\n');
+  assert.match(detail, /USING INDEX events_stam_decide/);
+  const ins = db.open().prepare("INSERT INTO events (agent_id, ts, type, data) VALUES ('stam', ?, 'decide', ?)");
+  const now = new Date('2026-10-29T12:00:00.000Z');
+  ins.run('2026-10-28T23:59:59.000Z', JSON.stringify({ purpose: classify.CLASSIFY_PURPOSE, cost: 5 }));
+  ins.run('2026-10-29T00:00:01.000Z', JSON.stringify({ purpose: classify.CLASSIFY_PURPOSE, cost: 0.25 }));
+  ins.run('2026-10-29T01:00:00.000Z', JSON.stringify({ purpose: 'mail-check', cost: 7 }));
+  assert.equal(classify.spentToday(now), 0.25);
+});
+
 test('classify > an answer naming no known leaf is not stored', async () => {
   reset(on);
   await classify.classifyTick();
@@ -466,4 +484,25 @@ test('classify > the backfill progress reads running, then the last run', async 
   await first;
   const p = classify.backfillProgress();
   assert.deepEqual({ running: p.running, labelled: p.labelled, failed: p.failed, remaining: p.remaining, stopped: p.stopped }, { running: false, labelled: 2, failed: 0, remaining: 0, stopped: 'done' });
+});
+
+// S-4356: the 5 s tick's query uses its partial index, newest first with no sort, not a walk over
+// every item since the classifier was switched on (the live tick took ~185 ms). The SQL is pending's.
+test('classify > the tick query uses its partial index', () => {
+  const plan = (sql, ...args) =>
+    db
+      .open()
+      .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+      .all(...args)
+      .map((r) => r.detail)
+      .join('\n');
+  const tick = plan(
+    `SELECT agent_id, seq, turn, kind, name, summary, start FROM activity_items
+       WHERE category_source IS NULL AND kind IN ('tool', 'text') AND start >= ?
+       ORDER BY start DESC, seq DESC LIMIT ?`,
+    '2026-01-01T00:00:00.000Z',
+    4,
+  );
+  assert.match(tick, /USING INDEX activity_items_unlabelled/);
+  assert.doesNotMatch(tick, /TEMP B-TREE/);
 });

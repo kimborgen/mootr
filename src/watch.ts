@@ -481,13 +481,64 @@ export function watchedSubjects(): string[] {
   // A start-node subscription is polled on the ITSA home daemon only: an instance is made there.
   const home = settings().itsa.home;
   const startsHere = !home || home === MACHINE;
+  const gone = new Map<string, boolean>();
   for (const sub of liveSubscriptions()) {
     if (sub.subscriber_kind === 'process' && !startsHere) continue;
+    if (sub.subscriber_kind === 'agent' && agentGone(sub.subscriber_id, gone)) continue;
+    if (sub.subscriber_kind === 'itsa' && itsaOwnerGone(sub.subscriber_id, gone)) continue;
     // A glob (a verdict subscription's `github:OWNER/REPO#*`) names events to match, not a subject to poll.
     for (const s of sub.filter.subjects ?? []) if (sub.subscriber_kind !== 'process' || !s.includes('*')) out.add(s);
   }
-  for (const w of openEventWaits()) for (const s of waitFilter(w).subjects ?? []) out.add(s);
-  return [...out];
+  for (const w of openEventWaits()) {
+    if (agentGone(w.agent_id, gone)) continue;
+    for (const s of waitFilter(w).subjects ?? []) out.add(s);
+  }
+  return [...out].filter((s) => !prFinished(s));
+}
+
+// Whether an ITSA's link watches go unpolled (S-4356): its owner is an agent that is archived, shut down, or forgotten.
+// An unowned ITSA, one the human owns, or one whose row can't be read keeps polling.
+function itsaOwnerGone(itsaId: string, memo: Map<string, boolean>): boolean {
+  let owner: string | null = null;
+  try {
+    const row = db.open().prepare('SELECT owner FROM itsas WHERE id = ?').get(itsaId) as { owner: string | null } | undefined;
+    owner = row?.owner ?? null;
+  } catch {
+    return false;
+  }
+  if (!owner || owner === HUMAN) return false;
+  return agentGone(owner, memo);
+}
+
+// Whether a pull request's final event is stored (S-4356): its watch state reads merged or closed, so nothing more is
+// polled for it. A reopened PR is not seen again: the poll stopped at its close. A state that can't be read keeps polling.
+function prFinished(subject: string): boolean {
+  try {
+    const row = db.getWatchState(subject);
+    const state = row ? JSON.parse(row.state) : null;
+    return state?.type === 'pr' && (state.state === 'merged' || state.state === 'closed');
+  } catch {
+    return false;
+  }
+}
+
+// Whether an agent's watches go unpolled (S-4356): it is archived or shut down, here or on a peer the daemon knows the
+// lifecycle of. An agent with no row here and no known lifecycle on a peer (a peer's agent this daemon hasn't heard of,
+// or one forgotten) is not known to be gone, so its watch keeps polling. The subscriptions stay, so a resumed agent gets
+// its watch back. A row that can't be read is not gone either.
+function agentGone(id: string, memo: Map<string, boolean>): boolean {
+  const known = memo.get(id);
+  if (known !== undefined) return known;
+  let gone = false;
+  try {
+    const local = db.open().prepare('SELECT lifecycle FROM agents WHERE id = ?').get(id) as { lifecycle: string } | undefined;
+    const life = local ? local.lifecycle : (db.open().prepare('SELECT lifecycle FROM peer_agents WHERE id = ?').get(id) as { lifecycle: string | null } | undefined)?.lifecycle;
+    gone = life === 'archived' || life === 'shut_down';
+  } catch {
+    gone = false;
+  }
+  memo.set(id, gone);
+  return gone;
 }
 
 // ---- delivery, with bursts folded ----

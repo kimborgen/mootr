@@ -4,6 +4,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRoot } from 'react-dom/client'
 import { act, createRef } from 'react'
+import { humanRowsOf } from './mail/thread-index'
 
 // jsdom has no matchMedia; the shell asks whether it is a phone.
 vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }))
@@ -13,7 +14,7 @@ const mail = (id: string, tid: string, created_at: string) => ({ id, thread_id: 
 const thread = (tid: string, created_at = '2026-10-13T10:00:00Z') => ({ thread_id: tid, mails: [mail('m-' + tid, tid, created_at)] })
 const wait = (id: string, thread: string | null) => ({ id, kind: 'human', target: null, thread, detail: 'Your answer', since: '2026-10-13T11:00:00Z', source: 'wait_for' })
 const agent = (waits: unknown[]) => ({ id: 'a1', name: 'bob', waits })
-const base = { humanArchived: [], humanDeferred: [], attention: [], decisions: [], perms: [], delegateDialogs: [], itsaStatuses: [] }
+const base = { attention: [], decisions: [], perms: [], delegateDialogs: [], itsaStatuses: [] }
 
 const pthread = { thread_id: 'tp', mails: [{ ...mail('m-tp', 'tp', '2026-10-13T10:00:00Z'), permission_id: 'p1', permission: { status: 'pending' } }] }
 const perm = { id: 'p1', agent_id: 'a1', status: 'pending', created_at: '2026-10-13T10:00:00Z', action: 'run x' }
@@ -24,7 +25,7 @@ describe('MailSide waiting rows', () => {
   it('marks a thread row tied to a wait, and counts only the rows', async () => {
     const store = await import('./store')
     const { MailSide } = await import('./MailSide')
-    store.setData({ ...base, humanThreads: [thread('t1'), thread('t2')], agents: [agent([wait('w1', 't1'), wait('w2', null)])] } as never)
+    store.setData({ ...base, humanRows: humanRowsOf([thread('t1'), thread('t2')] as never), agents: [agent([wait('w1', 't1'), wait('w2', null)])] } as never)
     const el = document.createElement('div')
     document.body.append(el)
     await act(async () => { createRoot(el).render(<MailSide leftRef={createRef()} />) })
@@ -41,7 +42,7 @@ describe('MailSide waiting rows', () => {
     const store = await import('./store')
     const { waitingRows } = await import('./itsa/WaitingList')
     const world = await import('./shell/layout')
-    store.setData({ ...base, humanThreads: [thread('t1')], agents: [agent([wait('w1', 'raw-mail-id')])] } as never)
+    store.setData({ ...base, humanRows: humanRowsOf([thread('t1')] as never), agents: [agent([wait('w1', 'raw-mail-id')])] } as never)
     const d = store.getData()
     waitingRows(d).find((r) => r.key === 'w:w1')!.open()
     expect(world.currentWorld()).toBe('a1')
@@ -54,7 +55,7 @@ describe('MailSide waiting rows', () => {
     const store = await import('./store')
     const actions = await import('./actions')
     const world = await import('./shell/layout')
-    store.setData({ ...base, humanThreads: [thread('i1')], humanDeferred: [thread('d1'), thread('d2')], agents: [] } as never)
+    store.setData({ ...base, humanRows: humanRowsOf([thread('i1')] as never, [], [thread('d1'), thread('d2')] as never), agents: [] } as never)
     actions.selectThread('d1')
     await act(async () => { await actions.archiveThreadAndAdvance('d1') })
     expect(world.currentWorld()).toBe('t:d2')
@@ -63,7 +64,7 @@ describe('MailSide waiting rows', () => {
   it('counts a pending request thread that has no wait row, as the list shows it', async () => {
     const store = await import('./store')
     const { MailSide } = await import('./MailSide')
-    store.setData({ ...base, humanThreads: [pthread, thread('t2')], perms: [perm], agents: [] } as never)
+    store.setData({ ...base, humanRows: humanRowsOf([pthread, thread('t2')] as never), perms: [perm], agents: [] } as never)
     const el = document.createElement('div')
     document.body.append(el)
     await act(async () => { createRoot(el).render(<MailSide leftRef={createRef()} />) })

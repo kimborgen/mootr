@@ -1,6 +1,7 @@
 import { statusLabel } from '../itsa/itsa'
 import { waitingRows } from '../itsa/WaitingList'
 import { FIELDS, itsa, itsaData, LONG, QUEUE, TREE, TREE_FIELDS, WAITING_ITSAS } from '../stories/itsaFixtures'
+import { humanRowsOf } from '../mail/thread-index'
 import { T_PERM } from '../stories/mailFixtures'
 import { ACTIVITY, COSTS } from '../stories/workFixtures'
 import { ds, type Story } from '../stories/types'
@@ -33,7 +34,7 @@ const filtered = (quick: QuickId[] = [], view?: GlanceFilter['view'], byStatus =
     groups: byStatus ? ['in_progress', 'in_review'].map((st) => ({ id: 'status:' + st, label: statusLabel(st), items: matches.filter((i) => i.status === st) })) : undefined }
   return <div className="work-view" style={{ height: 760 }}><div className="w-table"><Glance itsas={TREE} needs={needs} extras={extras} now={Date.now()} filter={filter} /></div></div>
 }
-const four = itsaData(TREE, { attention: WAITING_ITSAS, queue: QUEUE, perms: [PERM], humanThreads: [T_PERM] })
+const four = itsaData(TREE, { attention: WAITING_ITSAS, queue: QUEUE, perms: [PERM], humanRows: humanRowsOf([T_PERM]) })
 const quiet: Itsa[] = [itsa(996, null, 'Fixture backlog item', 'backlog'), itsa(997, null, 'Fixture finished item', 'done')]
 
 export const stories: Story[] = [{

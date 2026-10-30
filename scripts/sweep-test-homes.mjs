@@ -6,6 +6,8 @@
 //   node scripts/sweep-test-homes.mjs --dry-run        print what it would remove or keep, remove nothing
 //   node scripts/sweep-test-homes.mjs --hours 6        older than 6 hours
 //   node scripts/sweep-test-homes.mjs --review-hours 6 the review folders' age (default 6; see below)
+// It also removes folders of the worktrees dir that no registry agent owns and that are older than a day (S-4075; see sweepWorktrees).
+//   node scripts/sweep-test-homes.mjs --worktree-hours 48 their age (default 24); --worktrees DIR names the dir, for tests
 // It also prunes the deps caches (STAM_HOME/deps, ~/.cache/stam-gate-deps: keep entries a release or worktree
 // hard-links, main's current keys, and the newest 3 unused) and keeps the newest 2 stam.db.bak-* (S-1965).
 //   node scripts/sweep-test-homes.mjs --install        write sweep-test-homes units (stam-* under a real stam home, mootr-* under a mootr one), and enable the timer
@@ -25,7 +27,7 @@ import { createHash } from 'node:crypto';
 import { tryExclusive } from './deps-lock.mjs';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, sep } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { envVar, setEnvVar } from '../src/env.ts';
 import { defaultHome } from '../src/default-home.ts';
@@ -439,6 +441,177 @@ export function sweep({ hours = 2, reviewHours = 6, dryRun = false, now = Date.n
   return results;
 }
 
+// Orphan worktree folders (S-4075): a folder directly in the worktrees dir (STAM_HOME/worktrees) that no registry
+// agent, in any state (active, paused, shut down, resting, archived), owns, and that is older than a day. Scratch
+// folders and review clones sit there for good otherwise.
+// A folder is owned by an agent when the agent's cwd, workspace cwd or workspace worktree path is the folder or inside
+// it (also as text inside the raw workspace JSON), or the folder's name is the agent's id, its name, or REPO-NAME where
+// REPO is the basename of the agent's repo. Anything else is orphaned. A process whose cwd or open file is inside the
+// folder, or an unreadable /proc, keeps it too. The registry is read through the daemon (`stam ls --all --json`), never
+// stam.db; any failure to read it (not just a not-found) keeps every folder in the run. Plain files, symlinks and
+// the dir itself are never touched. Age is the newest mtime of the whole tree (an unreadable entry counts as new).
+// The removal race: after the first lookup the registry is read again and each candidate's age is measured again right
+// before its removal; a folder that is now owned, whose newest mtime changed, or that a process now uses (the processes
+// are scanned again for each removal) is kept.
+export const WORKTREE_HOURS = 24;
+
+export function worktreesRoot(env = process.env) {
+  return envVar('SWEEP_WORKTREES', env) || join(envVar('HOME', env) || defaultHome(), 'worktrees');
+}
+
+// Every agent row of the registry, or null when it can't be read. STAM_SWEEP_REGISTRY names a JSON file, for tests.
+export function registryAgents(env = process.env) {
+  try {
+    const file = envVar('SWEEP_REGISTRY', env);
+    let text;
+    if (file) text = readFileSync(file, 'utf8');
+    else {
+      const ls = spawnSync(envVar('BIN', env) || 'stam', ['ls', '--all', '--json'], { encoding: 'utf8', timeout: 120_000, maxBuffer: 512 * 2 ** 20 });
+      if (ls.status !== 0) return null;
+      text = ls.stdout;
+    }
+    const rows = JSON.parse(text);
+    return Array.isArray(rows) && rows.every((r) => r && typeof r === 'object') ? rows : null;
+  } catch {
+    return null;
+  }
+}
+
+const inside = (p, dir) => typeof p === 'string' && p !== '' && (p === dir || p.startsWith(dir + sep));
+
+// `p` with a symlinked part resolved (~/.local/share/stam is a link to mootr, and most registry rows use the stam
+// spelling): the real path of its longest existing prefix plus the rest, so a path that is gone since still resolves.
+// Memoized per agents list, as it is called for every folder.
+const resolved = new WeakMap();
+function resolvePrefix(agents, p) {
+  let memo = resolved.get(agents);
+  if (!memo) resolved.set(agents, (memo = new Map()));
+  if (memo.has(p)) return memo.get(p);
+  let head = p;
+  let rest = '';
+  let out = p;
+  while (head && head !== sep && head !== dirname(head)) {
+    try {
+      out = join(realpathSync(head), rest);
+      break;
+    } catch {
+      rest = rest ? join(basename(head), rest) : basename(head);
+      head = dirname(head);
+    }
+  }
+  memo.set(p, out);
+  return out;
+}
+
+export function ownedBy(agents, dir) {
+  const name = dir.slice(dir.lastIndexOf(sep) + 1);
+  return agents.some((a) => {
+    const raw = typeof a.workspace === 'string' ? a.workspace : a.workspace ? JSON.stringify(a.workspace) : '';
+    let ws = {};
+    try {
+      ws = typeof a.workspace === 'string' ? JSON.parse(a.workspace) : (a.workspace ?? {});
+    } catch {}
+    const paths = [a.cwd, ws?.cwd, ws?.worktree?.path];
+    if (paths.some((p) => inside(p, dir) || (typeof p === 'string' && p !== '' && inside(resolvePrefix(agents, p), dir)))) return true;
+    if (raw.includes(dir + sep) || raw.includes(`${dir}"`)) return true;
+    if (name === a.id || name === a.name) return true;
+    const repo = ws?.worktree?.repo ?? ws?.spec?.repo;
+    return typeof repo === 'string' && typeof a.name === 'string' && name === `${repo.slice(repo.lastIndexOf('/') + 1)}-${a.name}`;
+  });
+}
+
+const realpathOr = (path) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
+
+export function sweepWorktrees({ hours = WORKTREE_HOURS, dryRun = false, now = Date.now(), env = process.env, claims, lookup = registryAgents, freshClaims = () => claims ?? claimedPaths(envVar('SWEEP_PROC', env) || '/proc', pidsOf(env)) } = {}) {
+  const root = worktreesRoot(env);
+  const results = [];
+  try {
+    if (!lstatSync(root).isDirectory()) return results;
+  } catch {
+    return results;
+  }
+  const held = claims ?? claimedPaths(envVar('SWEEP_PROC', env) || '/proc', pidsOf(env));
+  const cutoff = now - hours * 3600_000;
+  let names;
+  try {
+    names = readdirSync(root).sort();
+  } catch {
+    return results;
+  }
+  const agents = lookup(env);
+  if (!agents) return [{ path: root, action: 'keep', why: 'the registry could not be read' }];
+  const candidates = [];
+  for (const name of names) {
+    const path = join(root, name);
+    let st;
+    try {
+      st = lstatSync(path);
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory()) continue;
+    const real = realpathOr(path);
+    if (ownedBy(agents, path) || ownedBy(agents, real)) {
+      results.push({ path, action: 'keep', why: 'a registry agent owns it' });
+      continue;
+    }
+    // A folder that vanished or can't be read since the listing counts as new: kept, and the run goes on.
+    let age = Infinity;
+    try {
+      age = newest(path, true);
+    } catch {}
+    if (age > cutoff) results.push({ path, action: 'keep', why: age === Infinity ? 'could not be read' : `newer than ${hours} h` });
+    else if (inUse(path, held) || inUse(real, held) || inside(process.cwd(), path)) results.push({ path, action: 'keep', why: 'a process uses it' });
+    else candidates.push({ path, name, age });
+  }
+  if (!candidates.length) return results;
+  const again = lookup(env);
+  for (const { path, age } of candidates) {
+    let why = null;
+    const real = realpathOr(path);
+    if (!again) why = 'the registry could not be read';
+    else if (ownedBy(again, path) || ownedBy(again, real)) why = 'a registry agent owns it';
+    else {
+      try {
+        if (newest(path, true) !== age) why = 'changed since it was measured';
+      } catch {
+        why = 'changed since it was measured';
+      }
+    }
+    // The processes are read again right before this folder's removal: one that took the folder since the first scan keeps it.
+    if (!why) {
+      const fresh = freshClaims();
+      if (inUse(path, fresh) || inUse(real, fresh)) why = 'a process uses it';
+    }
+    if (why) {
+      results.push({ path, action: 'keep', why });
+      continue;
+    }
+    if (!dryRun) removeWorktreeFolder(path);
+    results.push({ path, action: 'remove', why: `older than ${hours} h, no registry agent` });
+  }
+  return results;
+}
+
+// removeFolder, then a prune of the owning repo's worktree metadata, so a worktree git still lists leaves no stale entry.
+function removeWorktreeFolder(path) {
+  let repo = '';
+  try {
+    if (lstatSync(join(path, '.git')).isFile()) {
+      const common = spawnSync('git', ['-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' });
+      repo = common.status === 0 ? dirname(common.stdout.trim()) : '';
+    }
+  } catch {}
+  removeFolder(path);
+  if (repo && existsSync(repo)) spawnSync('git', ['-C', repo, 'worktree', 'prune'], { encoding: 'utf8' });
+}
+
 // Caches that fill the disk (S-1965): the deps caches and the database backups. Never uv or bai2: only
 // these folders. A deps entry is KEY, 16 hex digits; deploy's own prune handles .tmp- and .damaged- ones.
 export const KEEP_UNUSED_DEPS = 3;
@@ -633,6 +806,7 @@ function main(args) {
   const env = { ...process.env };
   let hours = 2;
   let reviewHours = 6;
+  let worktreeHours = WORKTREE_HOURS;
   let dryRun = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -640,21 +814,24 @@ function main(args) {
     else if (a === '--dry-run') dryRun = true;
     else if (a === '--hours') hours = Number(args[++i]);
     else if (a === '--review-hours') reviewHours = Number(args[++i]);
+    else if (a === '--worktree-hours') worktreeHours = Number(args[++i]);
+    else if (a === '--worktrees') setEnvVar('SWEEP_WORKTREES', args[++i], env);
     else if (a === '--review') setEnvVar('SWEEP_REVIEW', args[++i], env);
     else if (a === '--home-cache') setEnvVar('SWEEP_HOME_CACHE', args[++i], env);
     else if (a === '--tmp') setEnvVar('SWEEP_TMP', args[++i], env);
     else if (a === '--cache') setEnvVar('SWEEP_CACHE', args[++i], env);
     else {
-      console.error('usage: node scripts/sweep-test-homes.mjs [--dry-run] [--hours N] [--review-hours N] [--review DIR] [--home-cache DIR] [--tmp DIR] [--cache DIR] [--install]');
+      console.error('usage: node scripts/sweep-test-homes.mjs [--dry-run] [--hours N] [--review-hours N] [--worktree-hours N] [--worktrees DIR] [--review DIR] [--home-cache DIR] [--tmp DIR] [--cache DIR] [--install]');
       process.exit(2);
     }
   }
-  if (!(hours >= 0) || !(reviewHours >= 0)) {
+  if (!(hours >= 0) || !(reviewHours >= 0) || !(worktreeHours >= 0)) {
     console.error('--hours needs a number');
     process.exit(2);
   }
   const show = (r) => console.log(`${r.action === 'remove' && dryRun ? 'would remove' : r.action === 'remove' ? 'removed' : 'kept'} ${r.path} (${r.why})`);
   for (const r of sweep({ hours, reviewHours, dryRun, env })) show(r);
+  for (const r of sweepWorktrees({ hours: worktreeHours, dryRun, env })) show(r);
   const { results, freed } = pruneCaches({ dryRun, env });
   for (const r of results) show(r);
   if (freed != null && results.some((r) => r.action === 'remove')) console.log(`freed ${(freed / 2 ** 20).toFixed(0)} MiB on the stam disk (df)`);

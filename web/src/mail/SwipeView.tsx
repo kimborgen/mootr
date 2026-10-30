@@ -9,14 +9,17 @@
 // replaces the buttons; Archive, Enter or ← confirms, Cancel or Escape keeps the card. Defer, leave
 // and open never ask.
 // Archiving or deferring the opened thread comes back here (openFromSwipe).
+// The stack is the inbox's index rows (S-4616); a row holds no mail, so the top card's whole thread and the
+// next one's are read on demand while the view is on screen, and again when a row says its thread changed.
 import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import { openFromSwipe, setThreadArchived, setThreadDeferred } from '../actions'
+import { api } from '../api'
 import { Icon } from '../Icon'
 import { Loading } from '../Loading'
 import { currentWorld, useShell } from '../shell/layout'
-import { hasPendingPermission, threadWaitsOnHuman, useData } from '../store'
+import { humanIndex, threadWaitsOnHuman, useData } from '../store'
 import { tokenMs } from '../system/springs'
-import type { Thread } from '../types'
+import type { IndexRow, Mail, Thread } from '../types'
 import { cardKind } from './cardKind'
 import { cardMail, cardPlain, MailCard } from './MailCard'
 import { dragCard, dragTransform, flyTo, keyAction, pinFront, pullAction, stackOrder, threshold, type SwipeAction } from './swipeCard'
@@ -27,31 +30,45 @@ const left = new Map<string, string>()
 let last: { action: SwipeAction; tid: string; text: string } | null = null
 // The card on top, kept there until it is acted on (pinFront).
 let pinned: string | null = null
+// The whole threads the top cards show, by thread, with the row state they were read at, and the reads in flight.
+// Only the top two are kept.
+const cards = new Map<string, { key: string; thread: Thread }>()
+const reading = new Set<string>()
+// The newest row state asked for, by thread: an older read that lands after it is dropped.
+const asked = new Map<string, string>()
+// How long a failed read waits before the view tries again, when nothing else renders it.
+const RETRY_MS = 5000
+// What a read depends on: a new mail, a read or unread, or an ask answered changes it.
+const rowKey = (r: IndexRow) => `${r.thread_id}:${r.last_mail_id}:${r.mail_count}:${r.unread}:${r.ask}`
+const rowLast = (r: IndexRow) => ({ id: r.last_mail_id ?? '', created_at: r.last_created_at ?? r.last_at })
 
 const VERB: Record<SwipeAction, string> = { archive: 'Archived', leave: 'Left', defer: 'Deferred' }
 const REFUSED: Record<'archive', string> = { archive: 'Answer what waits on you before archiving' }
 
 // Runs an action on a thread: archive and defer through the inbox's helpers, leave locally.
 // Resolves false when the daemon refused it; the thread is then back in the inbox, and on top.
-function run(action: SwipeAction, t: Thread): Promise<boolean> {
+function run(action: SwipeAction, r: IndexRow): Promise<boolean> {
   if (action === 'leave') {
-    left.delete(t.thread_id)
-    left.set(t.thread_id, t.mails.at(-1)!.id)
+    left.delete(r.thread_id)
+    left.set(r.thread_id, rowLast(r).id)
     return Promise.resolve(true)
   }
-  return action === 'archive' ? setThreadArchived(t.thread_id, true) : setThreadDeferred(t.thread_id, true)
+  return action === 'archive' ? setThreadArchived(r.thread_id, true) : setThreadDeferred(r.thread_id, true)
 }
 
 export function SwipeView() {
-  const { humanThreads, loaded, decisions, attention } = useData()
+  const d = useData()
+  const { loaded, decisions, attention } = d
   const [, bump] = useReducer((n: number) => n + 1, 0)
-  const order = pinFront(stackOrder(humanThreads, left), pinned)
+  const order = pinFront(stackOrder(humanIndex(d, 'active'), left, rowLast), pinned)
   pinned = order[0]?.thread_id ?? null
-  const top = order[0] as Thread | undefined
+  const top = order[0] as IndexRow | undefined
+  // The top card's thread as last read: a stale copy stands in while a newer one is read.
+  const topThread = top ? cards.get(top.thread_id)?.thread : undefined
   const blocked = !!top && threadWaitsOnHuman(top.thread_id)
   const kind = top ? cardKind({
-    waiting: hasPendingPermission(top) || decisions.some((x) => x.thread_id === top.thread_id) || attention.some((x) => x.ask_thread_id === top.thread_id),
-    verdictKind: cardMail(top).verdict?.kind,
+    waiting: top.ask === 'pending' || decisions.some((x) => x.thread_id === top.thread_id) || attention.some((x) => x.ask_thread_id === top.thread_id),
+    verdictKind: top.verdict_kind ?? undefined,
   }) : 'general'
   // The thread whose archive waits on a confirm; only the card on top can be confirming.
   const [confirm, setConfirm] = useState<string | null>(null)
@@ -68,6 +85,24 @@ export function SwipeView() {
     if (on && !shown.current && !document.activeElement?.closest('input, textarea, select, [contenteditable=true]')) root.current?.focus({ preventScroll: true })
     shown.current = on
   })
+  // Reads the top two cards' threads while the view shows (the shell hides a view it parks); a failed read tries again
+  // on the next render, a tick's or the shell's.
+  const want = order.slice(0, 2)
+  useEffect(() => {
+    if (!root.current || root.current.closest('[hidden]')) return
+    for (const id of new Set([...cards.keys(), ...asked.keys()])) if (!want.some((r) => r.thread_id === id)) { cards.delete(id); asked.delete(id) }
+    for (const r of want) {
+      const key = rowKey(r)
+      if (cards.get(r.thread_id)?.key === key || reading.has(key)) continue
+      reading.add(key)
+      asked.set(r.thread_id, key)
+      void api<Mail[]>('GET', `/api/threads/${r.thread_id}`)
+        .then((mails) => { if (mails.length && asked.get(r.thread_id) === key) { cards.set(r.thread_id, { key, thread: { thread_id: r.thread_id, mails } }); bump() } })
+        // A failed read tries again after a while, as well as on the next render.
+        .catch(() => { setTimeout(bump, RETRY_MS) })
+        .finally(() => reading.delete(key))
+    }
+  })
   const ghostEl = useRef<HTMLDivElement>(null)
   // The card leaving the stack, drawn over it while it flies off.
   const [ghost, setGhost] = useState<{ t: Thread; action: SwipeAction; from: string; n: number } | null>(null)
@@ -75,8 +110,9 @@ export function SwipeView() {
   const [hint, setHint] = useState<{ action: SwipeAction; armed: boolean } | null>(null)
   const hintKey = useRef('')
 
+  // A card is acted on only once its thread shows: a key or tap never acts on a thread you haven't seen.
   const fire = (action: SwipeAction, from: string, confirmed = false) => {
-    if (!top) return
+    if (!top || !topThread) return
     setConfirm(null)
     if (action === 'archive' && blocked) {
       // The inbox's refusal; the card stays.
@@ -87,14 +123,14 @@ export function SwipeView() {
       setConfirm(top.thread_id)
       return springBack()
     }
-    const t = top
+    const r = top
+    const t = topThread
     pinned = null
     // The card's element stays when the stack keeps it on top (the last card, left); it starts at rest.
     if (card.current) { card.current.style.transition = 'none'; card.current.style.transform = '' }
     setGhost((g) => ({ t, action, from, n: (g?.n ?? 0) + 1 }))
-    const m = cardMail(t)
-    last = { action, tid: t.thread_id, text: cardPlain(m) }
-    void run(action, t).then((ok) => { if (!ok && last?.tid === t.thread_id) last = null; bump() })
+    last = { action, tid: t.thread_id, text: cardPlain(cardMail(t)) }
+    void run(action, r).then((ok) => { if (!ok && last?.tid === t.thread_id) last = null; bump() })
     bump()
   }
   const springBack = () => {
@@ -113,7 +149,7 @@ export function SwipeView() {
     pinned = l.tid
     bump()
   }
-  const open = () => { if (top) openFromSwipe(top.thread_id) }
+  const open = () => { if (top && topThread) openFromSwipe(top.thread_id) }
 
   // The top card follows the pointer; the hint changes only when its direction or arming does.
   useEffect(() => {
@@ -204,7 +240,7 @@ export function SwipeView() {
             <span className={hintClass('defer')} aria-hidden="true"><Icon name="alarm-clock" size="xs" />Defer</span>
             <div className="swipe-deck">
               {order.slice(1, 3).map((t, i) => <div key={t.thread_id} className={`swipe-edge d${i + 1}`} aria-hidden="true" />)}
-              <MailCard key={top.thread_id} ref={card} thread={top} onTap={open} className="swipe-top" />
+              {topThread ? <MailCard key={top.thread_id} ref={card} thread={topThread} onTap={open} className="swipe-top" /> : <Loading />}
               {ghost ? <MailCard key={'ghost' + ghost.n} ref={ghostEl} thread={ghost.t} className="swipe-ghost" style={{ transform: ghost.from || undefined }} /> : null}
             </div>
           </div>
@@ -218,10 +254,10 @@ export function SwipeView() {
             </div>
           ) : (
           <div className="swipe-actions" role="group" aria-label="Card actions">
-            <button className="btn" data-swipe-act="archive" disabled={blocked} title={btnTitle('archive', 'Archive the thread (←)')} onClick={() => fire('archive', '')}><Icon name="archive" size="xs" />Archive<span className="kbd">←</span></button>
-            <button className="btn" data-swipe-act="defer" title={btnTitle('defer', 'Defer: save it for later (↑)')} onClick={() => fire('defer', '')}><Icon name="alarm-clock" size="xs" />Defer<span className="kbd">↑</span></button>
-            <button className="btn" data-swipe-act="leave" title="Leave it: next card, nothing changes (→)" onClick={() => fire('leave', '')}>Leave<span className="kbd">→</span></button>
-            <button className="btn" data-swipe-act="open" title="Open the thread (Enter)" onClick={open}><Icon name="corner-down-left" size="xs" />Open<span className="kbd">Enter</span></button>
+            <button className="btn" data-swipe-act="archive" disabled={blocked || !topThread} title={btnTitle('archive', 'Archive the thread (←)')} onClick={() => fire('archive', '')}><Icon name="archive" size="xs" />Archive<span className="kbd">←</span></button>
+            <button className="btn" data-swipe-act="defer" disabled={!topThread} title={btnTitle('defer', 'Defer: save it for later (↑)')} onClick={() => fire('defer', '')}><Icon name="alarm-clock" size="xs" />Defer<span className="kbd">↑</span></button>
+            <button className="btn" data-swipe-act="leave" disabled={!topThread} title="Leave it: next card, nothing changes (→)" onClick={() => fire('leave', '')}>Leave<span className="kbd">→</span></button>
+            <button className="btn" data-swipe-act="open" disabled={!topThread} title="Open the thread (Enter)" onClick={open}><Icon name="corner-down-left" size="xs" />Open<span className="kbd">Enter</span></button>
           </div>)}
           <p className="swipe-help muted">Swipe left to archive, right to leave, up to defer; tap to open.</p>
         </div>)}

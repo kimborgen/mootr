@@ -79,3 +79,85 @@ describe('the sidebar tab headers', () => {
     expect(el.querySelector('#pane-tab-machines')!.getAttribute('aria-selected')).toBe('true')
   })
 })
+
+// The separator between panes (S-3810). jsdom has no layout, so the panes' heights (300, 200, 100) and their
+// minimum height (60) are stubbed, and the pointer is a MouseEvent of the pointer types.
+describe('the pane separators', () => {
+  const HEIGHTS = [300, 200, 100]
+  const patches = async () => {
+    await new Promise((r) => setTimeout(r, 650))
+    const { api } = await import('./api')
+    return vi.mocked(api).mock.calls.filter((c) => c[0] === 'PATCH')
+  }
+  const fire = (el: Element, type: string, y = 0) => act(async () => { el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientY: y })) })
+  let sep: HTMLElement
+  let el: HTMLElement
+  let store: typeof import('./sidebar-panes')
+
+  beforeEach(async () => {
+    store = await import('./sidebar-panes')
+    const { api } = await import('./api')
+    const rect = Element.prototype.getBoundingClientRect
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const i = this.classList.contains('side-pane') ? Number((this as HTMLElement).dataset.pane) : -1
+      return i < 0 ? rect.call(this) : { x: 0, y: 0, left: 0, right: 0, top: 0, bottom: HEIGHTS[i], width: 0, height: HEIGHTS[i], toJSON() {} }
+    })
+    const style = window.getComputedStyle
+    vi.spyOn(window, 'getComputedStyle').mockImplementation(((e: Element, pseudo?: string | null) => (e.classList?.contains('side-pane') ? { minHeight: '60px' } : style(e, pseudo))) as typeof window.getComputedStyle)
+    HTMLElement.prototype.setPointerCapture = vi.fn()
+    store.setSidebarPanes(store.defaultPanes())
+    store.setSidebarSizes(null)
+    await new Promise((r) => setTimeout(r, 650))
+    vi.mocked(api).mockClear()
+    const { SidebarPanes } = await import('./SidebarPanes')
+    el = await mount(<SidebarPanes left={createRef()} />)
+    sep = el.querySelector<HTMLElement>('.sep[data-sep="0"]')!
+  })
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('moves the panes while dragging and saves exactly once, on release', async () => {
+    await fire(sep, 'pointerdown', 300)
+    await fire(sep, 'pointermove', 250)
+    await fire(sep, 'pointermove', 200)
+    expect(store.currentSizes()).toBeUndefined()
+    expect(el.querySelector<HTMLElement>('[data-pane="0"]')!.style.flex).toBe('2 1 0%')
+    await fire(sep, 'pointerup', 200)
+    expect(store.currentSizes()?.map((v) => Math.round(v * 100) / 100)).toEqual([2, 3, 1])
+    const sent = await patches()
+    expect(sent).toHaveLength(1)
+    expect((sent[0][2] as { patch: { sidebarPanes: { main: { sizes: number[] } } } }).patch.sidebarPanes.main.sizes).toHaveLength(3)
+  })
+  it('saves nothing for a press with no movement', async () => {
+    await fire(sep, 'pointerdown', 300)
+    await fire(sep, 'pointerup', 300)
+    expect(store.currentSizes()).toBeUndefined()
+    expect(await patches()).toHaveLength(0)
+  })
+  it('does not nudge the panes when the gutter is pressed off the pane edge', async () => {
+    await fire(sep, 'pointerdown', 303)
+    await fire(sep, 'pointermove', 304)
+    await fire(sep, 'pointerup', 304)
+    expect(Math.abs(store.currentSizes()![0] - 3)).toBeLessThan(0.02)
+  })
+  it('puts the panes back and saves nothing when the pointer is cancelled', async () => {
+    await fire(sep, 'pointerdown', 300)
+    await fire(sep, 'pointermove', 200)
+    await fire(sep, 'pointercancel', 200)
+    expect(el.querySelector<HTMLElement>('[data-pane="0"]')!.style.flex).toBe('3 1 0%')
+    expect(store.currentSizes()).toBeUndefined()
+    expect(await patches()).toHaveLength(0)
+  })
+  it('steps with the arrow keys and keeps aria-valuenow, with the real limits, up to date', async () => {
+    expect(sep.getAttribute('aria-valuenow')).toBe('60')
+    expect(sep.getAttribute('aria-valuemin')).toBe('12')
+    expect(sep.getAttribute('aria-valuemax')).toBe('88')
+    await act(async () => { sep.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })) })
+    expect(store.currentSizes()).toBeDefined()
+    expect(el.querySelector('.sep[data-sep="0"]')!.getAttribute('aria-valuenow')).toBe('65')
+  })
+  it('resets to the default on a double-click', async () => {
+    await act(async () => { store.setSidebarSizes([1, 4, 1]) })
+    await act(async () => { sep.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    expect(store.currentSizes()).toBeUndefined()
+  })
+})

@@ -174,6 +174,26 @@ export async function migrateCardLayouts(fields: Pick<Field, 'id' | 'card' | 'po
 // How often an open page reads the record again, so a layout another page saved shows here (while visible).
 export const CARD_LAYOUT_POLL_MS = 5000
 
+// One poll for every mounted card, not one each: a tick reads the record once and tells each card it changed.
+const pollers = new Set<() => void>()
+let poll: ReturnType<typeof setInterval> | undefined
+function pollRecord(): void {
+  if (document.hidden) return
+  const before = JSON.stringify(records.all())
+  void records.refresh().then(() => { if (JSON.stringify(records.all()) !== before) for (const tell of pollers) tell() }, () => {})
+}
+// Joins the shared poll, which runs while any card is mounted. Returns the call that leaves it.
+function joinPoll(tell: () => void): () => void {
+  pollers.add(tell)
+  poll ??= setInterval(pollRecord, CARD_LAYOUT_POLL_MS)
+  return () => {
+    pollers.delete(tell)
+    if (pollers.size) return
+    clearInterval(poll)
+    poll = undefined
+  }
+}
+
 // A card's layout as the page shows it. Until the record has loaded, each layout is the migration's seed for
 // the fields this page knows, so a page never draws a layout the record would not (a field with `card: 'meta'`
 // sits in META, a chip in the agent's BADGES). `fields` are the fields the card may show: a stored issue layout
@@ -184,13 +204,9 @@ export function useCardLayout(id: CardId, fields: Pick<Field, 'id' | 'card' | 'p
     const on = () => bump()
     window.addEventListener(CARD_LAYOUT_EVENT, on)
     void records.load().then(bump, () => {})
-    // Reads the record again and re-renders only when it changed.
-    const poll = setInterval(() => {
-      if (document.hidden) return
-      const before = JSON.stringify(records.all())
-      void records.refresh().then(() => { if (JSON.stringify(records.all()) !== before) bump() }, () => {})
-    }, CARD_LAYOUT_POLL_MS)
-    return () => { clearInterval(poll); window.removeEventListener(CARD_LAYOUT_EVENT, on) }
+    // Re-renders when the shared poll finds the record changed.
+    const leave = joinPoll(bump)
+    return () => { leave(); window.removeEventListener(CARD_LAYOUT_EVENT, on) }
   }, [])
   // Kept by content: a settings refresh builds new record objects each poll, and a caller may build its fields each render.
   // Either would change the layout's identity, and with it every card's, though nothing a card draws has changed.

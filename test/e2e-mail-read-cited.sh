@@ -38,7 +38,7 @@ CITED=$(as_agent "$PM" POST /api/mail "{\"from\":\"$PM\",\"to\":[\"human\"],\"bo
 
 # An ITSA the manager owns; qa's comment goes to the manager, not the developer.
 KEY=$("$STAM" itsa new "Queue design" --owner pm --participant qa | awk '{print $1}')
-STAM_AGENT_ID="$QA" STAM_TOKEN="$(agent_token "$QA")" MOOTR_TOKEN="$STAM_TOKEN" "$STAM" itsa post "$KEY" "design: keep the queue per machine" >/dev/null || fail "qa's comment failed"
+QA_TOKEN=$(agent_token "$QA") STAM_AGENT_ID="$QA" MOOTR_AGENT_ID="$QA" STAM_TOKEN="$QA_TOKEN" MOOTR_TOKEN="$QA_TOKEN" "$STAM" itsa post "$KEY" "design: keep the queue per machine" >/dev/null || fail "qa's comment failed"
 TID=$(agent GET "/api/itsas/$KEY" | field thread_id)
 COMMENT=$(agent GET "/api/threads/$TID" | field 0.id)
 [ -n "$COMMENT" ] || fail "no comment in $KEY's thread"

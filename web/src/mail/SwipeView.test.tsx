@@ -5,9 +5,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRoot } from 'react-dom/client'
 import { act } from 'react'
+import type { Thread } from '../types'
+import { humanRowsOf } from './thread-index'
 
-// The polls after a change never answer, so the fixture stays the data.
-const api = vi.fn((method: string) => (method === 'GET' ? new Promise(() => {}) : Promise.resolve({})))
+// The polls after a change never answer, so the fixture stays the data. A card's thread read (S-4616) answers with the
+// thread as the test last seeded it; the store's lists hold only its rows.
+let store: typeof import('../store') | null = null
+let served: Thread[] = []
+const serve = (ts: Thread[]) => { served = ts; return humanRowsOf(ts) }
+const daemon = (method: string, path?: string) => {
+  const tid = String(path).match(/^\/api\/threads\/([^/?]+)$/)?.[1]
+  if (method === 'GET' && tid && store) return Promise.resolve(served.find((t) => t.thread_id === tid)?.mails ?? [])
+  return method === 'GET' ? new Promise(() => {}) : Promise.resolve({})
+}
+const api = vi.fn(daemon)
 vi.mock('../api', () => ({ api: (...a: unknown[]) => (api as (...b: unknown[]) => unknown)(...a), hash: new URLSearchParams() }))
 let world: string | null = 'w:swipe'
 vi.mock('../shell/layout', async (orig) => ({ ...(await orig<object>()), currentWorld: () => world, showAgentWorld: (id: string | null) => { world = id } }))
@@ -15,26 +26,34 @@ vi.mock('../shell/layout', async (orig) => ({ ...(await orig<object>()), current
 const thread = (id: string, at: string) => ({ thread_id: id, mails: [{ id: 'm-' + id, from_id: 'a1', from_name: 'fixture-dev', subject: 'About ' + id, body: '', created_at: at, recipients: [{ id: 'human', read_at: null }] }] })
 const statuses = [{ name: 'needs_input', category: 'active', human: true }]
 const top = (el: HTMLElement) => el.querySelector<HTMLElement>('.swipe-top')?.dataset.card
-const key = (k: string) => act(async () => { dispatchEvent(new KeyboardEvent('keydown', { key: k })) })
+// The top cards' thread reads land.
+// On the real clock, so it still settles while a test fakes timers.
+const realTimeout = globalThis.setTimeout
+const settle = () => act(async () => { await new Promise((r) => realTimeout(r, 0)) })
+const key = async (k: string) => { await act(async () => { dispatchEvent(new KeyboardEvent('keydown', { key: k })) }); await settle() }
 const calls = () => api.mock.calls.filter((c) => c[0] !== 'GET').map((c) => String((c as unknown[])[1]))
 
 let unmount: (() => void) | null = null
+let parked = false
 async function mount(threads: ReturnType<typeof thread>[], attention: unknown[] = []) {
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-  const store = await import('../store')
+  store = await import('../store')
   const { SwipeView } = await import('./SwipeView')
-  store.setData({ humanThreads: threads, humanArchived: [], humanDeferred: [], attention, decisions: [], itsas: [], itsaStatuses: statuses, loaded: { agents: true, mail: true, itsas: true } } as never)
+  store.setData({ humanRows: serve(threads), attention, decisions: [], itsas: [], itsaStatuses: statuses, loaded: { agents: true, mail: true, itsas: true } } as never)
   const el = document.createElement('div')
+  // A view the shell parks sits under a hidden element.
+  el.hidden = parked
   document.body.append(el)
   const root = createRoot(el)
   unmount = () => act(() => root.unmount())
   await act(async () => { root.render(<SwipeView />) })
+  await settle()
   return el
 }
 
 describe('the Swipe view', () => {
   afterEach(() => { unmount?.(); unmount = null })
-  beforeEach(() => { vi.resetModules(); api.mockClear(); world = 'w:swipe'; document.body.innerHTML = '' })
+  beforeEach(() => { vi.resetModules(); api.mockClear(); api.mockImplementation(daemon); world = 'w:swipe'; document.body.innerHTML = '' })
 
   it('stacks the newest thread on top and archives it with the left arrow', async () => {
     const el = await mount([thread('old', '2026-10-15T08:00:00Z'), thread('new', '2026-10-15T09:00:00Z')])
@@ -146,7 +165,7 @@ describe('the Swipe view', () => {
     const el = await mount([thread('a', '2026-10-15T09:00:00Z')])
     expect(top(el)).toBe('a')
     const store = await import('../store')
-    await act(async () => { store.setData({ ...store.getData(), humanThreads: [thread('a', '2026-10-15T09:00:00Z'), thread('n', '2026-10-15T10:00:00Z')] } as never) })
+    await act(async () => { store.setData({ ...store.getData(), humanRows: serve([thread('a', '2026-10-15T09:00:00Z'), thread('n', '2026-10-15T10:00:00Z')]) } as never) })
     expect(top(el)).toBe('a')
     await key('ArrowRight')
     expect(top(el)).toBe('n')
@@ -262,5 +281,128 @@ describe('the Swipe view', () => {
   it('shows the empty state when nothing is left', async () => {
     const el = await mount([])
     expect(el.querySelector('[data-swipe-empty]')?.textContent).toContain('Nothing left to swipe')
+  })
+})
+
+describe('the Swipe view reads its cards\' threads on demand (S-4616)', () => {
+  afterEach(() => { unmount?.(); unmount = null })
+  beforeEach(() => { vi.resetModules(); api.mockClear(); api.mockImplementation(daemon); world = 'w:swipe'; parked = false; document.body.innerHTML = '' })
+  const reads = () => api.mock.calls.map((c) => String((c as unknown[])[1])).filter((p) => p.startsWith('/api/threads/'))
+  const three = () => [thread('a', '2026-10-15T07:00:00Z'), thread('b', '2026-10-15T08:00:00Z'), thread('c', '2026-10-15T09:00:00Z')]
+
+  it('reads only the top card\'s thread and the next one\'s, once, and the next card after an archive', async () => {
+    const el = await mount(three())
+    expect(reads().sort()).toEqual(['/api/threads/b', '/api/threads/c'])
+    expect(top(el)).toBe('c')
+    // A tick with nothing changed reads nothing again.
+    const s = await import('../store')
+    await act(async () => { s.setData({ mailTick: s.getPolled().mailTick + 1 }) })
+    await settle()
+    expect(reads()).toHaveLength(2)
+    await key('ArrowLeft')
+    expect(top(el)).toBe('b')
+    expect(reads().sort()).toEqual(['/api/threads/a', '/api/threads/b', '/api/threads/c'])
+  })
+
+  it('reads a card\'s thread again when its row says a new mail came', async () => {
+    const el = await mount([thread('a', '2026-10-15T07:00:00Z')])
+    const s = await import('../store')
+    const grown = { thread_id: 'a', mails: [...thread('a', '2026-10-15T07:00:00Z').mails, { id: 'm-a2', from_id: 'a1', from_name: 'fixture-dev', subject: 'About a', body: 'Later news', created_at: '2026-10-15T10:00:00Z', recipients: [{ id: 'human', read_at: null }] }] }
+    await act(async () => { s.setData({ humanRows: serve([grown]) }) })
+    await settle()
+    expect(reads()).toEqual(['/api/threads/a', '/api/threads/a'])
+    expect(el.querySelector('.swipe-top')?.textContent).toContain('Later news')
+  })
+
+  it('keeps the newer read when an older one lands after it', async () => {
+    // Each thread read answers with the thread as it was when asked, once the test lets it.
+    const held: (() => void)[] = []
+    api.mockImplementation((method: string, path?: string) => {
+      if (!String(path).startsWith('/api/threads/')) return daemon(method, path)
+      const then = daemon(method, path)
+      return new Promise((ok) => { held.push(() => ok(then)) })
+    })
+    const el = await mount([thread('a', '2026-10-15T07:00:00Z')])
+    const s = await import('../store')
+    const grown = { thread_id: 'a', mails: [...thread('a', '2026-10-15T07:00:00Z').mails, { id: 'm-a2', from_id: 'a1', from_name: 'fixture-dev', subject: 'About a', body: 'Later news', created_at: '2026-10-15T10:00:00Z', recipients: [{ id: 'human', read_at: null }] }] }
+    await act(async () => { s.setData({ humanRows: serve([grown]) }) })
+    expect(held).toHaveLength(2)
+    // The newer read answers first, then the older one.
+    held[1]()
+    await settle()
+    held[0]()
+    await settle()
+    expect(el.querySelector('.swipe-top')?.textContent).toContain('Later news')
+  })
+
+  it('reads nothing while the shell has it parked, and reads once it shows', async () => {
+    parked = true
+    const el = await mount(three())
+    expect(reads()).toEqual([])
+    expect(el.querySelector('.swipe-top')).toBeNull()
+    el.hidden = false
+    // The shell's change renders the view again.
+    const s = await import('../store')
+    await act(async () => { s.setData({ mailTick: s.getPolled().mailTick + 1 }) })
+    await settle()
+    expect(reads().sort()).toEqual(['/api/threads/b', '/api/threads/c'])
+    expect(top(el)).toBe('c')
+  })
+
+  it('shows the card loading, and acts on no key, until its thread is read', async () => {
+    api.mockImplementation((method: string) => (method === 'GET' ? new Promise(() => {}) : Promise.resolve({})))
+    const el = await mount(three())
+    expect(el.querySelector('.swipe-top')).toBeNull()
+    expect(el.querySelector('.swipe-deck .loading')).not.toBeNull()
+    await key('ArrowLeft')
+    await key('Enter')
+    expect(calls()).toEqual([])
+    expect(world).toBe('w:swipe')
+    // Every action button waits for the card too.
+    const acts = [...el.querySelectorAll<HTMLButtonElement>('[data-swipe-act]')]
+    expect(acts.map((b) => [b.dataset.swipeAct, b.disabled])).toEqual([['archive', true], ['defer', true], ['leave', true], ['open', true]])
+  })
+
+  it('drops a read for a card that left the top two, and reads it again when it comes back', async () => {
+    const held = new Map<string, () => void>()
+    api.mockImplementation((method: string, path?: string) => {
+      if (!String(path).startsWith('/api/threads/')) return daemon(method, path)
+      const then = daemon(method, path)
+      // Thread b's first read waits for the test; the rest answer at once.
+      if (String(path).endsWith('/b') && !held.has('b')) return new Promise((ok) => { held.set('b', () => ok(then)) })
+      return then
+    })
+    const el = await mount(three())
+    expect(top(el)).toBe('c')
+    // A new thread d comes in under the card on top, so b leaves the top two before its read lands.
+    const s = await import('../store')
+    await act(async () => { s.setData({ humanRows: serve([...three(), thread('d', '2026-10-15T10:00:00Z')]) }) })
+    await settle()
+    held.get('b')!()
+    await settle()
+    const reads = () => api.mock.calls.map((c) => String((c as unknown[])[1])).filter((p) => p === '/api/threads/b')
+    expect(reads()).toHaveLength(1)
+    // c and d go, so b is on top again: it is read again, since the late answer wasn't kept.
+    await key('ArrowLeft')
+    await key('ArrowLeft')
+    expect(top(el)).toBe('b')
+    expect(reads()).toHaveLength(2)
+  })
+
+  it('tries a failed read again after a while', async () => {
+    let fail = true
+    api.mockImplementation((method: string, path?: string) => {
+      if (String(path).startsWith('/api/threads/') && fail) return Promise.reject(new Error('down'))
+      return daemon(method, path)
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    try {
+      const el = await mount([thread('a', '2026-10-15T07:00:00Z')])
+      expect(el.querySelector('.swipe-top')).toBeNull()
+      fail = false
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+      await settle()
+      expect(top(el)).toBe('a')
+    } finally { vi.useRealTimers() }
   })
 })

@@ -77,6 +77,10 @@ func (l *Lifecycle) OnHook(ctx context.Context, harness string, a db.Agent, payl
 	if err := l.applyHookWaits(ctx, a.ID, r.Waits); err != nil {
 		return nil, err
 	}
+	// A turn starts (not a prompt typed into a running one): the rest its last turn asked for is dropped.
+	if v, _ := p.Get("hook_event_name"); v == "UserPromptSubmit" && r.Activity == "working" && a.Activity != "working" {
+		l.restTurnStarted(ctx, a.ID)
+	}
 	var fields []db.Field
 	if r.Activity != "" {
 		fields = append(fields, db.Field{Col: "activity", Val: r.Activity})

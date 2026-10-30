@@ -289,7 +289,7 @@
     },
     "compact-restart": {
       "module": "unassigned",
-      "status": "fail"
+      "status": "pass"
     },
     "compact-restart-unit": {
       "module": "unassigned",
@@ -540,12 +540,12 @@
       "status": "fail"
     },
     "github-poller": {
-      "module": "unassigned",
-      "status": "fail"
+      "module": "events",
+      "status": "pass"
     },
     "github-poller-unit": {
-      "module": "unassigned",
-      "status": "fail"
+      "module": "events",
+      "status": "pass"
     },
     "go-catchup-unit": {
       "module": "unassigned",
@@ -756,11 +756,11 @@
       "status": "fail"
     },
     "linear-poller": {
-      "module": "unassigned",
-      "status": "fail"
+      "module": "linear",
+      "status": "pass"
     },
     "linear-poller-unit": {
-      "module": "unassigned",
+      "module": "linear",
       "status": "fail"
     },
     "live-head-guard": {
@@ -1089,7 +1089,7 @@
     },
     "peer-wait": {
       "module": "unassigned",
-      "status": "fail"
+      "status": "pass"
     },
     "peers": {
       "module": "unassigned",
@@ -1749,11 +1749,11 @@
     },
     "waits": {
       "module": "unassigned",
-      "status": "fail"
+      "status": "pass"
     },
     "waits-claude": {
       "module": "unassigned",
-      "status": "fail"
+      "status": "pass"
     },
     "waits-harness-unit": {
       "module": "unassigned",
@@ -1761,11 +1761,11 @@
     },
     "waits-mcp": {
       "module": "unassigned",
-      "status": "fail"
+      "status": "pass"
     },
     "waits-stam": {
       "module": "unassigned",
-      "status": "fail"
+      "status": "pass"
     },
     "waits-unit": {
       "module": "unassigned",
@@ -1776,12 +1776,12 @@
       "status": "pass"
     },
     "watch-pr": {
-      "module": "unassigned",
-      "status": "fail"
+      "module": "events",
+      "status": "pass"
     },
     "watch-pr-unit": {
-      "module": "unassigned",
-      "status": "fail"
+      "module": "events",
+      "status": "pass"
     },
     "watch-unit": {
       "module": "events",

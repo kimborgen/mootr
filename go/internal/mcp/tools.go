@@ -41,7 +41,7 @@ var toolOrder = []string{"whoami", "register", "workspace_share", "find_agents",
 	"spawn_agent", "agent_control", "compact_self", "request_permission", "suggest_input", "answer_permission", "ring_create", "ring_submit", "ring_decide",
 	"reconnect_mcp", "defer_thread", "list_inbox", "read_mail", "wait_for", "wait_done", "wake_me", "read_thread", "search_mail", "search",
 	"itsa_create", "req_create", "req_get", "req_set", "req_check", "req_waive", "feedback", "retro", "itsa_get", "itsa_list", "itsa_set", "itsa_fields", "itsa_link", "itsa_post", "subscribe", "unsubscribe", "list_subscriptions",
-	"layout_get", "layout_arrange"}
+	"watch_pr", "unwatch_pr", "layout_get", "layout_arrange"}
 
 var (
 	orderOnce sync.Once

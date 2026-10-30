@@ -15,7 +15,7 @@ import { prLinkClick } from './mail/prLinks'
 import { loadDiffRepos } from './diff/diffRepos'
 import { registerAppRefResolvers } from './mail/refResolvers'
 import * as shell from './shell/layout'
-import { applyLiveEvent, getData, loadThresholds, onAgentsChanged, refresh, refreshItsas, refreshMachines, refreshSlow, setData, startPolls, subscribe } from './store'
+import { applyLiveEvent, getData, loadThresholds, onAgentsChanged, poll, pollMachines, refresh, refreshItsas, refreshMachines, refreshSlowNow, setData, startPolls, subscribe } from './store'
 import { BASE_FONT, sessions } from './term/TermSession'
 import { toast } from './ui/menu'
 import { initNotify } from './notify'
@@ -129,7 +129,7 @@ async function boot() {
   void loadOutbox()
   const agents = refresh()
   const shells = api<PlainShell[]>('GET', '/api/shells').then((s) => setData({ shells: s })).catch(() => {})
-  agents.then(refreshSlow)
+  agents.then(refreshSlowNow)
   refreshItsas()
   refreshMachines()
   await Promise.all([fonts, health, loadThresholds(), agents, shells])
@@ -156,8 +156,8 @@ async function boot() {
   onLiveConnection(startPolls)
   startPolls(false)
   startLive()
-  setInterval(refreshSlow, 8000)
-  setInterval(refreshMachines, 5000)
+  poll(refreshSlowNow, 8000)
+  poll(pollMachines, 5000)
 }
 boot()
 

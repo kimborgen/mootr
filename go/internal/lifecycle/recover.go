@@ -29,7 +29,7 @@ const recoverStagger = 3 * time.Second
 const networkWait = 10 * time.Minute
 
 // being is src/lifecycle.ts BEING: how a refusal names the transition that holds the agent.
-var being = map[string]string{"archive": "archived", "switch": "switched", "resume": "resumed"}
+var being = map[string]string{"archive": "archived", "switch": "switched", "resume": "resumed", "rest": "rested"}
 
 // transition is one agent's held transition lock: its kind, and a token of its own so a release removes only it.
 type transition struct{ kind string }

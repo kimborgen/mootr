@@ -381,18 +381,30 @@ async function testSockets(): Promise<string[]> {
 }
 
 // Dead socket files of a known test name (S-3288): a test's `kill-server` can leave the file behind.
-// Only a name with a PID in it is looked at, and only when that process is gone. A child daemon of the test
+// A name with a PID in it is looked at only when that process is gone. A child daemon of the test
 // can outlive that PID and keep the name; if its server is alive, `tmux ls` says so and the socket stays.
-// A name without a PID is fixed at its source (the test's own cleanup) and never swept. A socket then goes only when `tmux -L NAME ls`
+// A name without a PID (a lib.sh run's stam-test-OWNER-RAND-NAME, a Go test's stam-test-tty-HEX) is looked at once its
+// file is PIDLESS_MIN_AGE_MS old and no test folder stam-test.OWNER.RAND holds it: a run killed hard (a gate's group
+// KILL, a systemd unit's stop) skips every trap, its watchdog too, and its folder may be gone (S-4129).
+// A socket then goes only when `tmux -L NAME ls`
 // says no server runs on it, and only if the file is still the one first seen (same inode and mtime).
 // Any other answer (a live server, a timeout, permission denied) keeps it. A pass makes at most
 // SOCKET_PROBES probes within about SOCKET_BUDGET_MS (one probe in flight may overrun it) and resumes after the last name next pass.
 const SOCKET_PROBES = 100;
 const SOCKET_BUDGET_MS = 10_000;
+const PIDLESS_MIN_AGE_MS = 60 * 60 * 1000;
 let socketCursor = '';
+// Whether a test folder still holds a socket of the stam-test-OWNER-RAND-NAME form; false for any other name.
+async function socketFolderLive(name: string): Promise<boolean> {
+  const id = socketOwner(name);
+  if (!id) return false;
+  for (const root of tmpRoots()) if (await lstat(join(root, `stam-test.${id.owner}.${id.rand}`)).catch(() => undefined)) return true;
+  return false;
+}
 export interface SocketSweepDeps {
   ls?: (name: string) => Promise<{ status: number | null; stderr: string; timedOut?: boolean }>;
   alive?: (pid: number) => boolean;
+  folderLive?: (name: string) => Promise<boolean>;
   now?: () => number;
   probes?: number;
   budgetMs?: number;
@@ -402,6 +414,7 @@ export async function sweepDeadSockets(opts: { dryRun?: boolean } & SocketSweepD
   const kept: Kept[] = [];
   const ls = opts.ls ?? ((name: string) => runErr('tmux', ['-L', name, 'ls']));
   const alive = opts.alive ?? pidAlive;
+  const folderLive = opts.folderLive ?? socketFolderLive;
   const now = opts.now ?? Date.now;
   const maxProbes = opts.probes ?? SOCKET_PROBES;
   const budgetMs = opts.budgetMs ?? SOCKET_BUDGET_MS;
@@ -419,7 +432,7 @@ export async function sweepDeadSockets(opts: { dryRun?: boolean } & SocketSweepD
     const st = await lstat(path).catch(() => undefined);
     if (!st?.isSocket()) continue;
     const pid = socketPid(name);
-    if (pid === undefined || alive(pid)) continue;
+    if (pid === undefined ? now() - st.mtimeMs < PIDLESS_MIN_AGE_MS || (await folderLive(name)) : alive(pid)) continue;
     probed++;
     const verdict = classifyTmuxLs(await ls(name));
     if (verdict !== 'dead') {
@@ -428,7 +441,7 @@ export async function sweepDeadSockets(opts: { dryRun?: boolean } & SocketSweepD
     }
     // The file must be the one probed: a server started since replaced it.
     const again = await lstat(path).catch(() => undefined);
-    if (!again?.isSocket() || again.ino !== st.ino || again.mtimeMs !== st.mtimeMs || alive(pid)) continue;
+    if (!again?.isSocket() || again.ino !== st.ino || again.mtimeMs !== st.mtimeMs || (pid !== undefined && alive(pid))) continue;
     if (!opts.dryRun) await rm(path, { force: true });
     removed.push(name);
   }

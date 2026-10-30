@@ -169,6 +169,11 @@ func (l *Lifecycle) onOpenCodeEvent(ctx context.Context, ev opencode.Event) {
 	l.retryAsks(a.ID)
 	switch ev.Type {
 	case "session.execution.started":
+		// A new turn (not one already running): the rest its last turn asked for no longer holds (S-2237, S-4332). A
+		// woken agent is starting, so its first execution drops the flag too.
+		if a.Activity != "working" {
+			l.restTurnStarted(ctx, a.ID)
+		}
 		// A completion notice starts this execution; the work it reports is over. Its end may end the turn only if it
 		// started under this generation, in the session the row runs (owner.startExec, which names the known gap); a
 		// start refused there writes no working state, which no end would clear.

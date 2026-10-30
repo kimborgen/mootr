@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRoot } from 'react-dom/client'
 import { act } from 'react'
+import { humanRowsOf } from './mail/thread-index'
 
 vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }))
 const api = vi.fn(async () => ({}))
@@ -20,7 +21,7 @@ const mail = (id: string, tid: string, permission?: { status: string }) => ({ id
 const thread = (tid: string, permission?: { status: string }) => ({ thread_id: tid, mails: [mail('m-' + tid, tid, permission)] })
 const statuses = [{ name: 'needs_input', category: 'active', human: true }, { name: 'done', category: 'closed', human: false }]
 const waiting = (askThread: string) => ({ id: 'i1', key: 'S-1', status: 'needs_input', ask_thread_id: askThread, since: '2026-10-13T10:00:00Z', actions: [] })
-const base = { humanThreads: [], humanArchived: [], humanDeferred: [], openThreads: [], attention: [], decisions: [], perms: [], delegateDialogs: [], agents: [], itsaStatuses: statuses }
+const base = { humanRows: humanRowsOf(), openThreads: [], attention: [], decisions: [], perms: [], delegateDialogs: [], agents: [], itsaStatuses: statuses }
 const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
 describe('the thread tab bar icons', () => {
@@ -40,7 +41,7 @@ describe('the thread tab bar icons', () => {
 
   it('keeps the texts, adds the key, and disables Archive while a permission waits', async () => {
     const store = await import('./store')
-    store.setData({ ...base, humanThreads: [thread('t1', { status: 'pending' })] } as never)
+    store.setData({ ...base, humanRows: humanRowsOf([thread('t1', { status: 'pending' })] as never) } as never)
     const el = await render((m) => <m.ThreadArchive tid="t1" desktop />)
     const defer = el.querySelector<HTMLButtonElement>('[data-defer]')!
     const archive = el.querySelector<HTMLButtonElement>('[data-archive]')!
@@ -52,7 +53,7 @@ describe('the thread tab bar icons', () => {
 
   it('names what waits on the human as the reason Archive is disabled, on the desktop only', async () => {
     const store = await import('./store')
-    store.setData({ ...base, humanThreads: [thread('ask')], attention: [waiting('ask')] } as never)
+    store.setData({ ...base, humanRows: humanRowsOf([thread('ask')] as never), attention: [waiting('ask')] } as never)
     const desk = await render((m) => <m.ThreadArchive tid="ask" desktop />)
     expect(desk.querySelector<HTMLButtonElement>('[data-archive]')!.title).toBe('Answer what waits on you first')
     expect(desk.querySelector<HTMLButtonElement>('[data-archive]')!.disabled).toBe(true)
@@ -65,7 +66,7 @@ describe('the thread tab bar icons', () => {
   it('keeps a pending permission past the list of 60 held, in the thread the view loaded', async () => {
     const store = await import('./store')
     const actions = await import('./actions')
-    store.setData({ ...base, humanThreads: [], openThreads: [thread('old', { status: 'pending' })] } as never)
+    store.setData({ ...base, openThreads: [thread('old', { status: 'pending' })] } as never)
     const el = await render((m) => <m.ThreadArchive tid="old" desktop />)
     expect(el.querySelector<HTMLButtonElement>('[data-archive]')!.disabled).toBe(true)
     await actions.toggleThreadArchived('old')
@@ -74,7 +75,7 @@ describe('the thread tab bar icons', () => {
 
   it('shows the deferred and archived icons with their undo texts and keys', async () => {
     const store = await import('./store')
-    store.setData({ ...base, humanDeferred: [thread('d1')], humanArchived: [thread('a1')] } as never)
+    store.setData({ ...base, humanRows: humanRowsOf([], [thread('a1')] as never, [thread('d1')] as never) } as never)
     const el = await render((m) => <><m.ThreadArchive tid="d1" desktop /><m.ThreadArchive tid="a1" desktop /></>)
     expect(el.querySelector<HTMLButtonElement>('[data-defer]')!.getAttribute('aria-label')).toBe('Undefer (d)')
     expect(el.querySelector<HTMLButtonElement>('[data-defer]')!.title).toBe('Move this thread back to your mail (d)')
@@ -86,7 +87,7 @@ describe('the thread tab bar icons', () => {
   it('opens the next mail in the Inbox page when its archive icon is clicked', async () => {
     const store = await import('./store')
     const shell = await import('./shell/layout')
-    store.setData({ ...base, humanThreads: [thread('t1'), thread('t2')] } as never)
+    store.setData({ ...base, humanRows: humanRowsOf([thread('t1'), thread('t2')] as never) } as never)
     shell.init({ valid: () => true, keep: () => true, keepWorld: () => true })
     shell.open('main', 'inbox')
     shell.open('main', 'thread:t1', { split: 'right' })
@@ -102,7 +103,7 @@ describe('the thread tab bar icons', () => {
   it('opens the next mail elsewhere when its defer icon is clicked, as the header did', async () => {
     const store = await import('./store')
     const shell = await import('./shell/layout')
-    store.setData({ ...base, humanThreads: [thread('t1'), thread('t2')] } as never)
+    store.setData({ ...base, humanRows: humanRowsOf([thread('t1'), thread('t2')] as never) } as never)
     shell.init({ valid: () => true, keep: () => true, keepWorld: () => true })
     shell.showAgentWorld('t:t1')
     const el = await render((m) => <m.ThreadArchive tid="t1" desktop />)

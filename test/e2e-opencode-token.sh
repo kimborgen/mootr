@@ -106,10 +106,10 @@ PERM_OC='{"agent":"'$OC'","action":"oc token","reason":"mine","details":"","audi
 # checkStep fails closed on a 403: the server's token as $CL is refused, so the call doesn't run.
 MCP="$(dirname "$(readlink -f "$0")")/mcp-call.mjs"
 MCP_CALL='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send_mail","arguments":{"to":["'$OC'"],"subject":"fail closed","body":"P=0.1 must not send"}}}'
-REFUSED=$(STAM_BIN="$STAM" STAM_TOKEN="$OC_TOKEN" MOOTR_TOKEN="$OC_TOKEN" STAM_AGENT_ID="$CL_ID" node "$MCP" "$MCP_CALL")
+REFUSED=$(STAM_BIN="$STAM" STAM_TOKEN="$OC_TOKEN" MOOTR_TOKEN="$OC_TOKEN" with_agent_id "$CL_ID" node "$MCP" "$MCP_CALL")
 echo "$REFUSED" | grep -q '"isError":true' && echo "$REFUSED" | grep -q "Refused" || { echo "FAIL: a check refused with 403 let the call run: $REFUSED"; exit 1; }
 # The same call as the OpenCode agent's own, with its token, isn't refused: no step is set here, so it runs.
-OWN=$(STAM_BIN="$STAM" STAM_TOKEN="$OC_TOKEN" MOOTR_TOKEN="$OC_TOKEN" STAM_AGENT_ID="$OC_ID" node "$MCP" "$MCP_CALL")
+OWN=$(STAM_BIN="$STAM" STAM_TOKEN="$OC_TOKEN" MOOTR_TOKEN="$OC_TOKEN" with_agent_id "$OC_ID" node "$MCP" "$MCP_CALL")
 echo "$OWN" | grep -q '"isError":true' && { echo "FAIL: the OpenCode agent's own allowed call was refused: $OWN"; exit 1; }
 
 # The shared token can't name an agent that has its own token (S-545), but reads without a claim as before.

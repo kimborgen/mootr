@@ -8,17 +8,20 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { selectThread } from '../actions'
 import { Icon } from '../Icon'
 import { MailCard } from '../mail/MailCard'
-import { byId, rapidOlder, useData, watchRapid } from '../store'
-import { activeIn } from '../shell/layout'
+import { byId, rapidOlder, showRapid, useData, watchRapid } from '../store'
+import { activeIn, useViewKey, useViewShown } from '../shell/layout'
 import { getPick, pickOf, rapidKey, rapidThreads, setPick, usePick } from './rapid'
 
 export function RapidView({ id }: { id: string }) {
   const d = useData()
   const name = byId(id)?.name ?? 'the agent'
-  const threads = useMemo(() => rapidThreads(id, d), [id, d.humanThreads, d.humanArchived, d.humanDeferred, d.rapidWith])
+  const threads = useMemo(() => rapidThreads(id, d), [id, d.rapidWith])
   const more = !!d.rapidWith?.[id]?.more
   const [loading, setLoading] = useState(false)
-  useEffect(() => watchRapid(id), [id])
+  // The pane holds the page count while mounted; the fetch runs only while it shows (S-4691).
+  const shown = useViewShown(useViewKey())
+  useEffect(() => watchRapid(id, false), [id])
+  useEffect(() => (shown ? showRapid(id) : undefined), [id, shown])
   const pick = usePick(id)
   const root = useRef<HTMLDivElement>(null)
   const scroll = useRef<HTMLDivElement>(null)
@@ -55,7 +58,8 @@ export function RapidView({ id }: { id: string }) {
     return () => removeEventListener('keydown', key)
   }, [id])
   return (
-    <div className="rf" ref={root} data-rapid={id}>
+    // `data-loaded` once the agent's own pages are in (S-4580): the cards come only from them.
+    <div className="rf" ref={root} data-rapid={id} data-loaded={d.rapidWith?.[id] ? '' : undefined}>
       <div className="rf-scroll" ref={scroll}>
         <div className="rf-col">
           <p className="rf-help" role="status">{pick
@@ -63,7 +67,7 @@ export function RapidView({ id }: { id: string }) {
             : <>Each send starts a new thread to {name}. Tap a card to follow up in it.</>}</p>
           {more ? <button className="btn rf-older" type="button" disabled={loading}
             onClick={() => { above.current = scroll.current ? { h: scroll.current.scrollHeight, top: scroll.current.scrollTop } : null; setLoading(true); void rapidOlder(id).finally(() => setLoading(false)) }}>{loading ? 'Loading…' : 'Load older threads'}</button> : null}
-          {threads.length ? null : <p className="ov-start">No mail with {name} yet.</p>}
+          {threads.length || !d.rapidWith?.[id] ? null : <p className="ov-start">No mail with {name} yet.</p>}
           <ol className="rf-list" aria-label={`Threads with ${name}`}>
             {threads.map((t) => {
               const on = pick?.thread_id === t.thread_id

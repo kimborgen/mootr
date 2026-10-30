@@ -7,11 +7,11 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Glyph } from '../Glyph'
-import { currentWorld } from '../shell/layout'
+import { currentWorld, shownChanged, viewElement } from '../shell/layout'
 import { setData } from '../store'
 import type { Agent } from '../types'
 import { getLive } from './ownview-live'
-import { activity, applyEvent, elapsed, layout, loosePermissions, mailNoticeSplit, prependOlder, readingOrder, toolLine, toolRuns, turnKind, turns, type ViewMessage, type ViewPart, type ViewState } from './ownview-model'
+import { activity, applyEvent, elapsed, joinGap, leavesGap, layout, loosePermissions, mailNoticeSplit, prependOlder, readGap, readingOrder, toolLine, toolRuns, turnKind, turns, type ViewMessage, type ViewPart, type ViewState } from './ownview-model'
 import { OwnView } from './OwnView'
 
 // Counts how often each text is drawn, to prove a stream event leaves unchanged turns alone (S-1566).
@@ -68,6 +68,32 @@ describe('the view state model', () => {
     ])
     // Only the mail notice's own start splits: a mail wording inside the notice before it stays put.
     expect(mailNoticeSplit(`${mail.replace('1 unread', '2 unread')}\n\n${child}`)).toEqual([{ text: `${mail.replace('1 unread', '2 unread')}\n\n${child}`, mail: true }])
+  })
+
+  it('bridges a reconnect snapshot that leaves a gap, and replaces past the bound (S-4691)', async () => {
+    const ids = (s: ViewState) => s.messages.map((m) => m.id)
+    const cached = state({ messages: [msg('a', 1), msg('b', 2), msg('c', 3)], older: null })
+    const snap = state({ messages: [msg('g', 7), msg('h', 8)], older: 'g' })
+    expect(leavesGap(cached, snap)).toBe(true)
+    expect(leavesGap(cached, state({ messages: [msg('c', 3), msg('d', 4)] }))).toBe(false)
+    // d..f arrived while hidden: two history pages reach the cached c.
+    const pages: Record<string, { messages: ViewMessage[]; older: string | null }> = { g: { messages: [msg('e', 5), msg('f', 6)], older: 'e' }, e: { messages: [msg('c', 3), msg('d', 4)], older: 'c' } }
+    const seen: string[] = []
+    const gap = await readGap(cached, snap, async (b) => { seen.push(b); return pages[b] })
+    expect(seen).toEqual(['g', 'e'])
+    expect(ids(joinGap(cached, gap!, snap)!)).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])
+    // An older page read while the gap was out stays, with its cursor: the join works on the current state.
+    const moved = prependOlder(state({ messages: [msg('b', 2), msg('c', 3)], older: 'b' }), { messages: [msg('a', 1)], older: null }, 'b')
+    expect(moved.older).toBeNull()
+    const both = joinGap(moved, gap!, snap)!
+    expect(ids(both)).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])
+    expect(both.older).toBeNull()
+    // A current state the gap no longer joins is not touched.
+    expect(joinGap(state({ messages: [msg('x', 0)] }), gap!, snap)).toBeNull()
+    // Past the bound, or at the start with no join: null, and the caller replaces.
+    expect(await readGap(cached, snap, async (b) => pages[b], 1)).toBeNull()
+    expect(await readGap(cached, snap, async () => ({ messages: [msg('z', 0)], older: null }))).toBeNull()
+    expect(ids(applyEvent(cached, { type: 'state', state: snap })!)).toEqual(['g', 'h'])
   })
 
   it('replaces a changed message in place and inserts a new one by time', () => {
@@ -369,6 +395,76 @@ describe('OwnView', () => {
     expect([...host.querySelectorAll('.ov-msg')].map((m) => (m as HTMLElement).dataset.id)).toEqual(['a', 'b', 'c'])
     expect(host.querySelector('.ov-older')).toBeNull()
     expect(host.querySelector('.ov-start')?.textContent).toBe('Start of the conversation')
+  })
+
+  it('closes its stream while hidden and reconnects on show with the older pages kept (S-4691)', async () => {
+    stub(state({ messages: [msg('c', 3)], older: 'c' }), { c: { messages: [msg('a', 1), msg('b', 2)], older: null } })
+    const aborted: AbortSignal[] = []
+    const real = globalThis.fetch
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => { if (path === '/api/agents/oc/view' && init?.signal) aborted.push(init.signal); return real(path, init) }))
+    const main = document.createElement('div')
+    main.id = 'w-main'
+    document.body.append(main)
+    const el = viewElement('view:oc')
+    main.append(el)
+    const streams = () => calls.filter((c) => c.path === '/api/agents/oc/view').length
+    await act(async () => { root.render(<OwnView id="oc" viewKey="view:oc" />) })
+    await flush()
+    await act(async () => { host.querySelector<HTMLButtonElement>('.ov-older')!.click() })
+    await flush()
+    expect(streams()).toBe(1)
+    await act(async () => { el.hidden = true; shownChanged() })
+    expect(aborted[0].aborted).toBe(true)
+    expect(getLive('oc')).toBeUndefined()
+    await act(async () => { await new Promise((r) => setTimeout(r, 2200)) })
+    expect(streams()).toBe(1)
+    // The drawn conversation stays while hidden, and showing again reconnects without losing the older pages.
+    expect([...host.querySelectorAll('.ov-msg')].map((m) => (m as HTMLElement).dataset.id)).toEqual(['a', 'b', 'c'])
+    await act(async () => { el.hidden = false; shownChanged() })
+    await flush()
+    expect(streams()).toBe(2)
+    expect(getLive('oc')).toBeDefined()
+    expect([...host.querySelectorAll('.ov-msg')].map((m) => (m as HTMLElement).dataset.id)).toEqual(['a', 'b', 'c'])
+    el.remove(); main.remove()
+  })
+
+  it('on show, bridges a snapshot that leaves a gap, and sets the live word only after its state lands (S-4691)', async () => {
+    const first = state({ messages: [msg('c', 3)], older: 'c' })
+    const snap = state({ messages: [msg('g', 7)], older: 'g' })
+    let opened = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      calls.push({ method: init?.method ?? 'GET', path })
+      if (path === '/api/agents/oc/view') {
+        const n = ++opened
+        if (n === 2) return new Response(JSON.stringify({ error: 'down' }), { status: 503 })
+        const body = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: 'state', state: n === 1 ? first : snap })}\n\n`)) } })
+        return new Response(body, { status: 200 })
+      }
+      const before = new URL(path, 'http://x').searchParams.get('before')
+      const page = before === 'g' ? { messages: [msg('d', 4), msg('f', 6)], older: 'd' } : before === 'd' ? { messages: [msg('b', 2), msg('c', 3)], older: 'c' } : { messages: [], older: null }
+      return new Response(JSON.stringify(page), { status: 200 })
+    }))
+    const main = document.createElement('div')
+    main.id = 'w-main'
+    document.body.append(main)
+    const el = viewElement('view:oc')
+    main.append(el)
+    await act(async () => { root.render(<OwnView id="oc" viewKey="view:oc" />) })
+    await flush()
+    expect(getLive('oc')).toBeDefined()
+    await act(async () => { el.hidden = true; shownChanged() })
+    expect(getLive('oc')).toBeUndefined()
+    // The reconnect fails: the pre-hide state must not come back as the live word.
+    await act(async () => { el.hidden = false; shownChanged() })
+    await flush()
+    expect(getLive('oc')).toBeUndefined()
+    expect([...host.querySelectorAll('.ov-msg')].map((m) => (m as HTMLElement).dataset.id)).toEqual(['c'])
+    // The retry connects: the snapshot is bridged to the cached c, and the live word returns.
+    await act(async () => { await new Promise((r) => setTimeout(r, 2200)) })
+    await flush()
+    expect([...host.querySelectorAll('.ov-msg')].map((m) => (m as HTMLElement).dataset.id)).toEqual(['b', 'c', 'd', 'f', 'g'])
+    expect(getLive('oc')).toBeDefined()
+    el.remove(); main.remove()
   })
 
   it('shows mail to the agent as a mail sheet with its read state, folded when long, opening its thread', async () => {

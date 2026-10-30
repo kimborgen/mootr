@@ -21,6 +21,7 @@ import { chiefOfStaff } from './org.ts';
 import type { BlockerKind } from './blockers.ts';
 import * as fallback from './cost-fallback.ts';
 import { withdrawQuietly } from './withdraw.ts';
+import { timed } from './stall.ts';
 
 export type CostEventKind = 'window' | 'projection' | 'blocker-set' | 'blocker-clear' | 'credits-low' | 'allocation' | 'budget-low' | 'reserve-near';
 
@@ -118,14 +119,41 @@ function humanFallback(): string[] {
   return humanMailAllows('important') ? [HUMAN] : [];
 }
 
+// A window's shares for the share lines, kept for SHARES_TTL_MS. A provider error storm blocks and
+// unblocks nearly every agent at once, and each notice calibrated the window again for each of its
+// managers: single stalls of 40 to 112 s live (S-4356). Each line still sums its own tree. The
+// shares are the window's now, on the wall clock as before (and as the Go mirror's shareLine);
+// `sharesClock` is the tests' seam.
+const SHARES_TTL_MS = 10_000;
+const sharesMemo = new Map<string, { at: number; value: ReturnType<typeof windowShares> }>();
+export const sharesClock = { now: (): number => Date.now() };
+
+export function resetSharesMemo(): void {
+  sharesMemo.clear();
+}
+
+function noticeShares(account: string, window: string): ReturnType<typeof windowShares> {
+  const now = sharesClock.now();
+  const key = `${account}\u0000${window}`;
+  const hit = sharesMemo.get(key);
+  if (hit && now >= hit.at && now - hit.at < SHARES_TTL_MS) return hit.value;
+  const value = windowShares(account, window, undefined, now);
+  sharesMemo.set(key, { at: now, value });
+  return value;
+}
+
 // One tree's estimated share of a window, as a sentence for the notice. Reads nothing when
 // no window reading exists yet, rather than claiming a 0% share.
 function shareLine(manager: string, account: string, window: string): string {
+  return timed('cost notice: share line', () => shareLineUntimed(manager, account, window));
+}
+
+function shareLineUntimed(manager: string, account: string, window: string): string {
   const harness = settings().cost.accounts?.[account]?.match?.harness;
   const has = harness ? db.open().prepare('SELECT 1 AS n FROM window_readings WHERE name = ? AND window = ? LIMIT 1').get(harness, window) : undefined;
   const win = window.replace('_', '-');
   if (!has) return `No ${win} reading yet to estimate this tree's share of ${account}.`;
-  const share = treeShare(manager, account, window);
+  const share = treeShare(manager, account, window, undefined, noticeShares(account, window));
   return `This tree's estimated share of the ${win} window on ${account}: about ${Math.round(share * 100) / 100}% (stam's estimate, never a rule).`;
 }
 

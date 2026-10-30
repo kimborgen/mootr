@@ -16,7 +16,7 @@ import { workColumnIds } from '../itsa/fields'
 import { isClosed, openItsa, statusInfo, StatusGlyph } from '../itsa/itsa'
 import { useWaiting } from '../itsa/WaitingList'
 import { isPhone, registerView, useShell } from '../shell/layout'
-import { refreshItsas, useData } from '../store'
+import { refreshItsas, useData, useQueueReader } from '../store'
 import { HarnessMark } from '../spawn'
 import { hideMenu, showMenu, showPopover, type MenuItem } from '../ui/menu'
 import { CARD_BELOW, WORK_COLUMNS, type CellContext, type WorkColumn } from './columns'
@@ -137,6 +137,7 @@ function TotalsRow({ cols, totals }: { cols: WorkColumn[]; totals: ReturnType<ty
 export function WorkView({ viewKey }: { viewKey: string }) {
   const { itsas, itsaStatuses, itsaError, queue, agents, loaded: storeLoaded, costMode } = useData()
   useShell()
+  useQueueReader(viewKey)
   const waiting = useWaiting()
   const phone = isPhone()
   const [prefs, setPrefsState] = useState<Prefs>(loadPrefs)
@@ -154,7 +155,7 @@ export function WorkView({ viewKey }: { viewKey: string }) {
   const keyMenu = useRef(0)
   useEffect(() => () => clearTimeout(keyMenu.current), [])
   const headRef = useRef<HTMLDivElement>(null)
-  const extras = useWorkExtras()
+  const extras = useWorkExtras(viewKey)
   // The columns: the built-ins, then one per ITSA field (S-369), the ids the layout is checked against.
   const fields = extras.fields
   const { ALL_COLS, COL_BY_ID, SEARCH_COLS } = useMemo(() => {
@@ -194,7 +195,7 @@ export function WorkView({ viewKey }: { viewKey: string }) {
     setStoreState((cur) => { const n = fn(cur, idsRef.current); if (now) saveWidthsOf(n, idsRef.current); return n })
   }
   // The views come from settings; this page shows what it had until they load.
-  useEffect(() => { loadWork().then(() => { loaded.current = true; readAt.current = nextTick(); void refreshFields(); setSettingsLoaded(true); if (!fieldsRef.current) setStoreState(loadStore(idsRef.current)) }).catch(() => {}) }, [])
+  useEffect(() => { loadWork().then(() => { loaded.current = true; readAt.current = nextTick(); void refreshFields(true); setSettingsLoaded(true); if (!fieldsRef.current) setStoreState(loadStore(idsRef.current)) }).catch(() => {}) }, [])
   // Both loads are in, or the fields changed (added, removed): the stored layout for the current
   // columns, where a new field shows and a removed one drops, with the edits made meanwhile, saved.
   const failed = extras.fieldsFailed
@@ -210,7 +211,7 @@ export function WorkView({ viewKey }: { viewKey: string }) {
   // Settings saved the layout or the fields: reload, so this page doesn't write its old copy back.
   useEffect(() => {
     // The stored layout is read again: only a fields read that starts after this may settle against it.
-    const onSaved = () => { setStoreState(loadStore(idsRef.current)); readAt.current = nextTick(); void refreshFields() }
+    const onSaved = () => { setStoreState(loadStore(idsRef.current)); readAt.current = nextTick(); void refreshFields(true) }
     window.addEventListener(WORK_LAYOUT_EVENT, onSaved)
     return () => window.removeEventListener(WORK_LAYOUT_EVENT, onSaved)
   }, [])

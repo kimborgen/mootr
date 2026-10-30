@@ -367,3 +367,58 @@ test('blockers cleared another way while a probe runs stop probing without a thr
   await running;
   assert.equal(probes.nextProbe('codex-plus'), null);
 });
+
+// S-4574: a success cleared the account, then a new failure scheduled its probe before its blockers
+// existed. Each blocker waits for its agent's serial chain; the probe came due first, found nothing
+// held and stopped, and the blockers landed with no probe: agents stayed held 18 minutes.
+const holdChains = (...agents) => {
+  let open;
+  const gate = new Promise((r) => (open = r));
+  for (const a of agents) void lifecycle.serial(a.id, () => gate);
+  return open;
+};
+
+test('a probe that comes due before a new failure\'s blockers land leaves them a probe', async () => {
+  const a = agent('codex');
+  const b = agent('codex');
+  probes.setProber(async () => 'ok');
+  await probes.onError(a.id, 'transient', 'old failure');
+  await probes.runProbe('codex-plus');
+  await until(() => !of(a, 'error') && !of(b, 'error') && get(a).lifecycle === 'active' && get(b).lifecycle === 'active', 'the old outage cleared');
+  assert.equal(probes.nextProbe('codex-plus'), null);
+
+  const open = holdChains(a, b);
+  const failing = probes.onError(a.id, 'transient', 'new failure');
+  assert.equal(probes.nextProbe('codex-plus')?.attempt, 0, 'start() scheduled before any blocker');
+  await probes.runProbe('codex-plus');
+  assert.equal(probes.nextProbe('codex-plus'), null, 'nothing held yet, so the probe stops');
+  open();
+  await failing;
+  assert.ok(of(a, 'error') && of(b, 'error'), 'the new failure blocks both');
+  const p = probes.nextProbe('codex-plus');
+  assert.equal(p?.attempt, 0, 'and has a probe from the first step');
+  probes.ensure('codex-plus');
+  assert.deepEqual(probes.nextProbe('codex-plus'), p, 'a held probe is not scheduled again');
+  await probes.runProbe('codex-plus');
+  await until(() => !of(a, 'error') && !of(b, 'error'), 'a success still clears every agent');
+  assert.equal(probes.nextProbe('codex-plus'), null);
+});
+
+test('Claude: a credits-out whose probe came due before it landed keeps a probe', async () => {
+  const a = agent('claude');
+  const open = holdChains(a);
+  fail(a, 'billing_error');
+  await until(() => probes.nextProbe('claude-max'), 'the probe started');
+  await probes.runProbe('claude-max');
+  assert.equal(probes.nextProbe('claude-max'), null, 'nothing held yet, so the probe stops');
+  open();
+  await until(() => of(a, 'credits-out') && probes.nextProbe('claude-max'), 'credits-out and a probe');
+  assert.equal(probes.nextProbe('claude-max').attempt, 0);
+});
+
+test('no probe is scheduled for an account that left the settings', async () => {
+  const a = agent('codex');
+  await blockers.addBlocker(a, { kind: 'error', account: 'gone', reason: 'old' });
+  probes.ensure('gone');
+  assert.equal(probes.nextProbe('gone'), null);
+});

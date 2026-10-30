@@ -795,77 +795,9 @@ type ClearedWait struct {
 // its line, ends a subscription the event ends, and clears the event waits it fits with their notices kept, all in one
 // transaction (src/watch.ts ingest). A restart finds the queue and the notices as the transaction left them.
 func (d *DB) IngestEvent(ctx context.Context, in IngestIn, h IngestHooks) (out IngestOut, err error) {
-	err = d.Write(ctx, func(conn *sqlite.Conn) error {
-		out = IngestOut{}
-		ms, iso := h.Now()
-		subjects, _ := json.Marshal(in.Subjects)
-		if in.Subjects == nil {
-			subjects = []byte("[]")
-		}
-		if err := runSQL(conn, "INSERT OR IGNORE INTO ext_events (source, type, subjects, actor, url, summary, payload, dedupe_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			in.Source, in.Type, string(subjects), sqlValue(in.Actor), sqlValue(in.URL), in.Summary, sqlValue(in.Payload), in.DedupeKey, iso); err != nil {
-			return err
-		}
-		if conn.Changes() == 0 {
-			return nil
-		}
-		ev := ExtEvent{ID: conn.LastInsertRowID(), Source: in.Source, Type: in.Type, Subjects: in.Subjects, Actor: in.Actor, URL: in.URL, Summary: in.Summary, DedupeKey: in.DedupeKey, CreatedAt: iso}
-		if ev.Subjects == nil {
-			ev.Subjects = []string{}
-		}
-		if in.Payload != nil {
-			ev.Payload = json.RawMessage(*in.Payload)
-		}
-		out.Stored, out.Event = true, ev
-		// Expired subscriptions go as they are found, as src/watch.ts liveSubscriptions does.
-		if err := runSQL(conn, "DELETE FROM event_subscriptions WHERE expires_at IS NOT NULL AND expires_at <= ?", ms); err != nil {
-			return err
-		}
-		subs, err := querySubs(conn, "ORDER BY created_at, rowid")
-		if err != nil {
-			return err
-		}
-		for _, sub := range subs {
-			dec := h.Fit(sub, ev)
-			if !dec.Match {
-				continue
-			}
-			out.Matched++
-			if sub.SubscriberKind == "process" {
-				continue
-			}
-			if err := appendQueue(conn, sub, dec.Line); err != nil {
-				return err
-			}
-			out.Queued = append(out.Queued, sub.ID)
-			// An ending event is delivered from the queued copy: the row goes now, the delivery stays.
-			if dec.Ends {
-				if err := runSQL(conn, "DELETE FROM event_subscriptions WHERE id = ?", sub.ID); err != nil {
-					return err
-				}
-			}
-		}
-		// A declared event wait clears on the first event that fits its filter.
-		open, err := queryWaits(conn, "WHERE kind = 'event' AND agent_id IN (SELECT id FROM agents) ORDER BY since, rowid")
-		if err != nil {
-			return err
-		}
-		for _, w := range open {
-			notice, ok := h.Wait(w, ev)
-			if !ok {
-				continue
-			}
-			if _, err := d.clearWait(conn, w.ID); err != nil {
-				return err
-			}
-			n := WaitNotice{WaitID: w.ID, Agent: w.AgentID, Text: notice}
-			b, _ := json.Marshal(n)
-			if err := kvPut(conn, waitPrefix+w.ID, string(b)); err != nil {
-				return err
-			}
-			out.Cleared = append(out.Cleared, ClearedWait{Wait: w, Notice: n})
-		}
-		return nil
+	err = d.Write(ctx, func(conn *sqlite.Conn) (err error) {
+		out, err = d.ingestConn(conn, in, h)
+		return err
 	})
 	return out, wrap("ingest event", err)
 }
@@ -1030,4 +962,80 @@ func (t EventWaitTx) SetTiming(id string, until *string, data string) (Wait, err
 // AddEvent records an agent event in the transaction.
 func (t EventWaitTx) AddEvent(agentID, typ string, data any) error {
 	return insertEvent(t.conn, agentID, typ, data)
+}
+
+// ingestConn is one event's ingest inside the caller's transaction.
+func (d *DB) ingestConn(conn *sqlite.Conn, in IngestIn, h IngestHooks) (out IngestOut, err error) {
+	err = func() error {
+		ms, iso := h.Now()
+		subjects, _ := json.Marshal(in.Subjects)
+		if in.Subjects == nil {
+			subjects = []byte("[]")
+		}
+		if err := runSQL(conn, "INSERT OR IGNORE INTO ext_events (source, type, subjects, actor, url, summary, payload, dedupe_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			in.Source, in.Type, string(subjects), sqlValue(in.Actor), sqlValue(in.URL), in.Summary, sqlValue(in.Payload), in.DedupeKey, iso); err != nil {
+			return err
+		}
+		if conn.Changes() == 0 {
+			return nil
+		}
+		ev := ExtEvent{ID: conn.LastInsertRowID(), Source: in.Source, Type: in.Type, Subjects: in.Subjects, Actor: in.Actor, URL: in.URL, Summary: in.Summary, DedupeKey: in.DedupeKey, CreatedAt: iso}
+		if ev.Subjects == nil {
+			ev.Subjects = []string{}
+		}
+		if in.Payload != nil {
+			ev.Payload = json.RawMessage(*in.Payload)
+		}
+		out.Stored, out.Event = true, ev
+		// Expired subscriptions go as they are found, as src/watch.ts liveSubscriptions does.
+		if err := runSQL(conn, "DELETE FROM event_subscriptions WHERE expires_at IS NOT NULL AND expires_at <= ?", ms); err != nil {
+			return err
+		}
+		subs, err := querySubs(conn, "ORDER BY created_at, rowid")
+		if err != nil {
+			return err
+		}
+		for _, sub := range subs {
+			dec := h.Fit(sub, ev)
+			if !dec.Match {
+				continue
+			}
+			out.Matched++
+			if sub.SubscriberKind == "process" {
+				continue
+			}
+			if err := appendQueue(conn, sub, dec.Line); err != nil {
+				return err
+			}
+			out.Queued = append(out.Queued, sub.ID)
+			// An ending event is delivered from the queued copy: the row goes now, the delivery stays.
+			if dec.Ends {
+				if err := runSQL(conn, "DELETE FROM event_subscriptions WHERE id = ?", sub.ID); err != nil {
+					return err
+				}
+			}
+		}
+		// A declared event wait clears on the first event that fits its filter.
+		open, err := queryWaits(conn, "WHERE kind = 'event' AND agent_id IN (SELECT id FROM agents) ORDER BY since, rowid")
+		if err != nil {
+			return err
+		}
+		for _, w := range open {
+			notice, ok := h.Wait(w, ev)
+			if !ok {
+				continue
+			}
+			if _, err := d.clearWait(conn, w.ID); err != nil {
+				return err
+			}
+			n := WaitNotice{WaitID: w.ID, Agent: w.AgentID, Text: notice}
+			b, _ := json.Marshal(n)
+			if err := kvPut(conn, waitPrefix+w.ID, string(b)); err != nil {
+				return err
+			}
+			out.Cleared = append(out.Cleared, ClearedWait{Wait: w, Notice: n})
+		}
+		return nil
+	}()
+	return out, err
 }

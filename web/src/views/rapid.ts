@@ -32,12 +32,12 @@ export const usePick = (id: string) => useSyncExternalStore((fn) => { ls.add(fn)
 
 // A thread is between you and the agent when you mailed it there, or it mailed you there.
 const between = (m: Mail, id: string) => (m.from_id === 'human' && m.recipients.some((r) => r.id === id)) || (m.from_id === id && m.recipients.some((r) => r.id === 'human'))
-// Every thread between you and the agent in your mailbox (inbox, archived, deferred; the agent's own pages reach past the first 60), oldest
-// first by when it started: a card keeps its place as answers arrive, and the newest sits at the
-// bottom, next to the prompt input that made it.
-export function rapidThreads(id: string, d: Pick<Data, 'humanThreads' | 'humanArchived' | 'humanDeferred'> & { rapidWith?: Data['rapidWith'] }): Thread[] {
+// Every thread between you and the agent in your mailbox (inbox, archived, deferred), from the agent's own pages
+// (S-1121; the human's lists hold index rows, not mail, S-4580), oldest first by when it started: a card keeps its
+// place as answers arrive, and the newest sits at the bottom, next to the prompt input that made it.
+export function rapidThreads(id: string, d: { rapidWith?: Data['rapidWith'] }): Thread[] {
   const seen = new Set<string>()
-  return [...d.humanThreads, ...d.humanArchived, ...d.humanDeferred, ...d.rapidWith?.[id]?.threads ?? []]
+  return (d.rapidWith?.[id]?.threads ?? [])
     .filter((t) => !seen.has(t.thread_id) && seen.add(t.thread_id) && t.mails.some((m) => between(m, id)))
     .sort((a, b) => a.mails[0].created_at.localeCompare(b.mails[0].created_at))
 }

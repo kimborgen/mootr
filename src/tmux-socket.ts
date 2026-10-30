@@ -42,9 +42,14 @@ export function classifyTmuxLs(r: { status: number | null; stderr: string; timed
 }
 
 // The process that made a PID-named socket (`NAME-test-PID`, `stam-check-PID`, `transcript-gz-resume-PID`,
-// `stam-test-lock-PID-NAME`). Only that process recreates the name, so once it is gone nothing races a removal.
+// `stam-test-lock-PID-NAME`, a Go test's `stam-test-go-PID-NANOS`). Only that process recreates the name, so once it is
+// gone nothing races a removal.
 export function socketPid(name: string): number | undefined {
-  const m = name.match(/^[a-z][a-z0-9-]*-test-(\d+)$/) ?? name.match(/^(?:stam-check|transcript-gz-resume)-(\d+)$/) ?? name.match(/^stam-test-lock-(\d+)-/);
+  const m =
+    name.match(/^[a-z][a-z0-9-]*-test-(\d+)$/) ??
+    name.match(/^(?:stam-check|transcript-gz-resume)-(\d+)$/) ??
+    name.match(/^stam-test-lock-(\d+)-/) ??
+    name.match(/^stam-test-go-(\d+)-\d+$/);
   return m ? Number(m[1]) : undefined;
 }
 

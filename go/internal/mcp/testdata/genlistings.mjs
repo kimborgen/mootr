@@ -27,7 +27,7 @@ const groups = {
     varName: 'reqringListings',
   },
   layout: { names: ['layout_get', 'layout_arrange'], what: 'layout', varName: 'layoutListings' },
-  events: { names: ['subscribe', 'unsubscribe', 'list_subscriptions'], what: 'event subscription', varName: 'eventsListings' },
+  events: { names: ['subscribe', 'unsubscribe', 'list_subscriptions', 'watch_pr', 'unwatch_pr'], what: 'event subscription', varName: 'eventsListings' },
 };
 const { names, what, varName } = groups[group];
 const home = mkdtempSync(join(tmpdir(), 'stam-genlistings-'));

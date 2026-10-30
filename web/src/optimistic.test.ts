@@ -81,4 +81,28 @@ describe('optimistic', () => {
     expect(getData().unread).toBe(0)
     expect(toast).toHaveBeenCalledWith("Couldn't change: the daemon refused it", true)
   })
+
+  it('tells the caller once when the change goes: settled, timed out, or failed (S-4617)', async () => {
+    const gone = vi.fn()
+    const settled = request()
+    void optimistic({ ...unreadIs(3), send: () => settled.p, done: () => gone('settled') })
+    settled.ok()
+    await settled.p
+    await Promise.resolve()
+    expect(gone).not.toHaveBeenCalled()
+    setData({ unread: 3 })
+    setData({ unread: 3 })
+    expect(gone.mock.calls).toEqual([['settled']])
+    const held = request()
+    void optimistic({ ...unreadIs(5), send: () => held.p, done: () => gone('held') })
+    held.ok()
+    await held.p
+    await Promise.resolve()
+    vi.advanceTimersByTime(8000)
+    const failed = request()
+    const no = optimistic({ ...unreadIs(6), send: () => failed.p, done: () => gone('failed') })
+    failed.no('refused')
+    await no
+    expect(gone.mock.calls).toEqual([['settled'], ['held'], ['failed']])
+  })
 })

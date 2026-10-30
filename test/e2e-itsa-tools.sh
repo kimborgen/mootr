@@ -25,7 +25,7 @@ OID=$(reg "{\"name\":\"$ONAME\",\"role\":\"other\",\"harness\":\"external\"}")
 
 # One tool call as agent $1: prints the result text, and fails on an error result.
 mcp() {
-  STAM_BIN="$STAM" STAM_AGENT_ID="$1" node "$ROOT/test/mcp-call.mjs" \
+  STAM_BIN="$STAM" with_agent_id "$1" node "$ROOT/test/mcp-call.mjs" \
     "$(python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":sys.argv[1],"arguments":json.loads(sys.argv[2])}}))' "$2" "$3")" |
     python3 -c 'import json,sys
 m = json.load(sys.stdin); r = m.get("result", {})

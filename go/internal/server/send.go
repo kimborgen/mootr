@@ -207,6 +207,9 @@ func (s *Server) sendMailRoute(r *http.Request, c auth.Resolved) (any, error) {
 		}
 	}
 	in.fromStam = fromStam.Truthy()
+	if fwd {
+		in.peerSender, in.peerKnown = s.senderPeer(c)
+	}
 	// The ITSA the sender names is the mail's about_itsa (src/mail.ts sendMail).
 	if v, ok := body.Get("itsa"); ok && v.Truthy() {
 		if in.aboutItsa, err = s.itsaIDOf(ctx, anyString(v)); err != nil {
@@ -309,6 +312,46 @@ type sendIn struct {
 	// inTx runs in the transaction that stores the mail here, with its id (db.Stored.InTx): a delivery that must commit
 	// with the mail.
 	inTx func(conn *sqlite.Conn, mailID string) error
+	// peerSender is the peer that sent a forwarded mail, when it can be told (senderPeer); peerKnown says it can.
+	peerSender string
+	peerKnown  bool
+}
+
+// peerSent is whether a forwarded mail is really from its sender (S-4332), so it may clear a wait_for on that sender. It
+// fails closed:
+//   - a sender this daemon holds reaches its waiters here directly; a forwarded copy naming it is only the ITSA home's
+//     relay of its ITSA post, so it counts only with an ITSA, when the home is a configured peer other than this machine
+//     (an itsa_id alone in the body is not enough), and, once the sender peer can be told, sent by that home;
+//   - a sender on a peer counts only when a configured peer holds it (a peer_agents row on one), and, once the sender
+//     peer can be told, when that is the peer that sent it. Until S-4127 gives each peer its own token the sender peer
+//     can't be told (senderPeer), so any configured peer's word for an agent a peer holds is taken.
+func (s *Server) peerSent(ctx context.Context, in *sendIn, sender db.Agent, isAgent bool) bool {
+	if isAgent && (sender.Machine == "" || sender.Machine == s.cfg.Machine) {
+		home, ok := s.homePeer()
+		return in.itsa != nil && ok && home.Name != s.cfg.Machine && (!in.peerKnown || in.peerSender == home.Name)
+	}
+	lookup := s.db.PeerAgentByID
+	if s.peerAgentByID != nil {
+		lookup = s.peerAgentByID
+	}
+	ref, ok, err := lookup(ctx, in.from)
+	if err != nil || !ok || !s.isPeer(ref.Machine) {
+		return false
+	}
+	return !in.peerKnown || ref.Machine == in.peerSender
+}
+
+// isPeer is whether name is a configured peer.
+func (s *Server) isPeer(name string) bool {
+	if s.peers == nil {
+		return false
+	}
+	for _, p := range s.peers.Peers() {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // itsaMail is what src/itsa.ts post adds to a sendMail call: itsa_id, thread_id, kind, health and interrupt.
@@ -1537,7 +1580,8 @@ func (s *Server) send(ctx context.Context, in *sendIn) (jsfmt.Value, error) {
 		}
 	}
 	m := db.Stored{
-		ItsaID: itsaID, AboutItsa: in.aboutItsa, Kind: kind, Health: health, Quiet: quiet, LinkText: subject + "\n" + body,
+		ForeignSender: in.forwarded && !s.peerSent(ctx, in, sender, isAgent),
+		ItsaID:        itsaID, AboutItsa: in.aboutItsa, Kind: kind, Health: health, Quiet: quiet, LinkText: subject + "\n" + body,
 		ID: id, ThreadID: threadID, From: from, FromName: fromName, Subject: subject, Body: stored, ReplyTo: replyTo, PermissionID: in.permissionID,
 		AutoThreaded: autoThreaded, Notice: (in.hasSystem && in.system != "") || in.fromStam, FromStam: in.fromStam, Override: override, To: local.list, Files: files,
 		InTx: in.inTx, FromHuman: from == humanBox, DeferThread: from == humanBox && isDeferralOnly(stored, len(files)),

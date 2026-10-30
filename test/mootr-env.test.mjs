@@ -8,6 +8,8 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { envVar, setEnvVar, entryValue, withMootrTwins, twinDefaults } from '../src/env.ts';
+// Scrubs this process's env first, so the child spawned in resolvedHome inherits neither name family (S-3429 guard).
+import './scrub-env.mjs';
 
 const ROOT = join(import.meta.dirname, '..');
 const dirs = [];
@@ -70,9 +72,9 @@ function scratchHome(...existing) {
   return home;
 }
 
-test('the data dir default is unchanged: ~/.local/share/stam, with no new env', () => {
+test('the data dir default: ~/.local/share/mootr on a fresh home, stam when a real stam dir exists (S-4335)', () => {
   const home = scratchHome();
-  assert.equal(resolvedHome(home), join(home, '.local', 'share', 'stam'));
+  assert.equal(resolvedHome(home), join(home, '.local', 'share', 'mootr'));
   const withStam = scratchHome('stam');
   assert.equal(resolvedHome(withStam), join(withStam, '.local', 'share', 'stam'));
 });

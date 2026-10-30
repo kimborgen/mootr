@@ -679,7 +679,9 @@ export const claude: Adapter = {
   // was, nothing is sent. With vim keys the box must be in insert mode first. Someone's draft in the
   // box is never touched: that is 'draft', as a busy agent or a dialog on screen is 'busy', and the
   // caller holds the approval. When it doesn't send, it erases what it typed: 'failed' when the
-  // screen was wrong, 'cancelled' when `proceed` said no.
+  // screen was wrong, 'cancelled' when `proceed` said no, and 'unsent' when `proceed` said yes but
+  // Enter couldn't be sent (tmux failed, or the session went away), so the caller, whose claim
+  // already went through, can undo it (S-4155, as the Go daemon's).
   async typeLiteralInput(agent: Agent, text: string, proceed: (stillTyped: () => boolean) => boolean | Promise<boolean> = () => true) {
     if (agent.activity !== 'idle' && agent.activity !== 'waiting') return 'busy' as const;
     if (!tmux.hasSession(agent.id)) return 'busy' as const;
@@ -792,7 +794,12 @@ export const claude: Adapter = {
       return !changed;
     };
     if (!(await proceed(stillTyped))) return erase((changed ? 'failed' : 'cancelled') as 'failed' | 'cancelled');
-    tmux.sendKeys(agent.id, 'Enter');
+    try {
+      tmux.sendKeys(agent.id, 'Enter');
+    } catch {
+      await erase(null);
+      return 'unsent' as const;
+    }
     return 'typed' as const;
   },
 

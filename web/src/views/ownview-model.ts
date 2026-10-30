@@ -138,6 +138,43 @@ export function applyEvent(s: ViewState | null, ev: ViewEvent): ViewState | null
   return { ...s, running: ev.running, permissions: ev.permissions }
 }
 
+// Whether a reconnect's snapshot leaves a gap after what the view has: its first message isn't
+// among the cached ones, so applyEvent would replace the older pages already read (S-4691).
+export function leavesGap(s: ViewState | null, snap: ViewState): boolean {
+  const first = snap.messages[0]
+  return !!s && s.agent === snap.agent && !!first && s.messages.length > 0 && !s.messages.some((m) => m.id === first.id)
+}
+
+export const BRIDGE_PAGES = 10
+// Reads /view/history backwards from the snapshot's `older` until a page holds a cached message.
+// Returns the messages read, oldest first; null past `max` pages or at the start of the
+// conversation without a join: the caller then replaces, as a dropped connection always did.
+export async function readGap(s: ViewState, snap: ViewState, read: (before: string) => Promise<ViewPage>, max = BRIDGE_PAGES): Promise<ViewMessage[] | null> {
+  const have = new Set(s.messages.map((m) => m.id))
+  const pages: ViewMessage[][] = []
+  let before = snap.older
+  for (let i = 0; before && i < max; i++) {
+    const page = await read(before)
+    pages.unshift(page.messages)
+    if (page.messages.some((m) => have.has(m.id))) return pages.flat()
+    before = page.older
+  }
+  return null
+}
+
+// Joins the gap and the snapshot onto the state as it is when they land, so an older page read
+// meanwhile (and its cursor) stays. null when the gap no longer joins `cur`.
+export function joinGap(cur: ViewState | null, gap: ViewMessage[], snap: ViewState): ViewState | null {
+  if (!cur || cur.agent !== snap.agent) return null
+  const have = new Set(cur.messages.map((m) => m.id))
+  const at = gap.findIndex((x) => have.has(x.id))
+  if (at < 0) return null
+  // The join page can hold messages older than the first cached one: they go before it.
+  const byId = new Map<string, ViewMessage>()
+  for (const m of [...gap.slice(0, at), ...cur.messages, ...gap, ...snap.messages]) byId.set(m.id, m)
+  return { ...snap, messages: interleave([...byId.values()]), older: cur.older }
+}
+
 // An older page from /view/history, read with `before`, goes before what the view has,
 // minus any it already has. A page read for an earlier window (a reconnect replaced it
 // while the read was out) no longer joins up, so it's dropped: the same state comes back.

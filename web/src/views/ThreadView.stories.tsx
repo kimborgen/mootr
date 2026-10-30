@@ -2,12 +2,13 @@ import { ThreadArchive, ThreadView } from './ThreadView'
 import { ds, reply, type Story } from '../stories/types'
 import { Row } from '../stories/helpers'
 import { AGENTS_STOPPED, ASK_ITSA, ASK_ROUTE, mail, Pane, STATUSES, T_ARCH, T_ASK, T_AWAIT, T_INPUT, T_LONG, T_PERM, T_PLAIN, T_RICH, T_UNREAD, threadRoutes } from '../stories/mailFixtures'
+import { humanRowsOf } from '../mail/thread-index'
 import type { Data } from '../store'
 import type { Thread } from '../types'
 
 const T_DEFER = { ...T_ARCH, thread_id: 'fx-t-defer' } satisfies Thread
 const view = (t: Thread) => <Pane><ThreadView tid={t.thread_id} viewKey={'thread:' + t.thread_id} /></Pane>
-const world = (t: Thread, extra: Partial<Data> = {}): Partial<Data> => ({ humanThreads: [t], itsaStatuses: STATUSES, ...extra })
+const world = (t: Thread, extra: Partial<Data> = {}): Partial<Data> => ({ humanRows: humanRowsOf([t]), itsaStatuses: STATUSES, ...extra })
 // Nobody to reply to: a thread only a script (the deploy watcher) wrote in.
 const SYSTEM = { thread_id: 'fx-t-system', mails: [mail('fm-sys', 'fx-t-system', 'system:deploy-watcher', ['human'], 'Deployed: fixture build', 'Deployed build `fixture-1`. No action needed.', { min: 15 })] } satisfies Thread
 
@@ -39,9 +40,9 @@ export const stories: Story[] = [{
     { name: 'A suggested input waiting', data: world(T_INPUT), routes: threadRoutes(T_INPUT), render: () => view(T_INPUT) },
     { name: 'An ITSA waiting on you', data: world(T_ASK, { agents: AGENTS_STOPPED, attention: [ASK_ITSA], itsas: [ASK_ITSA] }), routes: { ...threadRoutes(T_ASK), ...ASK_ROUTE }, render: () => view(T_ASK) },
     { name: 'Awaiting an answer', data: world(T_AWAIT), routes: threadRoutes(T_AWAIT), render: () => view(T_AWAIT) },
-    { name: 'Archived', data: { humanThreads: [], humanArchived: [T_ARCH], itsaStatuses: STATUSES }, routes: threadRoutes(T_ARCH), render: () => view(T_ARCH) },
+    { name: 'Archived', data: { humanRows: humanRowsOf([], [T_ARCH]), itsaStatuses: STATUSES }, routes: threadRoutes(T_ARCH), render: () => view(T_ARCH) },
     { name: 'No one to reply to', data: world(SYSTEM), routes: threadRoutes(SYSTEM), render: () => view(SYSTEM) },
     { name: 'Error', data: world(T_PLAIN), routes: { [`GET /api/threads/${T_PLAIN.thread_id}`]: reply(503, { error: 'fixture: the daemon is unreachable' }) }, render: () => view(T_PLAIN) },
-    { name: 'Phone defer and archive buttons', data: world(T_PLAIN, { humanThreads: [T_PLAIN, T_PERM], humanArchived: [T_ARCH], humanDeferred: [T_DEFER] }), render: () => <Row items={[{ label: 'Archive', node: <ThreadArchive tid={T_PLAIN.thread_id} /> }, { label: 'Unarchive', node: <ThreadArchive tid={T_ARCH.thread_id} /> }, { label: 'Held: a request is pending', node: <ThreadArchive tid={T_PERM.thread_id} /> }, { label: 'Undefer', node: <ThreadArchive tid={T_DEFER.thread_id} /> }]} /> },
+    { name: 'Phone defer and archive buttons', data: world(T_PLAIN, { humanRows: humanRowsOf([T_PLAIN, T_PERM], [T_ARCH], [T_DEFER]) }), render: () => <Row items={[{ label: 'Archive', node: <ThreadArchive tid={T_PLAIN.thread_id} /> }, { label: 'Unarchive', node: <ThreadArchive tid={T_ARCH.thread_id} /> }, { label: 'Held: a request is pending', node: <ThreadArchive tid={T_PERM.thread_id} /> }, { label: 'Undefer', node: <ThreadArchive tid={T_DEFER.thread_id} /> }]} /> },
   ],
 }]

@@ -134,3 +134,37 @@ func TestDraftNoticeStoresNoDraftText(t *testing.T) {
 		}
 	}
 }
+
+// TestArchiveDropsAnswerNotices (S-4155): the archive itself (archiveLocked) drops the agent's queued notices and answer
+// rows, with no restart, so a later start hands the archived agent nothing.
+func TestArchiveDropsAnswerNotices(t *testing.T) {
+	l := newLive(t)
+	l.spawn("anr7")
+	l.idle("anr7")
+	if _, err := l.life.Pause(l.ctx, l.agent("anr7"), "human"); err != nil {
+		t.Fatal(err)
+	}
+	l.life.QueueAnswerNotice(l.ctx, "anr7", "The human denied Run npm run release: not this week.")
+	if out, err := l.life.Archive(l.ctx, l.agent("anr7"), ArchiveOpts{}); err != nil || out != "done" {
+		t.Fatalf("archive: %q %v", out, err)
+	}
+	rows, err := l.db.AnswerNotices(l.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.AgentID == "anr7" {
+			t.Fatalf("a row survived the archive: %+v", r)
+		}
+	}
+	if got := l.life.Notices("anr7"); len(got) != 0 {
+		t.Fatalf("queued notices survived the archive: %q", got)
+	}
+	next := restarted(l)
+	if err := next.RestoreAnswerNotices(l.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := next.InTurnTake(l.ctx, "anr7"); strings.Contains(got, "not this week") {
+		t.Fatalf("the archived agent was handed %q after a restart", got)
+	}
+}

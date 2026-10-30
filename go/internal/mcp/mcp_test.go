@@ -372,7 +372,7 @@ func portedTool(n string) bool {
 		n == "feedback" || n == "retro" ||
 		n == "request_permission" || n == "suggest_input" || n == "answer_permission" || n == "ring_create" || n == "ring_submit" || n == "ring_decide" ||
 		n == "wait_for" || n == "wait_done" || n == "wake_me" || strings.HasPrefix(n, "req_") ||
-		n == "subscribe" || n == "unsubscribe" || n == "list_subscriptions" ||
+		n == "subscribe" || n == "unsubscribe" || n == "list_subscriptions" || n == "watch_pr" || n == "unwatch_pr" ||
 		n == "layout_get" || n == "layout_arrange"
 }
 
@@ -402,13 +402,17 @@ var cwdMember = regexp.MustCompile(`,?"cwd":"[^"]*"`)
 
 // sameCalls compares what the daemon was asked, in any order (requests are handled concurrently) and without the
 // requirements probe the TS tools/list makes for the tools Go doesn't list.
+// sinceIn is watch_pr's `since`, the time the tool ran.
+var sinceIn = regexp.MustCompile(`"since":"[^"]*"`)
+
 func sameCalls(t *testing.T, ts, goR []seen) {
 	t.Helper()
 	norm := func(l []seen) []string {
 		var out []string
 		for _, c := range l {
 			if c.Path != "/api/req-enabled" {
-				out = append(out, fmt.Sprintf("%s %s?%s %s %s %s", c.Method, c.Path, c.Query, c.Auth, c.Human, uuidIn.ReplaceAllString(c.Raw, "UUID")))
+				raw := sinceIn.ReplaceAllString(uuidIn.ReplaceAllString(c.Raw, "UUID"), `"since":"TIME"`)
+				out = append(out, fmt.Sprintf("%s %s?%s %s %s %s", c.Method, c.Path, c.Query, c.Auth, c.Human, raw))
 			}
 		}
 		sort.Strings(out)

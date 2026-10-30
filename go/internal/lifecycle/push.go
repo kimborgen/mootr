@@ -17,7 +17,7 @@ import (
 // its next PostToolUse hook's answer instead. A prompt that reaches no stream leaves the mail unpushed and the notices
 // queued, for the next push: the shim connecting, the turn ending, new mail or a new notice.
 //
-// Not ported: the rest clock's wake, passive and ring notices, and the push into Codex and OpenCode agents.
+// SchedulePush also wakes a resting agent (rest.go restPoke). Not ported: passive and ring notices, and the push into Codex and OpenCode agents.
 
 // pushDebounce is src/mail.ts PUSH_DEBOUNCE_MS: mail and notices that arrive close together go in one prompt.
 const pushDebounce = 2 * time.Second
@@ -41,6 +41,7 @@ type promptNullEvent struct {
 
 // SchedulePush is src/mail.ts schedulePush: the agent's push runs pushDebounce after the last call.
 func (l *Lifecycle) SchedulePush(id string) {
+	l.restPoke(id)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.pushTimers == nil {

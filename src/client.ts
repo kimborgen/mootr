@@ -19,14 +19,15 @@ export const writeId = (...parts: unknown[]): string => createHash('sha256').upd
 // The calls a script makes as what it is, not as the human (S-601): a write naming a system sender
 // (`--system deploy-watch`), the health check, an ITSA read, and the agents list. They send no x-stam-human, so under
 // auth.humanStrict the daemon doesn't log them as the human from a shared caller.
-function asSystem(method: string, path: string, body?: unknown): boolean {
+export function asSystem(method: string, path: string, body?: unknown): boolean {
   // `as_system` on the ITSA routes and `system` on mail only: an ITSA link's `system` is its kind.
   if (body && typeof body === 'object') {
     if ((body as any).as_system && path.startsWith('/api/itsas')) return true;
     if ((body as any).system && method === 'POST' && path === '/api/mail') return true;
   }
   // GET /api/agents ignores who asks (S-991): `stam ls` and the deploy's capPins logged a refusal each.
-  return method === 'GET' && /^\/api\/(health|agents|itsas\/[\w-]+)(\?|$)/.test(path);
+  // So do an ITSA's incident mark and its about-mails, which every waiting merge-pr worker reads (S-4356).
+  return method === 'GET' && /^\/api\/(health|agents|itsas\/[\w-]+(\/(incident|about-mails))?)(\?|$)/.test(path);
 }
 
 export async function api<T = any>(method: string, path: string, body?: unknown, timeoutMs = 10_000): Promise<T> {

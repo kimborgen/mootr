@@ -14,7 +14,7 @@ import { HARNESS, k, money, stateOf, STATE_LABEL } from '../format'
 import { Glyph } from '../Glyph'
 import { Icon } from '../Icon'
 import { stateHelp } from '../legend'
-import { destroyViewElement, leaves, mainWorld, useMadeViews, useShell, viewElement } from '../shell/layout'
+import { destroyViewElement, leaves, mainWorld, useMadeViews, useShell, ViewKeyContext, viewElement } from '../shell/layout'
 import { byId, getData, useData } from '../store'
 import type { Agent } from '../types'
 import { clock, restText, waitLabel, waitsOf } from '../waits'
@@ -32,7 +32,7 @@ import { StatusGlyph } from '../itsa/itsa'
 import { MailView } from './MailView'
 import { TerminalView } from './TerminalView'
 import { ThreadView } from './ThreadView'
-import { threadHead, threadOf } from '../mail/thread-chips'
+import { threadTabHead } from '../mail/thread-chips'
 import { UsageView } from './UsageView'
 import { RapidView } from './RapidView'
 import { getUi, useUi } from '../ui/state'
@@ -143,7 +143,7 @@ export function viewMeta(key: string): Meta {
   }
   if (key.startsWith('thread:')) {
     // The short title (S-2311): the thread's model title, else its subject; the full subject and people go in the tooltip.
-    const head = threadHead(threadOf(id, d)?.mails ?? [], d.agents)
+    const head = threadTabHead(id, d)
     return { title: head.title || 'Thread', icon: <Icon name="mail" />, tooltip: head.tooltip || undefined }
   }
   if (key.startsWith('itsa:')) {
@@ -200,7 +200,7 @@ function UsageHosted() {
 // throws unmounts below it, and its error must stay in the element it showed in.
 export function ViewHost({ viewKey: key, children }: { viewKey: string; children: ReactNode }) {
   useEffect(() => () => destroyViewElement(key), [key])
-  return <ViewBoundary viewKey={key}>{children}</ViewBoundary>
+  return <ViewKeyContext.Provider value={key}><ViewBoundary viewKey={key}>{children}</ViewBoundary></ViewKeyContext.Provider>
 }
 
 function Content({ viewKey: key }: { viewKey: string }) {
@@ -217,13 +217,13 @@ function Content({ viewKey: key }: { viewKey: string }) {
   if (key.startsWith('instructions:')) return <InstructionsView id={id} />
   if (key.startsWith('inventory:')) return <InventoryView id={id} />
   if (key.startsWith('image:')) return <ImageTabView id={id} viewKey={key} />
-  if (key.startsWith('type:')) return <TypeView name={id} />
+  if (key.startsWith('type:')) return <TypeView name={id} viewKey={key} />
   if (key.startsWith('mail:')) return <MailView owner={id} viewKey={key} />
   if (key.startsWith('thread:')) return <ThreadView tid={id} viewKey={key} />
   if (key.startsWith('itsa:')) return <ItsaView id={id} viewKey={key} />
   if (key.startsWith('board:')) return <Board id={id === 'all' ? null : id} viewKey={key} />
   if (key.startsWith('req:')) return <ReqView keyName={id} viewKey={key} />
-  if (key === 'compliance') return <ComplianceView />
+  if (key === 'compliance') return <ComplianceView viewKey={key} />
   if (key === 'work') return <WorkView viewKey={key} />
   if (key === 'agents') return <AgentsPage />
   if (key === 'system') return systemView(key)

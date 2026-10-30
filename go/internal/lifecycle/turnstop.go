@@ -22,7 +22,8 @@ import (
 // left (invalidate), and gives up once a later launch takes another, checked again with its publication. The state
 // (stops, slots, generations) is the agent's owner's (owner.go), changed only through its methods. The stops are in
 // memory, as TS's are: a daemon restart drops them, and a later archive or switch, finding none, stops the session
-// again. The shared server itself is never stopped here.
+// again, as reconcile does for a stopped agent whose session the server still runs (restop.go). The shared server itself
+// is never stopped here.
 
 // slotOp is one operation on a session in the shared server: a stop, or a one-shot interrupt. It acts only while it
 // holds the session's slot (sessionSlot), and a release cancels it, waiting or holding.
@@ -112,9 +113,15 @@ func (l *Lifecycle) stopTurn(a db.Agent, gen int) {
 func (l *Lifecycle) startStop(a db.Agent, sid string, gen int) *turnStop {
 	o := l.ownerOf(a.ID)
 	e, slot, started := o.startStop(sid, gen)
-	if !started {
-		return e
+	if started {
+		l.runStop(a, sid, e, slot, gen)
 	}
+	return e
+}
+
+// runStop runs the stop e, just listed under gen on sid's slot, in the background.
+func (l *Lifecycle) runStop(a db.Agent, sid string, e *turnStop, slot *sessionSlot, gen int) {
+	o := e.owner
 	l.bg.Add(1)
 	// The slot's holder, from waitSlot to publish: it takes no serial and no transition lock (owner).
 	go func() {
@@ -136,7 +143,6 @@ func (l *Lifecycle) startStop(a db.Agent, sid string, gen int) *turnStop {
 		// (owner.publish).
 		l.queueAsks(a.ID, parked)
 	}()
-	return e
 }
 
 // publishStop ends the stop through its owner (owner.publish), in its slot: a stop no longer the agent's confirmed
@@ -147,11 +153,16 @@ func (l *Lifecycle) publishStop(a db.Agent, sid string, e *turnStop, err error) 
 	if l.stopChecked != nil {
 		checked = func() { l.stopChecked(a.ID) }
 	}
-	return l.ownerOf(a.ID).publish(sid, e, err, checked, func(err error, givenUp bool) {
+	o := l.ownerOf(a.ID)
+	return o.publish(sid, e, err, checked, func(err error, givenUp bool) {
 		switch {
 		case err != nil:
-			l.stopFailed(a.ID, err)
+			// Once per session until a stop is confirmed (owner.stopNoted): a re-stop that fails again reports nothing.
+			if o.noteFailureLocked(sid) {
+				l.stopFailed(a.ID, err)
+			}
 		case !givenUp:
+			o.confirmedLocked(sid)
 			l.stopConfirmed(a.ID)
 		}
 	})

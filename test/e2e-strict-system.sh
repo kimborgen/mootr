@@ -33,14 +33,16 @@ watcher() { # MODE: runs the watcher's sequence against the running daemon
   on main "$STAM" itsa show "$ID" | grep -q '"status": *"done"' || fail "$_m: the ITSA isn't done"
   on main "$STAM" mail send --to "$A" --system deploy-watch --subject "alert" "stopped" >"$_t" 2>&1 || fail "$_m: mail send --system: $(cat "$_t")"
   [ "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $TOKEN" "$URL/api/health")" = 200 ] || fail "$_m: health refused"
-  on main "$STAM" status >/dev/null 2>&1 || fail "$_m: stam status failed"
+  on main "$STAM" daemon status >"$_t" 2>&1 || fail "$_m: stam daemon status failed: $(cat "$_t")"
+  ! grep -q "not running" "$_t" || fail "$_m: stam daemon status: $(cat "$_t")"
   on main "$STAM" ls >"$_t" 2>&1 || fail "$_m: stam ls: $(cat "$_t")"
   grep -q alpha "$_t" || fail "$_m: stam ls didn't list the agent: $(cat "$_t")"
   ! grep -Eq 'auth.humanStrict (off|is off|refuses)' "$LOG" || fail "$_m: log has a refusal: $(grep -E 'auth.humanStrict (off|is off|refuses)' "$LOG")"
   # A link's `system` is its kind, not a sender: the human's header stays, so it works with strict off.
   if [ "$_m" = off ]; then
-    # The derived repo's name is the checkout's folder name (S-2083), not always `stam2`.
-    _repo=$(python3 -c 'import json,sys; print(next(iter(json.load(open(sys.argv[1]))["itsa"]["repos"])))' "$TEST_TMP/main/settings.json") || fail "$_m: no derived repo in settings.json"
+    # The derived repo's name is the checkout's folder name (S-2083), not always `stam2`: the daemon derives it from the
+    # checkout it runs from, whether or not it writes it into settings.json.
+    _repo=$(basename "$(readlink -f "$ROOT")")
     on main "$STAM" itsa link "$ID" --system branch --external-id some-branch --repo "$_repo" >"$_t" 2>&1 || fail "$_m: itsa link --system branch: $(cat "$_t")"
   fi
 }

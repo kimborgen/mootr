@@ -36,10 +36,6 @@ for env in "$T"/*/test.env; do
     done
     [ -n "$dpid" ] && sig TERM "$dpid"
     tmux -L "$STAM_TMUX_SOCKET" kill-server 2>/dev/null
-    # The file goes only once the server is down: kill-server worked, or tmux says no server runs.
-    if tmux -L "$STAM_TMUX_SOCKET" kill-server 2>/dev/null || timeout 5 tmux -L "$STAM_TMUX_SOCKET" ls 2>&1 | grep -q "no server running"; then
-      rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$STAM_TMUX_SOCKET"
-    fi
     for p in $panes; do kill -s TERM -- "-$p" 2>/dev/null; done
     for _i in 1 2 3 4 5 6 7 8 9 10; do
       alive=
@@ -50,6 +46,11 @@ for env in "$T"/*/test.env; do
     done
     for p in $panes; do kill -s KILL -- "-$p" 2>/dev/null; done
     [ -n "$dpid" ] && sig KILL "$dpid"
+    # The file goes only once the daemon and the server are down (a daemon still stopping can start the server again,
+    # S-4129): kill-server worked, or tmux says no server runs.
+    if tmux -L "$STAM_TMUX_SOCKET" kill-server 2>/dev/null || timeout 5 tmux -L "$STAM_TMUX_SOCKET" ls 2>&1 | grep -q "no server running"; then
+      rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$STAM_TMUX_SOCKET"
+    fi
   )
 done
 # Anything still naming the folder (a stub, a Codex app-server), then the folder.

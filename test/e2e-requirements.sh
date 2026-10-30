@@ -87,7 +87,7 @@ cat > "$TEST_TMP/seed.json" <<'JSON'
   {"parent": "top", "title": "Seed two", "text": "Two shall hold.", "verification": ["decision"], "scope": {"subjects": ["branch"]}, "mode": "observe"}
 ]}
 JSON
-STAM_AGENT_ID="$WID" "$STAM" req seed "$TEST_TMP/seed.json" > "$TEST_TMP/seed.out" || fail "stam req seed failed: $(cat "$TEST_TMP/seed.out")"
+with_agent_id "$WID" "$STAM" req seed "$TEST_TMP/seed.json" > "$TEST_TMP/seed.out" || fail "stam req seed failed: $(cat "$TEST_TMP/seed.out")"
 grep -q '^3 drafts; approval ask S-' "$TEST_TMP/seed.out" || fail "the seed didn't raise one ask: $(cat "$TEST_TMP/seed.out")"
 ASK=$(sed -n 's/^3 drafts; approval ask \(S-[0-9]*\).*/\1/p' "$TEST_TMP/seed.out")
 SEEDED=$(awk 'NR<=3 {print $1}' "$TEST_TMP/seed.out")

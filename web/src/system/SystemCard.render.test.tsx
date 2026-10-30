@@ -135,8 +135,8 @@ describe('a settings refresh and the system view cards (S-3179 review)', () => {
     // A poll: the settings are read again (new record objects, the same content), then the page re-renders.
     await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
     await act(async () => { force() })
-    // One read per layout hook (the agent and the issue layout each poll once).
-    expect(reads()).toBe(before + 2)
+    // One read for the whole page: the agent and the issue layout share one poll (S-4610).
+    expect(reads()).toBe(before + 1)
     expect(renders.n).toBe(0)
   })
 })

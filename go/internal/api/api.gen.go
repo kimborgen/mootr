@@ -360,14 +360,33 @@ type Error struct {
 
 // Health defines model for Health.
 type Health struct {
+	// Caches What the daemon keeps in memory, counted, read-only (src/daemon.ts).
+	Caches struct {
+		// ActivityStats Entries in the activity stats memo.
+		ActivityStats int `json:"activityStats"`
+
+		// DbConnections Open database connections, the main one and the OpenCode databases.
+		DbConnections int `json:"dbConnections"`
+
+		// HumanPeers Entries in the human peer memo.
+		HumanPeers int `json:"humanPeers"`
+
+		// Stalls Event-loop stalls kept in memory (the same list as `stalls`).
+		Stalls int `json:"stalls"`
+	} `json:"caches"`
 	Machine string `json:"machine"`
 
 	// Memory The daemon's process.memoryUsage(), in bytes.
 	Memory struct {
-		External  int `json:"external"`
-		HeapTotal int `json:"heapTotal"`
-		HeapUsed  int `json:"heapUsed"`
-		Rss       int `json:"rss"`
+		// Anon The resident anonymous pages (RssAnon, S-4390); absent where /proc/self/status isn't there.
+		Anon     *int `json:"anon,omitempty"`
+		External int  `json:"external"`
+
+		// File The resident file-backed pages (RssFile, S-4390); absent where /proc/self/status isn't there.
+		File      *int `json:"file,omitempty"`
+		HeapTotal int  `json:"heapTotal"`
+		HeapUsed  int  `json:"heapUsed"`
+		Rss       int  `json:"rss"`
 	} `json:"memory"`
 	Ok HealthOk `json:"ok"`
 

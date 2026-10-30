@@ -12,6 +12,7 @@ import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { execSync } from 'node:child_process';
+import '../../test/scrub-env.mjs'; // scrubs the parent's MOOTR_ and STAM_ names before any child (S-3449)
 
 const [url, out, tokenFile] = process.argv.slice(2);
 if (!out) { console.error('usage: node locallogin.mjs URL OUT_DIR'); process.exit(2); }

@@ -7,6 +7,7 @@ const pages = vi.hoisted(() => ({ count: 60 }))
 vi.mock('../api', async (orig) => ({
   ...(await orig<typeof import('../api')>()),
   api: vi.fn(async (_m: string, path: string) => {
+    if (path.includes('/thread-index?')) return { threads: [], next_cursor: null }
     if (!path.includes('with=dev') || path.includes('archived=1') || path.includes('deferred=1')) return []
     return Array.from({ length: pages.count }, (_, i) => ({ thread_id: 'd' + i, mails: [{ id: 'm' + i, thread_id: 'd' + i, from_id: 'human', from_name: 'human', subject: 's' + i, body: 'b', created_at: new Date(Date.UTC(2026, 9, 15, 0, i)).toISOString(), recipients: [{ id: 'dev', read_at: null }] }] }))
   }),
@@ -31,12 +32,25 @@ beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, 'scrollTop', { configurable: true, get() { return tops.get(this) ?? 0 }, set(v: number) { tops.set(this, v) } })
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} takeRecords() { return [] } })
-  setData({ humanThreads: [], humanArchived: [], humanDeferred: [], rapidWith: {} })
+  setData({ humanRows: { active: [], archived: [], deferred: [] }, rapidWith: {} })
 })
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals() })
 
 const scroller = () => host.querySelector<HTMLElement>('.rf-scroll')!
 const older = () => host.querySelector<HTMLButtonElement>('.rf-older')
+
+describe('RapidView before its pages load (S-4580)', () => {
+  it('shows no empty line and no loaded mark until the agent\'s own pages are in', async () => {
+    pages.count = 0
+    // A plain act: the render and its effects run, and the pages' fetch is still pending.
+    act(() => { root.render(<RapidView id="dev" />) })
+    expect(host.querySelector('.rf')!.hasAttribute('data-loaded')).toBe(false)
+    expect(host.querySelector('.ov-start')).toBeNull()
+    await flush()
+    expect(host.querySelector('.rf')!.hasAttribute('data-loaded')).toBe(true)
+    expect(host.querySelector('.ov-start')?.textContent).toBe('No mail with the agent yet.')
+  })
+})
 
 describe('RapidView Load older threads', () => {
   it('keeps the cards you were reading in place when older ones load above', async () => {
@@ -60,7 +74,9 @@ describe('RapidView Load older threads', () => {
     await flush()
     expect(host.querySelectorAll('.rf-list > li')).toHaveLength(60)
     const sent = { thread_id: 'new', mails: [{ id: 'mn', thread_id: 'new', from_id: 'human', from_name: 'human', subject: 'new', body: 'b', created_at: '2026-10-15T09:00:00.000Z', recipients: [{ id: 'dev', read_at: null }] }] }
-    await act(async () => { setData({ humanThreads: [...getData().humanThreads, sent] }) })
+    // The next round's with= page holds the sent thread (S-4580: the human's lists hold rows, not mail).
+    const dev = getData().rapidWith.dev
+    await act(async () => { setData({ rapidWith: { dev: { ...dev, threads: [...dev.threads, sent] } } }) })
     expect(host.querySelectorAll('.rf-list > li')).toHaveLength(61)
     expect(scroller().scrollTop).toBe(6100)
   })

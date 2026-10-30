@@ -4,6 +4,7 @@
 import { openWorld } from './actions'
 import { Icon } from './Icon'
 import { attentionRows } from './MailSide'
+import { humanLists } from './mail/inbox-model'
 import * as shell from './shell/layout'
 import { useWaiting } from './itsa/WaitingList'
 import { useData } from './store'
@@ -17,7 +18,7 @@ export function PageButtons() {
   shell.useShell()
   const data = useData()
   // The Inbox badge is the sidebar Mail header's "waiting on you", from the same attention list (MailSide's attentionRows).
-  const inboxWaiting = attentionRows('inbox', data, useWaiting()).att.length
+  const inboxWaiting = attentionRows('inbox', humanLists(data), useWaiting()).att.length
   const cw = shell.currentWorld()
   return <>{PAGES.map((p) => {
     const on = cw === 'w:' + p.world

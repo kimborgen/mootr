@@ -14,7 +14,7 @@ vi.mock('./api', () => ({ api, sendAsHuman }))
 const KNOWN = ['agents', 'issues', 'mail', 'machines', 'cost']
 const LAYOUT = [{ tabs: ['agents', 'issues'], active: 'agents' }, { tabs: ['mail'], active: 'mail' }, { tabs: ['machines'], active: 'machines' }]
 
-async function shown(stored: Record<string, unknown>) {
+async function shown(stored: Record<string, unknown>, sizesOut?: { sizes?: number[] }) {
   vi.resetModules()
   localStorage.clear()
   api.mockReset()
@@ -22,7 +22,7 @@ async function shown(stored: Record<string, unknown>) {
     ? Promise.resolve({ text: JSON.stringify({ sidebarPanes: { main: stored } }) }) : Promise.resolve({ text: '{}' })))
   const { useSidebarPanes } = await import('./sidebar-panes')
   let tabs: string[] = []
-  function Probe() { tabs = useSidebarPanes(KNOWN).panes.flatMap((p) => p.tabs); return null }
+  function Probe() { const sb = useSidebarPanes(KNOWN); tabs = sb.panes.flatMap((p) => p.tabs); if (sizesOut) sizesOut.sizes = sb.sizes; return null }
   const host = document.createElement('div')
   await act(async () => { createRoot(host).render(<Probe />) })
   await act(async () => { await Promise.resolve() })
@@ -104,5 +104,73 @@ describe('saving the default', () => {
     await act(async () => { await Promise.resolve() })
     expect(r.revertToUserDefault()).toBe(true)
     expect(r.currentPanes()).toEqual([{ tabs: ['mail'], active: 'mail' }])
+  })
+})
+
+describe('the saved pane sizes (S-3810)', () => {
+  it('loads stored sizes that match the pane count', async () => {
+    const out: { sizes?: number[] } = {}
+    await shown({ panes: LAYOUT, tabBar: 'compact', v: 3, sizes: [1, 4, 1] }, out)
+    expect(out.sizes).toEqual([1, 4, 1])
+  })
+  it('loads an old record without sizes, leaving the defaults to the view', async () => {
+    const out: { sizes?: number[] } = {}
+    await shown({ panes: LAYOUT, tabBar: 'compact', v: 3 }, out)
+    expect(out.sizes).toBeUndefined()
+  })
+  it('ignores sizes whose count differs from the panes', async () => {
+    const out: { sizes?: number[] } = {}
+    await shown({ panes: LAYOUT, tabBar: 'compact', v: 3, sizes: [1, 2] }, out)
+    expect(out.sizes).toBeUndefined()
+  })
+})
+
+// The sizes ride with the layout: a saved default keeps them, and a revert replaces the whole record (S-3810).
+describe('pane sizes and the defaults', () => {
+  async function load(main: Record<string, unknown>, dflt?: Record<string, unknown>) {
+    vi.resetModules()
+    localStorage.clear()
+    api.mockReset()
+    api.mockImplementation((method: string, path: string) => (method === 'GET' && path === '/api/config/settings'
+      ? Promise.resolve({ text: JSON.stringify({ sidebarPanes: { main, ...(dflt ? { default: dflt } : {}) } }) }) : Promise.resolve({ text: '{}' })))
+    const m = await import('./sidebar-panes')
+    let sizes: number[] | undefined
+    function Probe() { sizes = m.useSidebarPanes(KNOWN).sizes; m.useHasUserDefault(); return null }
+    await act(async () => { createRoot(document.createElement('div')).render(<Probe />) })
+    await act(async () => { await Promise.resolve() })
+    return { m, sizes: () => sizes }
+  }
+  const THREE = [{ tabs: ['agents', 'issues'], active: 'agents' }, { tabs: ['mail'], active: 'mail' }, { tabs: ['machines'], active: 'machines' }]
+  it('saves the live sizes with the default and brings them back on a revert', async () => {
+    const { m, sizes } = await load({ panes: THREE, tabBar: 'compact', v: 3, sizes: [1, 4, 1] })
+    m.saveUserDefault()
+    expect(m.userDefault()?.sizes).toEqual([1, 4, 1])
+    await act(async () => { m.setSidebarSizes([2, 2, 2]) })
+    expect(sizes()).toEqual([2, 2, 2])
+    let ok = false
+    await act(async () => { ok = m.revertToUserDefault() })
+    expect(ok).toBe(true)
+    expect(sizes()).toEqual([1, 4, 1])
+  })
+  it('reads the sizes of a saved default back after a reload', async () => {
+    const { m, sizes } = await load({ panes: THREE, tabBar: 'compact', v: 3 }, { panes: THREE, tabBar: 'compact', v: 3, sizes: [5, 1, 1] })
+    let ok = false
+    await act(async () => { ok = m.revertToUserDefault() })
+    expect(ok).toBe(true)
+    expect(sizes()).toEqual([5, 1, 1])
+  })
+  it('reverting to mootr\'s default drops the sizes', async () => {
+    const { m, sizes } = await load({ panes: THREE, tabBar: 'compact', v: 3, sizes: [1, 4, 1] })
+    expect(sizes()).toEqual([1, 4, 1])
+    await act(async () => { m.revertToMootrDefault() })
+    expect(sizes()).toBeUndefined()
+  })
+  it('moving a pane carries its size, and an edit that changes the pane count drops the sizes', async () => {
+    const { m, sizes } = await load({ panes: THREE, tabBar: 'compact', v: 3, sizes: [5, 1, 1] })
+    await act(async () => { m.moveSidebarPane(0, 1) })
+    expect(m.currentPanes().map((p) => p.active)).toEqual(['mail', 'agents', 'machines'])
+    expect(sizes()).toEqual([1, 5, 1])
+    await act(async () => { m.setSidebarPanes(m.currentPanes().slice(0, 2)) })
+    expect(sizes()).toBeUndefined()
   })
 })

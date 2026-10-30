@@ -16,7 +16,7 @@ func TestAgentRoutesMatchTS(t *testing.T) {
 	var inputs []string
 	for _, m := range []string{"GET", "POST", "PUT", "DELETE"} {
 		for _, p := range []string{
-			"", "/files", "/instructions", "/inventory", "/inbox", "/threads", "/threads/t1/archive", "/threads/t1/unarchive", "/threads/t1/defer",
+			"", "/files", "/instructions", "/inventory", "/inbox", "/threads", "/thread-index", "/threads/t1/archive", "/threads/t1/unarchive", "/threads/t1/defer",
 			"/threads/t1/undefer", "/threads/t1/unread", "/threads/t1/nope", "/read", "/view", "/view/history", "/view/tools", "/view/prompt",
 			"/view/interrupt", "/view/permission", "/stream", "/permission-mode", "/prompt", "/pause", "/kill", "/forget", "/default-view",
 			"/events", "/usage", "/waits", "/waits/clear", "/waits/declared", "/waits/wake", "/waits/done", "/waits/nope", "/notice",

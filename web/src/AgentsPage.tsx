@@ -17,7 +17,8 @@ import { useWaiting } from './itsa/WaitingList'
 import { durationMs } from './ui/duration'
 import { MachinesStrip } from './MachinesSide'
 import { spawnMenu } from './spawn'
-import { useData } from './store'
+import { useMachinesShown, useData } from './store'
+import { useViewShown } from './shell/layout'
 import type { Agent, Ask } from './types'
 import { usePhone } from './ui/phone'
 import { useLongPress } from './ui/longpress'
@@ -268,6 +269,8 @@ const colsItems = (picked: ColumnId[]): MenuItem[] => [{ section: 'Columns, in o
 
 function AgentsDesk({ picked }: { picked: string | null }) {
   const { agents, itsas, machine, machines, thresholds, loaded } = useData()
+  // The machines strip reads the machines poll, which runs fast only while this view shows.
+  useMachinesShown(useViewShown('agents'))
   const waiting = useWaiting().length
   const { cols, group, scope, pane } = useAgentsView()
   const collapsed = useUi().collapsed

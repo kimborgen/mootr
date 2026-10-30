@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const { incidentRefusal, homeSaysMarked, chainMarked, mayMarkIncident, demoteRevoked, developerCapRefusal, developerHolders, holderInfo, holdersText, reserveSlot, releaseSlot, enqueueWaiter, grantSlots, queuedWaiters, queuePlace, dropWaiter, restoreQueue, saveQueueFile, loadQueueFile, hostHasRoom, roomRefusal, hostReadingFrom, cancelState, mayCancelWaiter, findDuplicate, spawnerKey, IDLE_HOLD_MS, SLOT_MIN_FREE_BYTES } = await import('../src/developer-cap.ts');
+const { incidentRefusal, homeSaysMarked, chainMarked, mayMarkIncident, demoteRevoked, developerCapRefusal, developerHolders, holderInfo, holdersText, reserveSlot, releaseSlot, enqueueWaiter, grantSlots, queuedWaiters, queuePlace, dropWaiter, restoreQueue, saveQueueFile, loadQueueFile, hostHasRoom, roomRefusal, hostReadingFrom, pinnedHostReading, cancelState, mayCancelWaiter, findDuplicate, spawnerKey, IDLE_HOLD_MS, SLOT_MIN_FREE_BYTES } = await import('../src/developer-cap.ts');
 
 // Host readings for grantSlots (S-2120): a quiet machine, and one over the load limit, one short of memory.
 const room = { load1: 1, freeBytes: 8 * 1024 ** 3 };
@@ -430,4 +430,10 @@ test('deliverWaiterNotice retries an unreachable machine and then falls back', a
   assert.equal(await deliverWaiterNotice(async () => (tries++, 'absent'), async (w) => why.push(w), 5, 1), 'fallback');
   assert.equal(tries, 1);
   assert.equal(await deliverWaiterNotice(async () => { throw new Error('x'); }, async (w) => why.push(w), 1, 1), 'fallback');
+});
+
+test('the test-daemon room pin reports a roomy host, so a loaded machine never load-queues an e2e spawn (S-3105)', () => {
+  assert.equal(roomRefusal(pinnedHostReading('1', () => loaded)), null);
+  assert.equal(roomRefusal(pinnedHostReading(undefined, () => loaded)), 'queued: load 5.0');
+  assert.equal(roomRefusal(pinnedHostReading('0', () => loaded)), 'queued: load 5.0');
 });

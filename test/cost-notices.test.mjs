@@ -57,6 +57,7 @@ const inboxSubjects = (box) => db.inbox(box, false, 50).map((m) => m.subject);
 
 beforeEach(() => {
   costNotices.notices(0); // creates the cost_notices table before it is cleared
+  costNotices.resetSharesMemo();
   const d = db.open();
   for (const t of ['cost_notices', 'blockers', 'agent_parents', 'agents', 'window_readings', 'usage_samples', 'subscriptions', 'mail_recipients', 'mail', 'events']) d.exec(`DELETE FROM ${t}`);
   writeSettings();
@@ -178,6 +179,74 @@ test("blocker > set and clear reach the blocked agent's manager, a refresh does 
   const cleared = all.find((x) => x.kind === 'blocker-clear');
   assert.ok(cleared, 'a clear notice was raised');
   assert.deepEqual(cleared.managers, [cost.id]);
+});
+
+// S-4356: a provider error storm blocks nearly every agent at once. Each notice calibrated the window
+// again for each manager (single stalls of 40 to 112 s live); now one burst calibrates each window once.
+test('blocker > a burst of notices calibrates the window once, and each line keeps its own tree', async () => {
+  const { windowShares, treeShare } = await import('../src/attribution.ts');
+  const d = db.open();
+  const MIN = 60_000;
+  const now = Math.floor(Date.now() / MIN) * MIN;
+  const iso = (t) => new Date(t).toISOString();
+  for (const [ago, used] of [[40, 10], [20, 30], [5, 50]]) {
+    d.prepare('INSERT INTO window_readings (name, window, at, used_percentage, resets_at) VALUES (?, ?, ?, ?, ?)').run('claude', 'five_hour', iso(now - ago * MIN), used, Math.floor(now / 1000) + 3600);
+  }
+  const cos = agent('cos');
+  const mgrs = [];
+  const devs = [];
+  for (let i = 0; i < 5; i++) {
+    mgrs.push(agent(`mgr${i}`, { parent_id: cos.id }));
+    setActivity(mgrs[i], 'working');
+    devs.push(agent(`dev${i}`, { parent_id: mgrs[i].id }));
+  }
+  // Distinct usage under three of the trees, so a line that reused another tree's total, or none, differs.
+  const sample = (dev, ago, tokens) => d.prepare('INSERT INTO usage_samples (agent_id, account, harness, model, bucket, tokens_in) VALUES (?, ?, ?, ?, ?, ?)').run(dev.id, 'claude', 'claude', 'claude-opus-5-5', iso(now - ago * MIN), tokens);
+  for (const ago of [30, 10]) {
+    sample(devs[0], ago, 1000);
+    sample(devs[1], ago, 3000);
+    sample(devs[2], ago, 6000);
+  }
+  const line = (m) => (mail.inTurnNotice(m.id) ?? '').match(/estimated share of the five-hour window on claude: about ([\d.]+)%/)?.[1];
+
+  // Counts the window-reading reads; one calibration makes `perCalibration` of them.
+  const prepare = d.prepare;
+  let reads = 0;
+  d.prepare = function (sql) {
+    if (/FROM window_readings WHERE name = \? AND window = \? AND at < \?/.test(sql)) reads++;
+    return prepare.call(this, sql);
+  };
+  // The share lines calibrate on the wall clock; the test holds it at `at`.
+  const block = (dev, at) => {
+    costNotices.sharesClock.now = () => at;
+    costNotices.blockerChanged(dev.id, 'window', 'claude', 'set', 'five_hour at 100%', iso(at), at);
+  };
+  const wall = costNotices.sharesClock.now;
+  try {
+    // The expected line of each tree, from a calibration of its own, outside the memo.
+    const fresh = windowShares('claude', 'five_hour', undefined, now);
+    const perCalibration = reads;
+    reads = 0;
+    assert.ok(perCalibration > 0);
+    const want = mgrs.map((m) => Math.round(treeShare(m.id, 'claude', 'five_hour', undefined, fresh) * 100) / 100);
+    assert.ok(want[0] > 0 && want[0] < want[1] && want[1] < want[2], `distinct nonzero shares: ${want}`);
+    assert.equal(want[3], 0);
+
+    for (const dev of devs) block(dev, now);
+    assert.equal(costNotices.notices().length, 5);
+    assert.equal(reads, perCalibration, 'one calibration for the burst');
+    mgrs.forEach((m, i) => assert.equal(Number(line(m)), want[i], m.name));
+
+    block(devs[0], now + 9_999);
+    assert.equal(reads, perCalibration, 'reused just before 10 s');
+    assert.equal(Number(line(mgrs[0])), want[0]);
+    block(devs[1], now + 10_000);
+    assert.equal(reads, 2 * perCalibration, 'calibrated again at 10 s');
+    assert.ok(line(mgrs[1]), 'the line after expiry still names a share');
+  } finally {
+    d.prepare = prepare;
+    costNotices.sharesClock.now = wall;
+  }
 });
 
 test('credits > low OpenRouter credit reaches the trees that use it, once per top-up', () => {

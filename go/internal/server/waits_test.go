@@ -61,8 +61,7 @@ func TestWaitsAuth(t *testing.T) {
 	}
 }
 
-// TestWaitsRefusals: what isn't ported answers 501 and writes nothing; a bad request answers 400 with TS's text and
-// writes nothing.
+// TestWaitsRefusals: a bad request answers 400 with TS's text and writes nothing.
 func TestWaitsRefusals(t *testing.T) {
 	f := newFixture(t, nil)
 	withLife(f)
@@ -81,8 +80,6 @@ func TestWaitsRefusals(t *testing.T) {
 		// Met before on a peer, with no peer to ask now: no agent, as TS's peerTarget answers.
 		{"declared", `{"on":"agent","target":"apeer","by":"achild"}`, 400, "no agent apeer"},
 		{"declared", `{"on":"agent","target":"remote-one","by":"achild"}`, 400, "no agent remote-one"},
-		{"declared", `{"on":"agent","target":"aboss","rest":true,"by":"achild"}`, 501, "rest is not ported"},
-		{"wake", `{"note":"n","in_minutes":5,"rest":true,"by":"achild"}`, 501, "rest is not ported"},
 		{"declared", `{"on":"mail","by":"achild"}`, 400, "on must be 'agent', 'human', or 'event'"},
 		{"declared", `{"on":"agent","by":"achild"}`, 400, "wait_for on 'agent' needs target (an agent id or name)"},
 		{"declared", `{"on":"agent","target":"nobody","by":"achild"}`, 400, "no agent nobody"},
@@ -207,5 +204,42 @@ func TestParseAt(t *testing.T) {
 		if got, ok := parseAt(in); ok {
 			t.Errorf("%q parsed as %v", in, got)
 		}
+	}
+}
+
+// TestRestRequest: `rest: true` on wait_for or wake_me asks for a rest on the wait it made (S-4332), as data.rest with the
+// until it was asked with, and a standing:rest-requested event; the answer is the wait as made, without the flag, as TS
+// answers. An agent type rest.types keeps up (the chief of staff, `cos`) asks for nothing.
+func TestRestRequest(t *testing.T) {
+	f := newFixture(t, nil)
+	withLife(f)
+	f.sql("UPDATE agents SET lifecycle = 'active', activity = 'idle' WHERE id = 'achild'")
+	for _, tc := range []struct{ path, body string }{
+		{"declared", `{"on":"human","timeout_minutes":30,"rest":true,"by":"achild"}`},
+		{"wake", `{"note":"n","in_minutes":5,"rest":true,"by":"achild"}`},
+	} {
+		rec := f.do(call{method: "POST", path: "/api/agents/achild/waits/" + tc.path, token: agentTok, body: tc.body})
+		if rec.Code != 200 || strings.Contains(rec.Body.String(), `rest`) {
+			t.Fatalf("%s: %d %s", tc.path, rec.Code, rec.Body.String())
+		}
+	}
+	if n := f.count(`SELECT count(*) FROM waits WHERE agent_id = 'achild' AND json_extract(data, '$.rest') = 1 AND json_extract(data, '$.rest_until') = until`); n != 2 {
+		t.Errorf("waits asking for a rest: %d", n)
+	}
+	if n := f.count("SELECT count(*) FROM events WHERE agent_id = 'achild' AND type = 'standing:rest-requested'"); n != 2 {
+		t.Errorf("rest-requested events: %d", n)
+	}
+	// Without rest, or rest not exactly true, nothing is asked.
+	f.do(call{method: "POST", path: "/api/agents/achild/waits/wake", token: agentTok, body: `{"note":"m","in_minutes":5,"rest":"yes","by":"achild"}`})
+	if n := f.count(`SELECT count(*) FROM waits WHERE agent_id = 'achild' AND json_extract(data, '$.rest') IS NULL`); n != 1 {
+		t.Errorf("a wait without a rest request: %d", n)
+	}
+	must(t, os.WriteFile(filepath.Join(f.home, "settings.json"), []byte(`{"chiefOfStaff":"achild"}`), 0o600))
+	f.sql("DELETE FROM waits")
+	if rec := f.do(call{method: "POST", path: "/api/agents/achild/waits/declared", token: agentTok, body: `{"on":"human","rest":true,"by":"achild"}`}); rec.Code != 200 {
+		t.Fatalf("the chief of staff's wait: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := f.count(`SELECT count(*) FROM waits WHERE json_extract(data, '$.rest') = 1`); n != 0 {
+		t.Errorf("the chief of staff asked for a rest: %d", n)
 	}
 }

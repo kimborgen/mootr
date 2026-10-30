@@ -153,7 +153,12 @@ func (s *Server) peerVia(ctx context.Context, c auth.Resolved) *itsaVia {
 // senderPeer is the peer that made this call, when it can be told. It can't yet: every peer sends this daemon's one peer
 // token, so a peer hook accepts an agent any peer holds, as TS does. S-4127 gives each peer its own token; then a hook
 // takes an agent only from the peer that holds it (holderMismatch).
-func (s *Server) senderPeer(c auth.Resolved) (string, bool) { return "", false }
+func (s *Server) senderPeer(c auth.Resolved) (string, bool) {
+	if s.senderPeerFor != nil {
+		return s.senderPeerFor(c)
+	}
+	return "", false
+}
 
 // holderMismatch is whether the caller is known and is not the peer that holds the agent.
 func (s *Server) holderMismatch(c auth.Resolved, holder string) bool {

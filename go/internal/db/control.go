@@ -121,7 +121,7 @@ type releasedEvent struct {
 
 // MarkArchived is the transaction at the end of src/lifecycle.ts archiveLocked: the agent is archived; it loses the
 // workspaces shared with it; an agent it took over from gets its own mail again; its blockers go; the archive event is
-// recorded; and off the home the unown is queued.
+// recorded; its waits go; and off the home the unown is queued.
 func (d *DB) MarkArchived(ctx context.Context, a Agent, o Archived) error {
 	err := d.Write(ctx, func(conn *sqlite.Conn) error {
 		if err := d.updateAgent(conn, a.ID, []Field{{"lifecycle", "archived"}, {"activity", "unknown"}, {"activity_detail", o.Result},
@@ -149,6 +149,10 @@ func (d *DB) MarkArchived(ctx context.Context, a Agent, o Archived) error {
 			d.noteChanged(pid, false)
 		}
 		if err := runSQL(conn, "DELETE FROM blockers WHERE agent_id = ?", a.ID); err != nil {
+			return err
+		}
+		// Its waits go too (S-4332): an archived agent's timer or timeout fires nothing, and its rest request is gone.
+		if err := runSQL(conn, "DELETE FROM waits WHERE agent_id = ?", a.ID); err != nil {
 			return err
 		}
 		if err := insertEvent(conn, a.ID, "archive", archiveEvent{Result: o.Result}); err != nil {

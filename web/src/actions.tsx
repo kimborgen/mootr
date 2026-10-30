@@ -10,10 +10,10 @@ import { inputMain } from './image-tab'
 import { spawnMenu } from './spawn'
 import { followsSettings } from './permission-modes'
 import { BULK_CONCURRENCY, applies, mapLimit, noteFor, notesOf, queuedOf, summarize, verbOf, type BulkAct, type BulkResult } from './agents-bulk'
-import { assistant, byId, chiefAssistants, chiefsOfStaff, childrenOf, getData, hasPendingPermission, isArchivedThread, isDeferredThread, refresh, refreshSlow, setData, threadWaitsOnHuman, type Data } from './store'
+import { assistant, byId, chiefAssistants, chiefsOfStaff, childrenOf, getData, getPolled, humanIndex, humanRow, isArchivedThread, isDeferredThread, refresh, refreshSlow, setData, slowBegun, slowLanded, threadWaitsOnHuman, unreadIn, type Data } from './store'
 import { showMenu, toast, type MenuItem } from './ui/menu'
 import { getUi, setUi } from './ui/state'
-import type { Agent, PlainShell, Thread, UploadFile } from './types'
+import type { Agent, IndexRow, Mail, PlainShell, Thread, UploadFile } from './types'
 import { choiceOf, defaultView, keyFor, swapForDefault, type AgentViewChoice } from './views/agent-view-choice'
 import { doneFocus } from './mail/mailFocus'
 import { inboxOrder } from './mail/inbox-order'
@@ -229,15 +229,22 @@ async function undoMove(tid: string, from: string) {
   else await setThreadDeferred(tid, true)
 }
 // `u` toggles the open thread's unread state (S-2246): a thread with unread mail for the human is marked read, and one
-// without is marked unread at its latest mail to the human. The rows and counts change at once.
+// without is marked unread at its latest mail to the human. The rows and counts change at once. The mail ids come from
+// the copy the thread view loaded, else from the daemon: a list's row has none (S-4580). The triage is the newest from
+// the key press on, so a `z` or an `e` pressed while the ids are read orders after it.
 export function toggleInboxUnread(tid: string): Promise<void> {
-  const d = getData()
-  const mails = [...d.humanThreads, ...d.humanArchived, ...d.humanDeferred].find((t) => t.thread_id === tid)?.mails.filter((m) => m.recipients.some((r) => r.id === 'human')) ?? []
-  const unread = mails.filter((m) => m.recipients.some((r) => r.id === 'human' && !r.read_at)).map((m) => m.id)
-  const latest = mails.at(-1)?.id
-  if (!unread.length && !latest) return Promise.resolve()
-  const sent = unread.length ? markMailRead(unread) : markThreadUnread(tid, [latest!])
-  lastTriage = { tid, sent, undo: () => (unread.length ? markThreadUnread(tid, unread) : markMailRead([latest!])) }
+  let undo: () => Promise<unknown> = () => Promise.resolve()
+  const toggle = (all: Mail[]): Promise<unknown> => {
+    const mails = all.filter((m) => m.recipients.some((r) => r.id === 'human'))
+    const unread = mails.filter((m) => m.recipients.some((r) => r.id === 'human' && !r.read_at)).map((m) => m.id)
+    const latest = mails.at(-1)?.id
+    if (!unread.length && !latest) return Promise.resolve()
+    undo = () => (unread.length ? markThreadUnread(tid, unread) : markMailRead(tid, [latest!]))
+    return unread.length ? markMailRead(tid, unread) : markThreadUnread(tid, [latest!])
+  }
+  const loaded = getData().openThreads.find((t) => t.thread_id === tid)?.mails
+  const sent = loaded ? toggle(loaded) : api<Mail[]>('GET', `/api/threads/${tid}`).catch((): Mail[] => []).then(toggle)
+  lastTriage = { tid, sent, undo: () => undo() }
   return sent.then(() => undefined)
 }
 // `z`: undoes the newest triage, `e`, `d` or `u`. It waits for that request first, so the server sees the two in order;
@@ -250,42 +257,89 @@ export async function undoInboxTriage() {
   await l.undo()
 }
 
-// The human's threads the list counts as unread: the threads in the inbox, not the archive or the deferred ones.
-const unreadIn = (threads: Thread[]) => threads.reduce((n, t) => n + t.mails.filter((m) => m.recipients.some((r) => r.id === 'human' && !r.read_at)).length, 0)
-// The overlays for mail: a thread moves between the inbox, the archive and the deferred ones, or the human's mail
-// in some threads is marked read. Both apply at once, over the polled threads.
-const moveThread = (tid: string, to: 'inbox' | 'archived' | 'deferred') => (d: Data): Data => {
-  const t = [...d.humanThreads, ...d.humanArchived, ...d.humanDeferred].find((x) => x.thread_id === tid)
-  if (!t) return d
-  const without = (l: Thread[]) => l.filter((x) => x !== t)
-  const humanThreads = to === 'inbox' ? [...without(d.humanThreads), t].sort((a, b) => b.mails.at(-1)!.created_at.localeCompare(a.mails.at(-1)!.created_at)) : without(d.humanThreads)
-  const humanArchived = to === 'archived' ? [t, ...without(d.humanArchived)] : without(d.humanArchived)
-  const humanDeferred = to === 'deferred' ? [t, ...without(d.humanDeferred)] : without(d.humanDeferred)
-  return { ...d, humanThreads, humanArchived, humanDeferred, unread: unreadIn(humanThreads) }
+// The overlays for mail: a thread's row moves between the inbox, the archive and the deferred ones, or the human's mail
+// in a thread is marked read. Both apply at once, over the polled rows; a mark applies to the copies thread views
+// loaded too, so `u` reads the mark from the open thread.
+type ListName = 'inbox' | 'archived' | 'deferred'
+const moveThread = (tid: string, to: ListName) => (d: Data): Data => {
+  const lists = d.humanRows
+  const row = [...lists.active, ...lists.archived, ...lists.deferred].find((x) => x.thread_id === tid)
+  if (!row) return d
+  const without = (l: IndexRow[]) => l.filter((x) => x !== row)
+  // The inbox goes by the newest mail the human sent or received, as the daemon orders it.
+  const active = to === 'inbox' ? [...without(lists.active), row].sort((a, b) => b.last_at.localeCompare(a.last_at)) : without(lists.active)
+  const humanRows = { active, archived: to === 'archived' ? [row, ...without(lists.archived)] : without(lists.archived), deferred: to === 'deferred' ? [row, ...without(lists.deferred)] : without(lists.deferred) }
+  return { ...d, humanRows, unread: unreadIn(active) }
 }
 // Only a thread's latest move applies: an undo sent before the next poll settles against the
 // stale poll at once and drops, and the earlier move's overlay must not keep hiding the thread (S-1003).
 const latestMove = new Map<string, number>()
 let moves = 0
-const moveLatest = (tid: string, to: 'inbox' | 'archived' | 'deferred') => {
+const moveLatest = (tid: string, to: ListName) => {
   const n = ++moves
   latestMove.set(tid, n)
   const move = moveThread(tid, to)
   return (d: Data): Data => (latestMove.get(tid) === n ? move(d) : d)
 }
-const markRead = (ids: string[], at: string) => (d: Data): Data => {
-  const mark = (t: Thread): Thread => t.mails.some((m) => ids.includes(m.id)) ? { ...t, mails: t.mails.map((m) => ids.includes(m.id)
-    ? { ...m, recipients: m.recipients.map((r) => (r.id === 'human' && !r.read_at ? { ...r, read_at: at } : r)) } : m) } : t
-  const humanThreads = d.humanThreads.map(mark)
-  return { ...d, humanThreads, humanArchived: d.humanArchived.map(mark), humanDeferred: d.humanDeferred.map(mark), unread: unreadIn(humanThreads) }
+// Only a mail's latest read or unread mark applies (S-4580): an older mark that waits for a loaded copy to agree must
+// not show again once a newer one has settled. Returns whether this mark still owns a mail.
+const latestMark = new Map<string, number>()
+let marks = 0
+const markLatest = (ids: string[]) => {
+  const n = ++marks
+  for (const id of ids) latestMark.set(id, n)
+  return { n, owns: (id: string) => latestMark.get(id) === n }
 }
-const markUnread = (ids: string[]) => (d: Data): Data => {
-  const mark = (t: Thread): Thread => t.mails.some((m) => ids.includes(m.id)) ? { ...t, mails: t.mails.map((m) => ids.includes(m.id)
-    ? { ...m, recipients: m.recipients.map((r) => (r.id === 'human' && r.read_at ? { ...r, read_at: null } : r)) } : m) } : t
-  const humanThreads = d.humanThreads.map(mark)
-  return { ...d, humanThreads, humanArchived: d.humanArchived.map(mark), humanDeferred: d.humanDeferred.map(mark), unread: unreadIn(humanThreads) }
+// A mail's state for the human before the marks still waiting on it, and the polled row count it goes with: read,
+// unread, or null when the human isn't a recipient. A mark of a mail another mark already moved starts from there, so
+// `z` after `u` puts the count back rather than adding to it (S-4617). It holds while the polled row counts the same,
+// and goes with the last mark that took it, once that mark's overlay goes (`owner`).
+const before = new Map<string, { read: boolean | null; row: number | undefined; owner: number }>()
+// The mail's state before mark `n`: a waiting mark's, else a copy a thread view loaded, else the opposite of the mark,
+// since its caller read the mail to pick it.
+const stateBefore = (id: string, read: boolean, row: number | undefined, n: number) => {
+  const was = before.get(id)
+  if (was && was.row === row) { was.owner = n; return was }
+  const copies = getPolled().openThreads.flatMap((t) => t.mails.filter((m) => m.id === id))
+  const human = copies.flatMap((m) => m.recipients.filter((r) => r.id === 'human'))
+  const now = { read: !copies.length ? !read : human.length ? human.every((r) => !!r.read_at) : null, row, owner: n }
+  before.set(id, now)
+  return now
 }
-const isRead = (p: Data, id: string) => [...p.humanThreads, ...p.humanArchived, ...p.humanDeferred].some((t) => t.mails.some((m) => m.id === id && m.recipients.some((r) => r.id === 'human' && !!r.read_at)))
+const release = (ids: string[], n: number) => { for (const id of ids) if (before.get(id)?.owner === n) before.delete(id) }
+// A mark over the thread's row and the copies thread views loaded. A row counts its unread mail but not which, so the
+// mark takes the mail it moves off the row's count, or adds it (S-4617), over whatever the other marks show. It does
+// so while the polled row still counts what it did when the mark was made: a poll that moved it may hold the write
+// already, so its count shows, and the poll begun after the write settles the mark.
+const polledUnread = (tid: string) => humanRow(tid, getPolled())?.unread
+const markMail = (tid: string, ids: string[], { n: mark, owns }: { n: number; owns: (id: string) => boolean }, read: string | null) => {
+  const base = polledUnread(tid)
+  const moving = new Set(ids.filter((id) => { const was = stateBefore(id, !!read, base, mark).read; return was !== null && was !== !!read }))
+  return (d: Data): Data => {
+    const mine = ids.filter(owns)
+    if (!mine.length) return d
+    const mark = (t: Thread): Thread => t.mails.some((m) => mine.includes(m.id)) ? { ...t, mails: t.mails.map((m) => mine.includes(m.id)
+      ? { ...m, recipients: m.recipients.map((r) => (r.id === 'human' && (read ? !r.read_at : !!r.read_at) ? { ...r, read_at: read } : r)) } : m) } : t
+    const openThreads = d.openThreads.map(mark)
+    const n = mine.filter((id) => moving.has(id)).length
+    if (!n || polledUnread(tid) !== base) return { ...d, openThreads }
+    const row = (r: IndexRow) => (r.thread_id === tid ? { ...r, unread: Math.max(0, r.unread + (read ? -n : n)) } : r)
+    const lists = d.humanRows
+    const humanRows = { active: lists.active.map(row), archived: lists.archived.map(row), deferred: lists.deferred.map(row) }
+    return { ...d, humanRows, openThreads, unread: unreadIn(humanRows.active) }
+  }
+}
+// Whether each copy of a mail the thread views loaded shows it read: a mark settles only once all agree, so `u` never
+// reads a loaded copy the overlay stopped covering (S-4580).
+const readIn = (p: Data, id: string) => p.openThreads
+  .flatMap((t) => t.mails.filter((m) => m.id === id)).map((m) => m.recipients.some((r) => r.id === 'human' && !!r.read_at))
+// A mark's write, then the poll it asks for: the mark settles once a round begun after the write has landed.
+const markSend = async (send: () => Promise<unknown>, after: { round: number }) => {
+  await send()
+  after.round = slowBegun()
+  void refreshSlow()
+}
+const polledSince = (after: { round: number }) => after.round >= 0 && slowLanded() > after.round
 
 // Archiving hides a thread from the human's mail list, without deleting it; a new mail in
 // the thread brings it back. The row leaves the list at once; the daemon's answer follows.
@@ -298,37 +352,44 @@ export function setThreadArchived(tid: string, archived: boolean, answered = fal
   return optimistic({
     apply: moveLatest(tid, archived ? 'archived' : 'inbox'),
     send: async () => { await api('POST', `/api/agents/human/threads/${tid}/${archived ? 'archive' : 'unarchive'}`); void refreshSlow() },
-    settled: (p) => p.humanArchived.some((t) => t.thread_id === tid) === archived,
+    settled: (p) => p.humanRows.archived.some((t) => t.thread_id === tid) === archived,
     failed: archived ? "Couldn't archive" : "Couldn't unarchive",
   })
 }
 // The human's mail that `u` marked unread, by thread. A thread view that is showing one doesn't read it again when its
 // reload sees it unread (ThreadView); the entry goes when the thread view opens again, or the mail is read.
 export const keptUnread = new Map<string, Set<string>>()
-// Marks the human's mail read as the thread opens: the rows stop being unread at once.
-export function markMailRead(ids: string[]): Promise<boolean> {
+// Marks the human's mail in a thread read as the thread opens: the row stops being unread at once.
+export function markMailRead(tid: string, ids: string[]): Promise<boolean> {
   const at = new Date().toISOString()
   for (const kept of keptUnread.values()) for (const id of ids) kept.delete(id)
+  const latest = markLatest(ids)
+  const after = { round: -1 }
   return optimistic({
-    apply: markRead(ids, at),
-    send: async () => { await api('POST', '/api/agents/human/read', { ids }); void refreshSlow() },
-    settled: (p) => ids.every((id) => isRead(p, id)),
+    apply: markMail(tid, ids, latest, at),
+    send: () => markSend(() => api('POST', '/api/agents/human/read', { ids }), after),
+    settled: (p) => polledSince(after) && ids.every((id) => !latest.owns(id) || readIn(p, id).every(Boolean)),
     failed: "Couldn't mark read",
+    done: () => release(ids, latest.n),
   })
 }
-// Marks the human's copies of these mail unread again (`u`, S-2246): the rows count them at once.
+// Marks the human's copies of these mail unread again (`u`, S-2246): the row counts them at once.
 export function markThreadUnread(tid: string, ids: string[]): Promise<boolean> {
   keptUnread.set(tid, new Set([...(keptUnread.get(tid) ?? []), ...ids]))
+  const latest = markLatest(ids)
+  const after = { round: -1 }
   return optimistic({
-    apply: markUnread(ids),
-    send: async () => { await api('POST', `/api/agents/human/threads/${tid}/unread`, { ids }); void refreshSlow() },
-    settled: (p) => ids.every((id) => !isRead(p, id)),
+    apply: markMail(tid, ids, latest, null),
+    send: () => markSend(() => api('POST', `/api/agents/human/threads/${tid}/unread`, { ids }), after),
+    settled: (p) => polledSince(after) && ids.every((id) => !latest.owns(id) || readIn(p, id).every((x) => !x)),
     failed: "Couldn't mark unread",
+    done: () => release(ids, latest.n),
   })
 }
 // The mail list in the order the inbox shows it: permission requests first, then the rest.
 export function mailOrder(d = getData()) {
-  return [...d.humanThreads.filter(hasPendingPermission), ...d.humanThreads.filter((t) => !hasPendingPermission(t))]
+  const rows = humanIndex(d, 'active')
+  return [...rows.filter((r) => r.ask === 'pending'), ...rows.filter((r) => r.ask !== 'pending')]
 }
 // The mail to open after `tid` leaves the list: the one above when the user came to it from below,
 // else the one below; at either end, the other neighbour; null when none is left.
@@ -365,7 +426,7 @@ function advanceFrom(tid: string) {
   // under it, and the queue walks as the desktop's does). The desktop keeps the mail order.
   const page = shell.isPhone() ? queuedRows(tid) : null
   const shown = page?.shown ?? []
-  const list = d.humanDeferred.some((t) => t.thread_id === tid) ? d.humanDeferred : shown.includes(tid) ? shown.map((t) => ({ thread_id: t })) : mailOrder(d)
+  const list = isDeferredThread(tid) ? humanIndex(d, 'deferred') : shown.includes(tid) ? shown.map((t) => ({ thread_id: t })) : mailOrder(d)
   const next = nextMail(list, tid, priorMail)
   if (page && shown.includes(tid)) queue = { order: page.saved.order.filter((t) => t !== tid), from: page.saved.from }
   if (next) selectThread(next)
@@ -378,7 +439,7 @@ export function setThreadDeferred(tid: string, deferred: boolean): Promise<boole
   return optimistic({
     apply: moveLatest(tid, deferred ? 'deferred' : 'inbox'),
     send: async () => { await api('POST', `/api/agents/human/threads/${tid}/${deferred ? 'defer' : 'undefer'}`); void refreshSlow() },
-    settled: (p) => p.humanDeferred.some((t) => t.thread_id === tid) === deferred,
+    settled: (p) => p.humanRows.deferred.some((t) => t.thread_id === tid) === deferred,
     failed: deferred ? "Couldn't defer" : "Couldn't undefer",
   })
 }
@@ -687,7 +748,7 @@ export function viewContext() {
   if (key.startsWith('agent:') && a) return `${a.name} (${a.id}), an agent's terminal`
   if (key.startsWith('view:') && a) return `${a.name} (${a.id}), mootr's view of an agent's conversation`
   if (key.startsWith('shell:')) return 'a plain terminal'
-  if (key.startsWith('thread:')) { const tid = key.slice(7); const t = getData().humanThreads.find((x) => x.thread_id === tid); return `the mail thread "${plainSubject(t?.mails[0].subject ?? '')}" (thread ${tid})` }
+  if (key.startsWith('thread:')) { const tid = key.slice(7); return `the mail thread "${plainSubject(humanRow(tid)?.subject ?? '')}" (thread ${tid})` }
   if (key.startsWith('mail:') && a) return `${a.name}'s inbox`
   if (key.startsWith('details:') && a) return `${a.name}'s details`
   if (key.startsWith('instructions:') && a) return `${a.name}'s instructions`

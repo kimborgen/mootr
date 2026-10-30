@@ -17,6 +17,7 @@ import * as db from './db.ts';
 import * as itsa from './itsa.ts';
 import { buildAttribution, computeSteps, COST_NOTE } from './issue-costs.ts';
 import { due, runSync, runSliced } from './slice.ts';
+import { timed } from './stall.ts';
 import { EFFORT_KEYS } from './retro.ts';
 import { isReviewerType, reviewerTypes } from './agent-types.ts';
 import { accountFor } from './accounts.ts';
@@ -263,7 +264,10 @@ function* statsSteps(opts: Options = {}) {
   }
 
   // ITSA state is read before the item pass, so the streamed items are the only open query.
-  const attribute = buildAttribution().attribute;
+  // The steps that don't yield are labelled, so a long slice names its step in daemon.log (S-4356).
+  if (due()) yield;
+  const attribute = timed('activity: attribution', () => buildAttribution()).attribute;
+  if (due()) yield;
   // weekly_percent is not part of the activity rows, and its worth estimate costs over 100 ms the first time.
   const c = yield* computeSteps({ days, now, worthMid: () => null });
   const categoryOf = new Map(itsa.statuses().map((s) => [s.name, s.category as string]));
@@ -288,13 +292,14 @@ function* statsSteps(opts: Options = {}) {
 
   // Review rounds: status moves from a review category back to an active or ready one.
   const moves = new Map<string, number>();
-  for (const e of d.prepare("SELECT itsa_id, data FROM itsa_events WHERE type = 'status'").all() as { itsa_id: string; data: string | null }[]) {
+  // Streamed and yielded, so the whole history of status events never holds the loop (S-4356).
+  for (const e of d.prepare("SELECT itsa_id, data FROM itsa_events WHERE type = 'status'").iterate() as Iterable<{ itsa_id: string; data: string | null }>) {
     const x = e.data ? (JSON.parse(e.data) as { from?: string; to?: string }) : {};
-    if (!REVIEW.has(categoryOf.get(x.from ?? '') ?? '') || !ACTIVE_OR_READY.has(categoryOf.get(x.to ?? '') ?? '')) continue;
-    moves.set(e.itsa_id, (moves.get(e.itsa_id) ?? 0) + 1);
+    if (REVIEW.has(categoryOf.get(x.from ?? '') ?? '') && ACTIVE_OR_READY.has(categoryOf.get(x.to ?? '') ?? '')) moves.set(e.itsa_id, (moves.get(e.itsa_id) ?? 0) + 1);
+    if (due()) yield;
   }
   if (due()) yield;
-  const reviewers = reviewersByItsa(d, agents, c.items);
+  const reviewers = timed('activity: reviewers', () => reviewersByItsa(d, agents, c.items));
   if (due()) yield;
 
   // Roll-up time over the ITSA tree, each node's own counted once.

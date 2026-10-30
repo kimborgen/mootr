@@ -3,12 +3,13 @@ import { ds, type Story } from './stories/types'
 import { ALL_THREADS, AGENTS_STOPPED, ASK_ITSA, DECISION, STATUSES, T_ARCH, T_AWAIT, T_ASK, T_LONG, T_PERM, T_PLAIN, T_RICH, T_UNREAD, WAITING, mail } from './stories/mailFixtures'
 import { OnMount } from './stories/helpers'
 import { MANY_ASKS } from './mail/NeedsYouList.stories'
+import { humanRowsOf } from './mail/thread-index'
 import type { Data } from './store'
 import type { Permission, Thread } from './types'
 
 const leftRef = { current: null as HTMLElement | null }
 const side = () => <div className="tree-side" style={{ width: '100%' }}><MailSide leftRef={leftRef} /></div>
-const sidebar = (threads: Thread[], o: Partial<Data> = {}): Partial<Data> => ({ humanThreads: threads, humanArchived: [], itsaStatuses: STATUSES, ...o })
+const sidebar = (threads: Thread[], o: Partial<Data> = {}, archived: Thread[] = [], deferred: Thread[] = []): Partial<Data> => ({ humanRows: humanRowsOf(threads, archived, deferred), itsaStatuses: STATUSES, ...o })
 const press = (label: string) => (el: HTMLElement) => [...el.querySelectorAll<HTMLElement>('.mail-toggle')].find((b) => b.textContent?.startsWith(label))?.click()
 // A harness dialog still with the stopped agent's parent (S-594).
 const DIALOG: Permission = { id: 'fx-perm-d', agent_id: 'fx-ops', agent_name: 'fixture-ops', machine: 'fixture-machine', status: 'pending', kind: 'dialog', dialog: 1, action: 'Claude Code asks to allow editing config.json', with: ['fixture-cos'], subject: 'fixture-ops: editing config.json', created_at: new Date(Date.now() - 6 * 60000).toISOString() }
@@ -24,6 +25,7 @@ export const stories: Story[] = [{
   rules: [
     'Rows are `--size-row-tree` tall (the tree\'s row), `--size-hit-touch` on a phone, with the unread dot, semibold subject and `--text-primary` ink for unread; read rows stay `--text-secondary` (' + ds('Density') + ').',
     'Waiting is never colour alone: a status glyph, a shield, a question mark or a clock, and the words (`waits on you`, `decision`) say it (' + ds('State vocabulary') + ').',
+    'A row draws from the thread\'s index row alone (S-4578), never its mails: its title, subject, message count, the last mail\'s age and sender, its unread count and pending ask. A pending request\'s thread pins by when the thread started.',
     'A thread that waits on your answer can\'t be archived: its archive button is disabled with the reason in its title, and a swipe doesn\'t archive it.',
     'On a phone a row swipes left to archive or unarchive (96 px of reveal); on a desktop an archive button shows on hover and focus, and the age gives way to it.',
     'A row has Defer beside Archive on hover and focus (on a phone: the thread\'s top bar and menu); in the Deferred list the same slot undefers. A thread that waits on your answer can be deferred too: it leaves the inbox and its count but stays under To answer, unanswered; a pending permission request too (nothing is answered, and the agent isn\'t told).',
@@ -36,21 +38,21 @@ export const stories: Story[] = [{
   states: [
     { name: 'Inbox', data: sidebar([T_UNREAD, T_PLAIN, T_LONG]), render: side },
     { name: 'In a sidebar pane', data: sidebar([T_UNREAD, T_PLAIN, T_LONG]), render: () => <div className="tree-side" style={{ width: '100%', height: 260, display: 'flex', flexDirection: 'column' }}><MailSide leftRef={leftRef} pane /></div> },
-    { name: 'Everything waiting on you', data: sidebar(ALL_THREADS, { ...WAITING, agents: AGENTS_STOPPED, perms: [T_PERM.mails[0].permission!], humanArchived: [T_ARCH] }), render: side },
+    { name: 'Everything waiting on you', data: sidebar(ALL_THREADS, { ...WAITING, agents: AGENTS_STOPPED, perms: [T_PERM.mails[0].permission!] }), render: side },
     { name: 'An ITSA\'s ask, stopping an agent', data: sidebar([T_PLAIN, T_ASK], { attention: [ASK_ITSA], itsas: [ASK_ITSA], agents: AGENTS_STOPPED }), render: side },
     { name: 'A decision waiting', data: sidebar([T_RICH, T_PLAIN], { decisions: [DECISION] }), render: side },
-    { name: 'Awaiting a reply', data: sidebar([T_PLAIN], { humanArchived: [T_ARCH], humanThreads: [T_AWAIT, T_PLAIN] }), render: () => <OnMount run={press('Awaiting')}>{side()}</OnMount> },
-    { name: 'To answer', data: sidebar([T_PLAIN], { ...WAITING, agents: AGENTS_STOPPED, perms: [T_PERM.mails[0].permission!], humanArchived: [T_ARCH] }), render: () => <OnMount run={press('To answer')}>{side()}</OnMount> },
+    { name: 'Awaiting a reply', data: sidebar([T_AWAIT, T_PLAIN], {}, [T_ARCH]), render: () => <OnMount run={press('Awaiting')}>{side()}</OnMount> },
+    { name: 'To answer', data: sidebar([T_PLAIN], { ...WAITING, agents: AGENTS_STOPPED, perms: [T_PERM.mails[0].permission!] }), render: () => <OnMount run={press('To answer')}>{side()}</OnMount> },
     { name: 'Needs you', data: sidebar([T_PLAIN], { asks: MANY_ASKS }), render: () => <OnMount run={(el) => el.querySelector<HTMLElement>('[data-needs-you]')?.click()}>{side()}</OnMount> },
     { name: 'Needs you, nothing waiting', data: sidebar([T_PLAIN], { asks: [] }), render: () => <OnMount run={(el) => el.querySelector<HTMLElement>('[data-needs-you]')?.click()}>{side()}</OnMount> },
-    { name: 'Archived', data: sidebar([T_PLAIN], { humanArchived: [T_ARCH] }), render: () => <OnMount run={press('Archived')}>{side()}</OnMount> },
+    { name: 'Archived', data: sidebar([T_PLAIN], {}, [T_ARCH]), render: () => <OnMount run={press('Archived')}>{side()}</OnMount> },
     { name: 'With the parent or chief of staff', data: sidebar([T_PLAIN], { delegateDialogs: [DIALOG] }), render: () => <OnMount run={(el) => el.querySelector<HTMLDetailsElement>('.mail-delegated')?.setAttribute('open', '')}>{side()}</OnMount> },
     { name: 'History on a phone', data: sidebar([T_PLAIN]), render: () => <OnMount run={press('History')}>{side()}</OnMount> },
-    { name: 'Deferred threads', data: sidebar([T_PLAIN], { humanDeferred: [T_ARCH] }), render: () => <OnMount run={press('Deferred')}>{side()}</OnMount> },
+    { name: 'Deferred threads', data: sidebar([T_PLAIN], {}, [], [T_ARCH]), render: () => <OnMount run={press('Deferred')}>{side()}</OnMount> },
     { name: 'Deferred asks', data: sidebar([T_RICH, T_PLAIN], { decisions: [{ ...DECISION, deferred: true }] }), render: side },
     { name: 'Many threads, long subjects', data: sidebar(MANY, { unread: 4 }), render: side },
-    { name: 'Loading', data: { humanThreads: [], loaded: { agents: true, mail: false, itsas: true } }, render: side },
-    { name: 'Loading, with a request waiting', data: { humanThreads: [], delegateDialogs: [DIALOG], loaded: { agents: true, mail: false, itsas: true } }, render: side },
+    { name: 'Loading', data: { humanRows: humanRowsOf(), loaded: { agents: true, mail: false, itsas: true } }, render: side },
+    { name: 'Loading, with a request waiting', data: { humanRows: humanRowsOf(), delegateDialogs: [DIALOG], loaded: { agents: true, mail: false, itsas: true } }, render: side },
     { name: 'Empty', data: sidebar([]), render: side },
   ],
 }]

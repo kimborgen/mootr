@@ -34,19 +34,30 @@ type reconcileState struct {
 	// held is the agents whose running compaction already has its reconcile:held event (S-273).
 	held      map[string]bool
 	startedAt time.Time
+	// listWarned is when a pass last logged an unreadable OpenCode listing (restop.go): once a minute while it lasts.
+	listWarned time.Time
 }
 
 // StartReconcile notes the tmux server running now, so a daemon restart under a live server loses no agent, and runs
-// the reconcile loop, and the idle compaction sweep beside it, until the daemon's context ends.
+// the reconcile loop, and the idle compaction sweep beside it, until the daemon's context ends. Its first pass runs
+// before it returns, so the API, which listens after, never serves the states from before a restart (src/daemon.ts
+// reconciles before it listens, S-4371); a first pass still running after reconcileTimeout goes on in the loop, which
+// starts its ticks once it ends, and the daemon listens meanwhile.
 func (l *Lifecycle) StartReconcile() {
 	ctx, cancel := context.WithTimeout(l.ctx, reconcileTimeout)
 	l.reconcile.server, _ = l.tmux.ServerID(ctx)
 	cancel()
 	l.reconcile.startedAt = time.Now()
 	l.startIdleSweep()
+	booted := make(chan struct{})
 	l.bg.Add(1)
 	go func() {
 		defer l.bg.Done()
+		// bootCtx bounds the first pass, as reconcileTimeout bounds every tick's.
+		bootCtx, endBoot := context.WithTimeout(l.ctx, reconcileTimeout)
+		l.Reconcile(bootCtx, l.tmux.SharedSnapshot(bootCtx))
+		endBoot()
+		close(booted)
 		t := time.NewTicker(ReconcileEvery)
 		defer t.Stop()
 		for {
@@ -60,6 +71,15 @@ func (l *Lifecycle) StartReconcile() {
 			cancel()
 		}
 	}()
+	// The wait has a timer of its own, so a pass that ignores its context can't keep the daemon from listening.
+	wait := time.NewTimer(reconcileTimeout)
+	defer wait.Stop()
+	select {
+	case <-booted:
+	case <-wait.C:
+		slog.Warn("reconcile: the first pass outran its timeout; listening before it ends")
+	case <-l.ctx.Done():
+	}
 }
 
 type lostEvent struct {
@@ -123,6 +143,7 @@ func (l *Lifecycle) Reconcile(ctx context.Context, snap *tmux.Snapshot) {
 	}
 	now := time.Now()
 	lost := false
+	var listing activeListing
 	for _, a := range agents {
 		// Registered agents (no workspace) run outside stam: no terminal to check.
 		if a.Workspace == nil || *a.Workspace == "" || a.Lifecycle == "archived" {
@@ -189,6 +210,10 @@ func (l *Lifecycle) Reconcile(ctx context.Context, snap *tmux.Snapshot) {
 			}
 			continue
 		}
+		// S-4254: a stopped OpenCode agent's session the shared server still runs is stopped again.
+		if orphanCandidate(a, gone) {
+			l.restopOrphan(ctx, a, &listing)
+		}
 		// S-358: on the first pass, a compaction the daemon's restart cut short is finished and resumed.
 		if first && a.Lifecycle == "active" && gone && l.compactionExit(ctx, a) {
 			lost = true
@@ -215,6 +240,12 @@ func (l *Lifecycle) Reconcile(ctx context.Context, snap *tmux.Snapshot) {
 			l.update(ctx, a.ID, db.Field{Col: "lifecycle", Val: "shut_down"}, db.Field{Col: "activity", Val: "unknown"},
 				db.Field{Col: "activity_detail", Val: "harness exited"})
 			l.event(ctx, a.ID, "exited", nil)
+			// S-4254: an OpenCode turn outlives its TUI in the shared server; it stops now, as a quit's would.
+			if a.Harness == "opencode" {
+				if fresh, err := l.db.GetAgent(ctx, a.ID); err == nil {
+					l.restopOrphan(ctx, fresh, &listing)
+				}
+			}
 		case a.Lifecycle == "active" && l.sessionEndedLong(ctx, a, now):
 			// The harness ended its session but its pane lives on, so nothing can reach it: it shuts down like an exit.
 			if err := l.tmux.KillSession(ctx, a.ID); err != nil {

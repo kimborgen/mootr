@@ -391,10 +391,12 @@ func TestEventWaitThroughTheRoutes(t *testing.T) {
 	if got := f.text("SELECT activity FROM agents WHERE id = 'achild'"); got != "waiting" {
 		t.Errorf("the agent is %s", got)
 	}
-	// rest is still refused, before any write.
-	if rec := declare(`{"on":"event","rest":true,"filter":{"source":"github"}}`); rec.Code != 501 {
+	// rest asks for a rest on the wait it made (S-4332); that wait goes again here, so the one above is alone.
+	if rec := declare(`{"on":"event","rest":true,"filter":{"source":"github"}}`); rec.Code != 200 ||
+		f.count("SELECT COUNT(*) FROM waits WHERE kind = 'event' AND json_extract(data, '$.rest') = 1") != 1 {
 		t.Errorf("rest: %d %s", rec.Code, rec.Body.String())
 	}
+	f.sql("DELETE FROM waits WHERE json_extract(data, '$.rest') = 1")
 	f.post2("POST", "/api/events", `{"source":"github","type":"check_run","subjects":["github:o/r#13"],"summary":"another PR","dedupe_key":"n1"}`)
 	if f.count("SELECT COUNT(*) FROM waits WHERE kind = 'event'") != 1 {
 		t.Fatal("an event outside the filter cleared the wait")

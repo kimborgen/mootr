@@ -1696,6 +1696,8 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .rollup.rq .unsure { background: var(--rq-unsure); }
 .rollup.rq .unverified { background: var(--border-strong); }
 .req-side { max-height: 30%; }
+/* The empty stand-in while requirements are off (ReqSide): no room, but still rendered for the poll's on-screen check. */
+.req-side:empty { min-height: 0; flex: none; }
 .req-side .rq-flagged { margin-left: auto; color: var(--rq-violates); font-size: var(--type-chrome-sm); font-variant-caps: normal; letter-spacing: 0; text-transform: none; }
 .rq-tag { flex: none; color: var(--text-muted); font-size: var(--type-chrome-xs); }
 .rrow.closed .ikey { color: var(--text-disabled); }
@@ -2693,6 +2695,7 @@ fieldset.ro { border: 0; margin: 0; padding: 0; min-width: 0; color: var(--text-
   .irow .rollup { width: 36px; }
   /* Requirements: the section shares the Issues tab; the world stacks in one column. */
   #w-left.phone-issues .req-side { max-height: none; }
+  #w-left.phone-issues .req-side:empty { flex: none; }
   .rq-verdict { grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--space-1); padding: var(--space-2) 0; }
   .rq-verdict .pbar { grid-column: 1 / -1; }
   .rq-waive, .rq-sheet-actions .btn, .rq-chip.link { min-height: var(--size-hit-touch); }
@@ -3710,7 +3713,10 @@ details[open] > summary .ov-what-sum > span { white-space: normal; }
 /* Desktop sidebar panes (S-1421): a stack of panes, each with a tab strip and one tab's content. */
 .side-panes { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .side-pane { flex: 1 1 0; min-height: var(--size-side-pane-min); display: flex; flex-direction: column; overflow: hidden; }
-.side-pane + .side-pane { border-top: 1px solid var(--border-subtle); }
+/* The separator between two panes (S-3810): the generic .sep.h, with the hairline the pane border was. Never drawn on a phone, which has no panes. */
+.side-panes > .sep.h { touch-action: none; }
+.side-panes > .sep.h::after { content: ''; position: absolute; top: 2px; height: 1px; left: 0; right: 0; background: var(--separator-idle); }
+.side-panes > .sep.h:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--focus-ring-width) var(--focus-ring); }
 .pane-tabs { flex: none; display: flex; align-items: stretch; height: var(--size-pane-tab-compact); background: var(--tabbar-bg); border-bottom: 1px solid var(--tabbar-border); }
 .side-panes[data-tab-bar="regular"] .pane-tabs { height: var(--size-tab-bar); }
 .pane-tab { position: relative; flex: 1 1 0; min-width: 0; display: flex; align-items: center; justify-content: center; gap: var(--space-15); padding: 0 var(--space-2); overflow: hidden; white-space: nowrap;

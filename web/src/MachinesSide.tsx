@@ -7,7 +7,7 @@
 import { memo } from 'react'
 import { Icon } from './Icon'
 import { isPhone, useShell } from './shell/layout'
-import { useData } from './store'
+import { useData, useMachinesShown } from './store'
 import type { Machine } from './types'
 import { hideMenu, menuOpen, menuTrigger, showPopover } from './ui/menu'
 import { setUi, useUi } from './ui/state'
@@ -152,11 +152,13 @@ function MachinesAll({ machines }: { machines: Machine[] }) {
   </div>
 }
 
-// In a sidebar pane (`pane`, S-1421) the tab says which list shows, so there is no fold.
-export function MachinesSide({ pane }: { pane?: boolean } = {}) {
+// In a sidebar pane (`pane`, S-1421) the tab says which list shows, so there is no fold. `shown`: the list is
+// on screen; the machines poll runs at 5 s only while it is (store.ts).
+export function MachinesSide({ pane, shown = true }: { pane?: boolean; shown?: boolean } = {}) {
   const { machines } = useData()
   const ui = useUi()
   useShell()
+  useMachinesShown(shown)
   const phone = isPhone()
   const folded = !pane && !!ui.machinesFolded
   if (!machines.length) return null

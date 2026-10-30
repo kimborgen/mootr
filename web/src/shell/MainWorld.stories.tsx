@@ -1,5 +1,6 @@
 import { MainWorld } from './MainWorld'
 import { AGENTS } from '../stories/fixtures'
+import { humanRowsOf } from '../mail/thread-index'
 import { mail, rapidThreads, STATUSES, T_ARCH, T_PERM, T_PLAIN, T_UNREAD, threadRoutes } from '../stories/mailFixtures'
 import { setRapid } from '../views/rapid'
 import { pane, seedShell } from '../stories/shell'
@@ -72,13 +73,13 @@ export const stories: Story[] = [{
     { name: 'Split side by side', data: { agents: AGENTS }, ...row, render: Main },
     { name: 'Split stacked', data: { agents: AGENTS }, ...col, render: Main },
     { name: 'Empty pane', data: { agents: AGENTS }, ...empty, render: Main },
-    { name: 'Thread tab bar, alone in main', ...threadTab(T_PLAIN, { humanThreads: [T_PLAIN] }), render: Main },
-    { name: 'Thread tab bar, deferred', ...threadTab(T_DEFER, { humanDeferred: [T_DEFER] }), render: Main },
-    { name: 'Thread tab bar, archived', ...threadTab(T_ARCH, { humanArchived: [T_ARCH] }), render: Main },
-    { name: 'Thread tab bar, archive disabled while a permission waits', ...threadTab(T_PERM, { humanThreads: [T_PERM], perms: [T_PERM.mails[0].permission!] }), render: Main },
-    { name: 'Thread tab bar, with its ITSA and agent chips', ...threadTab(T_CHIPS, { humanThreads: [T_CHIPS] }), render: Main },
-    { name: 'Thread tab bar, in the Inbox pane', data: { agents: AGENTS, itsaStatuses: STATUSES, humanThreads: [T_PLAIN, T_UNREAD] }, ...inboxPane, routes: { ...inboxPane.routes, ...threadRoutes(T_PLAIN) }, render: Main },
+    { name: 'Thread tab bar, alone in main', ...threadTab(T_PLAIN, { humanRows: humanRowsOf([T_PLAIN]) }), render: Main },
+    { name: 'Thread tab bar, deferred', ...threadTab(T_DEFER, { humanRows: humanRowsOf([], [], [T_DEFER]) }), render: Main },
+    { name: 'Thread tab bar, archived', ...threadTab(T_ARCH, { humanRows: humanRowsOf([], [T_ARCH]) }), render: Main },
+    { name: 'Thread tab bar, archive disabled while a permission waits', ...threadTab(T_PERM, { humanRows: humanRowsOf([T_PERM]), perms: [T_PERM.mails[0].permission!] }), render: Main },
+    { name: 'Thread tab bar, with its ITSA and agent chips', ...threadTab(T_CHIPS, { humanRows: humanRowsOf([T_CHIPS]) }), render: Main },
+    { name: 'Thread tab bar, in the Inbox pane', data: { agents: AGENTS, itsaStatuses: STATUSES, humanRows: humanRowsOf([T_PLAIN, T_UNREAD]) }, ...inboxPane, routes: { ...inboxPane.routes, ...threadRoutes(T_PLAIN) }, render: Main },
     { name: 'Terminal and conversation switch', data: { agents: WITH_VIEW }, ...sw, routes: { ...sw.routes, ...viewRoute }, setup: () => { setRapid('fx-dev', false); sw.setup() }, render: Main },
-    { name: 'Rapid-fire mode', data: { agents: WITH_VIEW, humanThreads: rapidThreads(8) }, ...sw, setup: () => { setRapid('fx-dev', true); sw.setup() }, render: Main },
+    { name: 'Rapid-fire mode', data: { agents: WITH_VIEW, rapidWith: { 'fx-dev': { threads: rapidThreads(8), more: false } } }, ...sw, setup: () => { setRapid('fx-dev', true); sw.setup() }, render: Main },
   ],
 }]

@@ -10,7 +10,7 @@
 import { selectAgent, selectThread } from '../actions'
 import { Icon } from '../Icon'
 import { ago } from '../format'
-import { byId, getData, ownPermThread, permThread, useData, type Data } from '../store'
+import { byId, getData, humanRow, ownPermThread, permThread, useData, type Data } from '../store'
 import { Loading } from '../Loading'
 import { hideMenu, showPopover } from '../ui/menu'
 import { isClosed, openItsa, personName, StatusGlyph, statusLabel } from './itsa'
@@ -43,7 +43,7 @@ export const isPlainWait = (r: WaitingRow) => r.icon === 'user' && !r.itsa && !r
 
 // A wait's thread can be a raw mail id the daemon couldn't resolve (mail held on a peer); opening it
 // would show an empty thread, so a thread the human doesn't hold opens the agent instead.
-export const holds = (tid: string) => { const d = getData(); return [...d.humanThreads, ...d.humanArchived, ...d.humanDeferred].some((t) => t.thread_id === tid) }
+export const holds = (tid: string) => !!humanRow(tid, getData())
 const openThreadOrAgent = (tid: string | undefined, agent?: Agent) => (tid && (holds(tid) || !agent) ? selectThread(tid) : agent && selectAgent(agent.id))
 
 const REQUEST_ID = /^p[0-9a-f]{6}$/
@@ -67,19 +67,19 @@ export function useToAnswerCount(): number {
 }
 
 // The rows that wait on the human: every count of them is their length (S-353: deferred rows leave).
-export function waitingRows(data: Pick<Data, 'attention' | 'agents' | 'perms' | 'decisions'> & Partial<Pick<Data, 'humanDeferred'>>): WaitingRow[] {
+export function waitingRows(data: Pick<Data, 'attention' | 'agents' | 'perms' | 'decisions'> & Partial<Pick<Data, 'humanRows'>>): WaitingRow[] {
   return allRows(data).filter((r) => !r.deferred)
 }
 
 // The asks and decisions the human deferred (S-353): open, listed under the mail list's Deferred group.
-export function deferredRows(data: Pick<Data, 'attention' | 'agents' | 'perms' | 'decisions'> & Partial<Pick<Data, 'humanDeferred'>>): WaitingRow[] {
+export function deferredRows(data: Pick<Data, 'attention' | 'agents' | 'perms' | 'decisions'> & Partial<Pick<Data, 'humanRows'>>): WaitingRow[] {
   return allRows(data).filter((r) => r.deferred)
 }
 
 // The rows themselves, from the store's data, so they can be tested without rendering.
-function allRows({ attention, agents, perms, decisions, humanDeferred = [] }: Pick<Data, 'attention' | 'agents' | 'perms' | 'decisions'> & Partial<Pick<Data, 'humanDeferred'>>): WaitingRow[] {
+function allRows({ attention, agents, perms, decisions, humanRows }: Pick<Data, 'attention' | 'agents' | 'perms' | 'decisions'> & Partial<Pick<Data, 'humanRows'>>): WaitingRow[] {
   // A thread the human deferred with Defer (S-1068) parks its asks too: they leave the counts and stay in To answer.
-  const parked = new Set(humanDeferred.map((t) => t.thread_id))
+  const parked = new Set((humanRows?.deferred ?? []).map((t) => t.thread_id))
   const rows: WaitingRow[] = attention.filter((x) => !isClosed(x)).map((x) => ({
     key: `i:${x.id}`, who: personName(x.owner), what: `${x.key} ${x.title}`, why: `${statusLabel(x.status)}: waits on you`, since: x.since, icon: 'itsa', status: x.status, open: () => openItsa(x.id), itsa: x, deferred: x.deferred || parked.has(x.ask_thread_id ?? ''),
   }))

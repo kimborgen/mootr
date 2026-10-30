@@ -2,6 +2,7 @@
 // request, a decision, a suggested input. Nobody here is real: the senders are fixtures.ts's
 // agents, the text is made up, and the times are relative to now so `ago` reads the same.
 import type { ReactNode } from 'react'
+import { humanRowsOf } from '../mail/thread-index'
 import type { Data } from '../store'
 import type { Agent, DecisionMail, ItsaAttention, ItsaStatus, Mail, Permission, Thread } from '../types'
 import { AGENTS } from './fixtures'
@@ -155,7 +156,7 @@ export const AGENTS_STOPPED: Agent[] = AGENTS.map((a) => (a.id === OPS ? { ...a,
 
 // The inbox with everything waiting on the human: an ITSA's ask, a request, a decision.
 export const WAITING: Partial<Data> = {
-  humanThreads: ALL_THREADS, humanArchived: [T_ARCH], unread: 4,
+  humanRows: humanRowsOf(ALL_THREADS, [T_ARCH]), unread: 4,
   itsaStatuses: STATUSES, attention: [ASK_ITSA], decisions: [DECISION], perms: [PERM],
   itsas: [ASK_ITSA],
 }

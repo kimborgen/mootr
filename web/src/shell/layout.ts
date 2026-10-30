@@ -7,7 +7,7 @@
 // The worlds and which one shows are the daemon's (src/layout.ts), shared by every client
 // and arranged by agents too: they come and go through layout-sync.ts. The side worlds'
 // sizes and whether they're open stay per browser.
-import { useSyncExternalStore } from 'react'
+import { createContext, useContext, useRef, useSyncExternalStore } from 'react'
 import { token } from '../api'
 import { PAGE } from '../page'
 import { defaultWorld, emptyLayout, isEmptyLayout, validLayout, type Layout, type LayoutOp } from '../../../src/layout-ops.ts'
@@ -224,6 +224,31 @@ export function viewElement(key: string) {
   if (!el) { el = document.createElement('div'); el.className = 'view'; el.dataset.key = key; viewStore().append(el); elements.set(key, el) }
   return el
 }
+
+// Whether a view is on screen: its element is in the current main world's pane and not hidden.
+// A view with no element (a test or a story renders it alone) counts as shown.
+export function viewShown(key: string | undefined): boolean {
+  const el = key === undefined ? undefined : elements.get(key)
+  return !el || (!el.hidden && !!el.closest('#w-main'))
+}
+const shownListeners = new Set<() => void>()
+// The main world moved views (a pane adopted, hid or parked one): each view reads its shown state again.
+export function shownChanged() { for (const fn of shownListeners) fn() }
+export function useViewShown(key: string | undefined): boolean {
+  return useSyncExternalStore((fn) => { shownListeners.add(fn); return () => { shownListeners.delete(fn) } }, () => viewShown(key))
+}
+// The tick a view refetches on. While the view shows, it is the tick, so each tick refetches.
+// While hidden it holds the last tick the view showed at, so the first tick on show is a new
+// value: the view refetches once for the ticks it missed.
+export function useShownTick(key: string | undefined, tick: number): number {
+  const held = useRef(tick)
+  if (useViewShown(key)) held.current = tick
+  return held.current
+}
+// The key of the view a component renders in (S-4670): ViewHost provides it, so a reader deep in a view
+// (a settings preview) gates on that view without being handed its key. Outside a view it is undefined.
+export const ViewKeyContext = createContext<string | undefined>(undefined)
+export const useViewKey = () => useContext(ViewKeyContext)
 
 // --- Worlds -------------------------------------------------------------------------
 

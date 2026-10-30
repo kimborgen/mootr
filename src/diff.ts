@@ -399,8 +399,8 @@ export function reviewOf(state: any, shownHead: string): ReviewVerdict | null {
   return { verdict, by: reviewAgentOfComment(desc), summary: summary || null, at: at(newest) || null, head: state.checksHead, stale: state.checksHead !== shownHead };
 }
 
-// The review of a repo's PR: its watch snapshot is kept after a merge or a close (nothing deletes watch_state), so a merged
-// PR still shows its last verdict. null when the repo has no GitHub origin, the PR isn't watched, or nothing is posted.
+// The review of a repo's PR: its watch snapshot is kept after a merge or a close (TS never deletes watch_state; the Go daemon drops only
+// issue, repo and typeless rows, never a PR's), so a merged PR still shows its last verdict. null when the repo has no GitHub origin, the PR isn't watched, or nothing is posted.
 export async function reviewFor(repo: string, pr: number, shownHead: string): Promise<ReviewVerdict | null> {
   try {
     const slug = githubSlug((await run(['config', '--get', 'remote.origin.url'], { cwd: checkoutOf(repo) })).stdout);

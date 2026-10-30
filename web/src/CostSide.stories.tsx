@@ -22,7 +22,7 @@ export const stories: Story[] = [{
   name: 'Cost',
   group: 'Tree and shell',
   what: 'The Cost tab of the desktop sidebar panes: one compact entry per subscription or paid account stam manages. A subscription shows its 5-hour and 7-day meters, and when the data exists its API-equivalent use, its actual paid spend (extra credits), and a budget bar. An account with no subscription, such as OpenRouter, shows its paid spend and its budget bar. The details open from the entry.',
-  when: 'The sidebar panes on a desktop, in the third pane beside Machines (showing by default); clicking the showing tab opens the Usage page. A phone does not draw panes. It loads when the tab mounts, again on a usage change (at most every 30 seconds; a change inside the gap loads when it ends), when the page becomes visible, and every 5 minutes.',
+  when: 'The sidebar panes on a desktop, in the third pane beside Machines (showing by default); clicking the showing tab opens the Usage page. A phone does not draw panes. It reads only while the tab shows (and the sidebar is open): when it shows, again on a usage change (at most every 30 seconds; a change inside the gap loads when it ends), when the page becomes visible, and every 5 minutes while it shows. A hidden tab reads nothing.',
   code: ['web/src/CostSide.tsx#CostSide', 'web/src/cost-side.ts#costEntry'],
   rules: [
     'An entry is two lines: the account, its harness, and the figures it has (`≈$ API` for API-equivalent use, `$ paid`, `≈` for an estimate); then the meters. A figure the account lacks is left out.',

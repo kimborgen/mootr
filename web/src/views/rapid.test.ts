@@ -6,6 +6,7 @@ vi.mock('../api', async (orig) => ({
   ...(await orig<typeof import('../api')>()),
   api: vi.fn(async (method: string, path: string, body?: Record<string, unknown>) => { posted.push({ method, path, body: body ?? {} }); return method === 'GET' ? [] : {} }),
 }))
+import { humanRowsOf } from '../mail/thread-index'
 import { getUi } from '../ui/state'
 import type { Agent, Mail, Thread } from '../types'
 import { getPick, isRapid, pickOf, rapidKey, rapidTarget, rapidThreads, sendRapid, setPick, setRapid } from './rapid'
@@ -23,7 +24,9 @@ const answered = T('t2', [m('b1', 't2', 'human', ['dev'], 10), m('b2', 't2', 'de
 const fromDev = T('t3', [m('c1', 't3', 'dev', ['human'], 25)])
 const other = T('t4', [m('d1', 't4', 'human', ['ops'], 5)])
 const cc = T('t5', [m('e1', 't5', 'dev', ['ops'], 1)])
-const data = { humanThreads: [fired, other, cc], humanArchived: [answered], humanDeferred: [fromDev, fired] }
+// Each agent's pages from the inbox, archive and deferred list (`with=`); a thread can be on two of them.
+const pages = { threads: [fired, other, cc, answered, fromDev, fired], more: false }
+const data = { rapidWith: { dev: pages, ops: pages } }
 
 beforeEach(() => { posted.length = 0; setPick('dev', null); setRapid('dev', false) })
 
@@ -36,18 +39,15 @@ describe('rapidThreads', () => {
   })
 })
 
-describe('rapidThreads past the first 60 (S-1121)', () => {
-  // 70 newer threads with others fill the mailbox pages; dev's old ones come only through `with=`.
-  const busy = Array.from({ length: 70 }, (_, i) => T('x' + i, [m('x' + i, 'x' + i, 'human', ['ops'], 100 + i)]))
+describe('rapidThreads from the agent\'s own pages (S-1121, S-4580)', () => {
   const old = [answered, fromDev]
-  it('lists the agent\'s threads that only the with= page holds', () => {
-    const d = { humanThreads: busy, humanArchived: [], humanDeferred: [] }
-    expect(rapidThreads('dev', d)).toEqual([])
-    expect(rapidThreads('dev', { ...d, rapidWith: { dev: { threads: old, more: false } } }).map((t) => t.thread_id)).toEqual(['t2', 't3'])
+  it('lists the agent\'s threads from its with= pages, and none before they load', () => {
+    expect(rapidThreads('dev', {})).toEqual([])
+    expect(rapidThreads('dev', { rapidWith: { dev: { threads: old, more: false } } }).map((t) => t.thread_id)).toEqual(['t2', 't3'])
   })
-  it('lists a thread once when both pages hold it', () => {
-    const d = { humanThreads: [fired, ...busy], humanArchived: [], humanDeferred: [], rapidWith: { dev: { threads: [fired, ...old], more: true } } }
-    expect(rapidThreads('dev', d).map((t) => t.thread_id)).toEqual(['t2', 't1', 't3'])
+  it('never reads the human\'s lists, which hold index rows', () => {
+    const d = { humanRows: humanRowsOf([fired]), rapidWith: { dev: { threads: old, more: true } } }
+    expect(rapidThreads('dev', d).map((t) => t.thread_id)).toEqual(['t2', 't3'])
   })
 })
 

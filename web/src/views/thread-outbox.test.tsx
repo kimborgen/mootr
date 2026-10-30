@@ -12,6 +12,13 @@ import { getData, setData } from '../store'
 import { ThreadView } from './ThreadView'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+// The real clock, for a delay fake timers don't skip.
+const realTimeout = globalThis.setTimeout
+// Slows WebCrypto's hash by 50 ms of real time, as a loaded machine can (S-4631); afterEach restores it.
+function slowHash() {
+  const digest = crypto.subtle.digest.bind(crypto.subtle)
+  vi.spyOn(crypto.subtle, 'digest').mockImplementation(async (...a: Parameters<SubtleCrypto['digest']>) => { await new Promise((r) => realTimeout(r, 50)); return digest(...a) })
+}
 
 let host: HTMLElement
 let root: Root
@@ -47,7 +54,7 @@ beforeEach(() => {
     return ok({})
   }))
 })
-afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); vi.useRealTimers(); try { sessionStorage.clear(); localStorage.clear() } catch {} })
+afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); try { sessionStorage.clear(); localStorage.clear() } catch {} })
 
 const flush = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
@@ -208,8 +215,11 @@ describe('a thread reply with a staged answer', () => {
     const ta = host.querySelector<HTMLTextAreaElement>('textarea')!
     const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
     await act(async () => { set.call(ta, 'I authorize'); ta.dispatchEvent(new Event('input', { bubbles: true })) })
+    // The answer goes after its text hash, which resolves on the real clock, slowed here as a loaded machine would:
+    // wait for the outcome it shows, not a fixed number of turns (S-4631).
+    slowHash()
     await act(async () => { host.querySelector<HTMLButtonElement>('.cmp-send')!.click() })
-    await flush(); await flush()
+    await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain("Failed: @lead's box didn't show it"), { timeout: 5000 }) })
     const answers = posts.filter((p) => p.path === '/api/permissions/p1/answer')
     expect(answers.map((a) => a.body)).toEqual([{ approve: true, text_sha256: await sha256Hex(text), client_id: expect.stringMatching(/:perm:p1$/) }])
     expect(getRows()).toEqual([])
@@ -233,11 +243,15 @@ describe('a thread reply with a staged answer', () => {
     await act(async () => { root.render(<ThreadView tid="t1" viewKey="thread:t1" />) })
     await flush(); await flush()
     await act(async () => { host.querySelector<HTMLButtonElement>('[data-perm="p1"][data-approve="1"]')!.click() })
+    // The approval's text hash resolves on the real clock, not the fake one: on a loaded machine it lands after any
+    // fixed run of fake time, so the hash is slowed here on purpose, and fake time runs until the retry has gone.
+    slowHash()
     vi.useFakeTimers()
     await act(async () => { host.querySelector<HTMLButtonElement>('.cmp-send')!.click() })
-    for (const ms of [0, 1000, 2000, 4000]) await act(async () => { await vi.advanceTimersByTimeAsync(ms) })
-    const answers = posts.filter((p) => p.path === '/api/permissions/p1/answer')
-    expect(answers).toHaveLength(2)
+    const answered = () => posts.filter((p) => p.path === '/api/permissions/p1/answer')
+    // waitFor moves the fake clock one interval per check, and waits on the real one between checks.
+    await act(async () => { await vi.waitFor(() => expect(answered()).toHaveLength(2), { timeout: 5000, interval: 50 }) })
+    const answers = answered()
     expect(answers[0].body.client_id).toMatch(/:perm:p1$/)
     expect(answers[1].body.client_id).toBe(answers[0].body.client_id)
     expect(getRows()).toEqual([])

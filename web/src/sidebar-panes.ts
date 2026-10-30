@@ -10,8 +10,9 @@ export interface PaneLayout { tabs: string[]; active: string }
 export type TabBar = 'compact' | 'regular'
 export const TAB_BARS: readonly TabBar[] = ['compact', 'regular']
 // `v` is the layout version a save was made under (LAYOUT_V); a record saved before it is absent.
-export interface PanesValue { panes: PaneLayout[]; tabBar: TabBar; v?: number }
-export interface Sidebar { panes: PaneLayout[]; tabBar: TabBar }
+// `sizes` are the panes' height ratios, one per pane in order (S-3810); absent means DEFAULT_GROW.
+export interface PanesValue { panes: PaneLayout[]; tabBar: TabBar; v?: number; sizes?: number[] }
+export interface Sidebar { panes: PaneLayout[]; tabBar: TabBar; sizes?: number[] }
 
 export const MAX_PANES = 4
 // Pane 1 holds the agents and the issues, pane 2 the mail, pane 3 the cost and the machines, with
@@ -58,6 +59,70 @@ export function sanitizePanes(x: unknown, known: readonly string[]): PaneLayout[
     out[at < 0 ? out.length - 1 : at].tabs.push('history')
   }
   return out
+}
+
+// --- Pane sizes (S-3810): the panes' heights as flex ratios, shared in the settings record like the
+// layout. Pure functions, so a later slice (collapse) can extend them.
+
+// Taller panes first: the agents get the most room, then the mail, then the rest.
+export const DEFAULT_GROW = [3, 2, 1]
+// The share of a pair of neighbours one step of the arrow keys moves.
+export const KEY_STEP = 0.05
+
+export const defaultSizes = (n: number): number[] => Array.from({ length: n }, (_, i) => DEFAULT_GROW[i] ?? 1)
+
+// Stored sizes for `n` panes, or null when they aren't usable: not an array of `n` finite positive numbers.
+export function sanitizeSizes(x: unknown, n: number): number[] | null {
+  const raw = x && typeof x === 'object' ? (x as { sizes?: unknown }).sizes : null
+  if (!Array.isArray(raw) || raw.length !== n) return null
+  return raw.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0) ? [...raw] : null
+}
+
+// The ratios to draw `n` panes with: the stored ones when they fit, else today's 3/2/1.
+export const resolveSizes = (sizes: number[] | undefined, n: number): number[] =>
+  sizes && sizes.length === n && sizes.every((v) => Number.isFinite(v) && v > 0) ? sizes : defaultSizes(n)
+
+// Moves the separator between panes `i` and `i + 1` so pane `i` takes `frac` of the two together.
+// `frac` is clamped to [minFrac, 1 - minFrac], the room each must keep (a minimum pane height as a
+// share of the pair); the pair's sum and every other pane are unchanged. Same array when nothing moves.
+export function resizePair(sizes: number[], i: number, frac: number, minFrac: number): number[] {
+  if (i < 0 || i + 1 >= sizes.length || !Number.isFinite(frac)) return sizes
+  const lo = Math.min(Math.max(minFrac, 0), 0.5)
+  const f = Math.min(Math.max(frac, lo), 1 - lo)
+  const sum = sizes[i] + sizes[i + 1]
+  if (Math.abs(sizes[i] / sum - f) < 1e-9) return sizes
+  const next = [...sizes]
+  next[i] = sum * f
+  next[i + 1] = sum - next[i]
+  return next
+}
+
+// Pane `i`'s share of the pair it forms with `i + 1`, from 0 to 1.
+export const pairFrac = (sizes: number[], i: number): number => sizes[i] / (sizes[i] + sizes[i + 1])
+
+// The share pane `i` takes after a key on its separator: arrows step, Home and End go to the limits
+// (Home gives the pane above its smallest, End its largest); null for any other key.
+export function separatorKey(frac: number, key: string, minFrac: number): number | null {
+  if (key === 'ArrowUp' || key === 'ArrowLeft') return Math.max(frac - KEY_STEP, minFrac)
+  if (key === 'ArrowDown' || key === 'ArrowRight') return Math.min(frac + KEY_STEP, 1 - minFrac)
+  if (key === 'Home') return minFrac
+  if (key === 'End') return 1 - minFrac
+  return null
+}
+
+// The sizes after pane `i` moves up (-1) or down (+1): they travel with the pane, as its tabs do.
+export function moveSizes(sizes: number[], i: number, d: -1 | 1): number[] {
+  const j = i + d
+  if (i < 0 || j < 0 || i >= sizes.length || j >= sizes.length) return sizes
+  const next = [...sizes]; [next[i], next[j]] = [next[j], next[i]]
+  return next
+}
+
+// The aria range of a separator, in percent of its pair, from the share each pane must keep.
+// An unmeasured or impossible share gives the whole range.
+export function ariaRange(minFrac: number): { min: number; max: number } {
+  if (!Number.isFinite(minFrac) || minFrac <= 0 || minFrac >= 0.5) return { min: 0, max: 100 }
+  return { min: Math.ceil(minFrac * 100), max: Math.floor((1 - minFrac) * 100) }
 }
 
 // A stored value as a tab strip height; anything else is the default.
@@ -163,7 +228,11 @@ const record = settingsRecord<PanesValue>({
   field: 'sidebarPanes',
   legacy: 'stam/sidebar-panes',
   // `v` stays, so a cleaned value is not read as an old layout and migrated again.
-  clean: (x) => ({ panes: sanitizePanes(x, knownIds), tabBar: sanitizeTabBar(x), v: LAYOUT_V }),
+  clean: (x) => {
+    const panes = sanitizePanes(x, knownIds)
+    const sizes = sanitizeSizes(x, panes.length)
+    return { panes, tabBar: sanitizeTabBar(x), v: LAYOUT_V, ...(sizes ? { sizes } : {}) }
+  },
 })
 const ID = 'main'
 
@@ -171,8 +240,29 @@ let state: Sidebar = { panes: clone(DEFAULT_PANES), tabBar: 'compact' }
 const subs = new Set<() => void>()
 const emit = () => subs.forEach((f) => f())
 
-export function setSidebarPanes(next: PaneLayout[]) {
-  state = { ...state, panes: next }
+// The sizes this page holds; undefined is the default 3/2/1.
+export const currentSizes = (): number[] | undefined => state.sizes
+
+// `sizes` are the ratios the new layout keeps: by default the held ones, which belong to a pane count,
+// so an edit that adds or drops a pane leaves them behind.
+export function setSidebarPanes(next: PaneLayout[], sizes: number[] | undefined = state.sizes) {
+  const { sizes: _held, ...rest } = state
+  state = { ...rest, panes: next, ...(sizes && sizes.length === next.length ? { sizes } : {}) }
+  record.save(ID, { ...state, v: LAYOUT_V })
+  emit()
+}
+
+// Moves pane `i` up (-1) or down (+1), its size with it.
+export function moveSidebarPane(i: number, d: -1 | 1) {
+  const next = movePane(state.panes, i, d)
+  if (next === state.panes) return
+  setSidebarPanes(next, state.sizes && moveSizes(state.sizes, i, d))
+}
+
+// Saves the pane ratios (null: back to the default 3/2/1). Called once per drag, on release.
+export function setSidebarSizes(sizes: number[] | null) {
+  const { sizes: _old, ...rest } = state
+  state = sizes && sizes.length === state.panes.length ? { ...rest, sizes } : rest
   record.save(ID, { ...state, v: LAYOUT_V })
   emit()
 }
@@ -186,7 +276,11 @@ export function setTabBar(tabBar: TabBar) {
 let loading: Promise<void> | null = null
 const loadOnce = () => (loading ??= record.load().then(() => {
   const v = record.cached(ID)
-  if (v) state = { panes: sanitizePanes(v, knownIds), tabBar: sanitizeTabBar(v) }
+  if (v) {
+    const panes = sanitizePanes(v, knownIds)
+    const sizes = sanitizeSizes(v, panes.length)
+    state = { panes, tabBar: sanitizeTabBar(v), ...(sizes ? { sizes } : {}) }
+  }
   emit()
 }, () => { loading = null }))
 
@@ -201,7 +295,14 @@ export function useSidebarPanes(known: readonly string[]): Sidebar {
 // field the record gains (sizes) is reset with the rest; it never writes another setting.
 const DEFAULT_ID = 'default'
 
-const cloneValue = (v: Sidebar): PanesValue => ({ panes: clone(v.panes), tabBar: v.tabBar, v: LAYOUT_V })
+const cloneValue = (v: Sidebar): PanesValue => ({ panes: clone(v.panes), tabBar: v.tabBar, v: LAYOUT_V, ...(v.sizes ? { sizes: [...v.sizes] } : {}) })
+
+// A stored record as a layout: cleaned panes and strip height, and the sizes when they fit the panes.
+function cleanSidebar(x: unknown): Sidebar {
+  const panes = sanitizePanes(x, knownIds)
+  const sizes = sanitizeSizes(x, panes.length)
+  return { panes, tabBar: sanitizeTabBar(x), ...(sizes ? { sizes } : {}) }
+}
 
 // mootr's own layout: the factory panes and the compact strip.
 export const mootrDefault = (): PanesValue => ({ panes: defaultPanes(), tabBar: 'compact', v: LAYOUT_V })
@@ -211,7 +312,7 @@ export const mootrDefault = (): PanesValue => ({ panes: defaultPanes(), tabBar: 
 let saved: PanesValue | null = null
 export function userDefault(): PanesValue | null {
   const v = saved ?? record.cached(DEFAULT_ID)
-  return v ? cloneValue({ panes: sanitizePanes(v, knownIds), tabBar: sanitizeTabBar(v) }) : null
+  return v ? cloneValue(cleanSidebar(v)) : null
 }
 
 // Saves the live layout as the human's default.
@@ -223,7 +324,7 @@ export function saveUserDefault() {
 
 // Replaces the live layout, whole, with `v`.
 function replaceLive(v: PanesValue) {
-  state = { panes: sanitizePanes(v, knownIds), tabBar: sanitizeTabBar(v) }
+  state = cleanSidebar(v)
   record.save(ID, cloneValue(state))
   emit()
 }

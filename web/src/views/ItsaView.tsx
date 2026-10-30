@@ -5,6 +5,7 @@
 // activity until the thread exists. Status and owner change from the header, as the human.
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { useShownTick } from '../shell/layout'
 import { ago, baseSubject, costShort, money } from '../format'
 import { Icon } from '../Icon'
 import { CATEGORY_LABEL, HEALTH, isClosed, openBoard, openItsa, ownerMenu, PersonGlyph, personName, RollupBar, rollupText, rollupTotal, StatusGlyph, statusInfo, statusLabel, statusMenu, toneVar, unsavedKids } from '../itsa/itsa'
@@ -30,7 +31,7 @@ import { Composer, type ComposerHandle, type SendPayload } from '../Composer'
 import { assistantOpts, selectAgent, selectThread } from '../actions'
 import { ItsaReqs } from '../req/ItsaReqs'
 import { ReqBatch } from '../req/ReqBatch'
-import { useWorkExtras } from '../work/data'
+import { useWorkFields } from '../work/data'
 import { FieldValue, fmtDay, isEmpty, textOf, valueOf } from '../work/field-columns'
 import { fieldApplies, type Field } from '../itsa/fields'
 import type { Itsa } from '../types'
@@ -178,14 +179,15 @@ export function ThreadItems({ items, atEnd }: { items: ItsaThreadItem[]; atEnd?:
 // children, filtered by kind; the effort split per model and type; and the coverage line.
 const RETRO_KINDS = ['all', 'went_well', 'improve', 'idea', 'instruction', 'stam_issue'] as const
 const EFFORT_LABEL: Record<string, string> = { reading: 'reading', implementing: 'implementing', testing: 'testing', waiting: 'waiting', review_fixes: 'review fixes', coordination: 'coordination' }
-function Retros() {
+function Retros({ viewKey }: { viewKey: string }) {
   const { mailTick } = useData()
+  const tick = useShownTick(viewKey, mailTick)
   const [data, setData] = useState<RetrosView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [kind, setKind] = useState<string>('all')
   useEffect(() => {
     api<RetrosView>('GET', '/api/retros').then((r) => { setData(r); setError(null) }, (e) => setError((e as Error).message))
-  }, [mailTick])
+  }, [tick])
   if (error && !data) return <section className="itsa-sec" aria-label="Retros"><p className="muted">Can't load the retros: {error}</p></section>
   if (!data) return <section className="itsa-sec" aria-label="Retros" />
   const items = data.items.filter((x) => kind === 'all' || x.kind === kind)
@@ -329,7 +331,9 @@ export function FieldsBlock({ it, fields }: { it: Pick<Itsa, 'fields' | 'kind'>;
 
 export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
   const { itsas, mailTick, attention, agents } = useData()
-  const { fields } = useWorkExtras()
+  // Refetches on a tick only while it shows; one hidden reloads once when it shows again.
+  const tick = useShownTick(viewKey, mailTick)
+  const { fields } = useWorkFields()
   const [v, setV] = useState<View | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
@@ -361,13 +365,13 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
       if (itsaTitles.get(id) !== title) { itsaTitles.set(id, title); refreshTabs() }
     } catch (e) { loaded.current = null; setError((e as Error).message) }
   }, [id])
-  useEffect(() => { load() }, [load, sig, mailTick])
+  useEffect(() => { load() }, [load, sig, tick])
   // The staged action ends when the ITSA no longer offers it (the owner moved it on).
   useEffect(() => { if (staged && v && !v.actions?.some((a) => a.id === staged)) setStaged(null) }, [v, staged])
   useEffect(() => registerView(viewKey, { show: () => { if (loaded.current !== id) load() }, focus: () => takeOpenFocus(root.current)?.focus() }), [viewKey, id, load])
-  const { items: thread, reload: reloadThread } = useThread(v, mailTick)
-  const mails = useMailThreads(id, [mailTick, v?.updated_at])
-  const linkedMail = useLinkedMail(id, [mailTick, v?.updated_at])
+  const { items: thread, reload: reloadThread } = useThread(v, tick)
+  const mails = useMailThreads(id, [tick, v?.updated_at])
+  const linkedMail = useLinkedMail(id, [tick, v?.updated_at])
   // Linked mail adds what the Mail section above doesn't already list: threads that name the ITSA without being about it.
   const linkedOnly = mails && linkedMail ? linkedMail.filter((r) => !mails.some((x) => x.thread_id === r.thread_id)) : []
   // A comment from the human goes to the participants; the first one starts the thread.
@@ -460,7 +464,7 @@ export function ItsaView({ id, viewKey }: { id: string; viewKey: string }) {
           <div className="itsa-sec-head"><span className="eyebrow">Latest update</span><HealthBadge health={latest.health} /></div>
           <ThreadItems items={[{ type: 'mail', ts: latest.created_at, mail: latest }]} /></section> : null}
 
-        {v.kind === 'retros' ? <Retros /> : null}
+        {v.kind === 'retros' ? <Retros viewKey={viewKey} /> : null}
         <section className="itsa-sec" aria-label="Children">
           <div className="itsa-sec-head"><span className="eyebrow">Children</span>
             {rollupTotal(v.rollup) ? <span className="count" title={rollupText(v.rollup)}>{v.rollup.closed}/{rollupTotal(v.rollup)}</span> : null}

@@ -1,4 +1,5 @@
 import { Fragment } from 'react'
+import { humanRowsOf } from '../mail/thread-index'
 import { AGENTS_STOPPED, ASK_ITSA, PERM_DONE, STATUSES, T_ASK, T_DIALOG } from '../stories/mailFixtures'
 import { AGENTS } from '../stories/fixtures'
 import { ds, type Story } from '../stories/types'
@@ -7,7 +8,7 @@ import { Icon } from '../Icon'
 import { AskBlockLine } from './AskBlockLine'
 import { ItsaActions } from './ItsaActions'
 
-const base = { itsaStatuses: STATUSES, humanThreads: [T_ASK, T_DIALOG] }
+const base = { itsaStatuses: STATUSES, humanRows: humanRowsOf([T_ASK, T_DIALOG]) }
 const holds = { ...base, attention: [ASK_ITSA] }
 const stops = { ...base, agents: AGENTS_STOPPED, attention: [ASK_ITSA] }
 const dialog = { ...base, perms: [{ ...PERM_DONE, id: 'fx-perm-2', status: 'pending', dialog: 1, agent_id: 'fx-ops' }], agents: AGENTS }

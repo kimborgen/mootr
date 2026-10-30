@@ -1,15 +1,17 @@
 // The daemon's data the UI shows. The live stream (S-457) applies agent, ITSA, mail, and
 // usage events as they arrive; the fallback polls run live agents every 2 s (archived ones every minute), pending permission
 // requests every 2 s, ITSAs every 4 s (15 s while connected), the human's threads and rings
-// every 8 s, each machine's load every 5 s. Components read it with useData().
-import { useSyncExternalStore } from 'react'
-import { api, setKnownOrigins } from './api'
+// every 8 s, each machine's load every 5 s while a reader shows it (otherwise about once a minute). Components read it with useData().
+import { useEffect, useId, useSyncExternalStore } from 'react'
+import { api, ApiError, setKnownOrigins } from './api'
+import { useViewShown } from './shell/layout'
 import { rearmMailTitles } from './mail/mail-titles'
 import { rearmToolSummaries } from './mail/tool-summaries'
 import { rearmToolNames } from './mail/tool-names'
-import { isPlacedAsk, live } from './format'
-import { onLiveEvent } from './live'
-import type { Agent, Ask, CostMode, DecisionMail, Itsa, ItsaAttention, ItsaQueueRow, ItsaStatus, Machine, Permission, PlainShell, Ring, Thread, Thresholds } from './types'
+import { live } from './format'
+import { fetchIndex } from './mail/thread-index'
+import { liveConnected, onLiveConnection, onLiveEvent } from './live'
+import type { Agent, Ask, CostMode, DecisionMail, IndexRow, Itsa, ItsaAttention, ItsaQueueRow, ItsaStatus, Machine, Permission, PlainShell, Ring, Thread, ThreadList, Thresholds } from './types'
 
 export interface Data {
   agents: Agent[]
@@ -18,11 +20,9 @@ export interface Data {
   // as who they are with, read-only and not waiting on them, until escalated into `perms`.
   delegateDialogs: Permission[]
   rings: Ring[]
-  humanThreads: Thread[]
-  // The human's threads archive hides; they return here when a new mail arrives.
-  humanArchived: Thread[]
-  // The human's threads set aside for later (S-976); a new mail in one brings it back to the inbox.
-  humanDeferred: Thread[]
+  // The human's thread lists as index rows (S-4617), the first 60 of each: the inbox (`active`), the threads archive
+  // hides (they return to the inbox when a new mail arrives), and the ones set aside for later (S-976).
+  humanRows: Record<ThreadList, IndexRow[]>
   // The threads a thread view has loaded, most recent last (S-2286): a thread past the 60 above still
   // counts as waiting on the human when its own mails say so.
   openThreads: Thread[]
@@ -71,7 +71,7 @@ export interface Data {
 // with each optimistic change (optimistic.ts) applied on top, so a poll never undoes one still
 // in flight.
 let polled: Data = {
-  agents: [], perms: [], delegateDialogs: [], rings: [], humanThreads: [], humanArchived: [], humanDeferred: [], openThreads: [], rapidWith: {}, unread: 0, machine: '',
+  agents: [], perms: [], delegateDialogs: [], rings: [], humanRows: { active: [], archived: [], deferred: [] }, openThreads: [], rapidWith: {}, unread: 0, machine: '',
   thresholds: { warnTokens: 300000, instructTokens: 400000, enforceTokens: 500000 }, agentView: 'conversation', assistantDefault: 'assistant', promptDefaultMode: 'mail', mailOpens: 'inbox', costMode: 'api',
   shells: [], error: null, mailTick: 0, booted: false, loaded: { agents: false, mail: false, itsas: false }, itsas: [], itsaStatuses: [], attention: [], decisions: [], asks: [], queue: [], itsaError: null, machines: [],
 }
@@ -121,21 +121,35 @@ export const hasPendingPermission = (t: Thread) => t.mails.some((m) => m.permiss
 // A thread that can't be archived until the human answers: it holds a pending permission
 // request, it is the ask thread of an ITSA waiting on them (S-311), or an agent waits for their reply in it.
 export function threadWaitsOnHuman(tid: string, d: Data = data): boolean {
-  const t = [...d.humanThreads, ...d.humanArchived, ...d.humanDeferred, ...d.openThreads].find((x) => x.thread_id === tid)
-  if (t && hasPendingPermission(t)) return true
+  // The lists' index row (S-4579), else the copy a view has loaded.
+  const r = humanRow(tid, d)
+  if (r ? r.ask === 'pending' : d.openThreads.some((x) => x.thread_id === tid && hasPendingPermission(x))) return true
   if (d.decisions.some((x) => x.thread_id === tid)) return true
   // An agent's wait for the human's reply in this thread (S-1881) is an open ask too.
   if (d.agents.some((a) => (a.waits ?? []).some((w) => w.kind === 'human' && w.thread === tid))) return true
   return d.attention.some((x) => x.ask_thread_id === tid && d.itsaStatuses.find((s) => s.name === x.status)?.category !== 'closed')
 }
-export const isArchivedThread = (tid: string) => data.humanArchived.some((t) => t.thread_id === tid)
-export const isDeferredThread = (tid: string) => data.humanDeferred.some((t) => t.thread_id === tid)
-export const permThread = (pid: string) => [...data.humanThreads, ...data.humanDeferred].find((t) => t.mails.some((m) => m.permission_id === pid))?.thread_id
+
+// The human's thread lists as index rows (S-4577), what the mail lists show of each thread: the polled rows with
+// each optimistic change on top (S-4617).
+export const humanIndex = (d: Pick<Data, 'humanRows'>, list: ThreadList): IndexRow[] => d.humanRows[list]
+// How many rows of each list the poll reads.
+export const LIST_ROWS = 60
+// The human's unread mail the inbox counts: its rows', not the archive's or the deferred ones'.
+export const unreadIn = (rows: IndexRow[]) => rows.reduce((n, r) => n + r.unread, 0)
+// A thread's row in the human's lists (inbox, archive, deferred), if one holds it.
+export const humanRow = (tid: string, d: Data = data): IndexRow | undefined =>
+  (['active', 'archived', 'deferred'] as const).map((l) => humanIndex(d, l).find((r) => r.thread_id === tid)).find(Boolean)
+export const isArchivedThread = (tid: string) => humanIndex(data, 'archived').some((t) => t.thread_id === tid)
+export const isDeferredThread = (tid: string) => humanIndex(data, 'deferred').some((t) => t.thread_id === tid)
+// The row in the inbox or the deferred list whose mail carries a permission.
+const permRow = (pid: string) => [...humanIndex(data, 'active'), ...humanIndex(data, 'deferred')].find((r) => r.perms?.some((p) => p.id === pid))
+export const permThread = (pid: string) => permRow(pid)?.thread_id
 // The thread a request started, so the request's row stands for it; none for an ask placed in another thread (S-3827),
 // whose thread holds other work the human is asked about.
 export const ownPermThread = (pid: string) => {
-  const t = [...data.humanThreads, ...data.humanDeferred].find((t) => t.mails.some((m) => m.permission_id === pid))
-  return t && !t.mails.some((m) => m.permission_id === pid && isPlacedAsk(m)) ? t.thread_id : undefined
+  const r = permRow(pid)
+  return r && !r.perms!.some((p) => p.id === pid && p.placed) ? r.thread_id : undefined
 }
 
 const fresh = new Set<() => void>()
@@ -183,9 +197,11 @@ function wouldChange<T extends object>(cur: T, patch: Partial<T>): boolean {
 export function applyLiveEvent(type: string, d: Record<string, unknown>): void {
   switch (type) {
     case 'mail.sent':
+      viewsStale = true
       for (const cb of mailSubs) cb({ type: 'sent', id: d.id as string, from: d.from as string, to: (d.to as string[]) ?? [], thread: (d.thread as string | null) ?? null, itsa: (d.itsa as string | null) ?? null, ask: !!d.ask, subject: (d.subject as string) ?? '', at: (d.at as string | null) ?? null })
       return
     case 'mail.read':
+      viewsStale = true
       for (const cb of mailSubs) cb({ type: 'read', id: d.id as string, by: d.by as string, at: (d.at as string | null) ?? null })
       return
     case 'agent.changed': {
@@ -210,15 +226,18 @@ export function applyLiveEvent(type: string, d: Record<string, unknown>): void {
     // refetch the list, as the poll would. A spawn usually comes with an ITSA for the new agent
     // to own, so the ITSAs are refetched too, and its card shows it from the start (S-462).
     case 'agent.spawned':
+      viewsStale = true
       emitAgentEvent({ type: 'spawned', id: d.id as string, parent: (d.parent_id as string | null) ?? null })
       void refresh()
       void refreshItsas()
       return
     case 'agent.archived':
+      viewsStale = true
       emitAgentEvent({ type: 'archived', id: d.id as string, parent: null })
       void refresh()
       return
     case 'itsa.changed': {
+      viewsStale = true
       const i = polled.itsas.findIndex((s) => s.id === d.id)
       if (i < 0) { void refreshItsas(); return }
       const cur = polled.itsas[i]
@@ -247,16 +266,40 @@ onLiveEvent((e) => applyLiveEvent(e.type, (e.data ?? {}) as Record<string, unkno
 // alone slows, 4 s to 15 s while the stream is connected (S-457), since itsa.changed carries
 // status, owner and fields; it restores on a break. Permissions keep their 2 s: the stream
 // carries no permission events, so an approval prompt must not wait.
-let agentPoll: ReturnType<typeof setInterval> | undefined
-let permPoll: ReturnType<typeof setInterval> | undefined
-let itsaPoll: ReturnType<typeof setInterval> | undefined
+let agentPoll: (() => void) | undefined
+let permPoll: (() => void) | undefined
+let itsaPoll: (() => void) | undefined
 export function startPolls(lives: boolean): void {
-  if (agentPoll) clearInterval(agentPoll)
-  if (permPoll) clearInterval(permPoll)
-  if (itsaPoll) clearInterval(itsaPoll)
-  agentPoll = setInterval(refreshAgents, 2000)
-  permPoll = setInterval(refreshPerms, 2000)
-  itsaPoll = setInterval(refreshItsas, lives ? 15_000 : 4000)
+  agentPoll?.()
+  permPoll?.()
+  itsaPoll?.()
+  agentPoll = poll(refreshAgents, 2000)
+  permPoll = poll(refreshPerms, 2000)
+  itsaPoll = poll(refreshItsas, lives ? 15_000 : 4000)
+}
+
+// Every poll runs `fn` each `ms` (S-4517), skipping a tick while its last round is still in flight, so a
+// slow daemon gets one round at a time rather than a growing pile, and none while the tab is hidden. Showing
+// the tab again runs one round of each at once. Returns the stop.
+const inFlight = new Set<() => Promise<unknown>>()
+const ticks = new Set<() => void>()
+export function poll(fn: () => Promise<unknown>, ms: number): () => void {
+  const tick = () => {
+    if (inFlight.has(fn) || document.hidden) return
+    inFlight.add(fn)
+    void fn().catch(() => {}).finally(() => inFlight.delete(fn))
+  }
+  const timer = setInterval(tick, ms)
+  ticks.add(tick)
+  return () => { clearInterval(timer); ticks.delete(tick) }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) for (const t of ticks) t() })
+
+// Promise.all that settles only once every read has: a round whose first read failed fast must not free its
+// poll while a sibling read is still in flight (S-4517).
+async function allOf<T extends readonly unknown[]>(ps: T): Promise<{ -readonly [K in keyof T]: Awaited<T[K]> }> {
+  await Promise.allSettled(ps)
+  return Promise.all(ps)
 }
 
 // Marks a list as loaded once its first fetch has succeeded.
@@ -347,33 +390,51 @@ export async function refreshPerms() {
     const pending = await api<Permission[]>('GET', '/api/permissions?status=pending')
     const perms = pending.filter((p) => (p.audience ?? 'human') === 'human')
     const delegateDialogs = pending.filter((p) => p.audience === 'delegate' && !!p.dialog)
-    if (JSON.stringify(perms) !== JSON.stringify(polled.perms)) setData({ perms })
-    if (JSON.stringify(delegateDialogs) !== JSON.stringify(polled.delegateDialogs)) setData({ delegateDialogs })
+    if (JSON.stringify(perms) !== JSON.stringify(polled.perms)) { viewsStale = true; setData({ perms }) }
+    if (JSON.stringify(delegateDialogs) !== JSON.stringify(polled.delegateDialogs)) { viewsStale = true; setData({ delegateDialogs }) }
   } catch {}
 }
 
 // The agents whose rapid-fire view is open (S-1121), and how many threads each box fetches for them.
 export const RAPID_PAGE = 60
 const rapidLimit = new Map<string, number>()
-// Panes showing each agent's rapid-fire view: the last to close stops the fetch.
+// Panes showing each agent's rapid-fire view: the last to close drops the page count.
 const rapidPanes = new Map<string, number>()
-export const watchRapid = (id: string) => {
+// Panes showing it on screen (S-4691): the fetch runs only while one does; a hidden pane keeps the limit.
+const rapidShown = new Map<string, number>()
+export const watchRapid = (id: string, shown = true) => {
   if (!rapidLimit.has(id)) rapidLimit.set(id, RAPID_PAGE)
   rapidPanes.set(id, (rapidPanes.get(id) ?? 0) + 1)
-  void refreshSlow()
+  if (shown) rapidShown.set(id, (rapidShown.get(id) ?? 0) + 1)
+  void refreshSlowNow()
   return () => {
+    if (shown) {
+      const k = (rapidShown.get(id) ?? 1) - 1
+      if (k > 0) rapidShown.set(id, k); else rapidShown.delete(id)
+    }
     const n = (rapidPanes.get(id) ?? 1) - 1
     if (n > 0) { rapidPanes.set(id, n); return }
     rapidPanes.delete(id); rapidLimit.delete(id)
   }
 }
-export const rapidOlder = (id: string) => { rapidLimit.set(id, (rapidLimit.get(id) ?? RAPID_PAGE) + RAPID_PAGE); return refreshSlow() }
+// A mounted pane that shows or hides: the page count stays, the fetch follows.
+export const showRapid = (id: string) => {
+  rapidShown.set(id, (rapidShown.get(id) ?? 0) + 1)
+  void refreshSlowNow()
+  return () => {
+    const k = (rapidShown.get(id) ?? 1) - 1
+    if (k > 0) rapidShown.set(id, k); else rapidShown.delete(id)
+  }
+}
+export const rapidOlder = (id: string) => { rapidLimit.set(id, (rapidLimit.get(id) ?? RAPID_PAGE) + RAPID_PAGE); return refreshSlowNow() }
 
 async function fetchRapid(): Promise<Data['rapidWith']> {
+  // A hidden pane keeps the threads it has, so showing it again draws them before the fetch lands.
   const out: Data['rapidWith'] = {}
-  await Promise.all([...rapidLimit].map(async ([id, limit]) => {
+  for (const id of rapidLimit.keys()) if (!rapidShown.has(id) && polled.rapidWith[id]) out[id] = polled.rapidWith[id]
+  await allOf([...rapidLimit].filter(([id]) => rapidShown.has(id)).map(async ([id, limit]) => {
     const q = `limit=${limit}&with=${encodeURIComponent(id)}`
-    const pages = await Promise.all(['', '&archived=1', '&deferred=1'].map((x) => api<Thread[]>('GET', `/api/agents/human/threads?${q}${x}`)))
+    const pages = await allOf(['', '&archived=1', '&deferred=1'].map((x) => api<Thread[]>('GET', `/api/agents/human/threads?${q}${x}`)))
     out[id] = { threads: pages.flat(), more: pages.some((p) => p.length >= limit) }
   }))
   return out
@@ -383,28 +444,58 @@ async function fetchRapid(): Promise<Data['rapidWith']> {
 // Load older would otherwise shrink the list again.
 let slowSeq = 0
 let slowApplied = 0
-export async function refreshSlow() {
+// The rounds begun so far, and the latest that landed: a round begun after a write landed shows it (S-4617).
+export const slowBegun = () => slowSeq
+export const slowLanded = () => slowApplied
+
+// Calls within SLOW_COALESCE ms of the first share one round at its end (S-4519): answering a mail archives,
+// reloads and marks read at once, and each asked for its own round of seven GETs. The promise settles when
+// that round lands. The boot, the poll and Load older use refreshSlowNow.
+export const SLOW_COALESCE = 300
+let slowWaiting: Promise<void> | null = null
+export function refreshSlow(): Promise<void> {
+  slowWaiting ??= new Promise<void>((done) => setTimeout(() => { slowWaiting = null; void refreshSlowNow().then(done) }, SLOW_COALESCE))
+  return slowWaiting
+}
+
+// Whether a view that reloads on mailTick may be stale since the last tick: a mail was sent or read, a permission
+// changed, an ITSA changed (retro items are ITSAs), an agent was spawned or archived (its final retro round), or
+// the stream connected or broke (it replays nothing it missed). mailTick moves only then, when the human's lists
+// changed, or on every round while the stream is down (no events to tell).
+let viewsStale = false
+onLiveConnection(() => { viewsStale = true })
+
+export async function refreshSlowNow() {
   const seq = ++slowSeq
   try {
-    const [threads, archived, deferred, rs, decisions, rapidWith, asks] = await Promise.all([
-      api<Thread[]>('GET', '/api/agents/human/threads?limit=60'),
-      api<Thread[]>('GET', '/api/agents/human/threads?limit=60&archived=1'),
-      api<Thread[]>('GET', '/api/agents/human/threads?limit=60&deferred=1'),
+    // The lists' first pages carry no cursor, so fetchIndex never asks for a restart (IndexRestart); a daemon without
+    // the index route answers from the old one.
+    const [active, archived, deferred, rs, decisions, rapidWith, asks] = await allOf([
+      fetchIndex('human', 'active', { limit: LIST_ROWS }),
+      fetchIndex('human', 'archived', { limit: LIST_ROWS }),
+      fetchIndex('human', 'deferred', { limit: LIST_ROWS }),
       api<Ring[]>('GET', '/api/rings'),
       api<DecisionMail[]>('GET', '/api/mail/decisions'),
       fetchRapid(),
-      // A daemon that predates the Needs you list has no route: keep the list empty rather than failing the refresh.
-      api<Ask[]>('GET', '/api/asks').catch((): Ask[] => []),
+      // A daemon that predates the Needs you list has no route (404): keep the list empty rather than failing the
+      // refresh. Any other failure, a read timeout included, keeps the list shown (S-4517).
+      api<Ask[]>('GET', '/api/asks').catch((e): Ask[] => (e instanceof ApiError && e.status === 404 ? [] : polled.asks)),
     ])
     if (seq < slowApplied) return
     slowApplied = seq
-    const unread = threads.reduce((n, t) => n + t.mails.filter((m) => m.recipients.some((r) => r.id === 'human' && !r.read_at)).length, 0)
+    const humanRows = { active: active.threads, archived: archived.threads, deferred: deferred.threads }
     // A ring shows while it runs and at least one member is running.
     const rings = rs.filter((r) => r.status !== 'done' && (JSON.parse(r.members || '[]') as string[]).some((id) => { const a = byId(id); return a && live(a) }))
-    const changed = JSON.stringify(threads) !== JSON.stringify(polled.humanThreads) || JSON.stringify(archived) !== JSON.stringify(polled.humanArchived) || JSON.stringify(deferred) !== JSON.stringify(polled.humanDeferred) || JSON.stringify(rings) !== JSON.stringify(polled.rings) || JSON.stringify(rapidWith) !== JSON.stringify(polled.rapidWith)
+    const changed = JSON.stringify(humanRows) !== JSON.stringify(polled.humanRows) || JSON.stringify(rings) !== JSON.stringify(polled.rings) || JSON.stringify(rapidWith) !== JSON.stringify(polled.rapidWith)
     const decided = JSON.stringify(decisions) !== JSON.stringify(polled.decisions)
     const asked = JSON.stringify(asks) !== JSON.stringify(polled.asks)
-    setData({ ...(changed ? { humanThreads: threads, humanArchived: archived, humanDeferred: deferred, rapidWith, unread, rings } : {}), ...(decided ? { decisions } : {}), ...(asked ? { asks } : {}), ...loadedOnce('mail'), mailTick: polled.mailTick + 1 })
+    const tick = changed || decided || asked || viewsStale || !liveConnected()
+    viewsStale = false
+    const patch: Partial<Data> = { ...(changed ? { humanRows, rapidWith, unread: unreadIn(humanRows.active), rings } : {}), ...(decided ? { decisions } : {}), ...(asked ? { asks } : {}), ...loadedOnce('mail'), ...(tick ? { mailTick: polled.mailTick + 1 } : {}) }
+    if (Object.keys(patch).length) setData(patch)
+    // A round that found nothing new still tells the changes waiting on it (optimistic.ts): it is the poll a mark
+    // waits for once its write landed (S-4617).
+    else if (overlays.size) notify()
   } catch {}
 }
 
@@ -420,16 +511,37 @@ export function refreshItsas(): Promise<void> {
   itsaNext ??= itsaRun.then(() => { itsaNext = null; return refreshItsas() })
   return itsaNext
 }
+// The merge-queue readers on screen, by hook instance id (S-4672). The queue is read only while one is shown;
+// with none shown, a poll keeps the rows it has. A reader with no view element counts as shown (layout.ts).
+const queueViews = new Set<string>()
+// A reader that starts showing reads the queue at once, when no reader was showing before.
+export function setQueueReader(id: string, shown: boolean): Promise<void> | undefined {
+  const reading = queueViews.size > 0
+  if (shown) queueViews.add(id); else queueViews.delete(id)
+  return shown && !reading ? refreshItsas() : undefined
+}
+// Each hook instance registers under its own id, so two readers on one view key don't share a registration.
+export function useQueueReader(key: string | undefined) {
+  const id = useId()
+  const shown = useViewShown(key)
+  useEffect(() => {
+    void setQueueReader(id, shown)
+    return () => { setQueueReader(id, false) }
+  }, [id, shown])
+}
+
 async function fetchItsas() {
   const startedAt = itsaSeq
   try {
-    const [listed, st, attention, queue] = await Promise.all([
+    const [listed, st, attention, queue] = await allOf([
       api<Itsa[]>('GET', '/api/itsas'),
       polled.itsaStatuses.length ? null : api<{ statuses: ItsaStatus[] }>('GET', '/api/itsas/statuses'),
       api<ItsaAttention[]>('GET', '/api/itsas/attention'),
       // A daemon that predates the queue has no route: keep the rows we last had rather than
       // failing the whole ITSA refresh.
-      api<ItsaQueueRow[]>('GET', '/api/itsas/queue').catch((): ItsaQueueRow[] => polled.queue),
+      queueViews.size
+        ? api<ItsaQueueRow[]>('GET', '/api/itsas/queue').catch((): ItsaQueueRow[] => polled.queue)
+        : Promise.resolve(polled.queue),
     ])
     // Re-apply an ITSA change that landed while this fetch was in flight.
     const itsas = listed.map((s) => {
@@ -438,7 +550,7 @@ async function fetchItsas() {
     })
     const patch: Partial<Data> = {}
     if (st) patch.itsaStatuses = st.statuses
-    if (JSON.stringify(itsas) !== JSON.stringify(polled.itsas)) patch.itsas = itsas
+    if (JSON.stringify(itsas) !== JSON.stringify(polled.itsas)) { viewsStale = true; patch.itsas = itsas }
     if (JSON.stringify(attention) !== JSON.stringify(polled.attention)) patch.attention = attention
     if (JSON.stringify(queue) !== JSON.stringify(polled.queue)) patch.queue = queue
     if (polled.itsaError) patch.itsaError = null
@@ -463,11 +575,30 @@ export async function loadThresholds() {
   } catch {}
 }
 
-// Every computer's CPU, RAM, and swap; the daemon samples every 5 s, so this polls no faster.
+// Every computer's CPU, RAM, and swap. The machines poll reads every 5 s only while a reader shows them
+// (holdMachines); otherwise once a minute, which keeps setKnownOrigins current.
+const MACHINES_KEEP_MS = 60_000
+let machineReaders = 0
+let machinesReadAt = 0
 export async function refreshMachines() {
+  machinesReadAt = Date.now()
   try {
     const machines = await api<Machine[]>('GET', '/api/machines')
     setKnownOrigins(machines)
     if (JSON.stringify(machines) !== JSON.stringify(polled.machines)) setData({ machines })
   } catch {}
+}
+// The poll's round, every 5 s: a read while a reader shows, or when the slow keep is due.
+export async function pollMachines() {
+  if (!machineReaders && Date.now() - machinesReadAt < MACHINES_KEEP_MS) return
+  await refreshMachines()
+}
+// A reader on screen holds the poll at 5 s until the returned release runs; it reads once when it holds.
+export function holdMachines(): () => void {
+  machineReaders++
+  void refreshMachines()
+  return () => { machineReaders-- }
+}
+export function useMachinesShown(shown: boolean) {
+  useEffect(() => (shown ? holdMachines() : undefined), [shown])
 }

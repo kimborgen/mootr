@@ -1,8 +1,9 @@
 import type { Agent, DecisionMail, Permission } from '../types'
+import { humanRowsOf } from '../mail/thread-index'
 import { AGENTS } from '../stories/fixtures'
 import { OnMount } from '../stories/helpers'
 import { itsaData, TREE, WAITING_ITSAS } from '../stories/itsaFixtures'
-import { AGENTS_STOPPED, ASK_ITSA, DECISION, T_PERM, T_RICH, T_ASK, WAITING } from '../stories/mailFixtures'
+import { ALL_THREADS, AGENTS_STOPPED, ASK_ITSA, DECISION, T_PERM, T_RICH, T_ASK } from '../stories/mailFixtures'
 import { ds, type Story } from '../stories/types'
 import { showWaiting } from './WaitingList'
 
@@ -14,7 +15,7 @@ const open = (el: HTMLElement) => { const b = el.querySelector('button')!; showW
 const REPLY_WAIT: Agent[] = AGENTS.map((a) => (a.id === 'fx-dev' ? { ...a, activity: 'waiting', waits: [{ id: 'w-reply', kind: 'human', since: ago(15), source: 'wait_for', detail: 'Which of the two designs to build' }] } : a))
 const everything = {
   ...itsaData([...TREE, ASK_ITSA], { attention: [ASK_ITSA, ...WAITING_ITSAS], decisions: [DECISION], perms: [PERM], agents: REPLY_WAIT }),
-  humanThreads: WAITING.humanThreads,
+  humanRows: humanRowsOf(ALL_THREADS),
 }
 // Twelve more asks: the list scrolls inside the popover.
 const MANY_DECISIONS: DecisionMail[] = Array.from({ length: 12 }, (_, i) => ({ mail_id: `fm-d${i}`, thread_id: `fx-t-d${i}`, from_id: 'fx-cos', from_name: 'fixture-cos', subject: `Pick the option for fixture question number ${i}, which has a long subject`, created_at: ago(20 + i * 40) }))
@@ -35,8 +36,8 @@ export const stories: Story[] = [{
   ],
   states: [
     { name: 'An ITSA, a request, a decision, and a reply', height: 520, data: everything, render: () => <OnMount run={open}>{trigger}</OnMount> },
-    { name: 'An ITSA\'s ask that stops an agent', height: 360, data: itsaData([...TREE, ASK_ITSA], { attention: [ASK_ITSA], agents: AGENTS_STOPPED, humanThreads: [T_ASK] }), render: () => <OnMount run={open}>{trigger}</OnMount> },
-    { name: 'A decision only', height: 320, data: itsaData(TREE, { decisions: [DECISION], humanThreads: [T_RICH] }), render: () => <OnMount run={open}>{trigger}</OnMount> },
+    { name: 'An ITSA\'s ask that stops an agent', height: 360, data: itsaData([...TREE, ASK_ITSA], { attention: [ASK_ITSA], agents: AGENTS_STOPPED, humanRows: humanRowsOf([T_ASK]) }), render: () => <OnMount run={open}>{trigger}</OnMount> },
+    { name: 'A decision only', height: 320, data: itsaData(TREE, { decisions: [DECISION], humanRows: humanRowsOf([T_RICH]) }), render: () => <OnMount run={open}>{trigger}</OnMount> },
     { name: 'Twelve decisions, long subjects', height: 560, data: itsaData(TREE, { decisions: MANY_DECISIONS }), render: () => <OnMount run={open}>{trigger}</OnMount> },
     { name: 'An ask you deferred is not listed', height: 300, data: itsaData(TREE, { attention: [{ ...ASK_ITSA, deferred: true }] }), render: () => <OnMount run={open}>{trigger}</OnMount> },
     { name: 'Loading', height: 300, data: itsaData(TREE, { loaded: { agents: true, mail: false, itsas: true } }), render: () => <OnMount run={open}>{trigger}</OnMount> },

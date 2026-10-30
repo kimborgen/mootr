@@ -189,6 +189,7 @@ func run() error {
 	life.StartOpenCode()
 	life.StartBanners()
 	life.StartWaits()
+	life.StartRest()
 	life.StartRules()
 	handler.StartRequirements(lifeCtx)
 	handler.StartPermissions(lifeCtx)
@@ -196,7 +197,6 @@ func run() error {
 	handler.StartPendingUnowns(lifeCtx)
 	handler.StartAutoArchive(lifeCtx)
 	handler.StartSearchIndex(lifeCtx)
-	handler.StartSettingsSync(lifeCtx)
 	handler.StartWebOrigin(lifeCtx)
 	handler.StartLayout(lifeCtx)
 	handler.StartViews(lifeCtx)
@@ -219,7 +219,34 @@ func run() error {
 		servers = append(servers, srv)
 		slog.Info("listening", "addr", srv.Addr, "machine", cfg.Machine)
 	}
-	return serve(ctx, endLife, hub, servers, (*http.Server).ListenAndServe, handler.WaitTerminals)
+	// The home's boot push tells its peers to fetch back, so it waits for the listeners (src/daemon.ts pushes in its
+	// listen callback, S-4371).
+	listen, err := bind(servers, func([]net.Addr) { handler.StartSettingsSync(lifeCtx) })
+	if err != nil {
+		return err
+	}
+	return serve(ctx, endLife, hub, servers, listen, handler.WaitTerminals)
+}
+
+// bind listens on each server's address, then runs bound, before any server serves: a connection made from then on
+// waits in its listener's backlog until serve runs, rather than being refused. It returns the listen that serves each
+// server on its listener; a bind that fails closes the ones made.
+func bind(servers []*http.Server, bound func([]net.Addr)) (func(*http.Server) error, error) {
+	lns := make(map[*http.Server]net.Listener, len(servers))
+	addrs := make([]net.Addr, 0, len(servers))
+	for _, srv := range servers {
+		ln, err := net.Listen("tcp", srv.Addr)
+		if err != nil {
+			for _, ln := range lns {
+				ln.Close()
+			}
+			return nil, err
+		}
+		lns[srv] = ln
+		addrs = append(addrs, ln.Addr())
+	}
+	bound(addrs)
+	return func(srv *http.Server) error { return srv.Serve(lns[srv]) }, nil
 }
 
 // serve runs each server with listen until ctx ends or one stops, then shuts them all down. The lifecycle ends first

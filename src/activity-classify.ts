@@ -93,11 +93,14 @@ export function categoryOf(r: DecisionResult | null): { category: string; confid
   return { category: a.choice, confidence };
 }
 
+// Today's decide events, through their partial index (src/db.ts events_stam_decide, S-4356).
+export const SPENT_SQL = "SELECT data FROM events INDEXED BY events_stam_decide WHERE agent_id = 'stam' AND type = 'decide' AND ts >= ?";
+
 // The UTC day's spend on the classifier: the decide events (usage keeps one row per day for the
 // account, labelled with whichever purpose wrote last, so it can't be split by purpose).
 export function spentToday(now = new Date()): number {
   const from = `${now.toISOString().slice(0, 10)}T00:00:00.000Z`;
-  const rows = db.open().prepare("SELECT data FROM events WHERE agent_id = 'stam' AND type = 'decide' AND ts >= ?").all(from) as { data: string }[];
+  const rows = db.open().prepare(SPENT_SQL).all(from) as { data: string }[];
   return rows.reduce((n, r) => {
     const d = JSON.parse(r.data ?? '{}');
     return d.purpose === CLASSIFY_PURPOSE ? n + (Number(d.cost) || 0) : n;

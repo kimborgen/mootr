@@ -5,7 +5,7 @@
 import { Icon } from '../Icon'
 import { TABS } from '../SidebarPanes'
 import {
-  activate, addPane, MAX_PANES, movePane, moveTab, removePane, removeTab, revertToMootrDefault, revertToUserDefault, saveUserDefault, sendTab, setSidebarPanes, setTabBar,
+  activate, addPane, MAX_PANES, moveSidebarPane, moveTab, removePane, removeTab, revertToMootrDefault, revertToUserDefault, saveUserDefault, sendTab, setSidebarPanes, setTabBar,
   TAB_BARS, unusedTabs, useHasUserDefault, useSidebarPanes, type TabBar,
 } from '../sidebar-panes'
 
@@ -32,8 +32,8 @@ export function SidebarSettings() {
             <div className="sbs-head">
               <b>Pane {i + 1}</b>
               <span className="wcol-ctl">
-                <button type="button" className="icon-btn" aria-label={`Move pane ${i + 1} up`} disabled={i === 0} onClick={() => setSidebarPanes(movePane(panes, i, -1))}><Icon name="arrow-up" size="xs" /></button>
-                <button type="button" className="icon-btn" aria-label={`Move pane ${i + 1} down`} disabled={i === panes.length - 1} onClick={() => setSidebarPanes(movePane(panes, i, 1))}><Icon name="arrow-down" size="xs" /></button>
+                <button type="button" className="icon-btn" aria-label={`Move pane ${i + 1} up`} disabled={i === 0} onClick={() => moveSidebarPane(i, -1)}><Icon name="arrow-up" size="xs" /></button>
+                <button type="button" className="icon-btn" aria-label={`Move pane ${i + 1} down`} disabled={i === panes.length - 1} onClick={() => moveSidebarPane(i, 1)}><Icon name="arrow-down" size="xs" /></button>
                 <button type="button" className="icon-btn" aria-label={`Remove pane ${i + 1}`} disabled={panes.length < 2} onClick={() => setSidebarPanes(removePane(panes, i))}><Icon name="trash-2" size="xs" /></button>
               </span>
             </div>

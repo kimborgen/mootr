@@ -284,7 +284,7 @@ for (const size of SIZES) for (const theme of THEMES) {
       if (await toConv.isVisible()) { await toConv.click(); await p.waitForTimeout(500); }
       await p.locator('#w-main .pane.focused .rapid-switch').click();
     } else await p.locator('#w-main .pane.focused .view-switch [data-view="rapid"]').click();
-    await p.waitForSelector('.rf:visible .rf-list');
+    await p.waitForSelector('.rf[data-loaded]:visible .rf-list');
   }, 800);
   await step('rapid-picked', async () => { await p.locator('.rf:visible .rf-list > li .mail-card').last().click(); await p.waitForSelector('#w-bottom .rf-target[data-rf="reply"]'); }, 600);
   if (!size.phone) {

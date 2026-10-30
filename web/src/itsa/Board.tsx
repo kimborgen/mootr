@@ -65,7 +65,7 @@ const END = '\u0000end'
 export function Board({ id, viewKey }: { id: string | null; viewKey: string }) {
   const { itsas } = useData()
   // The card's layout and the field definitions it draws. The extras are read here too: a card's costs and activity.
-  const extras = useWorkExtras()
+  const extras = useWorkExtras(viewKey)
   const fields = extras.fields
   const layout = useCardLayout('issue', fields ?? [])
   // The card items by id, built once for this render and shared by every card on the board.

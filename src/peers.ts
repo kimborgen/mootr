@@ -66,13 +66,28 @@ const down = new Map<string, number>();
 const LOOKUP_MS = Number(envVar('PEER_LOOKUP_MS')) || 4000;
 const checking = new Map<string, Promise<boolean>>();
 
-const peerFetch = (p: Peer, method: string, path: string, body: unknown, timeoutMs: number, human = false, via?: Via) =>
-  fetch(p.url.replace(/\/$/, '') + path, {
+// Told of each write this daemon sends a peer (S-4356), before it goes out and again once it settles: a write can apply
+// even when its answer never arrives, so the second call happens on failure too.
+const peerWriteListeners = new Set<() => void>();
+export function onPeerWrite(listener: () => void): void {
+  peerWriteListeners.add(listener);
+}
+const notifyPeerWrite = () => {
+  for (const listener of peerWriteListeners) listener();
+};
+
+const peerFetch = (p: Peer, method: string, path: string, body: unknown, timeoutMs: number, human = false, via?: Via) => {
+  const init = {
     method,
     headers: { authorization: `Bearer ${p.peerToken || p.token}`, 'content-type': 'application/json', 'x-stam-local': '1', ...(human ? { 'x-stam-human': '1' } : {}), ...viaHeaders(via) },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
-  });
+  };
+  const url = p.url.replace(/\/$/, '') + path;
+  if (method === 'GET') return fetch(url, init);
+  notifyPeerWrite();
+  return fetch(url, init).finally(notifyPeerWrite);
+};
 
 // Whether the peer answers /api/health, shared by callers that arrive while one is in flight.
 // Any answer means the peer is back, whatever its status.
@@ -612,19 +627,49 @@ export async function fanOut<T>(path: string, via?: Via): Promise<T[]> {
   return (await fanOutReport<T>(path, via)).rows;
 }
 
+// fanOutReport over several GETs that each peer answers in turn (S-4520), results concatenated: one page asked in
+// parts. A peer's turn ends after the answer `done` says holds the rest already (a peer that ignored the parts'
+// filter and sent everything), or after a request it didn't answer, or answered with an error: both count as
+// unreachable, since the part's rows are unknown.
+export async function fanOutParts<T>(paths: string[], via: Via | undefined, done: (rows: T[], part: number) => boolean): Promise<{ rows: T[]; unreachable: boolean }> {
+  const lists = await Promise.all(
+    peers().map(async (p) => {
+      const rows: T[] = [];
+      if (!paths.length) return { rows, unreachable: false };
+      if (skipDown(p)) return { rows, unreachable: true };
+      for (let i = 0; i < paths.length; i++) {
+        let part: T[];
+        try {
+          const r = await peerCall(p, 'GET', paths[i], undefined, 4000, false, via);
+          if (r.status !== 200 || !Array.isArray(r.data)) return { rows, unreachable: true };
+          part = r.data as T[];
+        } catch {
+          return { rows, unreachable: true };
+        }
+        rows.push(...part);
+        if (done(part, i)) break;
+      }
+      return { rows, unreachable: false };
+    }),
+  );
+  return { rows: lists.flatMap((l) => l.rows), unreachable: lists.some((l) => l.unreachable) };
+}
+
 // Whether every peer answers a health probe now (S-637): auto-archive judges a thread only with the
 // whole inbox in view, so it waits while one is down.
 export async function peersReachable(): Promise<boolean> {
   return (await Promise.all(peers().map((p) => checkUp(p)))).every(Boolean);
 }
 
-// fanOut, also saying whether a peer couldn't be asked (down, or the request failed) (S-359).
-export async function fanOutReport<T>(path: string, via?: Via): Promise<{ rows: T[]; unreachable: boolean }> {
+// fanOut, also saying whether a peer couldn't be asked (down, or the request failed) (S-359). `strict` counts an
+// answer that isn't a 200 with a list as not asked, so a partial answer isn't kept (S-4356).
+export async function fanOutReport<T>(path: string, via?: Via, strict = false): Promise<{ rows: T[]; unreachable: boolean }> {
   const lists = await Promise.all(
     peers().map(async (p) => {
       if (skipDown(p)) return { rows: [] as T[], unreachable: true };
       try {
         const r = await peerCall(p, 'GET', path, undefined, 4000, false, via);
+        if (strict && !(r.status === 200 && Array.isArray(r.data))) return { rows: [] as T[], unreachable: true };
         return { rows: r.status === 200 && Array.isArray(r.data) ? (r.data as T[]) : [], unreachable: false };
       } catch {
         return { rows: [] as T[], unreachable: true };

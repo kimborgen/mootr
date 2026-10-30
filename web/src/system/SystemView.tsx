@@ -27,7 +27,7 @@ import { workColumnIds, type Field } from '../itsa/fields'
 import { statusInfo, StatusGlyph, statusLabel, toneVar } from '../itsa/itsa'
 import { useWaiting } from '../itsa/WaitingList'
 import * as shell from '../shell/layout'
-import { onMailEvent, refreshSlow, useData } from '../store'
+import { onMailEvent, refreshSlow, useData, type MailEvent } from '../store'
 import type { Agent, Itsa, ItsaStatus } from '../types'
 import { WORK_COLUMNS, type CellContext, type WorkColumn } from '../work/columns'
 import { useWorkExtras } from '../work/data'
@@ -140,11 +140,25 @@ function useSize(el: React.RefObject<HTMLElement | null>) {
   return size
 }
 
+// The human's count comes from their threads, so their mail (sent to them, or read by them) runs the
+// slow round. It runs only while the view is on screen: a hidden view keeps its subscription, and the
+// 8 s slow poll keeps the badge current once it shows again (S-4690). `onMail` runs for every event.
+// The shown state is read through a ref, so the subscription is made once.
+export function useHumanMailRefresh(viewKey: string, onMail: (e: MailEvent) => void) {
+  const shown = shell.useViewShown(viewKey)
+  const live = useRef({ shown, onMail })
+  live.current = { shown, onMail }
+  useEffect(() => onMailEvent((e) => {
+    if (e.type === 'sent' ? e.to.includes(HUMAN) : e.by === HUMAN) { if (live.current.shown) void refreshSlow() }
+    live.current.onMail(e)
+  }), [])
+}
+
 export function SystemView({ viewKey }: { viewKey: string }) {
   const d = useData()
   shell.useShell()
   const shown = shell.leaves(shell.mainWorld().root).some((l) => l.active === viewKey)
-  const extras = useWorkExtras()
+  const extras = useWorkExtras(viewKey)
   const usage = useSystemUsage(shown)
   const cols = useWorkCols(extras.fields)
   const fields = useMemo(() => extras.fields ?? [], [extras.fields])
@@ -366,11 +380,7 @@ export function SystemView({ viewKey }: { viewKey: string }) {
     }
     setFlightTick((t) => t + 1)
   })
-  useEffect(() => onMailEvent((e) => {
-    // The human's count comes from their threads: fetch them when their mail moves.
-    if (e.type === 'sent' ? e.to.includes(HUMAN) : e.by === HUMAN) void refreshSlow()
-    if (e.type === 'sent') deck.current?.mail(e)
-  }), [])
+  useHumanMailRefresh(viewKey, (e) => { if (e.type === 'sent') deck.current?.mail(e) })
 
   // Cards that leave (archived, or folded away) shrink back into their nearest ancestor still
   // shown, and cards that arrive grow out of it (AnimatePresence, SystemCard): where from is

@@ -18,14 +18,14 @@ import { isPlainWait, useDeferred, useToAnswerCount, useWaiting, type WaitingRow
 import { HistorySide } from '../HistorySide'
 import { DelegatedGroup } from '../MailSide'
 import { currentWorld, isPhone, useShell } from '../shell/layout'
-import { hasPendingPermission, isUnreadForHuman, useData } from '../store'
-import type { Thread } from '../types'
+import { useData } from '../store'
+import type { IndexRow } from '../types'
 import { cardKind } from './cardKind'
 import { DigestCard } from './DigestCard'
 import { useDigest } from './digest'
 import { sameLine } from './cardSummary'
-import { bodyLines, cardFrom, cardMail, cardText, KIND } from './MailCard'
-import { FILTERS, filtered, grouped, hitGroup, isAwaiting, needsIds, unreadCount, waitThread, type Group, type InboxFilter, type SearchHit } from './inbox-model'
+import { bodyLines, KIND } from './MailCard'
+import { FILTERS, filtered, grouped, hitGroup, humanLists, isAwaiting, isPending, isUnread, needsIds, unreadCount, waitThread, type Group, type InboxFilter, type SearchHit } from './inbox-model'
 import { setInboxOrder } from './inbox-order'
 import { NeedsYouList } from './NeedsYouList'
 import { openAskCount } from './needsYou'
@@ -72,7 +72,7 @@ const EMPTY: Record<InboxFilter, string> = {
 // `selected` marks a row open without a pane (the stories' selected row); the page itself reads the open thread from the shell.
 export function InboxView({ selected }: { selected?: string }) {
   const d = useData()
-  const { humanThreads, humanArchived, humanDeferred, loaded, decisions, attention, itsas, delegateDialogs, asks } = d
+  const { loaded, decisions, attention, itsas, delegateDialogs, asks } = d
   useShell()
   const waiting = useWaiting()
   const deferred = useDeferred()
@@ -108,17 +108,19 @@ export function InboxView({ selected }: { selected?: string }) {
   const list = useRef<HTMLDivElement>(null)
   const searchBox = useRef<HTMLInputElement>(null)
 
-  const lists = { humanThreads, humanArchived, humanDeferred }
+  // The lists as index rows (S-4578): what a row shows of each thread.
+  const lists = humanLists(d)
+  const { active, archived: archivedRows, deferred: deferredRows } = lists
   const needs = needsIds(waiting, lists)
   const unreadN = unreadCount(lists, waiting, deferred)
-  const awaitingN = [...humanThreads, ...humanArchived, ...humanDeferred].filter(isAwaiting).length
-  const count = { toanswer: toAnswerN, unread: unreadN, all: 0, awaiting: awaitingN, deferred: filtered('deferred', lists, waiting, deferred).threads.length, archived: humanArchived.length }
+  const awaitingN = [...active, ...archivedRows, ...deferredRows].filter(isAwaiting).length
+  const count = { toanswer: toAnswerN, unread: unreadN, all: 0, awaiting: awaitingN, deferred: filtered('deferred', lists, waiting, deferred).threads.length, archived: archivedRows.length }
   const searching = query.trim() !== ''
   const shown = filtered(filter, lists, waiting, deferred)
   const groups: Group[] = searching ? (search.hits && search.q === query.trim() ? hitGroup(search.hits, lists) : []) : grouped(shown.threads, needs)
   // The All list shows what waits on you with no thread in any list (an ITSA's ask whose thread is elsewhere, say), and
   // what is deferred that way under Decide later, as the Mail list did. Plain waits are To answer's alone.
-  const threadIds = new Set([...humanThreads, ...humanArchived, ...humanDeferred].map((t) => t.thread_id))
+  const threadIds = new Set([...active, ...archivedRows, ...deferredRows].map((t) => t.thread_id))
   const orphan = (w: WaitingRow) => !threadIds.has(waitThread(w) ?? '')
   const inAll = filter === 'all' && !searching
   const alsoWaiting = phone && inAll ? waiting.filter((w) => !isPlainWait(w) && orphan(w)) : []
@@ -130,8 +132,8 @@ export function InboxView({ selected }: { selected?: string }) {
   const orderKey = order.join('\n')
   useEffect(() => { setInboxOrder(order) }, [orderKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const archivedIds = new Set(humanArchived.map((t) => t.thread_id))
-  const deferredIds = new Set(humanDeferred.map((t) => t.thread_id))
+  const archivedIds = new Set(archivedRows.map((t) => t.thread_id))
+  const deferredIds = new Set(deferredRows.map((t) => t.thread_id))
   // A deferred ask's thread is in the Deferred list but isn't deferred itself: its row offers no Undefer and no defer swipe
   // (the ask is cleared by the human's reply), so a tap answers it.
   const askDeferredIds = new Set(filtered('deferred', lists, waiting, deferred).threads.map((t) => t.thread_id).filter((id) => !deferredIds.has(id)))
@@ -196,24 +198,22 @@ export function InboxView({ selected }: { selected?: string }) {
     return () => removeEventListener('keydown', key)
   }, [])
 
-  const itsaOf = (t: Thread) => {
-    const m = cardMail(t)
+  const itsaOf = (t: IndexRow) => {
     const ask = attention.find((x) => x.ask_thread_id === t.thread_id)
     if (ask) return { key: ask.key, title: ask.title }
-    const about = m.about_itsa ?? m.itsa_id
-    return itsas.find((x) => x.id === about) ?? m.itsas?.[0] ?? null
+    return itsas.find((x) => x.id === t.about_itsa) ?? t.itsa_chip ?? null
   }
-  const row = (t: Thread) => {
-    const m = cardMail(t)
-    const from = cardFrom(t)
-    const perm = hasPendingPermission(t)
+  const row = (t: IndexRow) => {
+    const from = { id: t.card_from_id ?? t.from_id, name: t.card_from_id ? t.card_from_name : t.from_name }
+    const perm = isPending(t)
     const ask = perm || decisions.some((x) => x.thread_id === t.thread_id) || attention.some((x) => x.ask_thread_id === t.thread_id)
-    const kind = KIND[cardKind({ waiting: ask, verdictKind: m.verdict?.kind })]
-    const subject = plainSubject(t.mails[0].subject) || '(no subject)'
-    const summary = bodyLines(cardText(m).text, 1, 240)
+    const kind = KIND[cardKind({ waiting: ask, verdictKind: t.verdict_kind })]
+    const subject = plainSubject(t.subject) || '(no subject)'
+    // The card's text (MailCard's cardText): its summary or body, else its title, else the subject; a route row without it has its snippet.
+    const summary = bodyLines(t.card_text || t.card_title || (t.card_text === undefined ? t.snippet : '') || plainSubject(t.card_subject ?? t.subject) || '(no text)', 1, 240)
     const itsa = itsaOf(t)
-    const unread = isUnreadForHuman(t)
-    const last = t.mails.at(-1)!
+    const unread = isUnread(t)
+    const at = t.last_created_at ?? t.last_at
     // On a phone an ask that lives in its own thread opens its ITSA, as the Mail list did: the ITSA's view holds the thread and its actions.
     const askItsa = attention.find((x) => x.ask_thread_id === t.thread_id && x.thread_id === t.thread_id)
     const go = () => (isPhone() && askItsa ? openItsa(askItsa.id) : open(t.thread_id))
@@ -223,19 +223,19 @@ export function InboxView({ selected }: { selected?: string }) {
         <div className="mrow-act" aria-hidden="true"><Icon name={archivedIds.has(t.thread_id) ? 'archive-restore' : 'archive'} size="xs" />{archivedIds.has(t.thread_id) ? 'Unarchive' : 'Archive'}</div>
         <div className={`mrow irow${unread ? ' unread' : ''}${ask ? ' ask' : ''}${t.thread_id === openTid ? ' sel' : ''}`} data-thread={t.thread_id} data-inbox-row role="button" tabIndex={0}
           aria-pressed={t.thread_id === openTid}
-          title={`${subject} · ${kind.label} · from ${nameFor(from.id, from.name)} · ${new Date(last.created_at).toLocaleString()}`}
+          title={`${subject} · ${kind.label} · from ${nameFor(from.id, from.name)} · ${new Date(at).toLocaleString()}`}
           onClick={go} onKeyDown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) go() }}>
           <div className="ir-top">
             <span className="ir-kind" data-kind={kind.label.toLowerCase()} title={kind.label} aria-label={kind.label}><Icon name={kind.icon} size="xs" /></span>
             <Avatar id={from.id} />
             <span className="s">{subject}</span>
             {itsa ? <span className="chip" data-chip="itsa" title={itsa.title}>{itsa.key}</span> : null}
-            {t.mails.length > 1 ? <span className="badge n" title={`${t.mails.length} messages`}>{t.mails.length}</span> : null}
-            <span className="t">{ago(last.created_at)}</span>
+            {t.mail_count > 1 ? <span className="badge n" title={`${t.mail_count} messages`}>{t.mail_count}</span> : null}
+            <span className="t">{ago(at)}</span>
             {unread ? <span className="dot" role="img" aria-label="Unread" /> : null}
           </div>
           {/* The ask's line sits on the second line, where a long subject can't push it out of view. */}
-          <div className="ir-sum">{phone && ask ? <AskBlockLine thread={t.thread_id} short /> : null}{phone && ask && summary ? ' · ' : null}{summary && !sameLine(summary, baseSubject(t.mails[0].subject)) ? summary : null}</div>
+          <div className="ir-sum">{phone && ask ? <AskBlockLine thread={t.thread_id} short /> : null}{phone && ask && summary ? ' · ' : null}{summary && !sameLine(summary, baseSubject(t.subject)) ? summary : null}</div>
         </div>
       </div>)
   }
@@ -263,7 +263,7 @@ export function InboxView({ selected }: { selected?: string }) {
     <div className="inbox-view" id="inbox-view">
       <div className="inbox-head">
         <h2 className="inbox-title">Inbox</h2>
-        {showNeeds ? null : <span className="inbox-count" data-inbox-count>{parts.length ? parts.map((p, i) => <span key={i}>{i ? ' · ' : ''}{p}</span>) : `${humanThreads.length} threads`}</span>}
+        {showNeeds ? null : <span className="inbox-count" data-inbox-count>{parts.length ? parts.map((p, i) => <span key={i}>{i ? ' · ' : ''}{p}</span>) : `${active.length} threads`}</span>}
         <input className="inbox-search" type="search" aria-label="Search mail" placeholder="Search mail" value={query} data-inbox-search ref={searchBox}
           onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') { setQuery(''); e.currentTarget.blur() } }} />
         {/* The Mail list's other entries (S-2054): Swipe as a mode of this page, and the history of what was shown. */}

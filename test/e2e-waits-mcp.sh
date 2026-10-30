@@ -119,7 +119,7 @@ wait_for empty "$C" || fail "cleanup left waits behind"
 
 echo "-- the MCP tools drive the same waits over stdio"
 mcp() {
-  STAM_BIN="$STAM" STAM_AGENT_ID="$1" node "$ROOT/test/mcp-call.mjs" \
+  STAM_BIN="$STAM" with_agent_id "$1" node "$ROOT/test/mcp-call.mjs" \
     "$(python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":sys.argv[1],"arguments":json.loads(sys.argv[2])}}))' "$2" "$3")" |
     python3 -c 'import json,sys
 m=json.load(sys.stdin); r=m.get("result",{}); t=r.get("content",[{}])[0].get("text","")

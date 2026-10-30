@@ -76,6 +76,12 @@ describe('stackOrder', () => {
   it('forgets left threads no longer in the inbox', () => {
     expect(stackOrder([a, c], new Map([['b', 'm-b']])).map((x) => x.thread_id)).toEqual(['a', 'c'])
   })
+  it('orders index rows by what `last` says of their latest mail (S-4616)', () => {
+    const r = (id: string, at: string) => ({ thread_id: id, last_mail_id: 'm-' + id, last_created_at: at })
+    const rows = [r('a', '2026-10-15T09:00:00Z'), r('b', '2026-10-15T10:00:00Z'), r('c', '2026-10-15T08:00:00Z')]
+    const last = (x: (typeof rows)[number]) => ({ id: x.last_mail_id, created_at: x.last_created_at })
+    expect(stackOrder(rows, new Map([['b', 'm-b']]), last).map((x) => x.thread_id)).toEqual(['a', 'c', 'b'])
+  })
 })
 
 describe('pinFront', () => {

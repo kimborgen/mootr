@@ -27,6 +27,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"stam/internal/config"
 	"stam/internal/jsjson"
@@ -64,9 +65,11 @@ type Auth struct {
 	afterTemp func()
 
 	// leaseMu guards the leases a peer holds in memory and the fetches in flight (S-3177). Nothing here is written to disk.
-	leaseMu sync.Mutex
-	held    map[string]heldLease
-	leasing map[string]*leaseFlight
+	// leaseSeq numbers the fetches in the order they start, so a fetch's result never replaces or drops a newer one's.
+	leaseMu  sync.Mutex
+	held     map[string]heldLease
+	leasing  map[string]*leaseFlight
+	leaseSeq uint64
 
 	// loginMu guards the logins started and not yet finished, by state (login.go). They live in memory only.
 	loginMu sync.Mutex
@@ -763,6 +766,9 @@ func (a *Auth) TokenFor(ctx context.Context, name string, force bool) (Bearer, e
 // isSettingsHome is whether this daemon is the settings home, the one that keeps the logins (isSettingsHome in TS).
 func (a *Auth) isSettingsHome() bool { return a.opt.Settings().Home == a.opt.Machine }
 
+// GhToken is the user's `gh auth token` for the GitHub poller.
+func (a *Auth) GhToken(ctx context.Context) (string, error) { return a.ghToken(ctx) }
+
 // ghToken is the user's `gh auth token`, cached for five minutes (ghToken in TS).
 func (a *Auth) ghToken(ctx context.Context) (string, error) {
 	a.ghMu.Lock()
@@ -876,27 +882,67 @@ func (a *Auth) peerRows(ctx context.Context) Status {
 	if err != nil {
 		return Status{Servers: rows, Home: jsjson.NewObject("name", home, "reachable", false, "error", err.Error())}
 	}
+	local := map[string]string{}
+	for _, sv := range a.servers() {
+		local[sv.name] = sv.name
+	}
 	leased, _ := field(data, "servers").([]jsjson.Value)
 	for _, v := range leased {
 		if row, ok := v.(*jsjson.Object); ok {
-			row.Set("leased_from", home)
-			rows = append(rows, row)
+			if shown, ok := shownRow(row, local); ok {
+				shown.Set("leased_from", home)
+				rows = append(rows, shown)
+			}
 		}
 	}
 	return Status{Servers: rows, Home: jsjson.NewObject("name", home, "reachable", true)}
 }
 
+// shownRow is the part of a home's status row that status shows, with no text of the home's in it (S-4416): the row is
+// kept only for a server this machine has too, under the local name (local maps each name to itself), with the type
+// only when it is one of the auth types, and the login and expiry only with the types they have in a status row.
+// Anything else the home sends, a token or a field unknown here, is dropped.
+func shownRow(row *jsjson.Object, local map[string]string) (*jsjson.Object, bool) {
+	sent, _ := field(row, "name").(string)
+	name, ok := local[sent]
+	if !ok {
+		return nil, false
+	}
+	out := jsjson.NewObject("name", name)
+	switch field(row, "type") {
+	case "oauth":
+		out.Set("type", "oauth")
+	case "gh":
+		out.Set("type", "gh")
+	}
+	if b, ok := field(row, "logged_in").(bool); ok {
+		out.Set("logged_in", b)
+	}
+	if e, ok := num(row, "expires_at"); ok {
+		out.Set("expires_at", e)
+	} else if v, has := row.Get("expires_at"); has && v == nil {
+		out.Set("expires_at", nil)
+	}
+	return out, true
+}
+
 // heldLease is a peer's copy of a lease: the server's url, its bearer, and when it expires (ms). It is kept in memory
-// only, per server and url.
+// only, per server and url. seq is the fetch that brought it.
 type heldLease struct {
 	url, token string
 	expiresAt  float64
+	seq        uint64
 }
 
-// leaseFlight is one fetch from the home in flight; its callers wait on done and share the result.
+// leaseFlight is one fetch from the home, running or queued; its callers wait on done and share the result. queued is the
+// forced fetch that starts once this one ends (S-3472), set under leaseMu.
 type leaseFlight struct {
 	done   chan struct{}
 	joined int // the asks that waited on this fetch, counted under leaseMu
+	force  bool
+	ctx    context.Context // the context of the ask that made it, without its cancellation
+	seq    uint64
+	queued *leaseFlight
 	lease  heldLease
 	err    error
 }
@@ -905,8 +951,9 @@ type leaseFlight struct {
 const leaseTimeout = 15 * time.Second
 
 // peerLease is a peer's lease of server name for url want (peerLease in TS, S-3177). A copy serves until 60 s before it
-// expires, and one fetch from the home serves every caller that asks while it runs. A forced ask joining a fetch that is
-// already running gets that fetch's lease (the TS behaviour; S-3177 lists it as a follow-up).
+// expires. One fetch from the home runs per server and url at a time. A non-forced ask joins the running fetch. A
+// forced one never does, since that fetch may bring back the token it is replacing: it joins the forced fetch queued
+// behind it, which starts once the running one ends, so its token is newer than the ask (S-3472).
 func (a *Auth) peerLease(ctx context.Context, name string, force bool, want string) (heldLease, error) {
 	key := name + "\n" + want
 	a.leaseMu.Lock()
@@ -914,28 +961,69 @@ func (a *Auth) peerLease(ctx context.Context, name string, force bool, want stri
 		a.leaseMu.Unlock()
 		return cur, nil
 	}
-	if f, ok := a.leasing[key]; ok {
-		f.joined++
+	f, ok := a.leasing[key]
+	if !ok {
+		f = &leaseFlight{done: make(chan struct{}), force: force, ctx: context.WithoutCancel(ctx)}
+		a.launchLease(key, name, want, f)
 		a.leaseMu.Unlock()
 		return f.wait(ctx)
 	}
-	f := &leaseFlight{done: make(chan struct{})}
-	a.leasing[key] = f
-	a.leaseMu.Unlock()
-	go func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaseTimeout)
-		defer cancel()
-		l, err := a.leaseMatching(ctx, name, want, force)
-		a.leaseMu.Lock()
-		if err == nil {
-			a.held[key] = l
+	if force {
+		if f.queued == nil {
+			f.queued = &leaseFlight{done: make(chan struct{}), force: true, ctx: context.WithoutCancel(ctx)}
 		}
-		delete(a.leasing, key)
+		f = f.queued
+	}
+	f.joined++
+	a.leaseMu.Unlock()
+	then := ""
+	if force {
+		then = ", then fetches again"
+	}
+	slog.Info(fmt.Sprintf("mcp lease: %s waits for the running fetch from the home%s", name, then))
+	return f.wait(ctx)
+}
+
+// launchLease makes f the running fetch of key and starts it, under leaseMu. The fetch runs on f's context, apart from
+// every caller, bounded by leaseTimeout. When it ends, its result is committed and the fetch queued behind it, if any,
+// starts in the same critical section, so no ask finds the key without a fetch in between.
+func (a *Auth) launchLease(key, name, want string, f *leaseFlight) {
+	a.leaseSeq++
+	f.seq = a.leaseSeq
+	a.leasing[key] = f
+	go func() {
+		ctx, cancel := context.WithTimeout(f.ctx, leaseTimeout)
+		l, err := a.leaseMatching(ctx, name, want, f.force)
+		cancel()
+		l.seq = f.seq
+		a.leaseMu.Lock()
+		a.commitLease(key, f.seq, l, err)
+		if f.queued != nil {
+			a.launchLease(key, name, want, f.queued)
+		} else {
+			delete(a.leasing, key)
+		}
 		a.leaseMu.Unlock()
 		f.lease, f.err = l, err
 		close(f.done)
 	}()
-	return f.wait(ctx)
+}
+
+// commitLease is fetch seq's result for key, under leaseMu. A lease replaces the held one. A refusal (any error but an
+// unreachable home) drops it, so a lease the home no longer gives is never served from the cache; an unreachable home
+// keeps it, so the peer serves it until its margin (S-3472). A held lease from a newer fetch is never replaced or dropped.
+func (a *Auth) commitLease(key string, seq uint64, l heldLease, err error) {
+	cur, ok := a.held[key]
+	if ok && cur.seq > seq {
+		return
+	}
+	var down *homeUnreachableError
+	switch {
+	case err == nil:
+		a.held[key] = l
+	case !errors.As(err, &down):
+		delete(a.held, key)
+	}
 }
 
 // wait is the lease the fetch brings, or the caller's own context error when the caller goes away first.
@@ -949,19 +1037,21 @@ func (f *leaseFlight) wait(ctx context.Context) (heldLease, error) {
 }
 
 // leaseMatching is the home's lease for name, asked once more when it names another url than want. A lease for another
-// url is never used: it belongs to a different resource. Both urls are named in the error; no token is.
+// url is never used: it belongs to a different resource. Both urls are named in the error; no token is. The second ask
+// isn't forced: the url is the home's settings, which a refresh doesn't change, so it would only call the provider again
+// (S-3472).
 func (a *Auth) leaseMatching(ctx context.Context, name, want string, force bool) (heldLease, error) {
 	l, err := a.leaseFromHome(ctx, name, force)
 	if err != nil {
 		return heldLease{}, err
 	}
 	if l.url != want {
-		if l, err = a.leaseFromHome(ctx, name, true); err != nil {
+		if l, err = a.leaseFromHome(ctx, name, false); err != nil {
 			return heldLease{}, err
 		}
 	}
 	if l.url != want {
-		return heldLease{}, fmt.Errorf("%s: the home leases a token for %s, but this machine's settings name %s; the token is not used. Make the url of %s the same on both machines, then retry", name, l.url, want, name)
+		return heldLease{}, fmt.Errorf("%s: the home leases a token for another url, but this machine's settings name %s; the token is not used. Make the url of %s the same on both machines, then retry", name, want, name)
 	}
 	return l, nil
 }
@@ -995,8 +1085,16 @@ func (a *Auth) leaseFromHome(ctx context.Context, name string, force bool) (held
 	return heldLease{url: str(o, "url"), token: tok, expiresAt: exp}, nil
 }
 
+// homeUnreachableError is the error for a home that got nothing, or whose answer never came back (HomeUnreachable in TS,
+// S-3472): a network failure, not a refusal.
+type homeUnreachableError struct{ msg string }
+
+func (e *homeUnreachableError) Error() string { return e.msg }
+
 // homeGet is a GET to the settings home's peer routes with the lease token from settings.peers, the only bearer the home's
-// lease routes accept. what names the request in each error. Nothing here returns or logs the token.
+// lease routes accept. what names the request in each error. Nothing here returns or logs the token. A network failure
+// is a homeUnreachableError; an answer that isn't JSON is its own error, since the home is up (S-3472); an answer with
+// any status is returned, for homeError.
 func (a *Auth) homeGet(ctx context.Context, what, path string) (int, jsjson.Value, error) {
 	home := a.opt.Settings().Home
 	var peer config.Peer
@@ -1012,7 +1110,7 @@ func (a *Auth) homeGet(ctx context.Context, what, path string) (int, jsjson.Valu
 	if peer.LeaseToken == "" {
 		return 0, nil, fmt.Errorf("%s: settings.peers[%s].leaseToken is missing; copy the value of STAM_HOME/mcp-lease-token from %s into it", what, home, home)
 	}
-	unreachable := fmt.Errorf("%s: the home %s is unreachable, so its MCP logins can't be leased; start %s and retry", what, home, home)
+	unreachable := &homeUnreachableError{fmt.Sprintf("%s: the home %s is unreachable, so its MCP logins can't be leased; start %s and retry", what, home, home)}
 	if a.opt.HomeGet == nil {
 		return 0, nil, unreachable
 	}
@@ -1027,18 +1125,18 @@ func (a *Auth) homeGet(ctx context.Context, what, path string) (int, jsjson.Valu
 	}
 	data, err := jsjson.Parse(raw)
 	if err != nil {
-		return 0, nil, unreachable
+		return 0, nil, fmt.Errorf("%s: %s answered something that is not JSON, so its MCP logins can't be leased; check that settings.peers[%s].url is %s's daemon", what, home, home, home)
 	}
 	return status, data, nil
 }
 
-// homeError is the error for a home answer that isn't the one asked for. Each status says what to do; the home's message
-// names the cause, and no answer carries a token.
+// homeError is the error for a home answer that isn't the one asked for. Each status says what to do; homeCause names
+// the cause when the home sent a known one. No text of the home's reaches the error.
 func homeError(what, home string, status int, data jsjson.Value) error {
 	why := ""
 	if o, ok := data.(*jsjson.Object); ok {
-		if msg := str(o, "error"); msg != "" {
-			why = ": " + msg
+		if cause := homeCause(what, status, str(o, "error")); cause != "" {
+			why = ": " + cause
 		}
 	}
 	switch status {
@@ -1046,8 +1144,62 @@ func homeError(what, home string, status int, data jsjson.Value) error {
 		return fmt.Errorf("%s: %s refused the lease token (%d%s). Check that settings.peers[%s].leaseToken is the value of STAM_HOME/mcp-lease-token on %s, and that the server has shareWithPeers on %s", what, home, status, why, home, home, home)
 	case http.StatusConflict:
 		return fmt.Errorf("%s: %s has no lease for it%s. Re-login or refresh on %s, then retry", what, home, why, home)
+	case http.StatusOK:
+		return fmt.Errorf("%s: %s answered 200 without a lease", what, home)
 	}
 	return fmt.Errorf("%s: %s answered %d%s", what, home, status, why)
+}
+
+// homeCauseMax bounds a cause in an error, in bytes. A cause is local text, so this is only a belt.
+const homeCauseMax = 300
+
+// homeCause is the cause of a home's refusal of name, one of the refusals the home's lease route sends (LeaseFor and
+// peerLeaseRoute; leaseFor and peerLeaseRoute in TS), known by its status and its text with name filled in (S-4416).
+// The home sends no cause code, so its text is matched against each one. The cause returned is always built here, and
+// the home's text, which may quote a provider's answer, never is; any other text gives "".
+func homeCause(name string, status int, msg string) string {
+	// The refusals the home words the same each time: the cause is the same words.
+	exact := []struct {
+		status int
+		cause  string
+	}{
+		{http.StatusUnauthorized, "the MCP lease route needs the lease token as a Bearer"},
+		{http.StatusForbidden, "not the lease token"},
+		{http.StatusForbidden, name + " is not shared with peers (shareWithPeers is off)"},
+		{http.StatusNotFound, "no MCP server named " + name},
+		{http.StatusBadRequest, name + " uses gh; a peer uses its own gh login"},
+		{http.StatusConflict, name + " is not logged in on this home"},
+		{http.StatusConflict, name + "'s grant never expires, so it is not leased"},
+		{http.StatusConflict, name + "'s grant ends within a minute, so it is not leased"},
+		{http.StatusConflict, name + "'s leaseMaxSeconds must be a positive integer (settings mcpServers." + name + ".leaseMaxSeconds)"},
+	}
+	cause := ""
+	for _, c := range exact {
+		if c.status == status && c.cause == msg {
+			cause = c.cause
+		}
+	}
+	// The refusals that carry numbers, machines or another error: known by their fixed parts, named without the rest.
+	capTail := " s cap: the provider issues longer-lived tokens than peers accept (settings mcpServers." + name + ".leaseMaxSeconds)"
+	switch {
+	case cause != "":
+	case status == http.StatusConflict && strings.HasPrefix(msg, name+"'s token lives ") && strings.HasSuffix(msg, capTail):
+		cause = name + "'s token lives longer than the lease cap: the provider issues longer-lived tokens than peers accept (settings mcpServers." + name + ".leaseMaxSeconds)"
+	case status == http.StatusConflict && strings.Contains(msg, " is not the settings home"):
+		cause = "it is not the settings home; set settings.home to the machine that holds the logins"
+	case status == http.StatusForbidden && strings.HasPrefix(msg, name+": the settings could not be read, so sharing can't be checked ("):
+		cause = "the home could not read its settings, so sharing can't be checked"
+	case status == http.StatusBadGateway && strings.HasPrefix(msg, name+": the home could not get a token ("):
+		cause = "the home could not get a token from the provider; see the home's log"
+	}
+	if len(cause) > homeCauseMax {
+		cut := homeCauseMax
+		for cut > 0 && !utf8.RuneStart(cause[cut]) {
+			cut--
+		}
+		cause = cause[:cut]
+	}
+	return cause
 }
 
 // localRows are the rows of the servers that have an auth (and pass only).

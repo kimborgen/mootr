@@ -23,12 +23,12 @@ func agentRoutes(method string, paths ...string) []agentRoute {
 var (
 	// actingRoutes is the routes with auth `acting`.
 	actingRoutes = append(
-		agentRoutes("GET", `/files`, `/instructions`, `/inventory`, `/inbox`, `/threads`, `/view`, `/view/history`, `/view/tools`, `/stream`, `/events`),
+		agentRoutes("GET", `/files`, `/instructions`, `/inventory`, `/inbox`, `/threads`, `/thread-index`, `/view`, `/view/history`, `/view/tools`, `/stream`, `/events`),
 		agentRoutes("POST", `/threads/([\w-]+)/(archive|unarchive|defer|undefer)`, `/read`, `/waits`, `/waits/clear`, `/waits/declared`, `/waits/wake`, `/waits/done`)...)
 	// opencodeNamedRoutes is the routes whose path names the agent for the OpenCode server: `acting` ones, except POST
 	// /waits (mayManageWaits reads a missing `by` as the human), and POST /workspace-share, which is `self`.
 	opencodeNamedRoutes = append(
-		agentRoutes("GET", `/files`, `/instructions`, `/inventory`, `/inbox`, `/threads`, `/view`, `/view/history`, `/view/tools`, `/stream`, `/events`),
+		agentRoutes("GET", `/files`, `/instructions`, `/inventory`, `/inbox`, `/threads`, `/thread-index`, `/view`, `/view/history`, `/view/tools`, `/stream`, `/events`),
 		agentRoutes("POST", `/threads/([\w-]+)/(archive|unarchive|defer|undefer)`, `/read`, `/waits/clear`, `/waits/declared`, `/waits/wake`, `/waits/done`, `/workspace-share`)...)
 )
 

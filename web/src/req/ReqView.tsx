@@ -15,7 +15,7 @@ import { hideMenu, showPopover, toast } from '../ui/menu'
 import { STATE_WORD, stateOf, STATUS_WORD, subjectLabel, verdictLabel, verdictWord, WAIVER_WORD, type PreviewResult, type ReqLink, type ReqVerdict, type RequirementView, type WaiverKind } from './model'
 import { openReq, peekReqFocus, ProbBar, ReqGlyph, takeReqFocus, useReqFocus } from './parts'
 import { selectThread } from '../actions'
-import { refreshReq, useReq } from './store'
+import { refreshReq, useReq, useReqReader } from './store'
 
 export const reqTitles = new Map<string, string>()
 
@@ -120,6 +120,7 @@ function LinkChip({ l }: { l: ReqLink }) {
 
 export function ReqView({ keyName, viewKey }: { keyName: string; viewKey: string }) {
   const { enabled, reqs } = useReq()
+  useReqReader(viewKey)
   const [v, setV] = useState<RequirementView | null>(null)
   const [error, setError] = useState<string | null>(null)
   // The list row's latest verdicts change when a check lands: that reloads the view.

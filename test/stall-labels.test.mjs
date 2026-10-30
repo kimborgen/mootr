@@ -36,3 +36,10 @@ test('the startup rebuild names its steps', () => {
   assert.ok(labels().has('rebuild waits: children'));
   assert.ok(labels().has('rebuild waits: settle asks'));
 });
+
+// S-4356: the activity slice by=itsa stalled 2.8 s under one label; its steps that don't yield name themselves.
+test('the activity stats by itsa name their unyielded steps', async () => {
+  const stats = await import('../src/activity-stats.ts');
+  stats.activityStats({ by: 'itsa' });
+  for (const l of ['activity: attribution', 'activity: reviewers']) assert.ok(labels().has(l), l);
+});

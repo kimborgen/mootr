@@ -18,7 +18,7 @@ import { IssuesSide } from './itsa/IssuesSide'
 import { ReqSide } from './req/ReqSide'
 import { useDeferred, useWaiting } from './itsa/WaitingList'
 import { PageButtons } from './PageButtons'
-import { unreadCount } from './mail/inbox-model'
+import { humanLists, unreadCount } from './mail/inbox-model'
 import * as shell from './shell/layout'
 import { getBottomSlot, setBottomHandle, useBottomSlotVersion } from './bottom-slot'
 import { bottomTarget } from './composer-target'
@@ -311,7 +311,7 @@ export function navState(cw: string | null, side: shell.Mobile, topOpen: boolean
 }
 
 export function MobileNav() {
-  const { humanThreads, humanArchived, humanDeferred } = useData()
+  const lists = humanLists(useData())
   const { topOpen } = useUi()
   const cw = shell.currentWorld()
   const world = !cw ? null : viewMeta(cw.startsWith('t:') ? 'thread:' + cw.slice(2) : cw.startsWith('w:') ? cw.slice(2) : 'agent:' + cw)
@@ -319,7 +319,7 @@ export function MobileNav() {
   const on = (slot: NavSlot) => nav.on === slot ? 'on' : ''
   // What waits on you, counted once (`useWaiting`): the Mail, Issues and Work badges agree. Unread is the Inbox page's own count.
   const waitingRows = useWaiting()
-  const unread = unreadCount({ humanThreads, humanArchived, humanDeferred }, waitingRows, useDeferred())
+  const unread = unreadCount(lists, waitingRows, useDeferred())
   const waiting = waitingRows.length
   const go = (side: 'left' | 'issues' | null) => { openAssistant(false); closeSearch(); closeSuggest(); shell.phoneShow(side) }
   const goWork = () => { openAssistant(false); closeSearch(); closeSuggest(); shell.phoneShow(null); openWorld('work') }
@@ -483,7 +483,7 @@ export function App() {
           <Tree />
           <IssuesSide leftRef={left} />
           <ReqSide />
-          <MachinesSide />
+          <MachinesSide shown={st.mobile === 'left'} />
         </> : <SidebarPanes left={left} />}
         <div className="tree-footer">
           <ThemeButton />

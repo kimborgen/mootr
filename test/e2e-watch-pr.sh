@@ -50,7 +50,7 @@ hook "$A" '{"hook_event_name":"UserPromptSubmit"}'; hook "$A" '{"hook_event_name
 
 echo "-- the watch_pr tool makes one subscription on PR #1, ending on the merge"
 # The tool runs as alice would call it: over stdio, through `stam mcp`, against this daemon.
-STAM_BIN="$STAM" STAM_AGENT_ID="$A" node "$ROOT/test/mcp-call.mjs" "$(python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"watch_pr","arguments":{"self":sys.argv[1],"pr":"o/r#1"}}}))' "$A")" >"$TEST_TMP/watch.out" || fail "watch_pr failed: $(cat "$TEST_TMP/watch.out")"
+STAM_BIN="$STAM" with_agent_id "$A" node "$ROOT/test/mcp-call.mjs" "$(python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"watch_pr","arguments":{"self":sys.argv[1],"pr":"o/r#1"}}}))' "$A")" >"$TEST_TMP/watch.out" || fail "watch_pr failed: $(cat "$TEST_TMP/watch.out")"
 [ "$(api GET "/api/subscriptions?by=$A" | count)" = 1 ] || fail "watch_pr made no single subscription"
 api GET "/api/subscriptions?by=$A" | python3 -c "
 import json,sys

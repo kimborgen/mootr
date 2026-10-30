@@ -15,40 +15,38 @@
 // The Swipe entry opens the inbox's threads as a stack of cards in main (`w:swipe`, S-1003).
 import { useEffect, useRef, useState } from 'react'
 import { openWorld, selectAgent, selectThread, setThreadArchived, setThreadDeferred } from './actions'
-import { ago, baseSubject, plainSubject, threadTitle } from './format'
+import { ago, baseSubject, plainSubject } from './format'
 import { Icon } from './Icon'
 import { Loading } from './Loading'
 import { openedItsa, openItsa, StatusGlyph, statusLabel } from './itsa/itsa'
 import { AskBlockLine } from './itsa/AskBlockLine'
 import { isPlainWait, useDeferred, useToAnswerCount, useWaiting, type WaitingRow } from './itsa/WaitingList'
-import { unreadThreads as unreadThreadsOf } from './mail/inbox-model'
+import { humanLists, isAwaiting as awaiting, isPending as pending, lastAt, unreadThreads as unreadThreadsOf, type Lists } from './mail/inbox-model'
 import { NeedsYouList } from './mail/NeedsYouList'
 import { openAskCount } from './mail/needsYou'
 import { swipeRow } from './mail/swipeRow'
 import { nameFor } from './mail/ThreadPanel'
 import { HistorySide } from './HistorySide'
 import { currentWorld, useShell } from './shell/layout'
-import { byId, hasPendingPermission, useData, type Data } from './store'
+import { byId, useData } from './store'
 import { getUi, setUi } from './ui/state'
-import type { ItsaAttention, Permission } from './types'
+import type { IndexRow, ItsaAttention, Permission } from './types'
 
 // The tooltip of a row in the Deferred group (S-353): still open, not waiting on you.
 const DEFERRED_TIP = 'Deferred: still open; answer any time'
 // Who a delegated dialog is with, as mentions (S-594).
 const withWhom = (p: Permission) => (p.with?.length ? p.with.map((n) => '@' + n).join(', ') : 'its reviewers')
-const pending = hasPendingPermission
-// Awaiting: the human sent the last message, and nobody has answered it.
-const awaiting = (t: { mails: { from_id: string }[] }) => t.mails.at(-1)?.from_id === 'human'
 
 // The attention list the Inbox shows (see MailSide): one row per thing waiting on you, oldest first. `view` is
 // 'inbox' or 'toanswer'; the rows are empty for the other views. The sidebar header's count and the nav badge
 // both read it, so they agree. Plain waits (no thread, ask or decision) are left out of the inbox but kept for To answer.
-type Thread = Data['humanThreads'][number]
-export function attentionRows(view: string, data: Pick<Data, 'humanThreads' | 'humanArchived' | 'humanDeferred'>, waiting: WaitingRow[]) {
-  const { humanThreads, humanArchived, humanDeferred } = data
-  const deferredIds = new Set(humanDeferred.map((t) => t.thread_id))
+// The lists are index rows (S-4578): `humanLists` of the store's data.
+type Thread = IndexRow
+export function attentionRows(view: string, lists: Lists, waiting: WaitingRow[]) {
+  const { active, archived, deferred } = lists
+  const deferredIds = new Set(deferred.map((t) => t.thread_id))
   // To answer also resolves archived threads: an ask stays there while archived or deferred (S-984).
-  const inbox = new Map((view === 'toanswer' ? [...humanThreads, ...humanArchived, ...humanDeferred] : humanThreads).map((t) => [t.thread_id, t]))
+  const inbox = new Map((view === 'toanswer' ? [...active, ...archived, ...deferred] : active).map((t) => [t.thread_id, t]))
   const askRow = new Map<string, ItsaAttention>()
   // An agent's wait tied to a thread folds into that thread's row, which then carries the wait's marker.
   const waitRow = new Map<string, WaitingRow>()
@@ -63,7 +61,7 @@ export function attentionRows(view: string, data: Pick<Data, 'humanThreads' | 'h
       if (t) { used.add(t.thread_id); if (w.itsa) askRow.set(t.thread_id, w.itsa); else waitRow.set(t.thread_id, w) }
       att.push({ at: w.since, thread: t ?? null, row: t ? null : w })
     }
-    for (const t of view === 'toanswer' ? [...humanThreads, ...humanArchived, ...humanDeferred] : humanThreads) if (pending(t) && !used.has(t.thread_id) && !deferredIds.has(t.thread_id)) { used.add(t.thread_id); att.push({ at: t.mails[0].created_at, thread: t, row: null }) }
+    for (const t of view === 'toanswer' ? [...active, ...archived, ...deferred] : active) if (pending(t) && !used.has(t.thread_id) && !deferredIds.has(t.thread_id)) { used.add(t.thread_id); att.push({ at: t.first_created_at ?? t.last_at, thread: t, row: null }) }
     att.sort((a, b) => a.at.localeCompare(b.at))
   }
   return { att, askRow, waitRow, used, inbox }
@@ -94,7 +92,10 @@ export function DelegatedGroup({ delegated }: { delegated: Permission[] }) {
 
 // In a sidebar pane (`pane`, S-1421) the pane sets the height, so there is no resize separator.
 export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLElement | null>; pane?: boolean }) {
-  const { humanThreads, humanArchived, humanDeferred, decisions, asks, delegateDialogs, loaded } = useData()
+  const d = useData()
+  const { decisions, asks, delegateDialogs, loaded } = d
+  const lists = humanLists(d)
+  const { active: humanThreads, archived: humanArchived, deferred: humanDeferred } = lists
   useShell()
   const waiting = useWaiting()
   const deferred = useDeferred()
@@ -125,13 +126,14 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
     })
   }, [view, humanArchived])
   // The unread count is the Inbox page's Unread list (a deferred ask's thread isn't in it).
-  const unreadThreads = unreadThreadsOf({ humanThreads, humanArchived, humanDeferred }, waiting, deferred)
+  const unreadThreads = unreadThreadsOf(lists, waiting, deferred)
+  const unreadIds = new Set(unreadThreads.map((t) => t.thread_id))
   const selItsa = cw?.startsWith('w:itsa:') ? openedItsa() : null
   // The attention list: one row per thing waiting on you (`useWaiting`, oldest first), so the
   // header's count is the rows above the mail. Only the inbox has one. An item with a thread in
   // the inbox (an ITSA's ask thread, a request's thread) is that thread's row; any other keeps
   // a row of its own. A pending request's thread is pinned even when the list lacks it.
-  const { att, askRow, waitRow, used, inbox } = attentionRows(view, { humanThreads, humanArchived, humanDeferred }, waiting)
+  const { att, askRow, waitRow, used, inbox } = attentionRows(view, lists, waiting)
   // The deferred asks and decisions (S-353): under the Deferred group at the foot, off the count.
   const def: typeof att = []
   if (view === 'inbox' || view === 'toanswer') {
@@ -162,9 +164,9 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
   // the row opens the ITSA, whose view holds that thread and the action bar; an ask that sits
   // in another thread opens that thread, which shows the same actions on the ask mail. Such a
   // row is the ITSA's (`data-att-itsa`, its thread in `data-ask-thread`): it doesn't swipe to archive.
-  const threadRow = (t: (typeof humanThreads)[number], x?: ItsaAttention | null, deferred = false, w?: WaitingRow) => {
-    const last = t.mails.at(-1)!, isUnread = unreadThreads.includes(t), perm = pending(t), decided = decisions.some((d) => d.thread_id === t.thread_id), ask = perm || !!x || decided || !!w, wait = awaiting(t)
-    const isArch = archivedIds.has(t.thread_id), isDef = deferredIds.has(t.thread_id), title = threadTitle(t.mails)
+  const threadRow = (t: Thread, x?: ItsaAttention | null, deferred = false, w?: WaitingRow) => {
+    const isUnread = unreadIds.has(t.thread_id), perm = pending(t), decided = decisions.some((d) => d.thread_id === t.thread_id), ask = perm || !!x || decided || !!w, wait = awaiting(t)
+    const isArch = archivedIds.has(t.thread_id), isDef = deferredIds.has(t.thread_id), title = t.title
     const why = deferred ? `${DEFERRED_TIP} · ` : x ? `${statusLabel(x.status)}: waits on you · since ${new Date(x.since).toLocaleString()} · ` : perm ? 'Waiting for your approval: ' : decided ? 'Waiting for your decision: ' : w ? 'Waits for your reply: ' : wait ? 'Awaiting reply: ' : ''
     const blocked = x || w ? 'Answer what waits on you before archiving' : perm ? 'Answer the permission request before archiving' : 'Answer the decision before archiving'
     const open = () => (x && x.ask_thread_id === x.thread_id ? openItsa(x.id) : selectThread(t.thread_id))
@@ -172,12 +174,12 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
       <div className="mrow-wrap" key={t.thread_id}>
         <div className="mrow-act" aria-hidden="true"><Icon name={isArch ? 'archive-restore' : 'archive'} size="xs" />{isArch ? 'Unarchive' : 'Archive'}</div>
         <div className={`mrow ${isUnread ? 'unread' : ''} ${ask ? 'ask' : ''} ${x ? 'att' : ''} ${wait ? 'awaiting' : ''} ${t.thread_id === sel || (x && x.id === selItsa) ? 'sel' : ''}`} data-thread={x ? undefined : t.thread_id} data-ask-thread={x ? t.thread_id : undefined} data-att-itsa={x?.id} data-decision={decided || undefined}
-          title={`${why}${baseSubject(t.mails[0].subject)} · last from ${nameFor(last.from_id, last.from_name)}`} onClick={open}>
-          {x ? <StatusGlyph status={x.status} /> : perm ? <Icon name="shield-alert" size="xs" /> : decided ? <Icon name="circle-help" size="xs" /> : w ? <Icon name="user" size="xs" /> : wait ? <Icon name="clock" size="xs" /> : <span className="dot" />}{title ? <span className="chip mtitle">{title}</span> : <span className="s">{plainSubject(t.mails[0].subject)}</span>}
+          title={`${why}${baseSubject(t.subject)} · last from ${nameFor(t.from_id, t.from_name)}`} onClick={open}>
+          {x ? <StatusGlyph status={x.status} /> : perm ? <Icon name="shield-alert" size="xs" /> : decided ? <Icon name="circle-help" size="xs" /> : w ? <Icon name="user" size="xs" /> : wait ? <Icon name="clock" size="xs" /> : <span className="dot" />}{title ? <span className="chip mtitle">{title}</span> : <span className="s">{plainSubject(t.subject)}</span>}
           {x ? <span className="astat">{statusLabel(x.status)}</span> : decided ? <span className="astat">decision</span> : null}
           {ask ? <AskBlockLine thread={t.thread_id} short /> : null}
-          {t.mails.length > 1 ? <span className="badge n">{t.mails.length}</span> : null}
-          <span className="row-act two"><span className="t">{ago(last.created_at)}</span>
+          {t.mail_count > 1 ? <span className="badge n">{t.mail_count}</span> : null}
+          <span className="row-act two"><span className="t">{ago(lastAt(t))}</span>
             <span className="hover-actions"><button className="icon-btn" data-defer={t.thread_id} title={isDef ? 'Move back to your mail' : ask ? 'Defer: save for later; it stays under To answer' : 'Defer: save for later'}
               aria-label={isDef ? 'Undefer' : 'Defer'}
               onClick={(e) => { e.stopPropagation(); setThreadDeferred(t.thread_id, !isDef) }}><Icon name={isDef ? 'alarm-clock-off' : 'alarm-clock'} size="xs" /></button><button className="icon-btn" data-arch={t.thread_id} disabled={ask || decided || undefined}

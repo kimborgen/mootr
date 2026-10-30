@@ -24,7 +24,7 @@ import { agentTooltip } from './views/registry'
 import { RestBadge, WaitMark } from './waits'
 import { isClosed, openItsa, StatusGlyph, statusLabel, toneVar, waitsOnHuman } from './itsa/itsa'
 import { FieldValue } from './work/field-columns'
-import { useWorkExtras } from './work/data'
+import { useWorkFields } from './work/data'
 import { liveCols, pickable, rowValues, setSidebarCols, toggleCol, useSidebarCols, MAX_SIDEBAR_COLS } from './sidebar-cols'
 import type { Field } from './itsa/fields'
 import type { Badge } from './system/model'
@@ -67,7 +67,7 @@ function colsItems(fields: Field[], picked: string[]): MenuItem[] {
 
 // The tree's two header buttons: the columns on each row, and what the marks mean. The sidebar's tree header shows them.
 export function TreeTools() {
-  const extras = useWorkExtras()
+  const extras = useWorkFields()
   const picked = liveCols(useSidebarCols(), extras.fields)
   const fields = extras.fields ?? []
   return <>
@@ -84,7 +84,7 @@ export function Tree() {
   const el = useRef<HTMLDivElement>(null)
   const lp = useLongPress((at) => showMenu(at.x, at.y, agentMenu(byIdIn(at.el.dataset.id!))), '.node[data-id]')
   const { agents, machine, thresholds, rings } = d
-  const extras = useWorkExtras()
+  const extras = useWorkFields()
   const picked = liveCols(useSidebarCols(), extras.fields)
   const fields = extras.fields ?? []
   const labelOf = (id: string) => pickable(fields).find((c) => c.id === id)?.label ?? id

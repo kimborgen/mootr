@@ -438,3 +438,81 @@ test('a new head whose status fetch fails but whose check runs pass is not "chec
   assert.equal(r.state.checks, 'success');
   assert.ok(!types(r).includes('checks.completed'));
 });
+
+
+// S-4356: a tick logs one line of its requests, by endpoint family, as 200s, 304s and failures. The counts are exact.
+function captureTick(fn) {
+  const lines = [];
+  const log = console.log;
+  console.log = (...args) => lines.push(args.join(' '));
+  return fn().finally(() => {
+    console.log = log;
+  }).then((ret) => ({ ret, lines: lines.filter((l) => l.startsWith('github calls: ')) }));
+}
+
+test('family names each endpoint (S-4356)', () => {
+  assert.equal(github.family('/repos/o/r/pulls/3'), 'pulls');
+  assert.equal(github.family('/repos/o/r/pulls/3/reviews'), 'reviews');
+  assert.equal(github.family('/repos/o/r/commits/abc/check-runs'), 'check-runs');
+  assert.equal(github.family('/repos/o/r/commits/abc/status'), 'status');
+  assert.equal(github.family('/repos/o/r/issues/3/comments?since=x'), 'comments');
+  assert.equal(github.family('/repos/o/r/events?per_page=100&page=1'), 'events');
+  assert.equal(github.family('/repos/o/r/contents/x'), 'other');
+});
+
+test('a tick logs exact counts: 200s on the first poll, 304s on an unchanged one (S-4356)', async () => {
+  seedOpenPr();
+  fake.update({ checkRuns: { 'o/r@sha1': [{ name: 'build', status: 'completed', conclusion: 'success' }] }, statuses: { 'o/r@sha1': { state: 'success', statuses: [] } } });
+  watch.createSubscription({ subscriber_kind: 'agent', subscriber_id: 'a1', filter: { subjects: ['github:o/r#1'] }, by: 'a1' });
+  const first = await captureTick(() => github.tick());
+  assert.equal(first.lines.length, 1, 'one line for the tick');
+  const callsFirst = fake.calls.length;
+  assert.equal(first.lines[0], `github calls: subjects=1 requests=${callsFirst} other 1/0/0, pulls 1/0/0, check-runs 1/0/0, status 1/0/0, reviews 1/0/0, comments 1/0/0`);
+  const second = await captureTick(() => github.tick());
+  assert.equal(second.lines.length, 1, 'one line for the second tick');
+  assert.equal(second.lines[0], `github calls: subjects=1 requests=${fake.calls.length - callsFirst} other 0/1/0, pulls 0/1/0, check-runs 0/1/0, status 0/1/0, reviews 0/1/0, comments 0/1/0`);
+});
+
+test('a fetch that never answers counts as a failure, and the tick still logs (S-4356)', async () => {
+  seedOpenPr();
+  watch.createSubscription({ subscriber_kind: 'agent', subscriber_id: 'a1', filter: { subjects: ['github:o/r#1'] }, by: 'a1' });
+  const alive = process.env.STAM_GITHUB_API;
+  process.env.STAM_GITHUB_API = 'http://127.0.0.1:1';
+  try {
+    const r = await captureTick(() => github.tick());
+    assert.equal(r.ret, 0, 'the failed poll ingests nothing');
+    assert.deepEqual(r.lines, ['github calls: subjects=1 requests=1 other 0/0/1']);
+  } finally {
+    process.env.STAM_GITHUB_API = alive;
+  }
+});
+
+test('overlapping ticks each count only their own requests (S-4356)', async () => {
+  seedOpenPr();
+  fake.update({ checkRuns: { 'o/r@sha1': [{ name: 'build', status: 'completed', conclusion: 'success' }] }, statuses: { 'o/r@sha1': { state: 'success', statuses: [] } } });
+  watch.createSubscription({ subscriber_kind: 'agent', subscriber_id: 'a1', filter: { subjects: ['github:o/r#1'] }, by: 'a1' });
+  const before = fake.calls.length;
+  const both = await captureTick(() => Promise.all([github.tick(), github.tick()]));
+  assert.equal(both.lines.length, 2, 'each tick logs its own line');
+  const requests = both.lines.map((l) => Number(/requests=(\d+)/.exec(l)[1]));
+  for (const [i, line] of both.lines.entries()) {
+    const parts = [...line.matchAll(/([a-z-]+) (\d+)\/(\d+)\/(\d+)/g)];
+    const sum = parts.reduce((n, m) => n + Number(m[2]) + Number(m[3]) + Number(m[4]), 0);
+    assert.equal(sum, requests[i], `line ${i} counts its own families: ${line}`);
+  }
+  assert.equal(requests[0] + requests[1], fake.calls.length - before, 'the two lines together count every request made');
+});
+
+test('a log sink that throws does not fail the tick (S-4356)', async () => {
+  seedOpenPr();
+  watch.createSubscription({ subscriber_kind: 'agent', subscriber_id: 'a1', filter: { subjects: ['github:o/r#1'] }, by: 'a1' });
+  const log = console.log;
+  console.log = () => {
+    throw new Error('sink down');
+  };
+  try {
+    assert.equal(await github.tick(), 0, 'the tick resolves with its count');
+  } finally {
+    console.log = log;
+  }
+});

@@ -457,13 +457,14 @@ const childIdsOf = (id: string): string[] => (treeIndex ? [...(treeIndex.childre
 
 // The agent and everything below it, each once, even where the tree is a DAG.
 export function treeMembers(agentId: string): Set<string> {
+  const children = treeIndex ? childIdsOf : tree.childrenReader();
   const seen = new Set<string>();
   const stack = [agentId];
   while (stack.length) {
     const id = stack.pop()!;
     if (seen.has(id)) continue;
     seen.add(id);
-    stack.push(...childIdsOf(id));
+    stack.push(...children(id));
   }
   return seen;
 }

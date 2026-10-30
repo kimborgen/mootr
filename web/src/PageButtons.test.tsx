@@ -5,6 +5,7 @@ import { act, createRef, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, emptyLayout, type Layout, type LayoutOp } from '../../src/layout-ops.ts'
+import { humanRowsOf } from './mail/thread-index'
 
 vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }))
 vi.mock('./api', () => ({ api: vi.fn(async () => ({})), hash: new URLSearchParams() }))
@@ -13,7 +14,7 @@ const mail = (id: string, tid: string, created_at: string) => ({ id, thread_id: 
 const thread = (tid: string, created_at = '2026-10-13T10:00:00Z') => ({ thread_id: tid, mails: [mail('m-' + tid, tid, created_at)] })
 const wait = (id: string, thread: string | null) => ({ id, kind: 'human', target: null, thread, detail: 'Your answer', since: '2026-10-13T11:00:00Z', source: 'wait_for' })
 const agent = (waits: unknown[]) => ({ id: 'a1', name: 'bob', waits })
-const base = { humanArchived: [], humanDeferred: [], attention: [], decisions: [], perms: [], delegateDialogs: [], itsaStatuses: [] }
+const base = { attention: [], decisions: [], perms: [], delegateDialogs: [], itsaStatuses: [] }
 
 // The shell reads its layout from the daemon's stream: a stub daemon with one layout, as the nav-pages test has.
 let daemon: Layout = emptyLayout()
@@ -83,7 +84,7 @@ describe('the footer page icons', () => {
     const { MailSide } = await import('./MailSide')
     const { PageButtons } = await import('./PageButtons')
     // One plain wait (no thread: To answer only) and one wait tied to a thread the human holds (an ask in the inbox).
-    store.setData({ ...base, humanThreads: [thread('t1'), thread('t2')], agents: [agent([wait('w1', 't1'), wait('w2', null)])] } as never)
+    store.setData({ ...base, humanRows: humanRowsOf([thread('t1'), thread('t2')] as never), agents: [agent([wait('w1', 't1'), wait('w2', null)])] } as never)
     const el = await mount(<><MailSide leftRef={createRef()} /><PageButtons /></>)
     expect(el.querySelector('.count .asks')!.textContent).toBe('1 waiting on you')
     expect(el.querySelector('#open-inbox .badge')!.textContent).toBe('1')

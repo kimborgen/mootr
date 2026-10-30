@@ -1,9 +1,11 @@
 // What the Inbox page lists (S-2054): the filter chips, the three groups, and a search's hits,
 // as plain functions over the store's lists, so the page and its tests agree. The human's mail only:
-// the lists are the human's inbox, archive and deferred threads.
+// the lists are the human's inbox, archive and deferred threads, as index rows (S-4578): what a list shows of a
+// thread, without its mails.
 import type { WaitingRow } from '../itsa/WaitingList'
-import { isUnreadForHuman, hasPendingPermission } from '../store'
-import type { Thread } from '../types'
+import { humanIndex, type Data } from '../store'
+import type { IndexRow, Thread } from '../types'
+import { indexRow } from './thread-index'
 
 export type InboxFilter = 'toanswer' | 'unread' | 'all' | 'awaiting' | 'deferred' | 'archived'
 export const FILTERS: { id: InboxFilter; label: string; tip: string }[] = [
@@ -15,15 +17,20 @@ export const FILTERS: { id: InboxFilter; label: string; tip: string }[] = [
   { id: 'archived', label: 'Archived', tip: 'Threads you archived' },
 ]
 
-export interface Lists { humanThreads: Thread[]; humanArchived: Thread[]; humanDeferred: Thread[] }
+export interface Lists { active: IndexRow[]; archived: IndexRow[]; deferred: IndexRow[] }
+// The human's lists from the store's data.
+export const humanLists = (d: Data): Lists => ({ active: humanIndex(d, 'active'), archived: humanIndex(d, 'archived'), deferred: humanIndex(d, 'deferred') })
 export type GroupKey = 'needs' | 'today' | 'earlier' | 'results'
-export interface Group { key: GroupKey; label: string; threads: Thread[] }
+export interface Group { key: GroupKey; label: string; threads: IndexRow[] }
 
 const LABEL: Record<GroupKey, string> = { needs: 'Needs you', today: 'Today', earlier: 'Earlier', results: 'Results' }
-export const lastAt = (t: Thread) => t.mails.at(-1)!.created_at
+// The thread's last mail's time, any mail's; a route row without it has the box's last.
+export const lastAt = (r: IndexRow) => r.last_created_at ?? r.last_at
 // Awaiting: the human sent the last message, and nobody has answered it.
-export const isAwaiting = (t: Thread) => t.mails.at(-1)?.from_id === 'human'
-const all = (d: Lists) => [...d.humanThreads, ...d.humanArchived, ...d.humanDeferred]
+export const isAwaiting = (r: IndexRow) => r.from_id === 'human'
+export const isUnread = (r: IndexRow) => r.unread > 0
+export const isPending = (r: IndexRow) => r.ask === 'pending'
+const all = (d: Lists) => [...d.active, ...d.archived, ...d.deferred]
 
 // The thread a waiting row is about, when it has one.
 export const waitThread = (w: WaitingRow) => (w.itsa ? w.itsa.ask_thread_id : w.threadId) ?? null
@@ -32,12 +39,12 @@ export const waitThread = (w: WaitingRow) => (w.itsa ? w.itsa.ask_thread_id : w.
 export function needsIds(waiting: WaitingRow[], d: Lists): Set<string> {
   const ids = new Set<string>()
   for (const w of waiting) { const tid = waitThread(w); if (tid) ids.add(tid) }
-  for (const t of d.humanThreads) if (hasPendingPermission(t)) ids.add(t.thread_id)
+  for (const t of d.active) if (isPending(t)) ids.add(t.thread_id)
   return ids
 }
 
 export interface Shown {
-  threads: Thread[]
+  threads: IndexRow[]
   // To answer: the waiting rows that have no thread of yours (a plain wait for your reply, say).
   loose: WaitingRow[]
 }
@@ -49,12 +56,12 @@ export function filtered(filter: InboxFilter, d: Lists, waiting: WaitingRow[], d
   // A deferred ask's thread is Deferred's, not the inbox's, while the human's own deferring reply is its last message.
   // A new mail after that brings the thread back to the inbox, as a deferred thread's new mail does.
   // The last mail that involves the human (from them or to them): mail between two agents doesn't bring it back.
-  const parked = (tid: string) => byId.get(tid)?.mails.filter((m) => m.from_id === 'human' || m.recipients.some((r) => r.id === 'human')).at(-1)?.from_id === 'human'
+  const parked = (tid: string) => byId.get(tid)?.box_last_from === 'human'
   const askIds = new Set(deferred.map(waitThread).filter((x): x is string => !!x && parked(x)))
-  const deferredAsks = all(d).filter((t) => askIds.has(t.thread_id) && !d.humanDeferred.some((x) => x.thread_id === t.thread_id))
+  const deferredAsks = all(d).filter((t) => askIds.has(t.thread_id) && !d.deferred.some((x) => x.thread_id === t.thread_id))
   switch (filter) {
     case 'toanswer': {
-      const threads: Thread[] = []
+      const threads: IndexRow[] = []
       const loose: WaitingRow[] = []
       const seen = new Set<string>()
       for (const w of [...waiting, ...deferred]) {
@@ -62,26 +69,26 @@ export function filtered(filter: InboxFilter, d: Lists, waiting: WaitingRow[], d
         if (!t) loose.push(w)
         else if (!seen.has(t.thread_id)) { seen.add(t.thread_id); threads.push(t) }
       }
-      for (const t of d.humanThreads) if (hasPendingPermission(t) && !seen.has(t.thread_id)) { seen.add(t.thread_id); threads.push(t) }
+      for (const t of d.active) if (isPending(t) && !seen.has(t.thread_id)) { seen.add(t.thread_id); threads.push(t) }
       return { threads, loose }
     }
-    case 'unread': return { threads: d.humanThreads.filter((t) => isUnreadForHuman(t) && !askIds.has(t.thread_id)), loose: [] }
+    case 'unread': return { threads: d.active.filter((t) => isUnread(t) && !askIds.has(t.thread_id)), loose: [] }
     case 'awaiting': return { threads: all(d).filter(isAwaiting), loose: [] }
-    case 'deferred': return { threads: [...d.humanDeferred, ...deferredAsks], loose: [] }
-    case 'archived': return { threads: d.humanArchived, loose: [] }
-    default: return { threads: d.humanThreads.filter((t) => !askIds.has(t.thread_id)), loose: [] }
+    case 'deferred': return { threads: [...d.deferred, ...deferredAsks], loose: [] }
+    case 'archived': return { threads: d.archived, loose: [] }
+    default: return { threads: d.active.filter((t) => !askIds.has(t.thread_id)), loose: [] }
   }
 }
 
 // The unread threads the Unread chip lists. The page's count, the bottom bar's and the sidebar's are its length, so they agree.
-export const unreadThreads = (d: Lists, waiting: WaitingRow[], deferred: WaitingRow[]): Thread[] => filtered('unread', d, waiting, deferred).threads
+export const unreadThreads = (d: Lists, waiting: WaitingRow[], deferred: WaitingRow[]): IndexRow[] => filtered('unread', d, waiting, deferred).threads
 export const unreadCount = (d: Lists, waiting: WaitingRow[], deferred: WaitingRow[]) => unreadThreads(d, waiting, deferred).length
 
 // Needs you first (oldest first, as the sidebar's attention list), then today's threads and the earlier
 // ones, newest first. A group with no thread isn't returned.
-export function grouped(threads: Thread[], needs: Set<string>, now = new Date()): Group[] {
+export function grouped(threads: IndexRow[], needs: Set<string>, now = new Date()): Group[] {
   const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  const g: Record<'needs' | 'today' | 'earlier', Thread[]> = { needs: [], today: [], earlier: [] }
+  const g: Record<'needs' | 'today' | 'earlier', IndexRow[]> = { needs: [], today: [], earlier: [] }
   for (const t of threads) g[needs.has(t.thread_id) ? 'needs' : new Date(lastAt(t)).getTime() >= midnight ? 'today' : 'earlier'].push(t)
   g.needs.sort((a, b) => lastAt(a).localeCompare(lastAt(b)))
   g.today.sort((a, b) => lastAt(b).localeCompare(lastAt(a)))
@@ -94,13 +101,14 @@ export interface SearchHit { thread_id: string; subject?: string; latest?: strin
 
 // A thread the store doesn't hold (the lists keep the newest 60 each): drawn from the hit's own words, read, and
 // from the first person in it other than you. Opening it fetches the thread itself.
-export function hitThread(h: SearchHit): Thread {
-  return { thread_id: h.thread_id, mails: [{ id: h.latest ?? h.thread_id, from_id: h.people?.find((p) => p !== 'human') ?? 'human', from_name: h.people?.find((p) => p !== 'human') ?? null, subject: h.subject ?? '', body: h.excerpt ?? '', created_at: h.last ?? new Date(0).toISOString(), recipients: [] }] } as unknown as Thread
+export function hitRow(h: SearchHit): IndexRow {
+  const t = { thread_id: h.thread_id, mails: [{ id: h.latest ?? h.thread_id, from_id: h.people?.find((p) => p !== 'human') ?? 'human', from_name: h.people?.find((p) => p !== 'human') ?? null, subject: h.subject ?? '', body: h.excerpt ?? '', created_at: h.last ?? new Date(0).toISOString(), recipients: [] }] } as unknown as Thread
+  return indexRow('human', t)
 }
 
-// A search's hits as one group, in the search's order. A hit the store holds is its thread; an older one is drawn from the hit.
+// A search's hits as one group, in the search's order. A hit the store holds is its row; an older one is drawn from the hit.
 export function hitGroup(hits: SearchHit[], d: Lists): Group[] {
   const byId = new Map(all(d).map((t) => [t.thread_id, t]))
-  const threads = hits.map((h) => byId.get(h.thread_id) ?? hitThread(h))
+  const threads = hits.map((h) => byId.get(h.thread_id) ?? hitRow(h))
   return threads.length ? [{ key: 'results', label: LABEL.results, threads }] : []
 }

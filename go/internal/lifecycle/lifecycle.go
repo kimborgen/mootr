@@ -101,12 +101,19 @@ type Lifecycle struct {
 	// stopChecked, nil outside tests, runs in a turn stop's publication after its check, before its writes, under the
 	// agent's owner's lock.
 	stopChecked func(id string)
-	// paneKilling, nil outside tests, runs in killPane with its kill begun, before its tmux call.
+	// paneKilling, nil outside tests, runs in killPane with its kill begun, and in a superseded replacePane before its
+	// kill of what it made, before the tmux call.
 	paneKilling func(id string)
+	// paneMaking, nil outside tests, runs in replacePane with the old pane killed, before the token and new session;
+	// paneMade runs after them, before the replace ends.
+	paneMaking func(id string)
+	paneMade   func(id string)
 	// launchReleasing, nil outside tests, runs in launchAt after the launch's generation, before its release.
 	launchReleasing func(id string)
 	// quitWrote, nil outside tests, runs in quitHarness's serial after its write, before its stop is listed.
 	quitWrote func(id string)
+	// restopRead, nil outside tests, runs in restopOrphan after its row's re-read, before its stop is listed.
+	restopRead func(id string)
 
 	mu sync.Mutex
 	// owners is each agent's launch, stop and kill state (owner.go), under mu for the lookup alone.
@@ -219,6 +226,8 @@ type Lifecycle struct {
 	streams *push.Streams
 	// debounce is the wait before a scheduled push runs.
 	debounce time.Duration
+	// rest is the requested rests' timers and flights (rest.go), under mu.
+	rest restState
 	// compactions is the compactions running or just done (src/lifecycle.ts compactions), under mu.
 	compactions map[string]compaction
 	// transitions is the agents being switched or resumed (src/lifecycle.ts acquire), and switching the agents a cost
@@ -388,18 +397,25 @@ func (l *Lifecycle) invalidate(id string) { l.nextGen(id) }
 
 func (l *Lifecycle) current(id string, gen int) bool { return l.ownerOf(id).current(gen) }
 
+// errSuperseded is a launch's step refused because a later generation took the agent.
+var errSuperseded = errors.New("launch superseded")
+
 // mintToken is src/agent-token.ts mintAgentToken: a new token per launch, the agent's own (S-237), of which only the
-// hash is stored. The token itself goes only into the session's env.
-func (l *Lifecycle) mintToken(ctx context.Context, id string) (string, error) {
+// hash is stored. The token itself goes only into the session's env. The hash is written only while gen is current, in
+// one step with that check (S-4269): a launch superseded meanwhile never leaves its token as the agent's.
+func (l *Lifecycle) mintToken(ctx context.Context, id string, gen int) (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
 	token := base64.RawURLEncoding.EncodeToString(b)
-	if err := l.db.SetTokenHash(ctx, id, auth.Hash(token)); err != nil {
-		return "", err
+	wrote, err := l.ownerOf(id).whileCurrent(gen, nil, func() (bool, error) {
+		return true, l.db.SetTokenHash(ctx, id, auth.Hash(token))
+	})
+	if err == nil && !wrote {
+		err = errSuperseded
 	}
-	return token, nil
+	return token, err
 }
 
 func (l *Lifecycle) event(ctx context.Context, id, typ string, data any) {
@@ -520,21 +536,26 @@ func (l *Lifecycle) launchAt(ctx context.Context, a db.Agent, gen int, prompt st
 		}
 	}
 	// No pane begins while a kill of it is in flight, and only under a generation still current: a quit that took a
-	// later one has the agent (owner.beginPane).
-	if !l.ownerOf(a.ID).beginPane(gen) {
+	// later one has the agent. The old pane's kill, the token and the new pane are one kill in flight, which a newer
+	// launch waits for (owner.beginPane, S-4269).
+	begun, err := l.replacePane(ctx, a.ID, gen, func(ctx context.Context) error {
+		token, err := l.mintToken(ctx, a.ID, gen)
+		if err != nil {
+			return err
+		}
+		sessionEnv := adapters.SessionEnv(spec.Env, adapters.SessionVars{AgentID: a.ID, URL: l.url, Token: token})
+		// The Go bin dir goes first on the shell's PATH, for spawn and resume alike (S-3666; adapters.GoBinArgv).
+		argv := adapters.GoBinArgv(spec.Argv, adapters.GoBinDir(spec.Env))
+		return l.tmux.NewSession(ctx, a.ID, a.Cwd, sessionEnv, argv)
+	})
+	if !begun {
 		return nil, nil
 	}
-	if err := l.tmux.KillSession(ctx, a.ID); err != nil {
-		return nil, err
-	}
-	token, err := l.mintToken(ctx, a.ID)
 	if err != nil {
-		return nil, err
-	}
-	sessionEnv := adapters.SessionEnv(spec.Env, adapters.SessionVars{AgentID: a.ID, URL: l.url, Token: token})
-	// The Go bin dir goes first on the shell's PATH, for spawn and resume alike (S-3666; adapters.GoBinArgv).
-	argv := adapters.GoBinArgv(spec.Argv, adapters.GoBinDir(spec.Env))
-	if err := l.tmux.NewSession(ctx, a.ID, a.Cwd, sessionEnv, argv); err != nil {
+		// A launch superseded meanwhile is abandoned, not failed: its error is the later owner's pane or kill.
+		if !l.current(a.ID, gen) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	if !l.current(a.ID, gen) {

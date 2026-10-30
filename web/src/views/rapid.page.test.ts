@@ -12,6 +12,7 @@ vi.mock('../api', async (orig) => ({
       slow.gate ??= new Promise<void>((r) => { slow.release = () => { slow.gate = null; r() } })
       await slow.gate
     }
+    if (path.includes('/thread-index?')) return { threads: [], next_cursor: null }
     if (!path.startsWith('/api/agents/human/threads') || !path.includes('with=')) return []
     const limit = Number(/limit=(\d+)/.exec(path)![1])
     // 130 inbox threads with dev; the other boxes hold none.
@@ -20,7 +21,7 @@ vi.mock('../api', async (orig) => ({
   }),
 }))
 import { getData } from '../store'
-import { rapidOlder, refreshSlow, watchRapid } from '../store'
+import { rapidOlder, refreshSlow, refreshSlowNow, showRapid, watchRapid } from '../store'
 import { rapidThreads } from './rapid'
 
 const withCalls = () => calls.filter((c) => c.includes('with=dev'))
@@ -49,7 +50,7 @@ describe('rapid-fire paging', () => {
     await vi.waitFor(() => expect(getData().rapidWith.dev?.threads.length).toBe(60))
     // A poll that began at limit 60 answers late; Load older's refresh answers first.
     slow.hold = true
-    const early = refreshSlow()
+    const early = refreshSlowNow()
     slow.hold = false
     await rapidOlder('dev')
     expect(getData().rapidWith.dev.threads.length).toBe(120)
@@ -70,5 +71,24 @@ describe('rapid-fire paging', () => {
     calls.length = 0
     await refreshSlow()
     expect(withCalls()).toEqual([])
+  })
+
+  it('a hidden pane makes no rapid fetch and keeps its page count; showing it fetches at once with the same pages (S-4691)', async () => {
+    const stopMount = watchRapid('dev', false)
+    const stopShow = showRapid('dev')
+    await vi.waitFor(() => expect(getData().rapidWith.dev?.threads.length).toBe(60))
+    await rapidOlder('dev')
+    expect(getData().rapidWith.dev.threads.length).toBe(120)
+    stopShow()
+    calls.length = 0
+    await refreshSlow()
+    expect(withCalls()).toEqual([])
+    // The threads it had stay for the next show.
+    expect(getData().rapidWith.dev.threads.length).toBe(120)
+    const stopAgain = showRapid('dev')
+    await vi.waitFor(() => expect(withCalls().length).toBe(3))
+    expect(withCalls()[0]).toBe('/api/agents/human/threads?limit=120&with=dev')
+    stopAgain()
+    stopMount()
   })
 })

@@ -2,8 +2,9 @@
 // ITSAs and the agents in the thread. Plain data from the store, so the tab and its thin bar read
 // one set and the tests can drive it without a view.
 import { plainSubject, threadTitle } from '../format'
-import { hasPendingPermission, threadWaitsOnHuman, type Data } from '../store'
-import type { Itsa, Mail, MailItsa, Thread } from '../types'
+import { hasPendingPermission, humanIndex, humanRow, threadWaitsOnHuman, type Data } from '../store'
+import type { IndexRow, Itsa, Mail } from '../types'
+import { threadLinks, threadPeople } from './thread-index'
 
 // The one wait mark a thread's tab shows, by priority: a pending permission, a wait on the human's
 // answer, the unread count, deferred, archived. `count` is the unread mails and is 0 otherwise.
@@ -21,11 +22,11 @@ export function threadWaitMark(s: { perm: boolean; onHuman: boolean; unread: num
 // order they first appear. The store's ITSA is used when it holds one; a link the store lacks is
 // built from the link's own key, title and status, as the thread head builds its chip. An `about_itsa`
 // the store lacks has no link data, so it has no chip.
-export function threadItsas(mails: Mail[], itsas: Itsa[]): Itsa[] {
-  const links = new Map<string, MailItsa>()
-  for (const m of mails) for (const l of m.itsas ?? []) if (!links.has(l.id)) links.set(l.id, l)
-  const ids = new Set<string>(links.keys())
-  for (const m of mails) if (m.about_itsa) ids.add(m.about_itsa)
+export const threadItsas = (mails: Mail[], itsas: Itsa[]): Itsa[] => linkedItsas(threadLinks(mails), itsas)
+// The same from an index row's links (S-4579).
+export function linkedItsas(row: Pick<Required<IndexRow>, 'itsa_links' | 'about_itsas'>, itsas: Itsa[]): Itsa[] {
+  const links = new Map(row.itsa_links.map((l) => [l.id, l]))
+  const ids = new Set<string>([...links.keys(), ...row.about_itsas])
   return [...ids].flatMap((id) => {
     const x = itsas.find((i) => i.id === id)
     if (x) return [x]
@@ -36,20 +37,7 @@ export function threadItsas(mails: Mail[], itsas: Itsa[]): Itsa[] {
 
 // The agents in the thread, the human left out: the ones attached to its mail first (S-1305), then
 // its senders and recipients, each by their latest mail. `known` says which ids are agents.
-export function threadAgents(mails: Mail[], known: (id: string) => boolean): string[] {
-  const out: string[] = []
-  const add = (id: string | null | undefined) => { if (id && id !== 'human' && known(id) && !out.includes(id)) out.push(id) }
-  mails.flatMap((m) => m.agents ?? []).forEach(add)
-  const latest = [...mails].reverse()
-  latest.forEach((m) => add(m.from_id))
-  latest.forEach((m) => m.recipients.forEach((r) => add(r.id)))
-  return out
-}
-
-// The thread as the store holds it: the loaded copy when a view has it open, else the list's.
-export function threadOf(tid: string, d: Data): Thread | undefined {
-  return [...d.openThreads, ...d.humanThreads, ...d.humanArchived, ...d.humanDeferred].find((x) => x.thread_id === tid)
-}
+export const threadAgents = (mails: Mail[], known: (id: string) => boolean): string[] => threadPeople(mails, 'human').filter(known)
 
 // The tab's title is the thread's short title, else its subject; the tooltip names the subject,
 // the people and the count.
@@ -63,18 +51,32 @@ export function threadHead(mails: Mail[], agents: { id: string; name: string }[]
     tooltip: [subject, names.join(', '), `${n} message${n === 1 ? '' : 's'}`].filter(Boolean).join(' · '),
   }
 }
+// A thread tab's head from the store: the loaded copy when a view has it open, else the thread's index row in the
+// human's lists (S-4580), whose people are you and the row's agents.
+export function threadTabHead(tid: string, d: Data): { title: string; tooltip: string } {
+  const open = d.openThreads.find((x) => x.thread_id === tid)
+  const row = open ? undefined : humanRow(tid, d)
+  if (!row) return threadHead(open?.mails ?? [], d.agents)
+  const subject = plainSubject(row.subject)
+  const names = ['you', ...(row.agents ?? []).map((id) => d.agents.find((a) => a.id === id)?.name ?? id)]
+  const n = row.mail_count
+  return { title: row.title ?? subject, tooltip: [subject, names.join(', '), `${n} message${n === 1 ? '' : 's'}`].filter(Boolean).join(' · ') }
+}
 
-// Everything the chips slot of a thread's tab shows, read from the store.
+// Everything the chips slot of a thread's tab shows, read from the store: the copy a view has loaded, else the
+// thread's index row in the human's lists (S-4579). A row without the links or people shows no such chips.
 export function threadChips(tid: string, d: Data) {
-  const t = threadOf(tid, d)
-  const mails = t?.mails ?? []
-  const unread = mails.filter((m) => m.recipients.some((r) => r.id === 'human' && !r.read_at)).length
+  const known = (id: string) => d.agents.some((a) => a.id === id)
+  const open = d.openThreads.find((x) => x.thread_id === tid)
+  const row = humanRow(tid, d)
+  const mails = open?.mails ?? []
   const mark = threadWaitMark({
-    perm: !!t && hasPendingPermission(t),
+    perm: open ? hasPendingPermission(open) : row?.ask === 'pending',
     onHuman: threadWaitsOnHuman(tid, d),
-    unread,
-    deferred: d.humanDeferred.some((x) => x.thread_id === tid),
-    archived: d.humanArchived.some((x) => x.thread_id === tid),
+    unread: open ? mails.filter((m) => m.recipients.some((r) => r.id === 'human' && !r.read_at)).length : row?.unread ?? 0,
+    deferred: humanIndex(d, 'deferred').some((x) => x.thread_id === tid),
+    archived: humanIndex(d, 'archived').some((x) => x.thread_id === tid),
   })
-  return { mark, itsas: threadItsas(mails, d.itsas), agents: threadAgents(mails, (id) => d.agents.some((a) => a.id === id)) }
+  if (open || !row) return { mark, itsas: threadItsas(mails, d.itsas), agents: threadAgents(mails, known) }
+  return { mark, itsas: linkedItsas({ itsa_links: row.itsa_links ?? [], about_itsas: row.about_itsas ?? [] }, d.itsas), agents: (row.agents ?? []).filter(known) }
 }

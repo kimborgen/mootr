@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, chmodSync, lutimesSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import './scrub-env.mjs'; // scrubs the parent's MOOTR_ and STAM_ names before any child (S-3449)
 
 const TMP = new URL('../tmp/', import.meta.url).pathname;
 const UNIT = 'stamd-test-zzunit';

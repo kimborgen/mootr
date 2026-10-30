@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { getData, setData } from '../store'
 import type { Agent, Itsa, Mail, Thread } from '../types'
 import { threadAgents, threadChips, threadHead, threadItsas, threadWaitMark } from './thread-chips'
+import { humanRowsOf } from './thread-index'
 
 const mail = (id: string, o: Partial<Mail> & { to?: string[]; read?: boolean } = {}): Mail => {
   const { to = ['human'], read = false, ...rest } = o
@@ -74,14 +75,14 @@ describe('threadAgents', () => {
 })
 
 describe('threadChips and threadHead', () => {
-  const base = { attention: [], decisions: [], humanArchived: [], humanDeferred: [], openThreads: [], itsaStatuses: [] }
+  const base = { attention: [], decisions: [], openThreads: [], itsaStatuses: [] }
   const thread = (mails: Mail[]): Thread => ({ thread_id: 't1', mails })
 
   it('reads the thread from the store, with its wait mark, ITSAs and agents', () => {
-    setData({ ...base, agents: [agent('a1'), agent('a2')], itsas: [itsa('1')], humanThreads: [thread([
+    setData({ ...base, agents: [agent('a1'), agent('a2')], itsas: [itsa('1')], humanRows: humanRowsOf([thread([
       mail('m1', { from_id: 'a1', to: ['human'], itsas: [{ id: '1', key: 'S-1', title: '', status: '', source: 'itsa' }] } as Partial<Mail>),
       mail('m2', { from_id: 'a2', to: ['human'], read: true }),
-    ])] } as never)
+    ])]) } as never)
     const c = threadChips('t1', getData())
     expect(c.mark).toEqual({ kind: 'unread', count: 1 })
     expect(c.itsas.map((x) => x.key)).toEqual(['S-1'])

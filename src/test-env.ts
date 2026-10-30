@@ -1,5 +1,5 @@
 // The one gate for test-only env vars that relax auth, identity or permissions (S-634):
-// STAM_TEST_HUMAN_KEY, STAM_TEST_INPUT_BARRIER, the human-code vars of S-613, and STAM_TEST_PASSWORDLESS_SUDO (S-2121).
+// STAM_TEST_HUMAN_KEY, STAM_TEST_INPUT_BARRIER, STAM_TEST_INPUT_CRASH (S-4155), the human-code vars of S-613, and STAM_TEST_PASSWORDLESS_SUDO (S-2121).
 // A var is honoured only in a test home: not the live home, STAM_HOME holds the `.stam-test-home` marker
 // that test/lib.sh's daemon_home writes, and its parent folder holds the `owner` file test/lib.sh writes
 // into its throwaway TEST_TMP. A custom STAM_HOME with a restarted unit and the var set in its env does

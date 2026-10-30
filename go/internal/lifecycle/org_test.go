@@ -379,7 +379,13 @@ func TestOrgRestingWaits(t *testing.T) {
 	if got := l.children("alw2") + "|" + l.children("alw1"); got != "1 child|2 children" {
 		t.Errorf("children waits with a busy grandchild %s", got)
 	}
+	// The grandchild's turn end clears alw2's children wait. Its notice would wake the resting alw2 (S-4332); a blocker
+	// holds it down, so it stays resting and its counts are read once that held wake is done.
+	execOn(t, l, "INSERT INTO blockers (agent_id, kind, account, reason, since) VALUES ('alw2', 'manual', '', 'held', '"+since+"')")
 	l.turnEnds("alw3")
+	l.until("alw2's wake held", func() bool {
+		return len(l.events("alw2", "standing:wake-held")) == 1 && l.life.serialUsers("alw2") == 0
+	})
 	l.orgSettle()
 	if got := l.children("alw2") + "|" + l.children("alw1"); got != "|" {
 		t.Errorf("children waits after %s", got)

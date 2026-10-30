@@ -196,47 +196,96 @@ func fencedExact(text string) string {
 	return fence + "\n" + text + "\n" + fence
 }
 
+const typedResult = "was approved by your user (the human) and typed into your input as written."
+
+func heldResult(expires string) string {
+	return "was approved by your user (the human). End your turn so stam can type it into your input; you continue after. stam types it as soon as you are idle with an empty box, until " + expires + "."
+}
+
+// inputApproval is the human's approval's own notice (S-4155, src/permissions.ts Approval): its row is written with the move to
+// held, so a restart before the first try's outcome still tells the agent. That outcome replaces it in its own
+// transaction: a busy agent is handed this notice as it is, and any other outcome's row takes its place. settled once
+// one has. A nil inputApproval is no approval: a retry, or the sweep.
+type inputApproval struct {
+	row     int64
+	text    string
+	settled bool
+}
+
+// replaces is the row an outcome's notice takes the place of, 0 for none.
+func (p *inputApproval) replaces() int64 {
+	if p == nil || p.settled {
+		return 0
+	}
+	return p.row
+}
+
+func (p *inputApproval) settle() {
+	if p != nil {
+		p.settled = true
+	}
+}
+
 // moveInputNotice moves an input request and writes its input-answered notice in one transaction (S-3923): the move
-// happens only with its row. moved is false when the move didn't happen.
-func (s *Server) moveInputNotice(ctx context.Context, a db.Agent, r db.PermissionRequest, from, to string, f db.MoveInput, result string) (bool, error) {
+// happens only with its row, which replaces the approval's (S-4155). moved is false when the move didn't happen.
+func (s *Server) moveInputNotice(ctx context.Context, a db.Agent, r db.PermissionRequest, from, to string, f db.MoveInput, result string, first *inputApproval) (bool, error) {
 	text, err := s.render("input-answered", map[string]string{"id": r.ID, "result": result})
 	if err != nil {
 		return false, err
 	}
-	moved, row, err := s.db.MoveInputRequestNoticed(ctx, r.ID, from, to, f, &db.NewAnswerNotice{AgentID: a.ID, Text: text})
+	moved, row, err := s.db.MoveInputRequestNoticed(ctx, r.ID, from, to, f, &db.NewAnswerNotice{AgentID: a.ID, Text: text, Replaces: first.replaces()})
 	if err != nil || !moved {
 		return false, err
 	}
+	first.settle()
 	s.queueAnswerRow(ctx, a.ID, text, row)
 	return true, nil
 }
 
 // inputNoticeStored is inputNotice whose row keeps `stored` instead of the notice's text, for a draft's text (S-3923).
-func (s *Server) inputNoticeStored(ctx context.Context, a db.Agent, r db.PermissionRequest, result, stored string) {
+func (s *Server) inputNoticeStored(ctx context.Context, a db.Agent, r db.PermissionRequest, result, stored string, first *inputApproval) {
 	text, err := s.render("input-answered", map[string]string{"id": r.ID, "result": result})
 	if err != nil {
 		slog.Error("input notice", "err", err)
 		return
 	}
-	if s.noticeHook != nil {
+	keep, err := s.render("input-answered", map[string]string{"id": r.ID, "result": stored})
+	if err != nil {
+		slog.Error("input notice", "err", err)
+		return
+	}
+	if first.replaces() != 0 {
+		s.replaceApproval(ctx, a, text, keep, first)
+	} else if s.noticeHook != nil {
 		s.noticeHook(a.ID, text)
 	} else if s.life != nil {
-		keep, err := s.render("input-answered", map[string]string{"id": r.ID, "result": stored})
-		if err != nil {
-			slog.Error("input notice", "err", err)
-			return
-		}
 		s.life.QueueAnswerNoticeStored(ctx, a.ID, text, keep)
 	}
 }
 
-func (s *Server) inputNotice(ctx context.Context, a db.Agent, r db.PermissionRequest, result string) {
+func (s *Server) inputNotice(ctx context.Context, a db.Agent, r db.PermissionRequest, result string, first *inputApproval) {
 	text, err := s.render("input-answered", map[string]string{"id": r.ID, "result": result})
 	if err != nil {
 		slog.Error("input notice", "err", err)
 		return
 	}
+	if first.replaces() != 0 {
+		s.replaceApproval(ctx, a, text, text, first)
+		return
+	}
 	s.queueAnswerNotice(ctx, a.ID, text)
+}
+
+// replaceApproval writes an outcome's row (keeping `stored`) in place of the approval's, in one transaction, and queues
+// the notice (S-4155).
+func (s *Server) replaceApproval(ctx context.Context, a db.Agent, text, stored string, first *inputApproval) {
+	row, err := s.db.ReplaceAnswerNotice(ctx, db.NewAnswerNotice{AgentID: a.ID, Text: stored, Replaces: first.replaces()})
+	if err != nil {
+		slog.Error("answer notice not stored", "agent", a.ID, "err", err)
+	} else {
+		first.settle()
+	}
+	s.queueAnswerRow(ctx, a.ID, text, row)
 }
 
 // permissionError records a failure stam can't answer to anyone as the agent's permission-error event, as TS's
@@ -424,7 +473,7 @@ func (s *Server) approveInput(ctx context.Context, id string, sha jsjson.Value) 
 		return jsfmt.Value{}, err
 	}
 	given, isText := sha.(string)
-	first := false
+	var first *inputApproval
 	switch {
 	case r.Status == "held" && isText && given == r.SHA256:
 		if ago(r.ExpiresAt) {
@@ -437,24 +486,37 @@ func (s *Server) approveInput(ctx context.Context, id string, sha jsjson.Value) 
 		return jsfmt.Value{}, inputRefusal("text_sha256 doesn't match request %s's text; reload it and approve what it shows", id)
 	default:
 		by, note, session, expires := humanBox, "approved", deref(a.SessionID), time.Now().Add(inputTTL).UTC().Format(jsISO)
-		moved, err := s.db.MoveInputRequest(ctx, id, "pending", "held", db.MoveInput{By: &by, Note: &note, Session: &session, Expires: &expires, Settle: true})
+		text, err := s.render("input-answered", map[string]string{"id": id, "result": heldResult(expires)})
+		if err != nil {
+			return jsfmt.Value{}, err
+		}
+		// The approval and its own notice's row commit together (S-4155): a restart before the try below still tells the agent.
+		moved, row, err := s.db.MoveInputRequestNoticed(ctx, id, "pending", "held", db.MoveInput{By: &by, Note: &note, Session: &session, Expires: &expires, Settle: true}, &db.NewAnswerNotice{AgentID: a.ID, Text: text})
 		if err != nil {
 			return jsfmt.Value{}, err
 		}
 		if !moved {
 			return jsfmt.Value{}, s.notApproved(ctx, id)
 		}
+		first = &inputApproval{row: row, text: text}
 		if err := s.db.AddEvent(ctx, a.ID, "permission:answered", inputAnsweredEvent{ID: id, Approve: true, By: humanBox, Kind: "input"}); err != nil {
 			return jsfmt.Value{}, err
 		}
 		s.orgResync(ctx, a.ID)
-		first = true
+		s.testBarrier("-approved")
 	}
 	s.inputs.setWhy(id, "")
 	if r, _, err = s.db.PermissionRequestByID(ctx, id); err != nil {
 		return jsfmt.Value{}, err
 	}
 	outcome, err := s.tryHeld(ctx, a, r, first)
+	// A try that told the agent nothing (queued behind an earlier approval, another typing under way, or one that failed)
+	// drops the row, as the agent heard nothing then before (S-4155). A cancelled request still drops it.
+	if row := first.replaces(); row != 0 {
+		if derr := s.db.DeleteAnswerNotice(context.WithoutCancel(ctx), row); derr != nil && err == nil {
+			err = derr
+		}
+	}
 	if err != nil {
 		return jsfmt.Value{}, err
 	}
@@ -472,7 +534,7 @@ func (s *Server) approveInput(ctx context.Context, id string, sha jsjson.Value) 
 
 // tryHeld types the agent's oldest held approval, so approvals go in the order the human gave them (S-3830). r's own
 // outcome is "held" while an earlier one waits, why "queued".
-func (s *Server) tryHeld(ctx context.Context, a db.Agent, r db.PermissionRequest, first bool) (string, error) {
+func (s *Server) tryHeld(ctx context.Context, a db.Agent, r db.PermissionRequest, first *inputApproval) (string, error) {
 	held, err := s.db.InputRequests(ctx, "held", a.ID)
 	if err != nil || len(held) == 0 {
 		return "held", err
@@ -498,8 +560,9 @@ func (s *Server) notApproved(ctx context.Context, id string) error {
 }
 
 // testBarrier holds the typing right before Enter, for tests (S-422): with STAM_TEST_INPUT_BARRIER set to a folder
-// holding a `hold` file, it writes `at` there and waits until `hold` is gone. Only in a test home. The Go daemon has a
-// second stop, after the claim and before Enter: `hold-enter` and `at-enter` (suffix "-enter").
+// holding a `hold` file, it writes `at` there and waits until `hold` is gone. Only in a test home. The Go daemon has
+// more stops (suffixes): "-approved" after the human's approval commits and before the first try, "-enter" after the
+// claim and before Enter, and "-typed" after Enter and before the typed notice is queued (S-4155).
 func (s *Server) testBarrier(suffix string) {
 	dir := s.cfg.TestInputBarrier
 	hold := filepath.Join(dir, "hold"+suffix)
@@ -525,7 +588,7 @@ func fileExists(path string) bool {
 // the agent's session is still the approved one; else what was typed is erased ("cancelled"), so a suggestion
 // withdrawn or expired mid-typing is never sent. Typed input starts a turn, the human's own: a held agent gets it with
 // a cost:override event, and one taken over by another agent gets none.
-func (s *Server) typeHeld(ctx context.Context, r db.PermissionRequest, first bool) (string, error) {
+func (s *Server) typeHeld(ctx context.Context, r db.PermissionRequest, first *inputApproval) (string, error) {
 	a, err := s.db.GetAgent(ctx, r.AgentID)
 	if errors.Is(err, db.ErrNotFound) || (err == nil && (s.life == nil || a.Harness != "claude")) {
 		return "held", nil
@@ -546,14 +609,14 @@ func (s *Server) typeHeld(ctx context.Context, r db.PermissionRequest, first boo
 		return err == nil && deref(fresh.SessionID) == now.SessionID
 	}
 	if !sameSession() {
-		return "expired", s.expireHeld(ctx, a, now, "its harness session changed after you approved it")
+		return "expired", s.expireHeld(ctx, a, now, "its harness session changed after you approved it", first)
 	}
 	if a.Activity != "idle" && a.Activity != "waiting" {
 		return s.held(ctx, a, now, first, "busy")
 	}
 	if ok, reason := s.life.AdmitHuman(ctx, a.ID); !ok {
 		note := "not typed: " + reason
-		moved, err := s.moveInputNotice(ctx, a, r, "held", "failed", db.MoveInput{Note: &note}, "was approved, but stam didn't type it: "+reason+".")
+		moved, err := s.moveInputNotice(ctx, a, r, "held", "failed", db.MoveInput{Note: &note}, "was approved, but stam didn't type it: "+reason+".", first)
 		if err != nil {
 			return "", err
 		}
@@ -570,6 +633,12 @@ func (s *Server) typeHeld(ctx context.Context, r db.PermissionRequest, first boo
 	// UserPromptSubmit that comes as Enter lands finds it.
 	expects := !strings.HasPrefix(now.Text, "!") && !strings.HasPrefix(now.Text, "/")
 	expected := false
+	typedText, err := s.render("input-answered", map[string]string{"id": r.ID, "result": typedResult})
+	if err != nil {
+		return "", err
+	}
+	// The typed notice's row, written with the claim (S-4155); an unsent Enter's failure replaces it.
+	typed := &inputApproval{}
 	proceed := func(stillTyped func() bool) bool {
 		s.testBarrier("")
 		// The box is read again right before Enter: a key typed since the lifecycle's check is never sent with the text.
@@ -577,12 +646,16 @@ func (s *Server) typeHeld(ctx context.Context, r db.PermissionRequest, first boo
 			return false
 		}
 		offset = s.transcriptSize(ctx, a.ID)
-		// The session check is part of the claim, so a hook that changes the session can't come in between.
-		moved, err := s.db.MoveInputRequest(ctx, r.ID, "held", "approved", db.MoveInput{Unexpired: true, SameSession: true})
+		// The session check is part of the claim, so a hook that changes the session can't come in between. The claim and
+		// the typed notice's row commit together, before Enter (S-4155): the text is in the box as written by then, and the
+		// claim makes the approval terminal, so a restart after it delivers the notice and never types it again.
+		moved, row, err := s.db.MoveInputRequestNoticed(ctx, r.ID, "held", "approved", db.MoveInput{Unexpired: true, SameSession: true}, &db.NewAnswerNotice{AgentID: a.ID, Text: typedText, Replaces: first.replaces()})
 		claimErr = err
 		if err != nil || !moved {
 			return false
 		}
+		first.settle()
+		typed.row = row
 		if expects {
 			s.inputs.expect(a.ID, expectedPrompt{r: now, until: time.Now().Add(s.inputExpect)})
 			expected = true
@@ -620,7 +693,8 @@ func (s *Server) typeHeld(ctx context.Context, r db.PermissionRequest, first boo
 		if err := s.db.AddEvent(ctx, a.ID, "input:typed", inputIDEvent{ID: r.ID}); err != nil {
 			return "", err
 		}
-		s.inputNotice(ctx, a, r, "was approved by your user (the human) and typed into your input as written.")
+		s.testBarrier("-typed")
+		s.queueAnswerRow(ctx, a.ID, typedText, typed.row)
 		s.noteOutcome(ctx, a, r, "typed", "sent to its input exactly as approved.")
 		return "typed", nil
 	case "cancelled":
@@ -633,7 +707,7 @@ func (s *Server) typeHeld(ctx context.Context, r db.PermissionRequest, first boo
 		}
 		// Still held means only the session changed under it.
 		if st != nil && *st == "held" {
-			return "cancelled", s.expireHeld(ctx, a, now, "its harness session changed while stam typed it")
+			return "cancelled", s.expireHeld(ctx, a, now, "its harness session changed while stam typed it", first)
 		}
 		return "cancelled", nil
 	case "unsent":
@@ -642,8 +716,9 @@ func (s *Server) typeHeld(ctx context.Context, r db.PermissionRequest, first boo
 		ctx := context.WithoutCancel(ctx)
 		why := "the agent's pane changed or tmux failed"
 		note := "typed, but Enter not sent: " + why
-		// The failed state and its notice's row commit together (S-3923): the approval never reads as failed without its row.
-		moved, err := s.moveInputNotice(ctx, a, r, "approved", "failed", db.MoveInput{Note: &note}, "was approved, but after typing it stam couldn't press Enter, so it erased what it typed where it still could and sent nothing. Suggest it again if you still need it.")
+		// The failed state and its notice's row commit together (S-3923): the approval never reads as failed without its row,
+		// which replaces the claim's typed one (S-4155).
+		moved, err := s.moveInputNotice(ctx, a, r, "approved", "failed", db.MoveInput{Note: &note}, "was approved, but after typing it stam couldn't press Enter, so it erased what it typed where it still could and sent nothing. Suggest it again if you still need it.", typed)
 		if err != nil {
 			return "", err
 		}
@@ -676,7 +751,7 @@ func (s *Server) typeHeld(ctx context.Context, r db.PermissionRequest, first boo
 // held is src/permissions.ts held: the approval waits for the box, and the agent hears why once. A draft in the box is
 // named on the card while it blocks (S-534), and the first time it blocks the agent is told what to clear and the chief
 // of staff why.
-func (s *Server) held(ctx context.Context, a db.Agent, r db.PermissionRequest, first bool, why string) (string, error) {
+func (s *Server) held(ctx context.Context, a db.Agent, r db.PermissionRequest, first *inputApproval, why string) (string, error) {
 	s.inputs.setWhy(r.ID, why)
 	var box *string
 	if why == "draft" {
@@ -701,7 +776,7 @@ func (s *Server) held(ctx context.Context, a db.Agent, r db.PermissionRequest, f
 			if err := s.db.AddEvent(ctx, a.ID, "input:held", inputHeldEvent{ID: r.ID, Why: why}); err != nil {
 				return "", err
 			}
-			s.inputNotice(ctx, a, r, "was approved by your user (the human), but after typing it your input box didn't show exactly the text with nothing under it, so stam erased what it typed and sent nothing. It stays approved: stam types it once your input box is clear, until "+r.ExpiresAt+".")
+			s.inputNotice(ctx, a, r, "was approved by your user (the human), but after typing it your input box didn't show exactly the text with nothing under it, so stam erased what it typed and sent nothing. It stays approved: stam types it once your input box is clear, until "+r.ExpiresAt+".", first)
 		}
 	case why == "draft":
 		if !s.inputs.tellDraft(r.ID) {
@@ -718,18 +793,20 @@ func (s *Server) held(ctx context.Context, a db.Agent, r db.PermissionRequest, f
 		draftNotice := func(box string) string {
 			return "was approved by your user (the human), but stam can't type it: your input box holds " + box + ", which stam didn't type. Clear your input box (Ctrl+U) and stam types it at once; until " + r.ExpiresAt + "."
 		}
-		s.inputNoticeStored(ctx, a, r, draftNotice(shown), draftNotice("(a draft, not stored)"))
+		s.inputNoticeStored(ctx, a, r, draftNotice(shown), draftNotice("(a draft, not stored)"), first)
 		if cos := s.chiefOfStaffID(ctx); cos != "" && cos != a.ID {
 			body := "Your user approved input " + r.ID + " for @" + a.Name + ", but its input box holds " + shown + ", which stam didn't type. stam told the agent to clear it; the approval expires at " + r.ExpiresAt + "."
 			if _, err := s.send(ctx, &sendIn{from: a.ID, to: []string{cos}, subject: "Approved input for " + a.Name + " is held by text in its box", body: body, fromStam: true, inferred: map[string]bool{}}); err != nil {
 				s.permissionError(ctx, a.ID, err)
 			}
 		}
-	case first:
+	case first != nil && !first.settled:
 		if err := s.db.AddEvent(ctx, a.ID, "input:held", inputHeldEvent{ID: r.ID, Why: why}); err != nil {
 			return "", err
 		}
-		s.inputNotice(ctx, a, r, "was approved by your user (the human). End your turn so stam can type it into your input; you continue after. stam types it as soon as you are idle with an empty box, until "+r.ExpiresAt+".")
+		// The approval's own row holds this notice (S-4155): it was written with the approval, and is handed over as it is.
+		first.settle()
+		s.queueAnswerRow(ctx, a.ID, first.text, first.row)
 	}
 	return "held", nil
 }
@@ -742,8 +819,8 @@ func (s *Server) noteOutcome(ctx context.Context, a db.Agent, r db.PermissionReq
 
 // expireHeld is src/permissions.ts expireHeld: a held approval that won't be typed. The agent hears, and the human is
 // told once in its thread.
-func (s *Server) expireHeld(ctx context.Context, a db.Agent, r db.PermissionRequest, why string) error {
-	moved, err := s.moveInputNotice(ctx, a, r, "held", "expired", db.MoveInput{Note: &why}, "expired: "+why+", so nothing was typed.")
+func (s *Server) expireHeld(ctx context.Context, a db.Agent, r db.PermissionRequest, why string, first *inputApproval) error {
+	moved, err := s.moveInputNotice(ctx, a, r, "held", "expired", db.MoveInput{Note: &why}, "expired: "+why+", so nothing was typed.", first)
 	if err != nil || !moved {
 		return err
 	}
@@ -912,7 +989,7 @@ func (s *Server) TypeHeldInput(ctx context.Context, agentID string) error {
 		if err != nil || len(held) == 0 {
 			return err
 		}
-		if outcome, err := s.typeHeld(ctx, held[0], false); err != nil || outcome != "held" {
+		if outcome, err := s.typeHeld(ctx, held[0], nil); err != nil || outcome != "held" {
 			return err
 		}
 		// A box that didn't show the text waits for the sweep's retry: the hook doesn't type it again (S-3830).
@@ -971,7 +1048,7 @@ func (s *Server) ExpireInputs(ctx context.Context) {
 			continue
 		}
 		if ago(r.ExpiresAt) {
-			if err := s.expireHeld(ctx, a, r, "it expired at "+r.ExpiresAt+" before the input box was free"); err != nil {
+			if err := s.expireHeld(ctx, a, r, "it expired at "+r.ExpiresAt+" before the input box was free", nil); err != nil {
 				s.permissionError(ctx, a.ID, err)
 			}
 		} else if a.Activity != "idle" && a.Activity != "waiting" && strings.HasPrefix(r.Row.Text("note"), "box:") {
@@ -1002,7 +1079,7 @@ func (s *Server) retryHeldInputs(ctx context.Context) {
 		if err != nil || (a.Activity != "idle" && a.Activity != "waiting") || !s.inputs.retryDue(r.ID) {
 			continue
 		}
-		if _, err := s.typeHeld(ctx, r, false); err != nil {
+		if _, err := s.typeHeld(ctx, r, nil); err != nil {
 			s.permissionError(ctx, r.AgentID, err)
 		}
 	}

@@ -45,7 +45,7 @@ export const stories: Story[] = [{
     { name: 'An agent selected', height: HEIGHT, overlay: '#shell', data: { agents: AGENTS }, routes: seeded.routes, setup: () => { quiet(); seeded.setup() }, render: () => <App /> },
     { name: 'No agent selected', height: HEIGHT, overlay: '#shell', data: { agents: AGENTS }, routes: home.routes, setup: () => { quiet(); home.setup() }, render: () => <App /> },
     { name: 'Phone: the Agents tab', height: HEIGHT, overlay: '#shell', data: { agents: AGENTS }, routes: seeded.routes, setup: () => { quiet(); seeded.setup(); setTimeout(() => shell.phoneShow('left'), 100) }, render: () => <App /> },
-    { name: 'Rapid-fire, a card picked', height: HEIGHT, overlay: '#shell', data: { agents: WITH_VIEW, humanThreads: RAPID }, routes: conv.routes,
+    { name: 'Rapid-fire, a card picked', height: HEIGHT, overlay: '#shell', data: { agents: WITH_VIEW, rapidWith: { 'fx-dev': { threads: RAPID, more: false } } }, routes: conv.routes,
       setup: () => { quiet(); setRapid('fx-dev', true); setPick('fx-dev', pickOf(RAPID[5], 'fx-dev')); conv.setup() }, render: () => <App /> },
     { name: 'Inbox page open', height: HEIGHT, overlay: '#shell', data: { agents: AGENTS }, routes: inboxPage.routes, setup: () => { quiet(); inboxPage.setup() }, render: () => <App /> },
     { name: 'Work page open', height: HEIGHT, overlay: '#shell', data: { agents: AGENTS }, routes: workPage.routes, setup: () => { quiet(); workPage.setup() }, render: () => <App /> },

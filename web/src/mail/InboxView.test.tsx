@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
+import { humanRowsOf } from './thread-index'
 
 const open = vi.fn()
 const getMock = vi.fn(async (..._a: unknown[]): Promise<unknown> => [])
@@ -28,6 +29,14 @@ const iso = (ms: number) => new Date(ms).toISOString()
 const day = 864e5
 const to = (read: string | null) => [{ id: 'human', read_at: read }]
 const thread = (id: string, subject: string, created: string, extra = {}) => ({ thread_id: id, mails: [{ id: 'm-' + id, from_id: 'a1', from_name: 'fixture-dev', subject, created_at: created, recipients: to('x'), body: 'The body of ' + subject, ...extra }] })
+const inbox = [
+  thread('ask', 'Pick one', iso(at(1))),
+  thread('new', 'Unread today', iso(at(2)), { recipients: to(null) }),
+  thread('old', 'Read earlier', iso(at(2) - 3 * day)),
+  thread('mine', 'I asked', iso(at(3)), { from_id: 'human', recipients: [] }),
+]
+const archived = [thread('arch', 'Archived one', iso(at(2) - 5 * day))]
+const deferred = [thread('def', 'Deferred one', iso(at(2) - 4 * day))]
 
 const roots: Root[] = []
 afterEach(() => { for (const r of roots.splice(0)) act(() => r.unmount()) })
@@ -40,14 +49,7 @@ async function mount() {
   store.setData({
     loaded: { agents: true, mail: true, itsas: true }, error: null, agents: [], perms: [], itsas: [], itsaStatuses: [], decisions: [],
     attention: [{ id: 'i1', key: 'S-1', title: 'An ask', status: 'needs_input', since: iso(at(1)), ask_thread_id: 'ask', thread_id: 'ask', owner: 'a1' }],
-    humanThreads: [
-      thread('ask', 'Pick one', iso(at(1))),
-      thread('new', 'Unread today', iso(at(2)), { recipients: to(null) }),
-      thread('old', 'Read earlier', iso(at(2) - 3 * day)),
-      thread('mine', 'I asked', iso(at(3)), { from_id: 'human', recipients: [] }),
-    ],
-    humanArchived: [thread('arch', 'Archived one', iso(at(2) - 5 * day))],
-    humanDeferred: [thread('def', 'Deferred one', iso(at(2) - 4 * day))],
+    humanRows: humanRowsOf(inbox, archived, deferred),
   } as never)
   let waiting = 0
   const Probe = () => { waiting = useWaiting().length; return null }
@@ -110,7 +112,7 @@ describe('Inbox page', () => {
   it('says so when there is nothing, with words only', async () => {
     const { el } = await mount()
     const store = await import('../store')
-    await act(async () => { store.setData({ humanArchived: [] } as never) })
+    await act(async () => { store.setData({ humanRows: humanRowsOf(inbox, [], deferred) } as never) })
     await act(async () => { chip(el, 'archived').click() })
     expect(el.querySelector('[data-inbox-state="empty"]')?.textContent).toBe('Threads you archive show here.')
     expect(el.querySelector('.inbox-state svg')).toBeNull()
@@ -118,7 +120,7 @@ describe('Inbox page', () => {
   it('says it is loading, or that the load failed', async () => {
     const { el } = await mount()
     const store = await import('../store')
-    await act(async () => { store.setData({ loaded: { agents: true, mail: false, itsas: true }, humanThreads: [] } as never) })
+    await act(async () => { store.setData({ loaded: { agents: true, mail: false, itsas: true }, humanRows: humanRowsOf([], archived, deferred) } as never) })
     expect(el.querySelector('[data-inbox-state="loading"]')?.textContent).toBe('Loading mail…')
     await act(async () => { store.setData({ error: 'fixture: unreachable' } as never) })
     expect(el.querySelector('[data-inbox-state="error"]')?.textContent).toContain('fixture: unreachable')
@@ -227,8 +229,8 @@ describe('Inbox page keys', () => {
     const store = await import('../store')
     // The ask's thread ends with the human's deferring reply, and the ask is deferred.
     const answer = { id: 'm-defer', from_id: 'human', from_name: 'human', subject: 'Re: Pick one', created_at: iso(at(1)), recipients: [{ id: 'a1', read_at: null }], body: 'Deferring this one' }
-    const threads = store.getData().humanThreads.map((t) => (t.thread_id === 'ask' ? { ...t, mails: [...t.mails, answer] } : t))
-    await act(async () => { store.setData({ humanThreads: threads, attention: [{ id: 'i1', key: 'S-1', title: 'An ask', status: 'needs_input', since: iso(at(1)), ask_thread_id: 'ask', thread_id: 'ask', owner: 'a1', deferred: true }] } as never) })
+    const threads = inbox.map((t) => (t.thread_id === 'ask' ? { ...t, mails: [...t.mails, answer] } : t))
+    await act(async () => { store.setData({ humanRows: humanRowsOf(threads, archived, deferred), attention: [{ id: 'i1', key: 'S-1', title: 'An ask', status: 'needs_input', since: iso(at(1)), ask_thread_id: 'ask', thread_id: 'ask', owner: 'a1', deferred: true }] } as never) })
     await act(async () => { chip(el, 'deferred').click() })
     const wrap = el.querySelector('[data-thread="ask"]')?.closest('.mrow-wrap')
     expect(wrap).toBeTruthy()

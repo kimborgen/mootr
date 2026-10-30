@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -8,6 +10,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"stam/internal/auth"
+	"stam/internal/db"
 )
 
 // wait_for on an agent of another machine (src/waits.ts peerTarget, S-275): a target a peer answers for, by name or id,
@@ -249,4 +254,111 @@ func TestWaitForPeerTargetNoticeOnce(t *testing.T) {
 	if c := committed.Load(); c != 1 {
 		t.Errorf("the wait rows when far got the notice: %d", c)
 	}
+}
+
+// A peer's forwarded mail clears a wait_for on its sender only when it is really from that sender (S-4332), and fails
+// closed: one naming an agent this daemon holds is no reply from it (its mail comes here directly), unless it is the
+// relay of an ITSA post by an ITSA home that is a peer, not this machine (an itsa_id alone isn't enough); one from an
+// agent a configured peer holds clears it, and, once the sender peer can be told (senderPeer, S-4127), only when that
+// peer sent it. A peer row that is missing, on no configured peer, or can't be read clears nothing.
+func TestForwardedReplyClearsOnlyItsOwnSendersWait(t *testing.T) {
+	far := newPeerServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/bfar":
+			writeJSON(w, 200, map[string]any{"id": "bfar", "name": "far-one", "machine": "far", "lifecycle": "active"})
+		case "/api/agents/bfar/notice":
+			writeJSON(w, 200, map[string]any{})
+		default:
+			writeError(w, Errorf(http.StatusNotFound, "no agent"))
+		}
+	}))
+	f := newFixture(t, map[string]string{"STAM_MACHINE": "here", "STAM_TEST_HUMAN_KEY": humanKey})
+	peer := `{"name":"far","url":"` + far.ts.URL + `","token":"` + sharedTok + `","peerToken":"` + peerTok + `"}`
+	must(t, os.WriteFile(filepath.Join(f.home, "settings.json"), []byte(`{"peers":[`+peer+`]}`), 0o600))
+	withLife(f)
+	f.sql("UPDATE agents SET lifecycle = 'active', activity = 'idle', machine = 'here'")
+	f.sql("INSERT INTO peer_agents (id, name, machine, updated_at) VALUES ('bfar', 'far-one', 'far', '2026-10-01T00:00:00.000Z')")
+	declare := func(target string) {
+		t.Helper()
+		if rec := f.sendH("POST", "/api/agents/achild/waits/declared", agentTok, nil, `{"on":"agent","target":"`+target+`","by":"achild"}`); rec.Code != 200 {
+			t.Fatalf("declare on %s: %d %s", target, rec.Code, rec.Body.String())
+		}
+	}
+	forwardWith := func(from, id, extra string) {
+		t.Helper()
+		body := `{"from":"` + from + `","to":["achild"],"subject":"reply","body":"here","forwarded":{"from_name":"x"},"mail_id":"` + id + `","thread_id":"` + id + `"` + extra + `}`
+		if rec := f.sendH("POST", "/api/mail", peerTok, peerLocal, body); rec.Code != 200 {
+			t.Fatalf("forwarded from %s: %d %s", from, rec.Code, rec.Body.String())
+		}
+	}
+	forward := func(from, id string) { t.Helper(); forwardWith(from, id, "") }
+	left := func(target string) int {
+		t.Helper()
+		return f.count("SELECT count(*) FROM waits WHERE agent_id = 'achild' AND target = ?", target)
+	}
+	clear := func(target string) {
+		t.Helper()
+		f.sql("DELETE FROM waits WHERE agent_id = 'achild' AND target = ?", target)
+	}
+
+	// A local sender.
+	declare("aboss")
+	forward("aboss", "m00b0001")
+	if n := left("aboss"); n != 1 {
+		t.Errorf("a peer claiming a local agent cleared the wait on it: %d left", n)
+	}
+	// An itsa_id in the body is not enough while this machine is the ITSA home (or no peer is).
+	forwardWith("aboss", "m00b0003", `,"itsa_id":"i-spoof","kind":"comment"`)
+	if n := left("aboss"); n != 1 {
+		t.Errorf("a local sender spoofed with an itsa_id cleared the wait: %d left", n)
+	}
+	// The relay of an ITSA post by a home that is a peer clears it.
+	must(t, os.WriteFile(filepath.Join(f.home, "settings.json"), []byte(`{"peers":[`+peer+`],"itsa":{"home":"far"}}`), 0o600))
+	forwardWith("aboss", "m00b0004", `,"itsa_id":"i-real","kind":"comment"`)
+	if n := left("aboss"); n != 0 {
+		t.Errorf("the ITSA home's relay of a post left %d waits", n)
+	}
+	clear("aboss")
+
+	// A peer sender: a configured peer's agent clears it.
+	declare("bfar")
+	forward("bfar", "m00b0002")
+	if n := left("bfar"); n != 0 {
+		t.Errorf("the reply of the peer's own agent left %d waits", n)
+	}
+	// A peer row on a machine that is no configured peer, a missing row, and a row that can't be read clear nothing.
+	declare("bfar")
+	f.sql("UPDATE peer_agents SET machine = 'nowhere' WHERE id = 'bfar'")
+	forward("bfar", "m00b0005")
+	if n := left("bfar"); n != 1 {
+		t.Errorf("a row on no configured peer cleared the wait: %d left", n)
+	}
+	f.sql("DELETE FROM peer_agents WHERE id = 'bfar'")
+	forward("bfar", "m00b0006")
+	if n := left("bfar"); n != 1 {
+		t.Errorf("a missing peer row cleared the wait: %d left", n)
+	}
+	f.sql("INSERT INTO peer_agents (id, name, machine, updated_at) VALUES ('bfar', 'far-one', 'far', '2026-10-01T00:00:00.000Z')")
+	f.srv.peerAgentByID = func(context.Context, string) (db.PeerAgentRef, bool, error) {
+		// A row that looks held by far, with the error the read ended in: the error alone refuses it.
+		return db.PeerAgentRef{ID: "bfar", Machine: "far"}, true, errors.New("disk I/O error")
+	}
+	forward("bfar", "m00b0007")
+	f.srv.peerAgentByID = nil
+	if n := left("bfar"); n != 1 {
+		t.Errorf("a failed peer lookup cleared the wait: %d left", n)
+	}
+
+	// Once the sender peer can be told: only the peer that holds the agent clears it.
+	f.srv.senderPeerFor = func(auth.Resolved) (string, bool) { return "elsewhere", true }
+	forward("bfar", "m00b0008")
+	if n := left("bfar"); n != 1 {
+		t.Errorf("another peer's word for the agent cleared the wait: %d left", n)
+	}
+	f.srv.senderPeerFor = func(auth.Resolved) (string, bool) { return "far", true }
+	forward("bfar", "m00b0009")
+	if n := left("bfar"); n != 0 {
+		t.Errorf("the holding peer's reply left %d waits", n)
+	}
+	f.srv.senderPeerFor = nil
 }

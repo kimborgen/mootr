@@ -2866,6 +2866,10 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
       proto.subscribe = async (o) => (sub = { endpoint: `http://127.0.0.1:9/push/${tag}`, options: o, toJSON: () => ({ endpoint: `http://127.0.0.1:9/push/${tag}`, keys: { p256dh, auth } }), unsubscribe: async () => { sub = null; return true; } });
     }, tag);
     const mine = async () => (await api('/api/push')).devices.find((d) => d.endpoint_hash === createHash('sha256').update(`http://127.0.0.1:9/push/${tag}`).digest('hex'));
+    // The pane reads the permission when it renders, and the stub above grants it afterwards; reopen the pane so it shows the stub.
+    await p.locator('.settings-nav .item:has-text("Mail to you")').tap();
+    await p.locator('.settings-nav .item:has-text("Notifications")').tap();
+    await p.waitForSelector('#push-devices');
     await p.locator('#push-on').tap();
     await p.waitForSelector(`.device-row:has-text("this device")`);
     const d = await mine();
@@ -3417,7 +3421,8 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     if (await toConv.isVisible()) { await toConv.tap(); await p.waitForTimeout(800); }
     const toggle = p.locator('#w-main .pane.focused .rapid-switch');
     await toggle.tap();
-    await p.waitForSelector('.rf:visible', { timeout: 10000 });
+    // The cards come from the agent's own pages (S-4580): count them once those have loaded.
+    await p.waitForSelector('.rf[data-loaded]:visible', { timeout: 10000 });
     check(tag, 'rapid-fire: the ⚡ toggle shows the conversation as cards', await toggle.getAttribute('aria-pressed') === 'true');
     const target = p.locator('#w-bottom .rf-target');
     check(tag, 'rapid-fire: the prompt input starts a new thread', await target.getAttribute('data-rf') === 'new', await target.innerText());

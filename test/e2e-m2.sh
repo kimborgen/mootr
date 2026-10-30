@@ -59,10 +59,13 @@ human_has "fruit" || { echo "FAIL: no reply in the human inbox"; exit 1; }
 for i in $(seq 1 20); do pane "$B" | grep -q "draft-m2" && break; sleep 0.5; done
 pane "$B" | grep -q "draft-m2" || { echo "FAIL: draft lost"; exit 1; }
 
-# A mail during a turn arrives as a notice after a tool call. The turn holds at its await
-# (A is working then), so the mail is queued for the notice before the gate is typed.
+# A mail during a turn arrives as a notice after a tool call. The mail goes once the turn holds
+# at its await (the fake prints "waiting for input" there): sent while A is merely working, it
+# could land before the turn's read_mail, which would read it, leaving no notice due (S-4480).
 "$STAM" mail send --to "$A" --subject "Slow task" "Run the Bash command 'sleep 3', then wait for the next message, then mail human the result with subject 'slow'."
 "$STAM" wait "$A" --until working --timeout 60
+for i in $(seq 1 60); do pane "$A" | grep -q "waiting for input" && break; sleep 0.5; done
+pane "$A" | grep -q "waiting for input" || { echo "FAIL: slow task never reached its await"; exit 1; }
 "$STAM" mail send --to "$A" --subject "Extra" "In your mail about the slow task, include the word KIWI."
 tmux -L "$STAM_TMUX_SOCKET" send-keys -t "=$(id "$A"):" -l "gate-m2"
 tmux -L "$STAM_TMUX_SOCKET" send-keys -t "=$(id "$A"):" Enter

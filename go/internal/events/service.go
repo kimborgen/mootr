@@ -212,14 +212,68 @@ func eventOf(ev db.ExtEvent, payload jsjson.Value) Event {
 // subscription it fits queues its line for delivery after the fold window, and the event waits it fits clear, in one
 // transaction. ctx must not end with a request that may hang up: the transaction is the event's whole effect.
 func (s *Service) Ingest(ctx context.Context, in Input) (Result, error) {
+	row, hooks, err := s.prepare(in)
+	if err != nil {
+		return Result{}, err
+	}
+	out, err := s.o.DB.IngestEvent(ctx, row, hooks)
+	if err != nil || !out.Stored {
+		return Result{}, err
+	}
+	s.afterIngest(ctx, out)
+	return Result{Stored: true, Event: out.Event, Matched: out.Matched}, nil
+}
+
+// IngestAndStore is Ingest for a source that keeps a snapshot beside its events: the events and the snapshot (state and etags,
+// the poller's watch_state row of subject) are stored in one transaction, and only if subject is watched when it begins
+// (db.PollApply). It returns the events stored (a repeat of a dedupe key is dropped), and whether the transaction wrote.
+func (s *Service) IngestAndStore(ctx context.Context, subject string, ins []Input, state, etags string) (stored int, written bool, err error) {
+	evs := make([]db.PollEvent, 0, len(ins))
+	for _, in := range ins {
+		row, hooks, err := s.prepare(in)
+		if err != nil {
+			return 0, false, err
+		}
+		evs = append(evs, db.PollEvent{In: row, Hooks: hooks})
+	}
+	t := s.o.Now()
+	outs, written, err := s.o.DB.PollApply(ctx, subject, evs, state, etags, t.UTC().Format("2006-01-02T15:04:05.000Z"), t.UnixMilli(), SubjectsOf)
+	if err != nil {
+		return 0, false, err
+	}
+	for _, out := range outs {
+		if out.Stored {
+			stored++
+			s.afterIngest(ctx, out)
+		}
+	}
+	return stored, written, nil
+}
+
+// afterIngest makes the deliveries of a stored event. The queue and the notices are stored: what follows only makes the
+// deliveries, and a restart makes them again.
+func (s *Service) afterIngest(ctx context.Context, out db.IngestOut) {
+	for _, id := range out.Queued {
+		s.arm(id)
+	}
+	for _, c := range out.Cleared {
+		if s.hookWaitNotice != nil && !s.hookWaitNotice() {
+			continue
+		}
+		s.deliverWaitNotice(ctx, c.Notice)
+	}
+}
+
+// prepare validates an input and builds its row and the hooks that match it.
+func (s *Service) prepare(in Input) (db.IngestIn, db.IngestHooks, error) {
 	if in.Source == "" {
-		return Result{}, &ErrInvalid{"an event needs a source"}
+		return db.IngestIn{}, db.IngestHooks{}, &ErrInvalid{"an event needs a source"}
 	}
 	if in.Type == "" {
-		return Result{}, &ErrInvalid{"an event needs a type"}
+		return db.IngestIn{}, db.IngestHooks{}, &ErrInvalid{"an event needs a type"}
 	}
 	if in.DedupeKey == "" {
-		return Result{}, &ErrInvalid{"an event needs a dedupe_key"}
+		return db.IngestIn{}, db.IngestHooks{}, &ErrInvalid{"an event needs a dedupe_key"}
 	}
 	summary := in.Source + " " + in.Type
 	if in.Summary != nil {
@@ -261,21 +315,7 @@ func (s *Service) Ingest(ctx context.Context, in Input) (Result, error) {
 			return text, true
 		},
 	}
-	out, err := s.o.DB.IngestEvent(ctx, row, hooks)
-	if err != nil || !out.Stored {
-		return Result{}, err
-	}
-	// The queue and the notices are stored: what follows only makes the deliveries, and a restart makes them again.
-	for _, id := range out.Queued {
-		s.arm(id)
-	}
-	for _, c := range out.Cleared {
-		if s.hookWaitNotice != nil && !s.hookWaitNotice() {
-			continue
-		}
-		s.deliverWaitNotice(ctx, c.Notice)
-	}
-	return Result{Stored: true, Event: out.Event, Matched: out.Matched}, nil
+	return row, hooks, nil
 }
 
 func dedupe(in []string) []string {
@@ -660,4 +700,10 @@ func (s *Service) deliver(ctx context.Context, sub db.QueueSub, n int, lines []s
 		return dropped, 0, false
 	}
 	return sent, 0, false
+}
+
+// SubjectsOf says how a stored subscription filter and an event wait's data name subjects, for db.WatchedSubjects.
+var SubjectsOf = db.SubjectsOf{
+	Filter: func(filter string) []string { return ParseFilter(filter).Subjects },
+	Wait:   func(data *string) []string { return WaitFilter(db.Wait{Data: data}).Subjects },
 }

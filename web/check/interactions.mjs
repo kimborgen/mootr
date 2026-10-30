@@ -468,11 +468,11 @@ async function spawnFlow() {
   // The taken-name check gets a 409 on purpose.
   const p = await page(undefined, /status of 409/);
   const all = () => api('/api/agents');
-  const newest = async (before) => (await all()).find((a) => !before.some((b) => b.id === a.id));
+  const newest = async (before, name) => (await all()).find((a) => !before.some((b) => b.id === a.id) && (!name || a.name === name));
   const made = [];
   const stopLater = (a) => made.push(a);
-  const added = async (before, what) => {
-    for (let i = 0; i < 40; i++) { const a = await newest(before); if (a) return a; await sleep(250); }
+  const added = async (before, what, name) => {
+    for (let i = 0; i < 40; i++) { const a = await newest(before, name); if (a) return a; await sleep(250); }
     check(false, what + ': an agent was added');
     return null;
   };
@@ -576,7 +576,8 @@ async function spawnFlow() {
   check(await p.locator('.spawn-panel .sp-field input').first().inputValue() === `spawn-check-${n}`, 'the name keeps to lowercase letters, digits, and dashes');
   check(await p.locator('.spawn-panel .sp-error').count() === 0, 'editing clears the error');
   await p.keyboard.press('Control+Enter');
-  a = await added(before, 'the panel');
+  // Another agent can be added during the run, so match the one this panel named.
+  a = await added(before, 'the panel', `spawn-check-${n}`);
   if (a) {
     same([a.name, a.harness, a.model, a.effort, a.parent_id, a.permission_mode, a.cwd === helper.cwd], [`spawn-check-${n}`, 'claude', 'claude-haiku-5-5', 'low', helper.id, 'bypass', true], 'Ctrl+Enter adds the agent with every choice');
     await p.waitForTimeout(400);
@@ -972,14 +973,15 @@ async function archive() {
   const row = () => p.locator(`.mrow[data-thread="${tid}"]`);
   const current = () => p.evaluate(() => window.stamDebug.shell.currentWorld());
   const inList = async () => (await api('/api/agents/human/threads?limit=60')).some((x) => x.thread_id === tid);
-  // Opening an unread thread fetches it once and marks its mail read once (S-151), on a page of its own.
+  // Opening an unread thread marks its mail read once (S-151), on a page of its own, and fetches it no more than
+  // twice: on open, and on its read's tick, which a thread view never skips (S-4519). A loop fetched it ~160 times.
   const q = await page();
   const reqs = watch(q);
   await q.locator(`.mrow[data-thread="${tid}"]`).click();
   await q.waitForSelector('.thread-view:visible .msg');
   await sleep(3000);
   const fetches = reqs(`GET /api/threads/${tid}`), reads = reqs('POST /api/agents/human/read');
-  check(fetches <= 1, 'opening a thread fetches it once', fetches);
+  check(fetches <= 2, 'opening a thread fetches it at most twice', fetches);
   check(reads <= 1, 'opening a thread marks its mail read once', reads);
   await q.context().close();
 
@@ -3541,6 +3543,9 @@ async function requirementsFlow() {
 
   // Waive one verdict, from the world's Waive button and its form.
   const p = await page()
+  // Wait for the shell to mount: a world shown before that is replaced by the default Agents world.
+  await sideTab(p, 'issues');
+  await p.locator('#req-side').waitFor();
   await p.evaluate((w) => window.stamDebug.shell.showAgentWorld(w), 'w:req:' + leaf.key);
   const view = p.locator(`.req-view[data-req-view="${leaf.key}"]`);
   await view.waitFor();
@@ -3643,6 +3648,9 @@ async function batchApprovalFlow() {
     check(!!ask && got.approval?.to === 'human', 'a batch from helper raises one approval for its three drafts', got);
     const x = await api(`/api/itsas/${ask}`);
     p = await page({ width: 1500, height: 900 }, null, 'light');
+    // Requirements load after the shell: wait for the Issues sidebar before showing the ITSA, or its batch list isn't drawn.
+    await sideTab(p, 'issues');
+    await p.locator('#req-side').waitFor();
     await p.evaluate((w) => window.stamDebug.shell.showAgentWorld(w), 'w:itsa:' + x.id);
     const list = p.locator('[data-req-batch]');
     await list.waitFor();

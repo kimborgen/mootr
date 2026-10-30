@@ -3,6 +3,7 @@
 // request, the ask thread of an ITSA waiting on them, or an agent's open decision mail. The header
 // button, the phone menu, the `e` key and the row's button and swipe all leave such a thread in place.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { humanRowsOf } from './mail/thread-index'
 
 const api = vi.fn(async () => ({}))
 vi.mock('./api', () => ({ api: (...a: unknown[]) => (api as (...b: unknown[]) => unknown)(...a), hash: new URLSearchParams() }))
@@ -16,7 +17,7 @@ describe('the archive guard', () => {
 
   it('knows which threads wait on the human', async () => {
     const store = await import('./store')
-    store.setData({ humanThreads: [thread('ask'), thread('perm', { status: 'pending' }), thread('plain')], humanArchived: [], attention: [waiting('ask')], itsaStatuses: statuses } as never)
+    store.setData({ humanRows: humanRowsOf([thread('ask'), thread('perm', { status: 'pending' }), thread('plain')] as never), attention: [waiting('ask')], itsaStatuses: statuses } as never)
     expect(['ask', 'perm', 'plain'].map((t) => store.threadWaitsOnHuman(t))).toEqual([true, true, false])
     store.setData({ attention: [waiting('ask', 'done')] } as never)
     expect(store.threadWaitsOnHuman('ask')).toBe(false)
@@ -26,7 +27,7 @@ describe('the archive guard', () => {
     const store = await import('./store')
     const actions = await import('./actions')
     const agent = { id: 'a1', name: 'bob', waits: [{ id: 'w1', kind: 'human', thread: 'wt', since: '2026-10-13T10:00:00Z' }] }
-    store.setData({ humanThreads: [thread('wt')], humanArchived: [], decisions: [], attention: [], itsaStatuses: statuses, agents: [agent] } as never)
+    store.setData({ humanRows: humanRowsOf([thread('wt')] as never), decisions: [], attention: [], itsaStatuses: statuses, agents: [agent] } as never)
     expect(store.threadWaitsOnHuman('wt')).toBe(true)
     expect(await actions.setThreadArchived('wt', true)).toBe(false)
     await actions.toggleThreadArchived('wt')
@@ -39,7 +40,7 @@ describe('the archive guard', () => {
     const store = await import('./store')
     const actions = await import('./actions')
     const decision = { mail_id: 'm-dec', thread_id: 'dec', from_id: 'a1', from_name: 'alice', subject: 'dec', created_at: '2026-10-13T10:00:00Z' }
-    store.setData({ humanThreads: [thread('dec')], humanArchived: [], decisions: [decision], itsaStatuses: statuses, attention: [] } as never)
+    store.setData({ humanRows: humanRowsOf([thread('dec')] as never), decisions: [decision], itsaStatuses: statuses, attention: [] } as never)
     expect(store.threadWaitsOnHuman('dec')).toBe(true)
     expect(await actions.setThreadArchived('dec', true)).toBe(false)
     await actions.toggleThreadArchived('dec')
@@ -51,7 +52,7 @@ describe('the archive guard', () => {
   it("archives a thread the human just answered, even while the client still lists it as waiting", async () => {
     const store = await import('./store')
     const actions = await import('./actions')
-    store.setData({ humanThreads: [thread('dec')], humanArchived: [], decisions: [{ mail_id: 'm-dec', thread_id: 'dec', from_id: 'a1', from_name: 'alice', subject: 'dec', created_at: '2026-10-13T10:00:00Z' }], itsaStatuses: statuses, attention: [] } as never)
+    store.setData({ humanRows: humanRowsOf([thread('dec')] as never), decisions: [{ mail_id: 'm-dec', thread_id: 'dec', from_id: 'a1', from_name: 'alice', subject: 'dec', created_at: '2026-10-13T10:00:00Z' }], itsaStatuses: statuses, attention: [] } as never)
     expect(await actions.setThreadArchived('dec', true)).toBe(false)
     expect(await actions.setThreadArchived('dec', true, true)).toBe(true)
     expect(api.mock.calls.some((c) => JSON.stringify(c).includes('dec/archive'))).toBe(true)
@@ -61,7 +62,7 @@ describe('the archive guard', () => {
   it("leaves a waiting ITSA's ask thread in place, and still unarchives a thread", async () => {
     const store = await import('./store')
     const actions = await import('./actions')
-    store.setData({ humanThreads: [thread('ask')], humanArchived: [thread('plain')], attention: [waiting('ask')], itsaStatuses: statuses } as never)
+    store.setData({ humanRows: humanRowsOf([thread('ask')] as never, [thread('plain')] as never), attention: [waiting('ask')], itsaStatuses: statuses } as never)
     await actions.toggleThreadArchived('ask')
     expect(api.mock.calls.some((c) => JSON.stringify(c).includes('ask'))).toBe(false)
     await actions.toggleThreadArchived('plain')
@@ -75,7 +76,7 @@ describe('defer (S-976)', () => {
   it('moves a thread to the deferred list, off the unread count, and back', async () => {
     const store = await import('./store')
     const actions = await import('./actions')
-    store.setData({ humanThreads: [thread('plain')], humanArchived: [], humanDeferred: [], attention: [], decisions: [], itsaStatuses: statuses } as never)
+    store.setData({ humanRows: humanRowsOf([thread('plain')] as never), attention: [], decisions: [], itsaStatuses: statuses } as never)
     expect(await actions.setThreadDeferred('plain', true)).toBe(true)
     expect(api.mock.calls.some((c) => JSON.stringify(c).includes('plain/defer'))).toBe(true)
     expect(store.isDeferredThread('plain')).toBe(true)
@@ -87,7 +88,7 @@ describe('defer (S-976)', () => {
     const store = await import('./store')
     const actions = await import('./actions')
     const decision = { mail_id: 'm-dec', thread_id: 'dec', from_id: 'a1', from_name: 'alice', subject: 'dec', created_at: '2026-10-13T10:00:00Z' }
-    store.setData({ humanThreads: [thread('ask'), thread('dec')], humanArchived: [], humanDeferred: [], attention: [waiting('ask')], decisions: [decision], itsaStatuses: statuses } as never)
+    store.setData({ humanRows: humanRowsOf([thread('ask'), thread('dec')] as never), attention: [waiting('ask')], decisions: [decision], itsaStatuses: statuses } as never)
     expect(await actions.setThreadDeferred('ask', true)).toBe(true)
     vi.stubGlobal('matchMedia', () => ({ matches: false }))
     await actions.toggleThreadDeferred('dec')
@@ -100,7 +101,7 @@ describe('defer (S-976)', () => {
   it('defers a thread with a pending permission request without answering it (S-1068)', async () => {
     const store = await import('./store')
     const actions = await import('./actions')
-    store.setData({ humanThreads: [thread('perm', { status: 'pending' })], humanArchived: [], humanDeferred: [], attention: [], decisions: [], itsaStatuses: statuses } as never)
+    store.setData({ humanRows: humanRowsOf([thread('perm', { status: 'pending' })] as never), attention: [], decisions: [], itsaStatuses: statuses } as never)
     expect(await actions.setThreadDeferred('perm', true)).toBe(true)
     expect(api.mock.calls.some((c) => JSON.stringify(c).includes('perm/defer'))).toBe(true)
     expect(api.mock.calls.some((c) => JSON.stringify(c).includes('permissions'))).toBe(false)
@@ -110,9 +111,9 @@ describe('defer (S-976)', () => {
   it('archives a deferred thread straight out of the deferred list', async () => {
     const store = await import('./store')
     const actions = await import('./actions')
-    store.setData({ humanThreads: [], humanArchived: [], humanDeferred: [thread('d')], attention: [], decisions: [], itsaStatuses: statuses } as never)
+    store.setData({ humanRows: humanRowsOf([], [], [thread('d')] as never), attention: [], decisions: [], itsaStatuses: statuses } as never)
     expect(await actions.setThreadArchived('d', true)).toBe(true)
-    expect(store.getData().humanDeferred).toEqual([])
+    expect(store.getData().humanRows.deferred).toEqual([])
     expect(store.isArchivedThread('d')).toBe(true)
   })
 })

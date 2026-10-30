@@ -62,6 +62,9 @@ const mount = async (extra: Partial<React.ComponentProps<typeof FileDiff>> = {})
   act(() => root!.render(<FileDiff file={f} load={load} loadKey="stam2#7" download={download} mode="split" wrap={false} viewed={false} onViewed={() => {}} onHide={() => {}} onEditor={onEditor} {...extra} />))
   fire(NEAR, true)
   await vi.waitFor(() => expect(host.querySelector('.fake-editor')).not.toBeNull(), { timeout: 5000 })
+  // The editor's DOM lands before `drawn` is set, and the far observer is registered only after that: a `fire(FAR, …)` sent
+  // in between reaches no observer. Wait for it, so the test drives the seam instead of racing it.
+  await vi.waitFor(() => expect(observers.some((o) => o.live && o.margin === FAR)).toBe(true), { timeout: 5000 })
 }
 const section = () => host.querySelector<HTMLElement>('section')!
 

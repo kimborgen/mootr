@@ -59,14 +59,43 @@ export function terminalOriginFor(machine: string, origin: string | undefined): 
   return origin && originAllowed({ machine, origin }) ? origin : undefined
 }
 
-export async function api<T = unknown>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-  const r = await fetch(path, {
+// A read is given up after READ_TIMEOUT ms (S-4517), so a poll waiting on a hung daemon can run again. A write
+// has none: one that landed after its timeout would be sent again by the outbox.
+export const READ_TIMEOUT = 30_000
+
+// fetch and the body's JSON, with a GET aborted at READ_TIMEOUT as a retryable 504. The caller's own abort
+// still rejects with its own reason.
+async function send(method: string, path: string, body: unknown, signal?: AbortSignal): Promise<[Response, unknown]> {
+  const init = (s?: AbortSignal): RequestInit => ({
     method,
-    signal,
+    signal: s,
     headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', 'x-stam-human': '1' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  const d = await r.json().catch(() => ({}))
+  if (method !== 'GET') {
+    const r = await fetch(path, init(signal))
+    return [r, await r.json().catch(() => ({}))]
+  }
+  const ctl = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => { timedOut = true; ctl.abort() }, READ_TIMEOUT)
+  const relay = () => ctl.abort(signal?.reason)
+  if (signal?.aborted) relay()
+  signal?.addEventListener('abort', relay, { once: true })
+  try {
+    const r = await fetch(path, init(ctl.signal))
+    return [r, await r.json().catch(() => { if (timedOut) throw new Error('timeout'); return {} })]
+  } catch (e) {
+    if (timedOut) throw new ApiError(`No answer from the daemon in ${READ_TIMEOUT / 1000} s`, 504)
+    throw e
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', relay)
+  }
+}
+
+export async function api<T = unknown>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const [r, d] = await send(method, path, body, signal)
   // A refused token on 127.0.0.1 (an expired local login, S-613) is dropped, and the page loads again to ask anew.
   if (r.status === 401 && token && onLoopback()) { dropToken(); location.reload() }
   // A human action refused on 127.0.0.1 while a local login is there (a `stam web` token link, S-2121): offer it.

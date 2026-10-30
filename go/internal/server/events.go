@@ -23,9 +23,9 @@ import (
 // or the human, with a filter; who may make one is checked here, on the route, whoever calls it (the MCP tool, the CLI, a
 // peer, the web UI).
 //
-// Not ported yet, each a seam for the changes that follow: the pollers (GitHub, Linear) that call ingest, watch_pr, the
+// Not ported yet, each a seam for the changes that follow: the Linear poller that calls ingest, the
 // process start-node subscriptions (onProcessStart: a matching subscription of that kind is counted and nothing more),
-// watchedSubjects, the requirement check of a stored event (checkRequirementsOn), and the reviewer's join of the ITSAs a
+// process-derived watchedSubjects, the requirement check of a stored event (checkRequirementsOn), and the reviewer's join of the ITSAs a
 // watched PR is linked to (joinPrReviewer).
 
 func (s *Server) eventsRoutes() {
@@ -64,8 +64,13 @@ func (s *Server) StartEvents(ctx context.Context) {
 	if err := s.events.Start(ctx); err != nil {
 		slog.Error("event service: replay", "err", err)
 	}
+	s.startGithub(ctx)
+	s.startLinear(ctx)
 	s.goBg(func() {
 		<-ctx.Done()
+		// The poller ingests into the service, so it stops first and its tick in flight ends.
+		s.github.Close()
+		s.linear.Close()
 		s.events.Close()
 	})
 }

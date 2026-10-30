@@ -67,6 +67,8 @@ type Server struct {
 	URL string
 	// HTTP is the client for the server's API; http.DefaultClient's transport when nil.
 	HTTP *http.Client
+	// CallTimeout bounds every API call but the event stream; callTimeout when 0 (tests make it short).
+	CallTimeout time.Duration
 	// Sleep waits d, or until ctx ends; tests make it return at once.
 	Sleep func(ctx context.Context, d time.Duration) error
 
@@ -274,7 +276,11 @@ func (s *Server) Call(ctx context.Context, method, path string, body jsjson.Valu
 
 // callText is Call's request: the answer's text as the server sent it, for a 2xx status.
 func (s *Server) callText(ctx context.Context, method, path string, body jsjson.Value) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	limit := callTimeout
+	if s.CallTimeout > 0 {
+		limit = s.CallTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	var r io.Reader
 	if body != nil {

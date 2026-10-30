@@ -44,7 +44,7 @@ const USAGE = named(`${CLI}: run and coordinate coding agents
   stam rollback [RELEASE]           switch to the previous release, or a named one
   stam releases                     list releases
   stam deps relink [--force]        relink this worktree's node_modules from the lockfile cache (after a rebase changes package-lock.json); deps check only reports
-${SPAWN_USAGE}  stam ls [--all]   live agents; --all adds stopped and archived ones
+${SPAWN_USAGE}  stam ls [--all] [--json]   live agents; --all adds stopped and archived ones; --json prints the rows as JSON
   stam registry                     agent types, presets, harnesses, and models
   stam doctor [--json]              check this machine for a first run (Node, tmux, git, a harness, STAM_HOME, the port), with no daemon needed; a fix line per problem; exits 1 on a failure
   stam onboarding                   what a fresh install still lacks, as JSON: harness logins, keys, network mode, repos, chief of staff
@@ -600,6 +600,8 @@ async function main() {
     case 'ls': {
       // Live agents; `stam ls --all` adds stopped and archived ones (S-3816).
       const agents = await api<any[]>('GET', rest.includes('--all') ? '/api/agents?state=all' : '/api/agents');
+      // `--json` prints the rows as the API sends them (the worktree sweep reads each agent's cwd and workspace).
+      if (rest.includes('--json')) return console.log(JSON.stringify(agents));
       const rows = agents.map((a) => [
         a.id,
         a.name,

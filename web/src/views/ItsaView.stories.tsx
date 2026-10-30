@@ -1,4 +1,5 @@
 import type { AboutThread, CostModes, Itsa, ItsaThreadItem, ItsaView as View, Mail } from '../types'
+import { humanRowsOf } from '../mail/thread-index'
 import { ASK_ITSA, mail, PERM_DONE, T_ASK } from '../stories/mailFixtures'
 import { attention, itsa, itsaData, itsaView, LONG, TREE, DEEP } from '../stories/itsaFixtures'
 import { BATCH_ITEMS, REQS } from '../stories/reqFixtures'
@@ -92,7 +93,7 @@ const reqOn = { 'GET /api/req-enabled': { enabled: true }, 'GET /api/requirement
 const refresh = () => { void refreshReq() }
 const batch: World = { all: TREE, id: 'fx-i-950', view: { kind: 'requirement-approval', summary: 'Two drafts and a dropped one, asked together.', body: 'R-8, R-9 and R-10, drafted from the retry-policy review.' } }
 const waiter: World = { all: TREE, id: 'fx-i-913', view: { summary: 'Does the ß fold to ss when the query is upper-cased?', thread_id: 'fx-t-ask' }, thread: [{ type: 'mail', ts: ago(35), mail: T_ASK.mails[1] }] }
-const asking = { attention: [{ ...attention(TREE.find((x) => x.id === 'fx-i-913')!, 35), ask_thread_id: 'fx-t-ask' }, ASK_ITSA], humanThreads: [T_ASK] }
+const asking = { attention: [{ ...attention(TREE.find((x) => x.id === 'fx-i-913')!, 35), ask_thread_id: 'fx-t-ask' }, ASK_ITSA], humanRows: humanRowsOf([T_ASK]) }
 // The same ITSA with its status at needs_approval, as the approval asks.
 const APPROVAL = TREE.map((x) => (x.id === 'fx-i-913' ? { ...x, status: 'needs_approval' } : x))
 

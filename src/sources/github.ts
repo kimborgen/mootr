@@ -6,6 +6,7 @@
 // public webhook endpoint. The `gh` login's token (mcp-auth.ghToken) authorizes the calls;
 // STAM_GITHUB_API and STAM_GITHUB_TOKEN override the base and token for tests. See
 // docs/design.md, Event subscriptions.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as db from '../db.ts';
 import * as watch from '../watch.ts';
 import { settings } from '../settings.ts';
@@ -68,7 +69,14 @@ interface Reply {
 async function get(path: string, token: string, etag?: string): Promise<Reply> {
   const headers: Record<string, string> = { accept: 'application/vnd.github+json', 'user-agent': 'stam', authorization: `Bearer ${token}` };
   if (etag) headers['if-none-match'] = etag;
-  const res = await fetch(`${base()}${path}`, { headers, signal: AbortSignal.timeout(20_000) });
+  let res: Response;
+  try {
+    res = await fetch(`${base()}${path}`, { headers, signal: AbortSignal.timeout(20_000) });
+  } catch (e) {
+    tallyRequest(path, null);
+    throw e;
+  }
+  tallyRequest(path, res.status);
   const remaining = num(res.headers.get('x-ratelimit-remaining'));
   const reset = num(res.headers.get('x-ratelimit-reset'));
   const resetAt = reset ? reset * 1000 : null;
@@ -81,6 +89,42 @@ async function get(path: string, token: string, etag?: string): Promise<Reply> {
     body = undefined;
   }
   return { status: res.status, body, etag: res.headers.get('etag'), link: res.headers.get('link'), remaining, resetAt };
+}
+
+// Per-tick request counts for the log line (S-4356): by endpoint family, the 200s, the 304s and the rest.
+export function family(path: string): string {
+  if (path.endsWith('/reviews')) return 'reviews';
+  if (path.endsWith('/check-runs')) return 'check-runs';
+  if (path.endsWith('/status')) return 'status';
+  if (path.includes('/comments')) return 'comments';
+  if (path.includes('/events')) return 'events';
+  if (/\/pulls\/\d+$/.test(path)) return 'pulls';
+  return 'other';
+}
+// Each tick counts its own requests (S-4356): the tally travels with the tick's async context, so overlapping ticks never
+// share counts. A null status is a request that never got an answer (a timeout, a reset): a failure.
+type Tally = Map<string, { ok: number; notModified: number; failed: number }>;
+const tickTally = new AsyncLocalStorage<Tally>();
+function tallyRequest(path: string, status: number | null): void {
+  const tally = tickTally.getStore();
+  if (!tally) return;
+  const f = family(path);
+  const t = tally.get(f) ?? { ok: 0, notModified: 0, failed: 0 };
+  if (status === 200) t.ok++;
+  else if (status === 304) t.notModified++;
+  else t.failed++;
+  tally.set(f, t);
+}
+// The tick's one log line: its subjects, its requests, and each family as 200s/304s/failed. Logging never changes the
+// poll: a sink that throws is ignored.
+function logTally(tally: Tally, subjects: number): void {
+  try {
+    const parts = [...tally].map(([f, t]) => `${f} ${t.ok}/${t.notModified}/${t.failed}`);
+    const total = [...tally.values()].reduce((n, t) => n + t.ok + t.notModified + t.failed, 0);
+    console.log(`github calls: subjects=${subjects} requests=${total} ${parts.join(', ')}`);
+  } catch {
+    // The count is a log line only.
+  }
 }
 
 const num = (v: string | null): number | null => (v != null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null);
@@ -403,6 +447,16 @@ export function mirrorsHead(prev: any | null, result: { events: watch.EventInput
 // change, and backs off when the rate limit is low. Returns how many events it ingested.
 export async function tick(): Promise<number> {
   if (Date.now() < backoffUntil) return 0;
+  const tally: Tally = new Map();
+  const polled = { subjects: 0 };
+  try {
+    return await tickTally.run(tally, () => pollAll(polled));
+  } finally {
+    if (tally.size) logTally(tally, polled.subjects);
+  }
+}
+
+async function pollAll(polled: { subjects: number }): Promise<number> {
   const subjects = watch.watchedSubjects().filter((s) => s.startsWith('github:'));
   const pollable: string[] = [];
   for (const subject of subjects) {
@@ -412,6 +466,7 @@ export async function tick(): Promise<number> {
     }
     pollable.push(subject);
   }
+  polled.subjects = pollable.length;
   if (!pollable.length) return 0;
   const auth = await token();
   if (!auth) return 0;

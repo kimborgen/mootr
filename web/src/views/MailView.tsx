@@ -8,12 +8,14 @@ import { Icon } from '../Icon'
 import { Loading } from '../Loading'
 import * as mb from '../mail/mailblocks'
 import { Avatar, nameFor, ThreadPanel } from '../mail/ThreadPanel'
-import { registerView } from '../shell/layout'
+import { registerView, useShownTick } from '../shell/layout'
 import { byId, useData } from '../store'
 import type { Thread } from '../types'
 
 export function MailView({ owner, viewKey }: { owner: string; viewKey: string }) {
   const { mailTick } = useData()
+  // A mail list on screen reloads on each tick; one hidden reloads once when it shows again.
+  const tick = useShownTick(viewKey, mailTick)
   const [threads, setThreads] = useState<Thread[]>([])
   const [error, setError] = useState<string | null>(null)
   // Until the first list lands, the empty state would say "No mail yet." about mail not yet fetched.
@@ -35,8 +37,10 @@ export function MailView({ owner, viewKey }: { owner: string; viewKey: string })
     setLoaded(true)
   }
   useEffect(() => { sig.current = null; setLoaded(false) }, [owner])
-  useEffect(() => { load() }, [owner, mailTick])
-  useEffect(() => registerView(viewKey, { show: () => load() }), [viewKey])
+  // The tick last loaded. The shell shows a view after its layout (a catch-up tick reloads it first), so a show loads only a tick it hasn't loaded.
+  const synced = useRef<number | null>(null)
+  useEffect(() => { synced.current = tick; load() }, [owner, tick])
+  useEffect(() => registerView(viewKey, { show: () => { if (synced.current !== tick) load() } }), [viewKey, tick])
 
   const unreadIn = (t: Thread) => t.mails.filter((m) => m.recipients.some((r) => r.id === owner && !r.read_at))
   const open = (t: Thread) => {

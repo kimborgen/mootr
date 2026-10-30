@@ -5,14 +5,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
 import type { Ask } from '../types'
+import { humanRowsOf } from './thread-index'
 
 const selectThread = vi.fn()
 const selectAgent = vi.fn()
 const env = { held: [] as string[] }
 vi.mock('../actions', async (orig) => ({ ...(await orig<object>()), selectThread: (t: string) => selectThread(t), selectAgent: (a: string) => selectAgent(a) }))
 vi.mock('../itsa/itsa', async (orig) => ({ ...(await orig<object>()), openItsa: vi.fn() }))
-// The threads the human holds, as the waiting list reads them.
-vi.mock('../store', async (orig) => ({ ...(await orig<object>()), getData: () => ({ humanThreads: env.held.map((thread_id) => ({ thread_id, mails: [] })), humanArchived: [], humanDeferred: [] }) }))
+// The threads the human holds, as the waiting list reads them: as index rows, so each holds a mail.
+const held = (thread_id: string) => ({ thread_id, mails: [{ id: 'm-' + thread_id, from_id: 'fx-agent', body: '', created_at: '2026-10-29T10:00:00Z', recipients: [{ id: 'human', read_at: null }] }] })
+vi.mock('../store', async (orig) => ({ ...(await orig<object>()), getData: () => ({ humanRows: humanRowsOf(env.held.map(held)) }) }))
 
 import { NeedsYouList } from './NeedsYouList'
 

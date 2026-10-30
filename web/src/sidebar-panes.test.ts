@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LAYOUT_V, activate, addPane, DEFAULT_PANES, MAX_PANES, movePane, moveTab, removePane, removeTab, sanitizePanes, sanitizeTabBar, sendTab, tabKey, unusedTabs } from './sidebar-panes'
+import { KEY_STEP, ariaRange, moveSizes, LAYOUT_V, activate, defaultSizes, pairFrac, resizePair, resolveSizes, sanitizeSizes, separatorKey, addPane, DEFAULT_PANES, MAX_PANES, movePane, moveTab, removePane, removeTab, sanitizePanes, sanitizeTabBar, sendTab, tabKey, unusedTabs } from './sidebar-panes'
 
 const KNOWN = ['agents', 'issues', 'mail', 'machines']
 const WITH_COST = [...KNOWN, 'cost']
@@ -148,5 +148,68 @@ describe('sidebar layout edits (S-1422)', () => {
   it('edited layouts survive the stored-value cleaning unchanged', () => {
     const edited = sendTab(addPane(L(), 'issues'), 'machines', 0)
     expect(sanitizePanes({ panes: edited }, KNOWN)).toEqual(edited)
+  })
+})
+
+describe('pane sizes (S-3810)', () => {
+  it('defaults to 3/2/1, then 1 for any more', () => {
+    expect(defaultSizes(3)).toEqual([3, 2, 1])
+    expect(defaultSizes(4)).toEqual([3, 2, 1, 1])
+    expect(defaultSizes(1)).toEqual([3])
+  })
+  it('takes stored sizes only when they are n finite positive numbers', () => {
+    expect(sanitizeSizes({ sizes: [1, 2, 3] }, 3)).toEqual([1, 2, 3])
+    for (const x of [undefined, {}, { sizes: 'a' }, { sizes: [1, 2] }, { sizes: [1, 2, 3, 4] }, { sizes: [1, 0, 3] }, { sizes: [1, -2, 3] }, { sizes: [1, NaN, 3] }, { sizes: [1, '2', 3] }]) {
+      expect(sanitizeSizes(x, 3)).toBeNull()
+    }
+  })
+  it('falls back to the defaults for a record whose pane count differs from its sizes', () => {
+    expect(resolveSizes([1, 1], 3)).toEqual([3, 2, 1])
+    expect(resolveSizes(undefined, 3)).toEqual([3, 2, 1])
+    expect(resolveSizes([5, 1, 1], 3)).toEqual([5, 1, 1])
+  })
+  it('an old layout without sizes still loads with the sanitized panes', () => {
+    expect(sanitizeSizes({ panes: DEFAULT_PANES, tabBar: 'compact', v: LAYOUT_V }, 3)).toBeNull()
+  })
+  it('moves a separator by the share of the pair, keeping the sum and the other panes', () => {
+    const got = resizePair([3, 2, 1], 0, 0.8, 0.1)
+    expect(got[0] + got[1]).toBeCloseTo(5)
+    expect(got[0]).toBeCloseTo(4)
+    expect(got[2]).toBe(1)
+  })
+  it('keeps each pane of the pair at the minimum', () => {
+    const lo = resizePair([3, 2, 1], 1, -2, 0.2)
+    expect(pairFrac(lo, 1)).toBeCloseTo(0.2)
+    expect(lo[1]).toBeGreaterThan(0)
+    const hi = resizePair([3, 2, 1], 1, 5, 0.2)
+    expect(pairFrac(hi, 1)).toBeCloseTo(0.8)
+    expect(hi[2]).toBeGreaterThan(0)
+  })
+  it('returns the same array when nothing moves or the input is unusable', () => {
+    const s = [3, 2, 1]
+    expect(resizePair(s, 0, 0.6, 0.1)).toBe(s)
+    expect(resizePair(s, 2, 0.5, 0.1)).toBe(s)
+    expect(resizePair(s, 0, NaN, 0.1)).toBe(s)
+  })
+  it('steps with arrows and jumps to the limits with Home and End', () => {
+    expect(separatorKey(0.5, 'ArrowDown', 0.1)).toBeCloseTo(0.5 + KEY_STEP)
+    expect(separatorKey(0.5, 'ArrowUp', 0.1)).toBeCloseTo(0.5 - KEY_STEP)
+    expect(separatorKey(0.12, 'ArrowUp', 0.1)).toBe(0.1)
+    expect(separatorKey(0.5, 'Home', 0.1)).toBe(0.1)
+    expect(separatorKey(0.5, 'End', 0.1)).toBe(0.9)
+    expect(separatorKey(0.5, 'a', 0.1)).toBeNull()
+  })
+  it('moves the sizes with a moved pane', () => {
+    expect(moveSizes([5, 1, 1], 0, 1)).toEqual([1, 5, 1])
+    expect(moveSizes([5, 1, 1], 2, -1)).toEqual([5, 1, 1])
+    const s = [5, 1, 1]
+    expect(moveSizes(s, 0, -1)).toBe(s)
+    expect(moveSizes(s, 2, 1)).toBe(s)
+  })
+  it('gives the separator the range its panes allow, or all of it when unmeasured', () => {
+    expect(ariaRange(0.12)).toEqual({ min: 12, max: 88 })
+    expect(ariaRange(0)).toEqual({ min: 0, max: 100 })
+    expect(ariaRange(NaN)).toEqual({ min: 0, max: 100 })
+    expect(ariaRange(0.6)).toEqual({ min: 0, max: 100 })
   })
 })

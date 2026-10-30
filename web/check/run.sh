@@ -67,6 +67,10 @@ stop_recorded() {
   done
   for p in $panes; do [ "$p" -gt 1 ] && kill -s KILL -- "-$p" 2>/dev/null; done
   for p in $pids $panes; do [ "$p" -gt 1 ] && kill -s KILL "$p" 2>/dev/null; done
+  # A tmux server killed by its PID leaves its socket file (S-4129): the recorded one goes, by its exact path, once tmux
+  # says no server runs on it.
+  socket=$(sed -n 's/^socket //p' "$PIDS")
+  case $socket in stam-test-*/* | '') ;; stam-test-*) timeout 5 tmux -L "$socket" ls 2>&1 | grep -q "no server running" && rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$socket" ;; esac
   # Only the home daemon.sh created (it has lib.sh's owner file), by its recorded path, never a glob.
   case $home in "$STAM_TEST_TMPDIR"/stam-test.*) [ -f "$home/owner" ] && rm -rf "$home" ;; esac
 }

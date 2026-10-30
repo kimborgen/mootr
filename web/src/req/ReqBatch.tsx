@@ -7,7 +7,7 @@ import { api } from '../api'
 import type { Itsa } from '../types'
 import type { ReqStatus } from './model'
 import { openReq } from './parts'
-import { refreshReq, useReq } from './store'
+import { refreshReq, useReq, useReqReader } from './store'
 
 export interface BatchItem {
   key: string
@@ -27,6 +27,7 @@ interface BatchView { itsa: string; rev?: string; items: BatchItem[] }
 // waits while it lags the ITSA's own (S-2998).
 export function ReqBatch({ it, onBatch }: { it: Pick<Itsa, 'id' | 'kind' | 'closed_at' | 'updated_at'>; onBatch?: (batch: boolean, rev?: string) => void }) {
   const { enabled } = useReq()
+  useReqReader()
   const [items, setItems] = useState<BatchItem[] | null>(null)
   const [picking, setPicking] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)

@@ -96,7 +96,7 @@ check "d['version'] == 5" "an agent's change should be version 5"
 # The MCP tools (S-100): layout_get reads it, layout_arrange acts for the agent, and a stale
 # base or an invalid op is an error that changes nothing.
 mcp() {
-  STAM_BIN="$STAM" STAM_AGENT_ID="$AID" node "$ROOT/test/mcp-call.mjs" \
+  STAM_BIN="$STAM" with_agent_id "$AID" node "$ROOT/test/mcp-call.mjs" \
     "$(python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":sys.argv[1],"arguments":json.loads(sys.argv[2])}}))' "$1" "$2")" |
     python3 -c 'import json,sys
 m = json.load(sys.stdin); r = m.get("result", {})

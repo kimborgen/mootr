@@ -111,6 +111,7 @@ github-poller-unit
 go-catchup-unit
 harness-settings-unit
 hit-classify
+human-peer-memo
 inventory-block-unit
 issue-costs
 itsa-fields-line
@@ -148,6 +149,7 @@ mcp-import
 mcp-reconnect
 mcp-servers
 measured-effort
+memory-report
 merge-failures-unit
 mootr-env-unit
 network-probes-unit
@@ -211,6 +213,7 @@ settings-card-layouts
 settings-file-mode
 settings-memo
 settings-notice
+shared-build
 skill-import
 skills
 spawn-stale-window
@@ -446,6 +449,7 @@ harness-question
 harness-guard
 home-lock
 human-thread-quiet
+input-notice-restart
 instructions
 inventory
 inventory-block-unit
@@ -532,6 +536,8 @@ mail-threading
 mail-tools-unit
 mail-reply-only-unit
 threads-with
+threads-old-peer
+thread-index
 mail-title
 mail-title-peers
 mail-visibility-creator
@@ -716,6 +722,10 @@ settings-ask-conflict
 settings-card-layouts
 settings-file-mode
 settings-memo
+human-peer-memo
+peer-write-memo
+memory-report
+shared-build
 settings-notice
 settings-sync
 settings-writes
@@ -960,6 +970,10 @@ cmd() {
     tool-names) echo "node --test test/tool-names.test.mjs" ;;
     tiny-spend) echo "node --test test/tiny-spend.test.mjs" ;;
     settings-memo) echo "node --test test/settings-memo.test.mjs" ;;
+    human-peer-memo) echo "node --test test/human-peer-memo.test.mjs" ;;
+    peer-write-memo) echo "node --test test/peer-write-memo.test.mjs" ;;
+    memory-report) echo "node --test test/memory-report.test.mjs" ;;
+    shared-build) echo "node --test test/shared-build.test.mjs" ;;
     settings-notice) echo "node --test test/settings-notice.test.mjs" ;;
     peer-remember) echo "node --test test/peer-remember.test.mjs" ;;
     peer-scrub) echo "node --test test/peer-scrub.test.mjs" ;;
@@ -1139,6 +1153,7 @@ cmd() {
     notices-unit) echo "node --test test/notices.test.mjs" ;;
     answer-notice-client) echo "node --test test/answer-notice-client.test.mjs" ;;
     answer-notice-restart) echo "node --test test/answer-notice-restart.test.mjs" ;;
+    input-notice-restart) echo "node --test test/input-notice-restart.test.mjs" ;;
     doctor-unit) echo "node --test test/doctor.test.mjs" ;;
     onboarding-unit) echo "node --test test/onboarding.test.mjs" ;;
     events-unit) echo "node --test test/events.test.mjs" ;;

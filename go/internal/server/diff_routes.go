@@ -123,7 +123,7 @@ func (s *Server) diffRequest(w http.ResponseWriter, r *http.Request, sub string)
 }
 
 // diffReview is src/diff.ts reviewFor: the verdict in the poller's snapshot of the watched PR, kept after a merge or a
-// close. Nil when the repo has no GitHub origin, the PR isn't watched, or nothing is posted.
+// close (the Go poller's cleanup never drops a PR's row). Nil when the repo has no GitHub origin, the PR isn't watched, or nothing is posted.
 func (s *Server) diffReview(ctx context.Context, repo string, pr int, head string) *diff.Review {
 	checkout, err := s.diffs.Checkout(repo)
 	if err != nil {

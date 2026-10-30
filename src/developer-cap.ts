@@ -263,6 +263,12 @@ export function hostReadingFrom(s: HostSample | null, now: number, maxAgeMs: num
   return osReading();
 }
 
+// A test daemon's pin for the room guard (S-3105): STAM_TEST_HOST_ROOM=1, honoured only in a test home (testOnlyEnv),
+// reports a roomy host, so a developer spawn in an e2e script is never load-queued by the machine it runs on. The cap
+// still applies, so the e2e scripts that test queueing behind it keep working.
+export const ROOMY_HOST: HostReading = { load1: 0, freeBytes: 64 * 1024 ** 3 };
+export const pinnedHostReading = (pin: string | undefined, reading: () => HostReading): HostReading => (pin === '1' ? ROOMY_HOST : reading());
+
 // Why a developer spawn is queued on a host without room, such as "queued: load 6.2" (S-2120), or null when it has room.
 export function roomRefusal(h: HostReading): string | null {
   if (hostHasRoom(h)) return null;

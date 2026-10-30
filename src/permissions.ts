@@ -712,17 +712,45 @@ const fencedExact = (text: string) => {
   return `${fence}\n${text}\n${fence}`;
 };
 const inputText = (r: db.PermissionRequest, result: string) => render('input-answered', { id: r.id, result });
+const heldResult = (expires: string | null) => `was approved by your user (the human). End your turn so stam can type it into your input; you continue after. stam types it as soon as you are idle with an empty box, until ${expires}.`;
+const TYPED_RESULT = 'was approved by your user (the human) and typed into your input as written.';
+// The human's approval's own notice (S-4155): its row is written with the move to held, so a restart before the first
+// try's outcome still tells the agent. That outcome replaces it in its own transaction: a busy agent is handed this
+// notice as it is, and any other outcome's row takes its place (replaceApproval). `settled` once one has.
+type Approval = { row: number; text: string; settled?: boolean };
+// Deletes the approval's row inside the caller's transaction, which writes the outcome's row instead. True when it was
+// the approval's to replace: the caller marks it settled once the transaction commits (settleAfter).
+function replaceApproval(first?: Approval): boolean {
+  if (!first || first.settled) return false;
+  if (first.row) db.deleteAnswerNotice(first.row);
+  return true;
+}
+// Runs a transaction that may replace the approval's row, and marks the approval settled only after it commits.
+function settleAfter<T>(first: Approval | undefined, fn: (replace: () => void) => T): T {
+  let replaced = false;
+  const out = db.transaction(() => fn(() => (replaced = replaceApproval(first))));
+  if (replaced) first!.settled = true;
+  return out;
+}
 // An input answer's notice, durable (S-3923). `stored` is the text the row keeps, when it must differ: a draft's text
-// never goes into a row.
-const inputNotice = (a: db.Agent, r: db.PermissionRequest, result: string, stored?: string) => {
+// never goes into a row. It replaces the approval's row, when it is the approval's outcome (S-4155).
+const inputNotice = (a: db.Agent, r: db.PermissionRequest, result: string, stored?: string, first?: Approval) => {
   const text = inputText(r, result);
-  queueNotice(a.id, text, { row: db.addAnswerNotice(a.id, stored === undefined ? text : inputText(r, stored)) || undefined });
+  const row = settleAfter(first, (replace) => {
+    replace();
+    return db.addAnswerNotice(a.id, stored === undefined ? text : inputText(r, stored));
+  });
+  queueNotice(a.id, text, { row: row || undefined });
 };
 // A held approval's move and its notice commit in one transaction (S-3923): the move happens only with its row. False
 // when the move didn't happen.
-function moveInputNotice(a: db.Agent, r: db.PermissionRequest, move: () => boolean, result: string): boolean {
+function moveInputNotice(a: db.Agent, r: db.PermissionRequest, move: () => boolean, result: string, first?: Approval): boolean {
   const text = inputText(r, result);
-  const row = db.transaction(() => (move() ? db.addAnswerNotice(a.id, text) : null));
+  const row = settleAfter(first, (replace) => {
+    if (!move()) return null;
+    replace();
+    return db.addAnswerNotice(a.id, text);
+  });
   if (row === null) return false;
   queueNotice(a.id, text, { row: row || undefined });
   return true;
@@ -800,23 +828,36 @@ export async function approveInput(id: string, sha256: unknown): Promise<db.Publ
   }
   if (r.status !== 'pending') throw new InputRefused(`request ${id} is already ${r.status}`);
   if (typeof sha256 !== 'string' || sha256 !== r.sha256) throw new InputRefused(`text_sha256 doesn't match request ${id}'s text; reload it and approve what it shows`);
-  if (!db.moveInputRequest(id, 'pending', 'held', { by: HUMAN, note: 'approved', session: a.session_id ?? '', expires: approvalExpiry() })) throw new InputRefused(`request ${id} is already ${db.getPermissionRequest(id)?.status}`);
+  const expires = approvalExpiry();
+  // The approval and its own notice's row commit together (S-4155): a restart before the try below still tells the agent.
+  const first: Approval = { row: 0, text: inputText(r, heldResult(expires)) };
+  const row = db.transaction(() => (db.moveInputRequest(id, 'pending', 'held', { by: HUMAN, note: 'approved', session: a.session_id ?? '', expires }) ? db.addAnswerNotice(a.id, first.text) : null));
+  if (row === null) throw new InputRefused(`request ${id} is already ${db.getPermissionRequest(id)?.status}`);
+  first.row = row;
   db.addEvent(a.id, 'permission:answered', { id, approve: true, by: HUMAN, kind: 'input' });
   settle(a, id);
   heldWhy.delete(id);
-  const outcome = await tryHeld(a.id, id, true);
+  testCrash('approved');
+  let outcome: Outcome;
+  try {
+    outcome = await tryHeld(a.id, id, first);
+  } finally {
+    // A try that told the agent nothing (queued behind an earlier approval, another typing under way, or one that threw)
+    // drops the row, as the agent heard nothing then before (S-4155).
+    if (!first.settled && first.row) db.deleteAnswerNotice(first.row);
+  }
   return { ...db.publicRequest(db.getPermissionRequest(id)!), typed: outcome === 'typed', outcome, ...(outcome === 'held' && heldWhy.has(id) ? { why: heldWhy.get(id) } : {}) };
 }
 
 // Types the agent's first held approval, the oldest, so approvals go in the order the human gave them. `id` is the
 // approval the caller asked about: its outcome is 'held' while an earlier one waits (why: queued). `first` is set
-// when the human's approval is the call, so a busy agent is told to end its turn (held).
-async function tryHeld(agentId: string, id: string, first = false): Promise<Outcome> {
+// when the human's approval is the call, so a busy agent is told to end its turn (held), by the approval's own row.
+async function tryHeld(agentId: string, id: string, first?: Approval): Promise<Outcome> {
   const head = db.inputRequests('held', agentId)[0];
   if (!head) return 'held';
   if (head.id === id) return typeHeld(head, first);
   const r = db.getPermissionRequest(id);
-  if (r?.status === 'held') held(db.getAgent(agentId)!, r, true, 'queued');
+  if (r?.status === 'held') held(db.getAgent(agentId)!, r, first, 'queued');
   return 'held';
 }
 
@@ -824,11 +865,20 @@ type Outcome = 'typed' | 'held' | 'failed' | 'cancelled' | 'expired';
 
 // Tests hold the typing right before Enter (S-422): with STAM_TEST_INPUT_BARRIER set to a folder
 // holding a `hold` file, it writes `at` there and waits until `hold` is gone. Only in a test home (src/test-env.ts).
-async function testBarrier(): Promise<void> {
+// A second stop, after the claim and before Enter, is `hold-enter` and `at-enter` (suffix '-enter', S-4155), as the Go
+// daemon's.
+async function testBarrier(suffix = ''): Promise<void> {
   const dir = testOnlyEnv('STAM_TEST_INPUT_BARRIER');
-  if (!dir || !existsSync(join(dir, 'hold'))) return;
-  writeFileSync(join(dir, 'at'), '');
-  for (let i = 0; i < 600 && existsSync(join(dir, 'hold')); i++) await new Promise((res) => setTimeout(res, 100));
+  if (!dir || !existsSync(join(dir, `hold${suffix}`))) return;
+  writeFileSync(join(dir, `at${suffix}`), '');
+  for (let i = 0; i < 600 && existsSync(join(dir, `hold${suffix}`)); i++) await new Promise((res) => setTimeout(res, 100));
+}
+
+// Tests stop the daemon at one step of an approval (S-4155): with STAM_TEST_INPUT_CRASH set to the step's name, the
+// process exits there, as a crash would. 'approved' is after the approval's commit, 'claimed' after the claim's and
+// before Enter, 'typed' after Enter and before the notice is queued. Only in a test home (src/test-env.ts).
+function testCrash(step: 'approved' | 'claimed' | 'typed'): void {
+  if (testOnlyEnv('STAM_TEST_INPUT_CRASH') === step) process.exit(75);
 }
 
 // The prompt each typed suggestion should submit, checked at the agent's next UserPromptSubmit.
@@ -844,7 +894,7 @@ export const BASH_EXPECT_MS = 15 * 60_000;
 // and not expired, and the agent's session is still the approved one; else what was typed is
 // erased ('cancelled'), so an approval that expired mid-typing is never sent.
 const typing = new Set<string>();
-async function typeHeld(r: db.PermissionRequest, first = false): Promise<Outcome> {
+async function typeHeld(r: db.PermissionRequest, first?: Approval): Promise<Outcome> {
   const a = db.getAgent(r.agent_id);
   const type = a && adapters[a.harness]?.typeLiteralInput;
   if (!a || !type || typing.has(a.id)) return 'held';
@@ -855,7 +905,7 @@ async function typeHeld(r: db.PermissionRequest, first = false): Promise<Outcome
     if (now?.status !== 'held' || now.sha256 !== r.sha256 || ago(now.expires_at)) return 'held';
     const sameSession = () => (db.getAgent(a.id)?.session_id ?? '') === now.session_id;
     if (!sameSession()) {
-      expireHeld(a, now, 'its harness session changed after you approved it');
+      expireHeld(a, now, 'its harness session changed after you approved it', first);
       return 'expired';
     }
     if (a.activity !== 'idle' && a.activity !== 'waiting') return held(a, now, first, 'busy');
@@ -863,19 +913,32 @@ async function typeHeld(r: db.PermissionRequest, first = false): Promise<Outcome
     // and one taken over by another agent gets none.
     const admitted = admit(a, 'human');
     if (!admitted.ok) {
-      if (moveInputNotice(a, r, () => db.moveInputRequest(r.id, 'held', 'failed', { note: `not typed: ${admitted.reason}` }), `was approved, but stam didn't type it: ${admitted.reason}.`)) {
+      if (moveInputNotice(a, r, () => db.moveInputRequest(r.id, 'held', 'failed', { note: `not typed: ${admitted.reason}` }), `was approved, but stam didn't type it: ${admitted.reason}.`, first)) {
         noteOutcome(a, r, 'failed', `stam didn't type it: ${admitted.reason}.`);
       }
       return 'failed';
     }
     // The transcript's size right before Enter: a bash-mode command is looked for after it.
     let offset = 0;
+    // The typed notice and its row, written with the claim (row 0 until then); an unsent Enter's failure replaces it.
+    const typed: Approval = { row: 0, text: inputText(r, TYPED_RESULT) };
     // The box is read again here, right before Enter (stillTyped): a key typed since the adapter's check is never sent.
+    // The claim and the typed notice's row commit together, before Enter (S-4155): the text is in the box as written by
+    // then, and the claim makes the approval terminal, so a restart after it delivers the notice and never types it again.
     const proceed = async (stillTyped: () => boolean) => {
       await testBarrier();
       if (!stillTyped()) return false;
       offset = transcriptSize(a);
-      return sameSession() && db.moveInputRequest(r.id, 'held', 'approved', { unexpired: true });
+      const row = settleAfter(first, (replace) => {
+        if (!sameSession() || !db.moveInputRequest(r.id, 'held', 'approved', { unexpired: true })) return null;
+        replace();
+        return db.addAnswerNotice(a.id, typed.text);
+      });
+      if (row === null) return false;
+      typed.row = row;
+      testCrash('claimed');
+      await testBarrier('-enter');
+      return true;
     };
     const done = await holdingPushes(a.id, () => type(a, now.text!, proceed));
     if (done === 'typed') {
@@ -886,14 +949,26 @@ async function typeHeld(r: db.PermissionRequest, first = false): Promise<Outcome
       heldWhy.delete(r.id);
       db.addEvent(a.id, 'input:typed', { id: r.id });
       forgetHeld(r.id);
-      inputNotice(a, r, 'was approved by your user (the human) and typed into your input as written.');
+      testCrash('typed');
+      queueNotice(a.id, typed.text, { row: typed.row || undefined });
       noteOutcome(a, r, 'typed', 'sent to its input exactly as approved.');
       return 'typed';
+    }
+    // The claim went through but Enter didn't: the approval was never sent, so it fails, its notice replaces the typed
+    // one, and both sides hear (S-4155, as the Go daemon's).
+    if (done === 'unsent') {
+      const why = "the agent's pane changed or tmux failed";
+      if (moveInputNotice(a, r, () => db.moveInputRequest(r.id, 'approved', 'failed', { note: `typed, but Enter not sent: ${why}` }), "was approved, but after typing it stam couldn't press Enter, so it erased what it typed where it still could and sent nothing. Suggest it again if you still need it.", typed)) {
+        db.addEvent(a.id, 'input:failed', { id: r.id });
+        // Written here rather than from a template: input-expired-human says nothing was typed, and here it was.
+        tellHuman(a, r, `[stam] Approved input for ${a.name} was not sent`, `You approved @${a.name}'s suggested input ${r.id}. stam typed it, but couldn't press Enter (${why}), so it wasn't sent. stam erased the text where the pane was still the agent's; if that failed, it may still be in the input box. It can suggest it again.`);
+      }
+      return 'failed';
     }
     if (done === 'cancelled') {
       db.addEvent(a.id, 'input:cancelled', { id: r.id, status: db.getPermissionRequest(r.id)?.status });
       // Still held means only the session changed under it.
-      if (db.getPermissionRequest(r.id)?.status === 'held') expireHeld(a, now, 'its harness session changed while stam typed it');
+      if (db.getPermissionRequest(r.id)?.status === 'held') expireHeld(a, now, 'its harness session changed while stam typed it', first);
       return 'cancelled';
     }
     // The box didn't show exactly the text, so nothing was sent and what stam typed is erased (or left, when the
@@ -916,7 +991,7 @@ const draftTold = new Set<string>();
 
 const heldWhy = new Map<string, string>();
 
-function held(a: db.Agent, r: db.PermissionRequest, first: boolean, why: string): 'held' {
+function held(a: db.Agent, r: db.PermissionRequest, first: Approval | undefined, why: string): 'held' {
   heldWhy.set(r.id, why);
   // The card names the text in the box while it blocks (S-534), and drops it when something else does.
   db.setHeldBox(r.id, why === 'draft' ? (adapters[a.harness]?.inputText?.(a) ?? '').slice(0, 200) : null);
@@ -927,7 +1002,7 @@ function held(a: db.Agent, r: db.PermissionRequest, first: boolean, why: string)
     if (!mismatchTold.has(r.id)) {
       mismatchTold.add(r.id);
       db.addEvent(a.id, 'input:held', { id: r.id, why });
-      inputNotice(a, r, `was approved by your user (the human), but after typing it your input box didn't show exactly the text with nothing under it, so stam erased what it typed and sent nothing. It stays approved: stam types it once your input box is clear, until ${r.expires_at}.`);
+      inputNotice(a, r, `was approved by your user (the human), but after typing it your input box didn't show exactly the text with nothing under it, so stam erased what it typed and sent nothing. It stays approved: stam types it once your input box is clear, until ${r.expires_at}.`, undefined, first);
     }
   } else if (why === 'draft') {
     // Whenever a draft first blocks the input, also after a busy start: the agent is told what to clear, and the chief of staff why.
@@ -938,12 +1013,14 @@ function held(a: db.Agent, r: db.PermissionRequest, first: boolean, why: string)
     const shown = box === undefined ? 'text' : `\`${box.slice(0, 200).replace(/`/g, "'")}\``;
     // The draft's text is the agent's to see now, and never stored: the row keeps the notice with the draft left out.
     const draftNotice = (box: string) => `was approved by your user (the human), but stam can't type it: your input box holds ${box}, which stam didn't type. Clear your input box (Ctrl+U) and stam types it at once; until ${r.expires_at}.`;
-    inputNotice(a, r, draftNotice(shown), draftNotice('(a draft, not stored)'));
+    inputNotice(a, r, draftNotice(shown), draftNotice('(a draft, not stored)'), first);
     const cos = settings().chiefOfStaff;
     if (cos && cos !== a.id) sendMail({ from: a.id, to: [cos], subject: `Approved input for ${a.name} is held by text in its box`, body: `Your user approved input ${r.id} for @${a.name}, but its input box holds ${shown}, which stam didn't type. stam told the agent to clear it; the approval expires at ${r.expires_at}.`, from_stam: true }).catch((e) => db.addEvent(a.id, 'permission-error', String(e)));
-  } else if (first) {
+  } else if (first && !first.settled) {
     db.addEvent(a.id, 'input:held', { id: r.id, why });
-    inputNotice(a, r, `was approved by your user (the human). End your turn so stam can type it into your input; you continue after. stam types it as soon as you are idle with an empty box, until ${r.expires_at}.`);
+    // The approval's own row holds this notice (S-4155): it was written with the approval, and is handed over as it is.
+    first.settled = true;
+    queueNotice(a.id, first.text, { row: first.row || undefined });
   }
   return 'held';
 }
@@ -958,8 +1035,8 @@ function forgetHeld(id: string): void {
 }
 
 // A held approval that won't be typed: the agent hears, and the human is told once in its thread.
-function expireHeld(a: db.Agent, r: db.PermissionRequest, why: string): void {
-  if (!moveInputNotice(a, r, () => db.moveInputRequest(r.id, 'held', 'expired', { note: why }), `expired: ${why}, so nothing was typed.`)) return;
+function expireHeld(a: db.Agent, r: db.PermissionRequest, why: string, first?: Approval): void {
+  if (!moveInputNotice(a, r, () => db.moveInputRequest(r.id, 'held', 'expired', { note: why }), `expired: ${why}, so nothing was typed.`, first)) return;
   forgetHeld(r.id);
   db.addEvent(a.id, 'input:expired', { id: r.id, was: 'held', why });
   tellHuman(a, r, `[stam] Approved input for ${a.name} expired untyped`, render('input-expired-human', { requester: a.name, id: r.id, why }));

@@ -139,10 +139,13 @@ export function attributor(): Attribution['attribute'] {
   return buildAttribution().attribute;
 }
 
+// An agent's ITSAs at a moment with their even shares; shared between calls, so read-only.
+type Split = readonly Readonly<{ itsaId: string; share: number }>[];
+
 export interface Attribution {
   items: Map<string, Item>;
   managers: Set<string>;
-  attribute(agent: string, t: number): { itsaId: string; share: number }[];
+  attribute(agent: string, t: number): Split;
 }
 
 // The ITSA rows the attribution reads (S-1079): the ITSA home exports them so a daemon without ITSAs of its
@@ -258,20 +261,135 @@ export function buildAttribution(data: AttributionData = readAttributionData()):
   const ownerAt = (x: Item, t: number): string | null => at(x.owners, t)?.owner ?? null;
   const categoryName = (status: string | null) => (status == null ? null : (categoryOf.get(status) ?? null));
 
-  // An empty list means unattributed: the agent has no ITSA at all.
-  const attribute = (agent: string, t: number) => {
-    const cands = agentIdx.get(agent);
-    if (!cands || !cands.size) return [];
+  // The agent's flags for x: bit 1 owns it and bit 2 takes part in it, each only while x is active.
+  const OWNED = 1;
+  const PART = 2;
+  const flagsOf = (agent: string, x: Item, status: string | null, owner: string | null, existed: boolean): number => {
+    if (!existed || !ACTIVE_CATEGORIES.has(categoryName(status) ?? '')) return 0;
+    return (owner === agent ? OWNED : 0) | (x.participants.has(agent) ? PART : 0);
+  };
+  const existedAt = (agent: string, t: number) => {
     const created = agentCreated.get(agent);
-    const existed = created == null || created <= t;
-    const candidates = [...cands].map((id) => items.get(id)!);
-    const activeNow = (x: Item) => existed && ACTIVE_CATEGORIES.has(categoryName(statusAt(x, t)) ?? '');
-    // Owner first; participation only when the agent owns no active ITSA then.
-    let split = candidates.filter((x) => ownerAt(x, t) === agent && activeNow(x));
-    if (!split.length) split = candidates.filter((x) => x.participants.has(agent) && activeNow(x));
-    if (!split.length) split = candidates;
+    return created == null || created <= t;
+  };
+  const evenly = (split: Item[]): Split => {
     const share = 1 / split.length;
-    return split.map((item) => ({ itsaId: item.id, share }));
+    return Object.freeze(split.map((item) => Object.freeze({ itsaId: item.id, share })));
+  };
+  // Owner first; participation only when the agent owns no active ITSA then; else every candidate.
+  // owned and part hold candidate positions, so the split keeps the candidates' order.
+  const splitOf = (candidates: Item[], owned: Set<number>, part: Set<number>, all: () => Split): Split => {
+    const pick = owned.size ? owned : part;
+    return pick.size ? evenly([...pick].sort((a, b) => a - b).map((i) => candidates[i])) : all();
+  };
+  // The split read at the moment itself, for a moment no timeline orders (an unparsable time).
+  const scan = (agent: string, candidates: Item[], t: number): Split => {
+    const owned = new Set<number>();
+    const part = new Set<number>();
+    candidates.forEach((x, i) => {
+      const f = flagsOf(agent, x, statusAt(x, t), ownerAt(x, t), existedAt(agent, t));
+      if (f & OWNED) owned.add(i);
+      if (f & PART) part.add(i);
+    });
+    return splitOf(candidates, owned, part, () => evenly(candidates));
+  };
+
+  // Each agent's flag changes, indexed on its first call (S-4356). A call used to pass over every ITSA
+  // the agent was ever on, per item: 3,000 ITSAs held one activity slice 5 s. The agent's flags change
+  // only at its candidates' created, status and owner times and its own creation, so the index keeps
+  // each such time's changes (candidate, flags before, flags after), linear in the events. A cursor
+  // per agent holds the owned and taking-part sets at one time and steps to the time asked; calls come
+  // mostly in time order, so a step is a few changes. Only the cursor's split is materialized.
+  interface Index {
+    candidates: Item[];
+    cuts: number[];
+    // Cut c's changes are at from[c] .. from[c + 1] - 1 of who, was and now.
+    from: number[];
+    who: number[];
+    was: number[];
+    now: number[];
+    // The cursor: the last cut at or before its time (-1 before every cut), its sets and its split.
+    at: number;
+    owned: Set<number>;
+    part: Set<number>;
+    split: Split | null;
+    all: Split | null;
+  }
+  const indexes = new Map<string, Index>();
+  const indexOf = (agent: string, ids: Set<string>): Index => {
+    const candidates = [...ids].map((id) => items.get(id)!);
+    const created = agentCreated.get(agent);
+    const owned = new Set<number>();
+    const part = new Set<number>();
+    // Each candidate's flags from -Infinity on, walking its timelines once in time order: at(list, t)
+    // takes the entries before the first one after t, so a pointer per timeline only moves forward.
+    const changes: { t: number; i: number; was: number; now: number }[] = [];
+    candidates.forEach((x, i) => {
+      const times = [x.created, ...x.statuses.map((s) => s.at), ...x.owners.map((o) => o.at), created ?? NaN].filter(Number.isFinite);
+      times.sort((a, b) => a - b);
+      let s = 0;
+      let o = 0;
+      const flagsAtT = (t: number) => {
+        while (s < x.statuses.length && !(x.statuses[s].at > t)) s++;
+        while (o < x.owners.length && !(x.owners[o].at > t)) o++;
+        const status = t < x.created ? null : s ? x.statuses[s - 1].to : x.initialStatus;
+        return flagsOf(agent, x, status, o ? x.owners[o - 1].owner : null, existedAt(agent, t));
+      };
+      let f = flagsAtT(-Infinity);
+      if (f & OWNED) owned.add(i);
+      if (f & PART) part.add(i);
+      for (let k = 0; k < times.length; k++) {
+        if (k && times[k] === times[k - 1]) continue;
+        const g = flagsAtT(times[k]);
+        if (g !== f) changes.push({ t: times[k], i, was: f, now: g });
+        f = g;
+      }
+    });
+    changes.sort((a, b) => a.t - b.t);
+    const index: Index = { candidates, cuts: [], from: [], who: [], was: [], now: [], at: -1, owned, part, split: null, all: null };
+    for (const c of changes) {
+      if (index.cuts[index.cuts.length - 1] !== c.t) {
+        index.cuts.push(c.t);
+        index.from.push(index.who.length);
+      }
+      index.who.push(c.i);
+      index.was.push(c.was);
+      index.now.push(c.now);
+    }
+    index.from.push(index.who.length);
+    indexes.set(agent, index);
+    return index;
+  };
+  const apply = (index: Index, c: number, flags: number[]) => {
+    for (let k = index.from[c]; k < index.from[c + 1]; k++) {
+      const i = index.who[k];
+      if (flags[k] & OWNED) index.owned.add(i);
+      else index.owned.delete(i);
+      if (flags[k] & PART) index.part.add(i);
+      else index.part.delete(i);
+    }
+  };
+
+  // An empty list means unattributed: the agent has no ITSA at all.
+  const attribute = (agent: string, t: number): Split => {
+    const ids = agentIdx.get(agent);
+    if (!ids || !ids.size) return [];
+    const index = indexes.get(agent) ?? indexOf(agent, ids);
+    if (Number.isNaN(t)) return scan(agent, index.candidates, t);
+    // The last cut at or before t.
+    let lo = 0;
+    let hi = index.cuts.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (index.cuts[mid] <= t) lo = mid + 1;
+      else hi = mid;
+    }
+    const target = lo - 1;
+    if (target !== index.at) index.split = null;
+    while (index.at < target) apply(index, ++index.at, index.now);
+    while (index.at > target) apply(index, index.at--, index.was);
+    index.split ??= splitOf(index.candidates, index.owned, index.part, () => (index.all ??= evenly(index.candidates)));
+    return index.split;
   };
 
   return { items, managers, attribute };

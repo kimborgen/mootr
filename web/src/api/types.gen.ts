@@ -93,6 +93,21 @@ export interface components {
                 heapTotal: number;
                 rss: number;
                 external: number;
+                /** @description The resident anonymous pages (RssAnon, S-4390); absent where /proc/self/status isn't there. */
+                anon?: number;
+                /** @description The resident file-backed pages (RssFile, S-4390); absent where /proc/self/status isn't there. */
+                file?: number;
+            };
+            /** @description What the daemon keeps in memory, counted, read-only (src/daemon.ts). */
+            caches: {
+                /** @description Entries in the activity stats memo. */
+                activityStats: number;
+                /** @description Entries in the human peer memo. */
+                humanPeers: number;
+                /** @description Open database connections, the main one and the OpenCode databases. */
+                dbConnections: number;
+                /** @description Event-loop stalls kept in memory (the same list as `stalls`). */
+                stalls: number;
             };
         };
         /** @description One row of `GET /api/agents`: the `agents` table row plus the extras the daemon adds for the web tree. A peer's agents come through the same shape. JSON columns travel as strings (x-legacy). `token_hash` (the launch-token hash) is removed on purpose (x-removed S-2519): no daemon serves it, and the closed object makes the contract test fail if one does. */

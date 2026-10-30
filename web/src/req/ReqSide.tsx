@@ -3,7 +3,7 @@
 // a roll-up bar of the subtree), each expandable into its children, to any depth, like the
 // Issues tree. Obsolete roots fold into one row at the end. A row opens the requirement's world.
 // On a phone the section follows the issues in the Issues tab, as full-width rows.
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { Icon } from '../Icon'
 import { Loading } from '../Loading'
 import { isPhone, showAgentWorld, useShell } from '../shell/layout'
@@ -16,8 +16,11 @@ export function ReqSide() {
   const { enabled, reqs, loaded, error } = useReq()
   const ui = useUi()
   const onMatrix = useShell().current === 'w:compliance'
-  useEffect(() => watchReq(), [])
-  if (!enabled) return null
+  // Always rendered, so the poll can tell whether the pane is on screen even while requirements are off. It has
+  // the same classes, so the phone and the folded rules hide it with the section, and an empty `.req-side` takes no room.
+  const anchor = useRef<HTMLDivElement>(null)
+  useEffect(() => watchReq(() => anchor.current), [])
+  if (!enabled) return <div ref={anchor} className="issues-side req-side" />
   const phone = isPhone()
   const folded = !phone && !!ui.reqFolded
   const open = ui.reqOpen ?? {}
@@ -56,7 +59,7 @@ export function ReqSide() {
   }
   const flagged = liveRoots.reduce((n, x) => n + (counts.get(x.id)?.violates ?? 0), 0)
   return (
-    <div className={'issues-side req-side' + (folded ? ' folded' : '')} id="req-side">
+    <div ref={anchor} className={'issues-side req-side' + (folded ? ' folded' : '')} id="req-side">
       <div className="section eyebrow">
         <button className="fold" type="button" aria-expanded={!folded} disabled={phone} title={folded ? 'Show the requirements' : 'Fold the requirements'} onClick={() => setUi({ reqFolded: !folded })}>
           {phone ? null : <span className={`chev ${folded ? '' : 'open'}`}><Icon name="chevron-right" size="xs" /></span>}<Icon name="scale" size="xs" />Requirements

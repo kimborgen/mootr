@@ -22,6 +22,12 @@ var (
 	dialogWait = 30 * time.Second
 )
 
+// firstPromptSteps are the launch's waits (src/adapters/claude.ts): before each look for a launch dialog, between looks
+// at the input box, the settle a pasted prompt must hold through, and the wait for its UserPromptSubmit before
+// first-prompt:awaiting-hook is recorded. Tests shorten them.
+var firstPromptSteps = struct{ dialog, look, settle, hook time.Duration }{400 * time.Millisecond, 300 * time.Millisecond,
+	500 * time.Millisecond, 2 * time.Second}
+
 // answerLaunchDialogs accepts the dialogs Claude Code shows at launch (folder trust, new MCP servers, development
 // channels) and returns once the input prompt shows, the session ends, or after 30 s. Nobody has attached yet, so
 // answering them can't collide with a human's typing. Enter goes only once the cursor is on the accepting option: a
@@ -29,7 +35,7 @@ var (
 func (l *Lifecycle) answerLaunchDialogs(ctx context.Context, id string) error {
 	deadline := time.Now().Add(dialogWait)
 	for time.Now().Before(deadline) {
-		if err := sleep(ctx, 400*time.Millisecond); err != nil {
+		if err := sleep(ctx, firstPromptSteps.dialog); err != nil {
 			return err
 		}
 		if !l.tmux.HasSession(ctx, id) || l.tmux.IsDead(ctx, id) {
@@ -130,7 +136,7 @@ func (l *Lifecycle) deliverFirstPrompt(ctx context.Context, id, text string, del
 	until := func(d time.Duration, done func() bool) (bool, error) {
 		end := time.Now().Add(d)
 		for time.Now().Before(end) && !done() {
-			if err := sleep(ctx, 300*time.Millisecond); err != nil {
+			if err := sleep(ctx, firstPromptSteps.look); err != nil {
 				return false, err
 			}
 		}
@@ -159,7 +165,7 @@ func (l *Lifecycle) deliverFirstPrompt(ctx context.Context, id, text string, del
 		if time.Now().After(deadline) {
 			return failed("no empty input box")
 		}
-		if err := sleep(ctx, 300*time.Millisecond); err != nil {
+		if err := sleep(ctx, firstPromptSteps.look); err != nil {
 			return err
 		}
 	}
@@ -204,7 +210,7 @@ func (l *Lifecycle) deliverFirstPrompt(ctx context.Context, id, text string, del
 	if !one {
 		return notOne()
 	}
-	if err := sleep(ctx, 500*time.Millisecond); err != nil {
+	if err := sleep(ctx, firstPromptSteps.settle); err != nil {
 		return err
 	}
 	if screen().box != claude.BoxOne {
@@ -235,7 +241,7 @@ func (l *Lifecycle) deliverFirstPrompt(ctx context.Context, id, text string, del
 		return failed("typed the prompt, but Claude Code did not take it")
 	}
 	done := func() bool { return delivered() || !current() }
-	if ok, err := until(2*time.Second, done); err != nil || ok {
+	if ok, err := until(firstPromptSteps.hook, done); err != nil || ok {
 		return err
 	}
 	l.event(ctx, id, "first-prompt:awaiting-hook", nil)

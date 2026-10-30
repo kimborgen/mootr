@@ -114,9 +114,11 @@ export function dragCard(card: HTMLElement, h: DragHandlers): () => void {
 
 // The stack's order: the inbox's threads newest first, the ones left (swiped right) at the back
 // in the order they were left. A thread left before is back in line once new mail reaches it:
-// `left` maps each thread to its latest mail id when it was left.
-export function stackOrder<T extends { thread_id: string; mails: { id: string; created_at: string }[] }>(threads: T[], left: Map<string, string>): T[] {
-  const last = (t: T) => t.mails.at(-1)!
+// `left` maps each thread to its latest mail id when it was left. `last` gives a thread's latest mail: a whole
+// thread's own by default, or what an index row says of it (S-4616).
+type Last = { id: string; created_at: string }
+const lastMail = (t: unknown): Last => (t as { mails: Last[] }).mails.at(-1)!
+export function stackOrder<T extends { thread_id: string }>(threads: T[], left: Map<string, string>, last: (t: T) => Last = lastMail): T[] {
   const isLeft = (t: T) => left.get(t.thread_id) === last(t).id
   const newest = [...threads].sort((a, b) => last(b).created_at.localeCompare(last(a).created_at))
   const back = [...left.keys()].map((id) => newest.find((t) => t.thread_id === id)).filter((t): t is T => !!t && isLeft(t))

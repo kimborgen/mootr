@@ -66,9 +66,13 @@ wait_until _gone "$M1" || fail "main still lists the decision after the human's 
 echo "-- main refuses to archive the thread while it is open, and allows it after the reply"
 R2=$(api twin POST /api/mail "{\"from\":\"$FAR\",\"to\":[\"human\"],\"subject\":\"Pick again\",\"body\":\"${FENCE}yesno\nship?\n${FENCE}\"}")
 M2=$(printf '%s' "$R2" | jget "d['id']"); T2=$(printf '%s' "$R2" | jget "d['thread_id']")
-[ "$(listed main "$M2")" = 1 ] || fail "main doesn't list the second decision"
+# The listing may lag a peer's write by up to the memo's TTL (5 s), so it waits; the archive checks below don't.
+_listedSecond() { [ "$(listed main "$M2")" = 1 ]; }
+wait_until _listedSecond || fail "main doesn't list the second decision"
 [ "$(status main POST "/api/agents/human/threads/$T2/archive")" = 409 ] || fail "main archived a thread with an open decision"
 api twin POST /api/mail "{\"from\":\"human\",\"to\":[\"$FAR\"],\"subject\":\"Re: Pick again\",\"body\":\"yes\",\"reply_to\":\"$M2\"}" human >/dev/null
+# main's memo still holds the decision open, so this passes only if the archive check reads the peers fresh.
+[ "$(status main POST "/api/agents/human/threads/$T2/archive")" = 200 ] || fail "main refused to archive after the human answered on twin (the archive check read a memoized decision)"
 wait_until _gone "$M2" || fail "the second decision isn't cleared"
 [ "$(status main POST "/api/agents/human/threads/$T2/archive")" = 200 ] || fail "main refused to archive a thread with no open decision"
 

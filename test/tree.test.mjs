@@ -36,6 +36,39 @@ test('a child on the peer machine counts, and its own children are walked', () =
   assert.deepEqual(db.childrenOf('root'), ['a']);
 });
 
+// S-4356: GET /api/usage for an agent's token walks every tree above it (usage-scope visibleAgents), and
+// reading the peer links per node parsed every remembered peer agent each time: 14 s live.
+test('a walk reads the peer links once and finds what a per-node walk finds, in the same order', () => {
+  mk('w0');
+  for (let i = 1; i <= 30; i++) mk(`w${i}`, `w${Math.floor((i - 1) / 3)}`);
+  for (let i = 0; i < 20; i++) db.rememberPeerAgent({ id: `wp${i}`, name: `wp${i}`, machine: 'there', parents: [`w${i}`, `w${i + 1}`] });
+  mk('wl', 'wp3');
+  const perNode = (id, seen = new Set()) => {
+    for (const c of tree.childrenOf(id)) {
+      if (seen.has(c)) continue;
+      seen.add(c);
+      perNode(c, seen);
+    }
+    return seen;
+  };
+  const d = db.open();
+  const prepare = d.prepare;
+  let reads = 0;
+  d.prepare = function (sql) {
+    if (/FROM peer_agents WHERE parents/.test(sql)) reads++;
+    return prepare.call(this, sql);
+  };
+  let got;
+  try {
+    got = [...tree.descendantsOf('w0')];
+  } finally {
+    d.prepare = prepare;
+  }
+  assert.equal(reads, 1);
+  assert.deepEqual(got, [...perNode('w0')]);
+  assert.ok(got.includes('wl') && got.includes('wp19'));
+});
+
 test('an agent adopted by several parents shows under each, once', () => {
   db.rememberPeerAgent({ id: 'p1', name: 'p1', machine: 'there', parents: ['root', 'a'] });
   assert.deepEqual(tree.childrenOf('a').sort(), ['b', 'p1']);

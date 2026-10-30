@@ -60,7 +60,18 @@ writeFileSync(agentsFile, '[]');
 // The sweeps scan only the processes this test started (never the host's others), so a host process that can't be
 // read can't change a result; a '1' keeps the list from being empty, which would mean every process.
 const pids = () => started.join(',') || '1';
-const cacheEnv = { STAM_HOME: join(base, 'stamhome'), STAM_GATE_DEPS: join(base, 'gatedeps'), STAM_SWEEP_MAIN: join(base, 'nomain') };
+// Both names of each: src/env.ts reads MOOTR_X first, so a MOOTR_HOME in the host's environment (a deploy sets it) would
+// win over a STAM_HOME alone, and the sweep would reach the real worktrees dir. The worktrees dir is named too, so no CLI run reads it from a home.
+const cacheEnv = {
+  STAM_HOME: join(base, 'stamhome'),
+  MOOTR_HOME: join(base, 'stamhome'),
+  STAM_GATE_DEPS: join(base, 'gatedeps'),
+  MOOTR_GATE_DEPS: join(base, 'gatedeps'),
+  STAM_SWEEP_MAIN: join(base, 'nomain'),
+  MOOTR_SWEEP_MAIN: join(base, 'nomain'),
+  STAM_SWEEP_WORKTREES: join(base, 'noworktrees'),
+  MOOTR_SWEEP_WORKTREES: join(base, 'noworktrees'),
+};
 const sweep = (...args) =>
   spawnSync(process.execPath, [SCRIPT, '--tmp', tmp, '--cache', cache, '--review', review, '--home-cache', homeCache, ...args], {
     encoding: 'utf8',
@@ -607,4 +618,250 @@ test('a malformed STAM_SWEEP_PIDS still sees the processes: a folder a fake proc
     assert.match(r.stdout, /kept .*stam-budgets-yyyyyy \(a process uses it\)/);
     assert.match(r.stderr, /not a comma list of pids/);
   }
+});
+
+// Orphan worktree folders (S-4075): lookup is a stub, mtimes are set, `now` is fixed; claims are empty so no host process matters.
+import { sweepWorktrees, ownedBy, registryAgents } from '../scripts/sweep-test-homes.mjs';
+const NOW = Date.UTC(2026, 9, 28, 12);
+const DAY = 24 * 3600_000;
+function wtree() {
+  const root = mkdtempSync(join(base, 'wt-'));
+  const make = (name, ageMs) => {
+    const d = join(root, name);
+    mkdirSync(join(d, 'src'), { recursive: true });
+    writeFileSync(join(d, 'src', 'a.txt'), 'x');
+    const t = new Date(NOW - ageMs);
+    for (const p of [join(d, 'src', 'a.txt'), join(d, 'src'), d]) utimesSync(p, t, t);
+    return d;
+  };
+  return { root, make };
+}
+const claims = Object.assign([], { unreadable: false });
+const run = (root, lookup, extra = {}) => sweepWorktrees({ now: NOW, claims, env: { STAM_SWEEP_WORKTREES: root }, lookup, ...extra });
+const why = (res, path) => res.find((r) => r.path === path);
+
+test('worktrees: an unowned folder older than a day is removed; a dry run removes nothing', () => {
+  const { root, make } = wtree();
+  const d = make('scratch-phone', 3 * DAY);
+  assert.equal(why(run(root, () => [], { dryRun: true }), d).action, 'remove');
+  assert.ok(existsSync(d));
+  assert.equal(why(run(root, () => []), d).action, 'remove');
+  assert.ok(!existsSync(d) && existsSync(root));
+});
+
+test('worktrees: an owned folder is kept, by cwd, worktree path, name or REPO-NAME', () => {
+  const { root, make } = wtree();
+  const byCwd = make('one', 3 * DAY);
+  const byPath = make('two', 3 * DAY);
+  const byName = make('wren', 3 * DAY);
+  const byRepoName = make('stam2-otter', 3 * DAY);
+  const agents = [
+    { id: 'a1', name: 'x1', cwd: join(byCwd, 'src') },
+    { id: 'a2', name: 'x2', cwd: '/elsewhere', workspace: JSON.stringify({ worktree: { path: byPath, repo: '/r/stam2' } }) },
+    { id: 'a3', name: 'wren', cwd: null },
+    { id: 'a4', name: 'otter', cwd: null, workspace: JSON.stringify({ spec: { repo: '/srv/work/stam2' } }) },
+  ];
+  const res = run(root, () => agents);
+  for (const d of [byCwd, byPath, byName, byRepoName]) {
+    assert.equal(why(res, d).why, 'a registry agent owns it', d);
+    assert.ok(existsSync(d), `${d} stays`);
+  }
+  assert.equal(ownedBy([], byCwd), false);
+});
+
+test('worktrees: a registry error keeps every folder', () => {
+  const { root, make } = wtree();
+  const d = make('rev759', 9 * DAY);
+  const res = run(root, () => null);
+  assert.deepEqual(res.map((r) => r.action), ['keep']);
+  assert.ok(existsSync(d));
+  // The re-check before the removal failing keeps the candidate as well.
+  let n = 0;
+  const flaky = () => (n++ === 0 ? [] : null);
+  const res2 = run(root, flaky);
+  assert.equal(why(res2, d).action, 'keep');
+  assert.ok(existsSync(d));
+});
+
+test('worktrees: a registry file that is missing or not a list is an error', () => {
+  assert.equal(registryAgents({ STAM_SWEEP_REGISTRY: join(base, 'nope.json') }), null);
+  const bad = join(base, 'bad.json');
+  writeFileSync(bad, '{"a":1}');
+  assert.equal(registryAgents({ STAM_SWEEP_REGISTRY: bad }), null);
+  writeFileSync(bad, '[]');
+  assert.deepEqual(registryAgents({ STAM_SWEEP_REGISTRY: bad }), []);
+});
+
+test('worktrees: a folder younger than a day, or with a fresh file deep inside, is kept', () => {
+  const { root, make } = wtree();
+  const fresh = make('fresh', DAY - 60_000);
+  const deep = make('deep', 5 * DAY);
+  const t = new Date(NOW - 1000);
+  utimesSync(join(deep, 'src', 'a.txt'), t, t);
+  const res = run(root, () => []);
+  assert.match(why(res, fresh).why, /newer than 24 h/);
+  assert.match(why(res, deep).why, /newer than 24 h/);
+  assert.ok(existsSync(fresh) && existsSync(deep));
+});
+
+test('worktrees: a folder an agent takes between the lookup and the removal is kept', () => {
+  const { root, make } = wtree();
+  const d = make('late', 4 * DAY);
+  let n = 0;
+  const res = run(root, () => (n++ === 0 ? [] : [{ id: 'a9', name: 'late', cwd: d }]));
+  assert.equal(why(res, d).action, 'keep');
+  assert.ok(existsSync(d));
+  // A folder touched between the two reads is kept too.
+  const e = make('touched', 4 * DAY);
+  let m = 0;
+  const res2 = run(root, () => {
+    if (m++ === 1) writeFileSync(join(e, 'src', 'new.txt'), 'y');
+    return [];
+  });
+  assert.equal(why(res2, e).why, 'changed since it was measured');
+  assert.ok(existsSync(e));
+});
+
+test('worktrees: files, symlinks and the dir itself are never removed; a symlinked dir is not swept', () => {
+  const { root, make } = wtree();
+  const outside = make('target', 4 * DAY);
+  const { root: other } = wtree();
+  symlinkSync(outside, join(other, 'link'));
+  writeFileSync(join(other, 'old.log'), 'x');
+  utimesSync(join(other, 'old.log'), new Date(NOW - 5 * DAY), new Date(NOW - 5 * DAY));
+  const res = run(other, () => []);
+  assert.deepEqual(res, []);
+  assert.ok(existsSync(join(other, 'link')) && existsSync(join(other, 'old.log')) && existsSync(outside));
+  // The root itself a symlink: nothing is swept.
+  const rootLink = join(base, 'rootlink');
+  symlinkSync(root, rootLink);
+  assert.deepEqual(run(rootLink, () => []), []);
+  assert.ok(existsSync(outside));
+});
+
+test('worktrees: a folder a process uses, or any when /proc is unreadable, is kept', () => {
+  const { root, make } = wtree();
+  const d = make('busy', 4 * DAY);
+  assert.equal(why(run(root, () => [], { claims: Object.assign([join(d, 'src')], { unreadable: false }) }), d).why, 'a process uses it');
+  assert.equal(why(run(root, () => [], { claims: Object.assign([], { unreadable: true }) }), d).why, 'a process uses it');
+  assert.ok(existsSync(d));
+});
+
+test('worktrees: a registered git worktree is removed through git, which leaves no stale entry', () => {
+  const { root } = wtree();
+  const repo = join(base, 'wtrepo');
+  mkdirSync(repo);
+  const git = (...a) => spawnSync('git', ['-C', repo, ...a], { encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'i');
+  const d = join(root, 'stam2-gone');
+  assert.equal(git('worktree', 'add', '-q', d, '-b', 'gone').status, 0);
+  const t = new Date(NOW - 4 * DAY);
+  for (const p of [join(d, '.git'), d]) utimesSync(p, t, t);
+  assert.equal(why(run(root, () => []), d).action, 'remove');
+  assert.ok(!existsSync(d) && existsSync(repo));
+  assert.doesNotMatch(git('worktree', 'list').stdout, /stam2-gone/);
+});
+
+test('worktrees: the CLI sweeps --worktrees with a stubbed registry and keeps the owned folder', () => {
+  const { root, make } = wtree();
+  const gone = make('scratch-shots', 3 * DAY);
+  const kept = make('stam2-mine', 3 * DAY);
+  const t = new Date(Date.now() - 3 * DAY);
+  for (const d of [gone, kept]) for (const p of [join(d, 'src', 'a.txt'), join(d, 'src'), d]) utimesSync(p, t, t);
+  const reg = join(base, 'reg.json');
+  writeFileSync(reg, JSON.stringify([{ id: 'ab', name: 'x', cwd: kept }]));
+  const r = spawnSync(process.execPath, [SCRIPT, '--tmp', tmp, '--cache', cache, '--review', review, '--home-cache', homeCache, '--worktrees', root], {
+    encoding: 'utf8',
+    env: { ...process.env, ...cacheEnv, STAM_SWEEP_PIDS: pids(), STAM_SWEEP_AGENTS: agentsFile, STAM_SWEEP_REGISTRY: reg },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!existsSync(gone) && existsSync(kept));
+});
+
+test('worktrees: a folder that can not be read is kept and the run goes on', () => {
+  const { root, make } = wtree();
+  const locked = make('a-locked', 4 * DAY);
+  const gone = make('b-gone', 4 * DAY);
+  chmodSync(locked, 0o000);
+  try {
+    const res = run(root, () => []);
+    assert.equal(why(res, locked).action, 'keep');
+    assert.equal(why(res, gone).action, 'remove');
+    assert.ok(existsSync(locked) && !existsSync(gone));
+  } finally {
+    chmodSync(locked, 0o755);
+  }
+});
+
+test('worktrees: a process that takes the folder after the first scan keeps it at the removal', () => {
+  const { root, make } = wtree();
+  const d = make('claimed', 4 * DAY);
+  const procRoot = join(base, 'late-proc');
+  mkdirSync(procRoot);
+  fakeProc(procRoot, 41);
+  let n = 0;
+  const env = { STAM_SWEEP_WORKTREES: root, STAM_SWEEP_PROC: procRoot, STAM_SWEEP_PIDS: '41' };
+  const res = sweepWorktrees({
+    now: NOW,
+    env,
+    lookup: () => {
+      // The second registry read comes after the first scan: the process now has the folder as its working directory.
+      if (n++ === 1) {
+        rmSync(join(procRoot, '41', 'cwd'));
+        symlinkSync(d, join(procRoot, '41', 'cwd'));
+      }
+      return [];
+    },
+  });
+  assert.equal(why(res, d).why, 'a process uses it');
+  assert.ok(existsSync(d));
+});
+
+test('worktrees: ownership by the real path counts at the removal too', () => {
+  const { root, make } = wtree();
+  const d = make('viaparent', 4 * DAY);
+  const parentLink = join(base, 'wtparent-link');
+  symlinkSync(join(root, '..'), parentLink);
+  const viaLink = join(parentLink, root.slice(root.lastIndexOf('/') + 1));
+  let n = 0;
+  const res = run(viaLink, () => (n++ === 0 ? [] : [{ id: 'a7', name: 'q', cwd: d }]));
+  assert.equal(why(res, join(viaLink, 'viaparent')).why, 'a registry agent owns it');
+  assert.ok(existsSync(d));
+});
+
+test('worktrees: the CLI tests leave the folders of a MOOTR_HOME decoy alone', () => {
+  const decoy = join(base, 'decoyhome');
+  const old = join(decoy, 'worktrees', 'scratch-decoy');
+  mkdirSync(join(old, 'src'), { recursive: true });
+  writeFileSync(join(old, 'src', 'a.txt'), 'x');
+  const t = new Date(Date.now() - 5 * DAY);
+  for (const p of [join(old, 'src', 'a.txt'), join(old, 'src'), old]) utimesSync(p, t, t);
+  // cacheEnv without its worktrees dir: the homes alone must keep the sweep off the decoy. The registry stub is empty, so the
+  // decoy folder would be removed if the sweep reached it.
+  const homesOnly = Object.fromEntries(Object.entries(cacheEnv).filter(([k]) => !k.endsWith('SWEEP_WORKTREES')));
+  const r = spawnSync(process.execPath, [SCRIPT, '--tmp', tmp, '--cache', cache, '--review', review, '--home-cache', homeCache], {
+    encoding: 'utf8',
+    env: { ...process.env, MOOTR_HOME: decoy, STAM_HOME: decoy, ...homesOnly, STAM_SWEEP_PIDS: pids(), STAM_SWEEP_AGENTS: agentsFile, STAM_SWEEP_REGISTRY: agentsFile },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(old), 'the decoy folder stays');
+});
+
+test('worktrees: an agent whose cwd uses a symlinked spelling of the home keeps its folder', () => {
+  const { root, make } = wtree();
+  const d = make('unrelated-name', 4 * DAY);
+  const alias = join(base, 'home-alias');
+  symlinkSync(join(root, '..'), alias);
+  const spelled = join(alias, root.slice(root.lastIndexOf('/') + 1), 'unrelated-name');
+  // The cwd is inside the folder; a subfolder that is gone since still resolves through its existing prefix.
+  for (const cwd of [spelled, join(spelled, 'src'), join(spelled, 'gone', 'deeper')]) {
+    const res = run(root, () => [{ id: 'z1', name: 'q', cwd }]);
+    assert.equal(why(res, d).why, 'a registry agent owns it', cwd);
+    assert.ok(existsSync(d));
+  }
+  // A workspace path in the alias spelling counts too, and an agent elsewhere does not.
+  assert.equal(why(run(root, () => [{ id: 'z2', name: 'q', cwd: '/elsewhere', workspace: JSON.stringify({ worktree: { path: spelled } }) }]), d).action, 'keep');
+  assert.ok(existsSync(d));
+  assert.equal(why(run(root, () => [{ id: 'z3', name: 'q', cwd: join(alias, 'other') }]), d).action, 'remove');
 });

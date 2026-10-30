@@ -61,7 +61,7 @@ AID=$(curl -s -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: applic
 
 # initialize (JSON), a notification (silent 202), then tools/list (SSE), all through the
 # proxy. Two requests carry an id, so two lines come back.
-OUT=$(STAM_BIN="$STAM" STAM_AGENT_ID="$AID" STAM_URL="$STAM_URL" MOOTR_URL="$STAM_URL" STAM_TOKEN="$TOKEN" MOOTR_TOKEN="$TOKEN" \
+OUT=$(STAM_BIN="$STAM" with_agent_id "$AID" env STAM_URL="$STAM_URL" MOOTR_URL="$STAM_URL" STAM_TOKEN="$TOKEN" MOOTR_TOKEN="$TOKEN" \
   node "$ROOT/test/mcp-proxy-call.mjs" fake \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \

@@ -68,7 +68,10 @@ test('socketPid reads the owning PID of a PID-named socket and nothing else', ()
   assert.equal(socketPid('stam-check-77'), 77);
   assert.equal(socketPid('transcript-gz-resume-9'), 9);
   assert.equal(socketPid('stam-test-lock-55-a'), 55);
+  assert.equal(socketPid('stam-test-go-78630-1793219367979509235'), 78630);
+  assert.equal(socketPid('home-forgery-test-2110607'), 2110607);
   assert.equal(socketPid('stam-test-user-Ab3dE5-main'), undefined);
+  assert.equal(socketPid('stam-test-tty-0696fea2'), undefined);
 });
 
 test('isTestSocket excludes the configured STAM_TMUX_SOCKET', () => {
@@ -192,15 +195,73 @@ test('the PID coming alive between probe and delete keeps the file', async () =>
   });
 });
 
-test('a name without a PID is never swept, however old', async () => {
-  await withSockets(['stam-test-user-Cd4eF6-main'], async (sockDir, { sweepDeadSockets }) => {
-    const old = new Date(Date.now() - 400 * 3600_000);
-    utimesSync(join(sockDir, 'stam-test-user-Cd4eF6-main'), old, old);
+// PID-less names (S-4129): a lib.sh run's stam-test-OWNER-RAND-NAME and a Go test's stam-test-tty-HEX, left when the run
+// was killed hard. They go once old and no test folder holds them; until then they aren't even probed.
+const OLD = new Date(Date.now() - 2 * 3600_000);
+const age = (sockDir, names) => names.forEach((n) => utimesSync(join(sockDir, n), OLD, OLD));
+const PIDLESS = ['stam-test-user-Cd4eF6-ui', 'stam-test-tty-0696fea2'];
+
+test('a dead PID-less socket goes once it is old and no test folder holds it', async () => {
+  await withSockets(PIDLESS, async (sockDir, { sweepDeadSockets }) => {
+    age(sockDir, PIDLESS);
+    const r = await sweepDeadSockets({ ls: DEAD, folderLive: async () => false });
+    assert.deepEqual(r.removed, [...PIDLESS].sort());
+    for (const n of PIDLESS) assert.ok(!existsSync(join(sockDir, n)), n);
+  });
+});
+
+test('a young PID-less socket is kept unprobed', async () => {
+  await withSockets(PIDLESS, async (sockDir, { sweepDeadSockets }) => {
     let probed = 0;
-    const r = await sweepDeadSockets({ ls: async () => (probed++, DEAD()) });
+    const r = await sweepDeadSockets({ ls: async () => (probed++, DEAD()), folderLive: async () => false });
     assert.deepEqual(r.removed, []);
     assert.equal(probed, 0);
-    assert.ok(existsSync(join(sockDir, 'stam-test-user-Cd4eF6-main')));
+    for (const n of PIDLESS) assert.ok(existsSync(join(sockDir, n)), n);
+  });
+});
+
+test('an old PID-less socket whose test folder is still there is kept unprobed', async () => {
+  const tmp = mkdtempSync('/tmp/tms-root-');
+  const prev = process.env.TMPDIR;
+  process.env.TMPDIR = tmp;
+  spawnSync('mkdir', [join(tmp, 'stam-test.user.Cd4eF6')]);
+  try {
+    await withSockets(['stam-test-user-Cd4eF6-ui'], async (sockDir, { sweepDeadSockets }) => {
+      age(sockDir, ['stam-test-user-Cd4eF6-ui']);
+      let probed = 0;
+      // The default folder check, against the test folder under TMPDIR.
+      const r = await sweepDeadSockets({ ls: async () => (probed++, DEAD()) });
+      assert.deepEqual(r.removed, []);
+      assert.equal(probed, 0);
+      assert.ok(existsSync(join(sockDir, 'stam-test-user-Cd4eF6-ui')));
+    });
+  } finally {
+    if (prev === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = prev;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('an old PID-less socket with a live server is kept', async () => {
+  await withSockets(PIDLESS, async (sockDir, { sweepDeadSockets }) => {
+    age(sockDir, PIDLESS);
+    const r = await sweepDeadSockets({ ls: async () => ({ status: 0, stderr: '' }), folderLive: async () => false });
+    assert.deepEqual(r.removed, []);
+    for (const n of PIDLESS) assert.ok(existsSync(join(sockDir, n)), n);
+  });
+});
+
+test('an old PID-less socket is kept on any inspection error other than no server', async () => {
+  await withSockets(PIDLESS, async (sockDir, { sweepDeadSockets }) => {
+    age(sockDir, PIDLESS);
+    const answers = {
+      'stam-test-user-Cd4eF6-ui': { status: 1, stderr: 'error connecting to /x (Permission denied)' },
+      'stam-test-tty-0696fea2': { status: null, stderr: 'no server running', timedOut: true },
+    };
+    const r = await sweepDeadSockets({ ls: async (n) => answers[n], folderLive: async () => false });
+    assert.deepEqual(r.removed, []);
+    assert.deepEqual(r.kept.map((k) => k.path).sort(), [...PIDLESS].sort());
+    for (const n of PIDLESS) assert.ok(existsSync(join(sockDir, n)), n);
   });
 });
 

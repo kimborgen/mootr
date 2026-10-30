@@ -9,13 +9,29 @@ export function childrenOf(id: string): string[] {
   return [...new Set([...db.childrenOf(id), ...db.peerChildrenOf(id)])];
 }
 
+// childrenOf for a whole walk: the peer links are read once, not once per node. Each read parses every
+// remembered peer agent, so a walk of a big tree took seconds (S-4356).
+export function childrenReader(): (id: string) => string[] {
+  const peers = new Map<string, string[]>();
+  for (const l of db.peerParentLinks()) {
+    const list = peers.get(l.parent_id);
+    if (list) list.push(l.child_id);
+    else peers.set(l.parent_id, [l.child_id]);
+  }
+  return (id) => [...new Set([...db.childrenOf(id), ...(peers.get(id) ?? [])])];
+}
+
 // Every child below `id`, at any depth, `id` itself excluded.
 export function descendantsOf(id: string, seen = new Set<string>()): Set<string> {
-  for (const c of childrenOf(id)) {
-    if (seen.has(c)) continue;
-    seen.add(c);
-    descendantsOf(c, seen);
-  }
+  const children = childrenReader();
+  const walk = (p: string) => {
+    for (const c of children(p)) {
+      if (seen.has(c)) continue;
+      seen.add(c);
+      walk(c);
+    }
+  };
+  walk(id);
   return seen;
 }
 

@@ -21,8 +21,8 @@ import (
 // timer that fires its note each time and stays until wait_done. Each notice goes out after the write that made it
 // commits.
 //
-// Not ported, refused by the routes before any write: a wait on an external event, a target on another machine, and
-// rest. Nor are daemon-owned timers (a tag).
+// A wait on an external event is the events package's; a rest a wait asks for is rest.go's. Not ported: daemon-owned
+// timers (a tag).
 
 // ErrWait is a wait the request can't make: the route answers 400 with its text.
 type ErrWait struct{ Msg string }

@@ -23,7 +23,8 @@ const plain = (id) => ({ thread_id: id, mails: [{ id: `${id}-m`, from_id: 'a1', 
 const resolved = (id) => ({ thread_id: id, mails: [{ id: `${id}-m`, from_id: 'a1', subject: 's', created_at: '2026-10-14T06:00:00.000Z', kind: null, body: 'Permission: push', itsa_id: null,
   permission_id: 'p1', permission: { status: 'approved' }, recipients: [{ id: 'human', read_at: '2026-10-14T07:00:00.000Z' }] }] });
 const src = (archived) => ({
-  inbox: async () => ({ active: [], archived }),
+  inbox: async () => [],
+  archived: async () => archived,
   openDecisions: async () => new Set(),
   humanWaits: async () => [],
   tellPeers: async () => {},

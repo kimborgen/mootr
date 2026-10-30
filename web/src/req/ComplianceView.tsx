@@ -9,11 +9,11 @@ import { useState } from 'react'
 import { Icon } from '../Icon'
 import { openItsa } from '../itsa/itsa'
 import { isPhone, useShell } from '../shell/layout'
-import { useData } from '../store'
+import { useData, useQueueReader } from '../store'
 import { buildMatrix, cellState, flaggedPerSubject, queueSubjects, subtreeSubjects, type MatrixCell, type MatrixSubject } from './matrix'
 import { STATE_WORD, stateOf, STATUS_WORD, verdictWord, WAIVER_WORD, type Requirement } from './model'
 import { openReq, openReqAt, ReqGlyph } from './parts'
-import { useReq } from './store'
+import { useReq, useReqReader } from './store'
 
 type Source = { kind: 'queue' } | { kind: 'itsa'; id: string }
 const PICK_KEY = 'stam/compliance-subjects'
@@ -41,10 +41,12 @@ function CellMark({ c }: { c: MatrixCell | null }) {
   return <ReqGlyph state={st} waived={!!c!.waived || c!.stale} title="" />
 }
 
-export function ComplianceView() {
+export function ComplianceView({ viewKey }: { viewKey?: string }) {
   const { enabled, reqs, loaded } = useReq()
   const { itsas, queue } = useData()
   useShell()
+  useQueueReader(viewKey)
+  useReqReader(viewKey)
   const [pick, setPick] = useState<Source>(loadPick)
   const choose = (s: Source) => { setPick(s); savePick(s) }
   if (!enabled) return <div className="itsa-view"><div className="empty-pane"><h3>Requirements are off</h3><p>Turn them on in Settings › Requirements to see the compliance matrix.</p></div></div>

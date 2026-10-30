@@ -8,7 +8,7 @@ import { ReqBatch } from './ReqBatch'
 
 const hoisted = vi.hoisted(() => ({ enabled: true, get: vi.fn() }))
 vi.mock('../api', () => ({ api: (...args: unknown[]) => hoisted.get(...args) }))
-vi.mock('./store', () => ({ useReq: () => ({ enabled: hoisted.enabled }), refreshReq: () => Promise.resolve() }))
+vi.mock('./store', () => ({ useReq: () => ({ enabled: hoisted.enabled }), refreshReq: () => Promise.resolve(), useReqReader: () => {} }))
 vi.mock('./parts', () => ({ openReq: vi.fn() }))
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true

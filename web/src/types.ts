@@ -48,6 +48,8 @@ export interface Agent {
   lifecycle: Lifecycle
   activity?: string | null
   activity_detail?: string | null
+  // When the agent last stopped working; null while it works.
+  idle_since?: string | null
   context_tokens?: number | null
   // A long-lived specialist (S-874); `load` is the daemon's numbers for it (S-919), set for standing agents only.
   standing?: number | boolean
@@ -201,6 +203,60 @@ export interface MailVerdict {
 export interface Thread {
   thread_id: string
   mails: Mail[]
+}
+
+// One of a mailbox's thread lists (S-4577): the inbox, the archive, or the deferred.
+export type ThreadList = 'active' | 'archived' | 'deferred'
+
+// What a mail list shows of a thread, without its bodies (GET /api/agents/:box/thread-index, S-4520): the subject
+// is the first mail's, the sender and kind the last mail's, `last_at` the newest mail the box sent or received.
+export interface IndexRow {
+  thread_id: string
+  subject: string
+  title: string | null
+  kind: string | null
+  itsa_id: string | null
+  from_id: string
+  from_name: string | null
+  last_at: string
+  mail_count: number
+  unread: number
+  ask: 'pending' | null
+  // The last mail's first 200 characters, whitespace collapsed.
+  snippet: string
+  // What a list's row shows of the thread's card mail (S-4578), the latest mail to the box, else the last mail
+  // (MailCard's cardMail). Optional: a route without them leaves them out, and a row built here fills them.
+  card_from_id?: string
+  card_from_name?: string | null
+  // The card mail's summary, else its body: the first 300 characters, line breaks kept.
+  card_text?: string
+  card_title?: string | null
+  // The card mail's own subject: its text's last fallback.
+  card_subject?: string
+  verdict_kind?: string | null
+  // The ITSA the card mail is about, else the one it was sent under, and the first ITSA it mentions.
+  about_itsa?: string | null
+  itsa_chip?: { key: string; title: string } | null
+  // Who sent the last mail the box sent or received.
+  box_last_from?: string
+  // The thread's first and last mail's times, and the last mail's id.
+  first_created_at?: string
+  last_created_at?: string
+  last_mail_id?: string
+  // The permissions the thread's mails carry, any status, and whether each is an ask placed in it (S-3827) rather
+  // than one the thread started (S-4579).
+  perms?: { id: string; placed: boolean }[]
+  // Every ITSA the thread's mail links, once each in the order they first appear, and the ones it is about.
+  itsa_links?: { id: string; key: string; title: string; status: string }[]
+  about_itsas?: string[]
+  // The people in the thread other than the box: attached first, then senders and recipients by their latest mail.
+  agents?: string[]
+}
+
+// A page of a thread index: pass `next_cursor` back for the next one; null at the end.
+export interface IndexPage {
+  threads: IndexRow[]
+  next_cursor: string | null
 }
 
 export interface PlainShell {

@@ -121,6 +121,15 @@ function stop(account: string): void {
   told.delete(account);
 }
 
+// Held probe blockers always have a probe scheduled (S-4574). start() schedules before the
+// blockers exist, and each waits for its agent's serial chain, so a probe that comes due first
+// finds nothing held and stops; the blockers then land with no probe, and agents stayed held
+// 18 minutes. Called after anything that adds them. A removed account is left alone.
+export function ensure(account: string, now: number = Date.now()): void {
+  if (states.has(account) || !settings().cost.accounts?.[account]?.match) return;
+  if (held(account).length) schedule(account, 0, now);
+}
+
 // A transient or auth provider error ended a turn on a managed agent: block the account's
 // agents, mail the human once for an auth error, and start (or advance) the probe.
 export async function onError(agentId: string, cls: 'transient' | 'auth', source: string, now: number = Date.now()): Promise<void> {
@@ -148,6 +157,7 @@ export async function onError(agentId: string, cls: 'transient' | 'auth', source
     if (have?.reason === reason && have.clear?.human === clear.human) continue;
     db.addEvent(x.id, 'cost:rule', { rule: 'error', account, action: 'set', reason });
     await blockers.addBlocker(x, { kind: 'error', account, reason, clear });
+    ensure(account);
   }
 }
 
@@ -241,11 +251,13 @@ async function succeeded(account: string, why: string): Promise<void> {
   const gen = generation(account);
   stop(account);
   for (const b of blockers.blockersFor(account).filter((x) => x.kind === 'error')) {
-    if (generation(account) !== gen) return;
+    if (generation(account) !== gen) return ensure(account);
     db.addEvent(b.agent_id, 'cost:rule', { rule: 'error', account, action: 'clear', reason: b.reason, cleared: why });
     await blockers.clearBlocker(b.agent_id, 'error', account, why);
   }
   if (probeKinds(account).includes('credits-out')) await rules.probeCleared(account, why, gen);
+  // A newer failure during the clears keeps its blockers, and they keep their probe.
+  ensure(account);
 }
 
 // At daemon start: probe every account that has an error blocker, or a Claude credits-out,

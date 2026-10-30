@@ -40,7 +40,7 @@ REL=$(reg release "$TEST_TMP")
 
 KEYS=""
 for n in 1 2 3; do
-  F=$(STAM_AGENT_ID="$AID" "$STAM" retro --kind instruction --target type-developer --title "Item $n" --summary "item $n $T" --details "Scenario $n.")
+  F=$(with_agent_id "$AID" "$STAM" retro --kind instruction --target type-developer --title "Item $n" --summary "item $n $T" --details "Scenario $n.")
   KEYS="$KEYS $(echo "$F" | sed -n 's/^Filed \(S-[0-9]*\).*/\1/p')"
 done
 
@@ -78,7 +78,7 @@ for k in $KEYS; do
 done
 
 echo "-- a second digest spawns no second steward while the first lives"
-STAM_AGENT_ID="$AID" "$STAM" retro --kind improve --target type-developer --summary "item 4 $T" --details "Scenario 4." >/dev/null
+with_agent_id "$AID" "$STAM" retro --kind improve --target type-developer --summary "item 4 $T" --details "Scenario 4." >/dev/null
 "$STAM" retro --digest >/dev/null
 api GET /api/agents/retro-steward-2 >/dev/null 2>&1 && fail "a second steward was spawned"
 

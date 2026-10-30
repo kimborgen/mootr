@@ -28,9 +28,9 @@ import { NoticeLine, TurnFrame } from '../mail/TurnFrame'
 import { byId, getData, useData } from '../store'
 import { clock } from '../waits'
 import { clearLive, setLive } from './ownview-live'
-import { activity, applyEvent, elapsed, loosePermissions, MAIL_NOTICE_LINE, mailNoticeSplit, plainText, prependOlder, readingOrder, toolRuns, turnKind, turns, type Activity, type PermissionDecision, type ToolPart, type Turn, type ViewEvent, type ViewMessage, type ViewPage, type ViewPart, type ViewPermission, type ViewState } from './ownview-model'
+import { activity, applyEvent, elapsed, joinGap, leavesGap, loosePermissions, MAIL_NOTICE_LINE, mailNoticeSplit, plainText, prependOlder, readGap, readingOrder, toolRuns, turnKind, turns, type Activity, type PermissionDecision, type ToolPart, type Turn, type ViewEvent, type ViewMessage, type ViewPage, type ViewPart, type ViewPermission, type ViewState } from './ownview-model'
 import { Loading } from '../Loading'
-import { registerView } from '../shell/layout'
+import { registerView, useViewShown } from '../shell/layout'
 import { takeOpenFocus } from '../mail/diffOpen'
 
 const PAGE = 50
@@ -38,12 +38,19 @@ const RETRY_MS = 2000
 
 // Follows the view stream: server-sent events read through fetch, which can send the token
 // header (EventSource can't). Reconnects after a drop; a 4xx (no view for this agent) stops.
-function useViewStream(id: string) {
+// Closed while the view is hidden (S-4691); the state stays, and the reconnect's `state` event
+// joins the older pages already read (applyEvent), so nothing flashes empty.
+function useViewStream(id: string, shown: boolean) {
   const [state, setState] = useState<ViewState | null>(null)
   const [error, setError] = useState<string | null>(null)
   // The daemon refused the view for good (4xx): the terminal takes its place.
   const [gone, setGone] = useState(false)
+  // This connection's first `state` event has landed (S-4691): until then the state is the pre-hide one.
+  const [fresh, setFresh] = useState(false)
+  const cur = useRef(state)
+  cur.current = state
   useEffect(() => {
+    if (!shown) return
     let stop = false
     const ctl = new AbortController()
     ;(async () => {
@@ -66,7 +73,15 @@ function useViewStream(id: string) {
               while ((i = buf.indexOf('\n\n')) >= 0) {
                 const data = buf.slice(0, i).split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('')
                 buf = buf.slice(i + 2)
-                if (data) { const ev = JSON.parse(data) as ViewEvent; setState((s) => applyEvent(s, ev)) }
+                if (data) {
+                  const ev = JSON.parse(data) as ViewEvent
+                  // A snapshot that doesn't join the cached messages (more than a page arrived while hidden):
+                  // read the gap, awaited so later events apply after it. Past the bound it replaces.
+                  const gap = ev.type === 'state' && leavesGap(cur.current, ev.state) ? await readGap(cur.current!, ev.state, (b) => api<ViewPage>('GET', `/api/agents/${id}/view/history?before=${encodeURIComponent(b)}&limit=${PAGE}`)).catch(() => null) : null
+                  if (stop) return
+                  setState((s) => ((gap && ev.type === 'state' ? joinGap(s, gap, ev.state) : null) ?? applyEvent(s, ev)))
+                  if (ev.type === 'state') setFresh(true)
+                }
               }
             }
           }
@@ -74,9 +89,9 @@ function useViewStream(id: string) {
         await new Promise((r) => setTimeout(r, RETRY_MS))
       }
     })()
-    return () => { stop = true; ctl.abort() }
-  }, [id])
-  return { state, setState, error, gone }
+    return () => { stop = true; ctl.abort(); setFresh(false) }
+  }, [id, shown])
+  return { state, setState, error, gone, fresh }
 }
 
 // assistant-ui gets one message per turn, with its text only; the view draws each turn from
@@ -259,7 +274,8 @@ function useOlder(id: string, state: ViewState | null, setState: (f: (s: ViewSta
 // every world that shows it (the top world has no such tab, so it passes its own).
 export function OwnView({ id, onGone, viewKey }: { id: string; onGone?: () => void; viewKey?: string }) {
   useData()
-  const { state, setState, error, gone } = useViewStream(id)
+  const onScreen = useViewShown(viewKey)
+  const { state, setState, error, gone, fresh } = useViewStream(id, onScreen)
   // The terminal stays the fallback: a view the daemon can't give shows the terminal in its
   // place (S-82), in whichever world has it; the note below shows until it does.
   useEffect(() => { if (gone && !state) (onGone ?? (() => fallBackToTerminal(id)))() }, [gone, state, id])
@@ -289,7 +305,11 @@ export function OwnView({ id, onGone, viewKey }: { id: string; onGone?: () => vo
   // A failed stop belongs to the turn it failed in: the next turn starts with no error.
   useEffect(() => { if (!running) setStopErr('') }, [running])
   const [owner] = useState(() => ({}))
-  useEffect(() => { setLive(id, owner, { running, asking, stop: canStop ? stop : null, stopError: running ? stopErr : '' }) }, [id, owner, running, asking, canStop, stop, stopErr])
+  // Hidden, the stream is closed and these would freeze: the agent list's state stands until the view shows (S-4691).
+  useEffect(() => {
+    if (!onScreen || !fresh) { clearLive(id, owner); return }
+    setLive(id, owner, { running, asking, stop: canStop ? stop : null, stopError: running ? stopErr : '' })
+  }, [id, owner, onScreen, fresh, running, asking, canStop, stop, stopErr])
   useEffect(() => () => clearLive(id, owner), [id, owner])
   // What a Part reads, memoized so a stream event doesn't redraw the parts of unchanged turns (S-1566).
   const canApprove = here && !!state?.capabilities.can_approve

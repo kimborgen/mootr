@@ -21,9 +21,8 @@ import (
 
 // The waits routes (src/daemon.ts, src/waits.ts, S-2848 B2a): GET /api/agents/:id/waits, POST /api/agents/:id/waits
 // (any wait, from the sources of waits), /waits/clear, and the agent's own wait_for (/waits/declared), wake_me
-// (/waits/wake) and wait_done (/waits/done). Who may write is mayManageWaits.
-//
-// Not ported, a 501 before any write: `rest`.
+// (/waits/wake) and wait_done (/waits/done). Who may write is mayManageWaits. `rest: true` on wait_for or wake_me asks
+// for a rest at the agent's turn end (lifecycle.RequestRest, S-4332).
 
 func (s *Server) waitsRoutes() {
 	s.handle("GET /api/agents/{id}/waits", agentPath(s.getWaits))
@@ -263,12 +262,25 @@ func waitError(err error) error {
 	return err
 }
 
-// restRefusal answers 501 for `rest: true`: a wait or timer that puts its agent to rest (lifecycle.requestRest).
-func restRefusal(body *jsjson.Object) error {
-	if bodyField(body, "rest") == true {
-		return Errorf(http.StatusNotImplemented, "rest is not ported to the Go daemon yet")
+// requestRest is src/daemon.ts's `if (body?.rest === true) lifecycle.requestRest(a.id, w)` after a wait_for or wake_me
+// made w: the wait asks for a rest at the agent's turn end. An agent type that rest.types keeps up (`cos` the chief of
+// staff) never rests, so its wait asks for nothing (TS's restPlan refuses it at the rest).
+func (s *Server) requestRest(ctx context.Context, a db.Agent, body *jsjson.Object, w db.Wait, err error) (db.Wait, error) {
+	if err != nil || bodyField(body, "rest") != true {
+		return w, err
 	}
-	return nil
+	reg, rerr := s.agentRegistry()
+	if rerr != nil {
+		return w, rerr
+	}
+	key := reg.typeOf(a, s.settings.Get().ChiefOfStaff)
+	if key == "chief-of-staff" {
+		key = "cos"
+	}
+	if allowed, set := s.settings.Get().Rest.Types[key]; set && !allowed {
+		return w, nil
+	}
+	return w, s.life.RequestRest(context.WithoutCancel(ctx), a.ID, w)
 }
 
 // declareWait is POST /api/agents/:id/waits/declared, wait_for (src/waits.ts declare).
@@ -295,16 +307,13 @@ func (s *Server) declareWait(r *http.Request, c auth.Resolved) (any, error) {
 	if on == "event" {
 		// An event wait clears on the first external event its filter fits (src/watch.ts ingest), and is kept by its
 		// rows: a restart keeps it, and a cleared one stays cleared.
-		if err := restRefusal(body); err != nil {
-			return nil, err
-		}
 		ed := events.Declare{Filter: events.Sanitize(bodyField(body, "filter")), Note: d.Note, Timeout: d.Timeout, Expect: d.Expect}
 		w, err := s.events.DeclareWait(ctx, a.ID, ed)
 		var bad *events.ErrInvalid
 		if errors.As(err, &bad) {
 			return nil, Errorf(http.StatusBadRequest, "%s", bad.Msg)
 		}
-		return w, err
+		return s.requestRest(ctx, a, body, w, err)
 	}
 	if on == "agent" {
 		ref := ""
@@ -338,11 +347,11 @@ func (s *Server) declareWait(r *http.Request, c auth.Resolved) (any, error) {
 	if th := bodyField(body, "thread"); th != nil && th != "" {
 		d.Thread = claude.JSString(th)
 	}
-	if err := restRefusal(body); err != nil {
-		return nil, err
-	}
 	w, err := s.life.DeclareWait(ctx, a, d)
-	return w, waitError(err)
+	if err != nil {
+		return nil, waitError(err)
+	}
+	return s.requestRest(ctx, a, body, w, nil)
 }
 
 // peerTarget is src/waits.ts peerTarget: an agent on a peer, found there now, or one this daemon has met before on a peer
@@ -426,11 +435,11 @@ func (s *Server) wakeWait(r *http.Request, c auth.Resolved) (any, error) {
 	case "cron":
 		w.Cron = jsjson.Trim(claude.JSString(v))
 	}
-	if err := restRefusal(body); err != nil {
-		return nil, err
-	}
 	out, err := s.life.WakeAt(r.Context(), a.ID, w)
-	return out, waitError(err)
+	if err != nil {
+		return nil, waitError(err)
+	}
+	return s.requestRest(r.Context(), a, body, out, nil)
 }
 
 // parseAt is `new Date(String(at))` for the ISO forms an agent sends, surrounding spaces trimmed:

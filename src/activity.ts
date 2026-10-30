@@ -433,6 +433,10 @@ const OPENCODE_PAGE = 200;
 // is a background task's completion); an assistant row is one model message, whose parts are
 // its text and tool calls. A message finished with anything but tool-calls ends the turn.
 // The cursor's offset is the seq of the last row of a finished turn.
+// The OpenCode databases open right now, read-only, for `daemon status` (S-4390).
+let openOpenCodeDbs = 0;
+export const openOpenCodeDbCount = () => openOpenCodeDbs;
+
 export async function* readOpenCode(dbPath: string, sessionId: string, cursor: Cursor | null, opts: ReadOptions): AsyncGenerator<ReadResult> {
   const source = `${dbPath}#${sessionId}`;
   const same = !!cursor && cursor.source === source;
@@ -440,6 +444,7 @@ export async function* readOpenCode(dbPath: string, sessionId: string, cursor: C
   let seq = same ? cursor!.offset : 0;
   let prevSeq = seq;
   const d = new DatabaseSync(dbPath, { readOnly: true });
+  openOpenCodeDbs++;
   const usage = new Map<string, MessageUsage>();
   let items: RawItem[] = [];
   let safe = { seq, items: 0, state: { ...st } };
@@ -547,6 +552,7 @@ export async function* readOpenCode(dbPath: string, sessionId: string, cursor: C
     if (st.running && st.lastT != null && opts.turnEnded(st.lastT)) endTurn(prevSeq, st.lastT);
   } finally {
     d.close();
+    openOpenCodeDbs--;
   }
   if (safe.seq !== emitted) yield slice();
 }

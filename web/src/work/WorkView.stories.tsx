@@ -1,4 +1,5 @@
-import { itsa, itsaData, LONG, QUEUE, TREE, TREE_FIELDS, WAITING_ITSAS } from '../stories/itsaFixtures'
+import { itsa, itsaData, LONG, QUEUE, STATUSES, TREE, TREE_FIELDS, WAITING_ITSAS } from '../stories/itsaFixtures'
+import { agent, AGENTS } from '../stories/fixtures'
 import { FIELD_ROUTE, layout, WORK_ROUTES } from '../stories/workFixtures'
 import { ds, type Story } from '../stories/types'
 import type { Itsa } from '../types'
@@ -8,6 +9,11 @@ import { WorkView } from './WorkView'
 const page = (width?: number, height = 720) => <div style={{ height, width }}><WorkView viewKey="work" /></div>
 const busy = itsaData(TREE_FIELDS, { attention: WAITING_ITSAS, queue: QUEUE })
 const idle = itsaData(TREE_FIELDS)
+// An epic left in progress with every open child todo or backlog, its owner idle 26 h (S-4103): its card shows waiting.
+const paused = itsaData([...TREE_FIELDS, itsa(990, null, 'Fixture paused epic', 'in_progress', { owner: 'fx-idle-mgr' }), itsa(991, 990, 'Fixture queued child', 'todo'), itsa(992, 990, 'Fixture parked child', 'backlog')], {
+  itsaStatuses: [...STATUSES, { name: 'waiting', category: 'active', human: false }],
+  agents: [...AGENTS, agent({ id: 'fx-idle-mgr', name: 'fixture-idle-mgr', idle_since: new Date(Date.now() - 26 * 3600000).toISOString() })],
+})
 const closedOnly: Itsa[] = [itsa(995, null, 'Fixture finished project', 'done'), itsa(996, 995, 'Fixture last step', 'done')]
 // Two saved views; the working layout is the Review queue plus one more quick filter, so its tab has the dot.
 const VIEW_COLS = ['work', 'status', 'agents', 'cost', 'updated']
@@ -52,6 +58,7 @@ export const stories: Story[] = [{
     { name: 'Every row expanded', data: busy, routes: WORK_ROUTES, setup: folds(), render: () => page() },
         { name: 'A 1024 px pane with every column: they shrink and drop by width, no sideways scroll', data: itsaData(TREE_FIELDS, { attention: WAITING_ITSAS, queue: QUEUE }), routes: { ...WORK_ROUTES, ...layout({ cols: WIDE_COLS }) }, render: () => page(1024) },
     { name: 'Phone: the glance (cards are the issue card)', data: busy, routes: WORK_ROUTES, render: () => page(390, 760) },
+    { name: 'Phone: a paused epic\'s card shows waiting (S-4103)', data: paused, routes: WORK_ROUTES, render: () => page(360, 760) },
     { name: 'Nothing needs you', data: idle, routes: WORK_ROUTES, render: () => page() },
     { name: 'By agent', data: busy, routes: { ...WORK_ROUTES, ...layout({ group: 'agents' }) }, render: () => page() },
     { name: 'By column: Status', data: busy, routes: { ...WORK_ROUTES, ...layout({ group: 'column', groupBy: 'status' }) }, render: () => page() },

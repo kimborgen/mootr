@@ -20,8 +20,11 @@ export const QUIET_MS = Number(envVar('AUTO_ARCHIVE_QUIET_MS') ?? 3 * 60_000);
 export const EVERY_MS = 10 * 60_000;
 
 export interface Sources {
-  // The human's threads, up to `limit`, merged from every daemon and split by this daemon's archive state.
-  inbox: (limit?: number) => Promise<{ active: Thread[]; archived: Thread[] }>;
+  // The human's threads archive doesn't hide, among the newest `limit` and the hidden ones, merged from every daemon
+  // and split by this daemon's archive state.
+  inbox: (limit?: number) => Promise<Thread[]>;
+  // Every thread archive hides from the human, by the same merge (S-4520: loaded only when the repair asks).
+  archived: () => Promise<Thread[]>;
   // The ids of the decision mails still waiting on the human, on every daemon.
   openDecisions: () => Promise<Set<string>>;
   // The open waits on the human, on every daemon: the thread each names, or the request or mail it is tied to.
@@ -81,8 +84,7 @@ export async function archiveResolved(src: Sources, opts: { now?: number; dry?: 
   const now = opts.now ?? Date.now();
   const from = opts.all ? 0 : since();
   // `all` looks at the whole inbox; the regular pass at its newest threads.
-  const [inbox, open, waits] = await Promise.all([src.inbox(opts.all ? 1_000_000 : 200), src.openDecisions(), src.humanWaits()]);
-  const threads = inbox.active;
+  const [threads, open, waits] = await Promise.all([src.inbox(opts.all ? 1_000_000 : 200), src.openDecisions(), src.humanWaits()]);
   const ctx = {
     itsaClosedAt: (id: string) => {
       const x = itsa.find(id);
@@ -171,7 +173,7 @@ function loggedAutoArchived(): string[] {
 export async function repair(src: Sources): Promise<string[]> {
   const candidates = new Set([...db.autoArchivedThreads(HUMAN), ...loggedAutoArchived()]);
   if (!candidates.size) return [];
-  const { archived } = await src.inbox(1_000_000);
+  const archived = await src.archived();
   const [open, waits] = await Promise.all([src.openDecisions(), src.humanWaits()]);
   const ctx = {
     itsaClosedAt: (id: string) => {

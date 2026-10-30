@@ -50,6 +50,9 @@ type Stored struct {
 	// (DeferThread) or answers its decisions; a mail to the human brings a deferred ask back (ToHuman) and is itself a
 	// decision (DecisionMail).
 	FromHuman, DeferThread, ToHuman, DecisionMail bool
+	// ForeignSender marks a forwarded mail whose sender the peer that sent it can't be shown to hold (S-4332): it clears
+	// no wait_for on that agent.
+	ForeignSender bool
 	// CopyTo is the sender's copy of a mail that went to a peer (S-241, S-2663): the agents it was sent to there. nil for none.
 	CopyTo []string
 	// InTx, when set, runs first in the transaction that stores a new mail, with the mail's id; an error rolls the mail
@@ -352,7 +355,7 @@ func (d *DB) clearDeclaredWaits(conn *sqlite.Conn, m Stored) error {
 		cleared := false
 		for _, w := range waits {
 			kind, target := w.Text("kind"), w.Text("target")
-			if !(kind == "agent" && target == m.From) && !(kind == "human" && m.From == "human") {
+			if !(kind == "agent" && target == m.From && !m.ForeignSender) && !(kind == "human" && m.From == "human") {
 				continue
 			}
 			if raw := w.Text("data"); raw != "" {

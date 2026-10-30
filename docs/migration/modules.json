@@ -6,7 +6,12 @@
   },
   {
     "name": "events",
-    "globs": ["src/watch.ts", "src/events.ts"],
+    "globs": ["src/watch.ts", "src/events.ts", "src/sources/github.ts"],
+    "portSha": ""
+  },
+  {
+    "name": "linear",
+    "globs": ["src/sources/linear.ts", "src/sources/mcp-client.ts"],
     "portSha": ""
   }
 ]

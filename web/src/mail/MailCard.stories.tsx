@@ -3,6 +3,7 @@ import { ds, type Story } from '../stories/types'
 import { Row } from '../stories/helpers'
 import { ASK_ITSA, DECISION, kinded, mail, T_K_BLOCKER, T_K_DECISION, T_K_DONE, T_K_GENERAL, T_K_LONG, T_K_OLD, rapidThreads, STATUSES, T_ASK, T_LONG, T_PERM, T_PLAIN, T_RICH, T_UNREAD } from '../stories/mailFixtures'
 import type { Thread } from '../types'
+import { humanRowsOf } from './thread-index'
 
 // A mail with a model's summary (S-1002), and one whose body is long and starts with a heading.
 const T_SUMMARY: Thread = { thread_id: 'fx-t-sum', mails: [{ ...mail('fm-sum', 'fx-t-sum', 'fx-dev', ['human'], 'Login fails for SSO users', 'Long body.', { read: false, min: 5 }), summary: 'SSO login works again after the fix in PR #356. Pick a token lifetime before Friday:\n- 1h: safest, users re-login daily (recommended)\n- 12h: one login per workday' } as never] }
@@ -30,19 +31,19 @@ export const stories: Story[] = [{
     'Selected is `--accent-subtle` with its border, as a selected row is; never a solid accent fill (' + ds('Developer rules') + ').',
   ],
   states: [
-    { name: 'Read, plain', data: { humanThreads: [T_PLAIN] }, render: () => card(T_PLAIN) },
-    { name: 'Unread, with a title', data: { humanThreads: [T_UNREAD] }, render: () => card(T_UNREAD) },
-    { name: 'Card kinds', data: { humanThreads: [T_K_DECISION, T_K_BLOCKER, T_K_DONE, T_K_GENERAL] },
+    { name: 'Read, plain', data: { humanRows: humanRowsOf([T_PLAIN]) }, render: () => card(T_PLAIN) },
+    { name: 'Unread, with a title', data: { humanRows: humanRowsOf([T_UNREAD]) }, render: () => card(T_UNREAD) },
+    { name: 'Card kinds', data: { humanRows: humanRowsOf([T_K_DECISION, T_K_BLOCKER, T_K_DONE, T_K_GENERAL]) },
       render: () => <Row items={[{ label: 'Decision: the question, a four-option list, one recommended', node: card(T_K_DECISION) }, { label: 'Blocker: problem and solution', node: card(T_K_BLOCKER) }, { label: 'Done: problem, solution, deferred, note', node: card(T_K_DONE) }, { label: 'General', node: card(T_K_GENERAL) }]} /> },
-    { name: 'Kind with a long title, or an old-style summary', data: { humanThreads: [T_K_LONG, T_K_OLD] }, render: () => <Row items={[{ label: 'Blocker, long title and text', node: card(T_K_LONG) }, { label: 'Decision whose summary is off the contract: Markdown, as before', node: card(T_K_OLD) }]} /> },
-    { name: 'A long unbroken option', data: { humanThreads: [T_K_WIDE] }, render: () => card(T_K_WIDE) },
-    { name: 'With a condensed summary', data: { humanThreads: [T_SUMMARY] }, render: () => card(T_SUMMARY) },
-    { name: 'Waiting on you', data: { humanThreads: [T_PERM, T_ASK, T_RICH], attention: [ASK_ITSA], itsas: [ASK_ITSA as never], decisions: [DECISION], itsaStatuses: STATUSES },
+    { name: 'Kind with a long title, or an old-style summary', data: { humanRows: humanRowsOf([T_K_LONG, T_K_OLD]) }, render: () => <Row items={[{ label: 'Blocker, long title and text', node: card(T_K_LONG) }, { label: 'Decision whose summary is off the contract: Markdown, as before', node: card(T_K_OLD) }]} /> },
+    { name: 'A long unbroken option', data: { humanRows: humanRowsOf([T_K_WIDE]) }, render: () => card(T_K_WIDE) },
+    { name: 'With a condensed summary', data: { humanRows: humanRowsOf([T_SUMMARY]) }, render: () => card(T_SUMMARY) },
+    { name: 'Waiting on you', data: { humanRows: humanRowsOf([T_PERM, T_ASK, T_RICH]), attention: [ASK_ITSA], itsas: [ASK_ITSA as never], decisions: [DECISION], itsaStatuses: STATUSES },
       render: () => <Row items={[{ label: 'Approval', node: card(T_PERM) }, { label: 'ITSA ask', node: card(T_ASK) }, { label: 'Decision', node: card(T_RICH) }]} /> },
-    { name: 'Long thread, long body', data: { humanThreads: [T_LONG, T_BODY] }, render: () => <Row items={[{ label: 'Sixteen messages', node: card(T_LONG) }, { label: 'No summary: the first lines of the body', node: card(T_BODY) }]} /> },
-    { name: 'Long title, Markdown summary', data: { humanThreads: [T_MD] }, render: () => card(T_MD) },
-    { name: 'Body with a code block and a table', data: { humanThreads: [T_BODY_MD] }, render: () => card(T_BODY_MD) },
-    { name: 'Selected', data: { humanThreads: [T_PLAIN] }, render: () => card(T_PLAIN, true) },
-    { name: 'Sent by you', data: { humanThreads: [T_ANSWERED, T_FOLLOWED] }, render: () => <Row items={[{ label: 'Answered, unread', node: card(T_ANSWERED, false, 'sent') }, { label: 'Your follow-up last, selected', node: card(T_FOLLOWED, true, 'sent') }]} /> },
+    { name: 'Long thread, long body', data: { humanRows: humanRowsOf([T_LONG, T_BODY]) }, render: () => <Row items={[{ label: 'Sixteen messages', node: card(T_LONG) }, { label: 'No summary: the first lines of the body', node: card(T_BODY) }]} /> },
+    { name: 'Long title, Markdown summary', data: { humanRows: humanRowsOf([T_MD]) }, render: () => card(T_MD) },
+    { name: 'Body with a code block and a table', data: { humanRows: humanRowsOf([T_BODY_MD]) }, render: () => card(T_BODY_MD) },
+    { name: 'Selected', data: { humanRows: humanRowsOf([T_PLAIN]) }, render: () => card(T_PLAIN, true) },
+    { name: 'Sent by you', data: { humanRows: humanRowsOf([T_ANSWERED, T_FOLLOWED]) }, render: () => <Row items={[{ label: 'Answered, unread', node: card(T_ANSWERED, false, 'sent') }, { label: 'Your follow-up last, selected', node: card(T_FOLLOWED, true, 'sent') }]} /> },
   ],
 }]

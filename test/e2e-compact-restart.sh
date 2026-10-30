@@ -1,8 +1,9 @@
 #!/bin/sh
-# S-358, free: an idle compaction of a Claude Code agent that a daemon restart cuts short isn't read as an exit:
-# the restarted daemon stops the compactor the old one left running, confirms it gone, compacts again (never two
-# compactors on a session at once), and resumes the agent, which ends active and idle and answers mail. The same
-# holds when the tmux server went down too. Claude Code agents on the scripted fake (test/fake-claude, no model).
+# S-358, free: an idle compaction of a Claude Code agent that a daemon restart cuts short isn't read as an exit.
+# The contract (S-4389): the compactor the old daemon ran doesn't outlive the restart, the compaction runs again at
+# most once (never two compactors on a session at once), the agent is resumed with the continue prompt and ends
+# active and idle, answers mail, and no compactor process or pane is left. The same holds when the tmux server went
+# down too. How the old compactor ends is the daemon's own: TS stops one that survived, Go's dies with its daemon. Claude Code agents on the scripted fake (test/fake-claude, no model).
 # The compaction is held open with a flag file while the daemon restarts; the fake logs each compactor's session
 # in fake-compact-runs, and an OVERLAP line when two run on one session.
 # Runs against its own daemon (test/lib.sh). Nothing waits on a timer: the checks poll state.
@@ -36,6 +37,28 @@ whole_transcript() {
 }
 half_written() { tail -c 20 "$(field "$N" transcript_path)" | grep -q 'compacting$'; }
 no_overlap() { ! grep -q OVERLAP "$STAM_HOME/fake-compact-runs" || { echo "FAIL: two compactors ran on one session"; exit 1; }; }
+# The test's own compactors: headless `claude -p --resume` runs under this stam home.
+compactor_pids() {
+  node -e 'const fs = require("fs");
+for (const n of fs.readdirSync("/proc")) {
+  if (!/^\d+$/.test(n)) continue;
+  try {
+    const argv = fs.readFileSync(`/proc/${n}/cmdline`, "utf8").split("\0");
+    if (!argv.includes("-p") || !argv.includes("--resume")) continue;
+    const env = fs.readFileSync(`/proc/${n}/environ`, "utf8").split("\0");
+    if (env.includes(`STAM_HOME=${process.argv[1]}`) || env.includes(`MOOTR_HOME=${process.argv[1]}`)) console.log(n);
+  } catch {}
+}' "$STAM_HOME"
+}
+# None of the pids in $OLD still runs.
+old_gone() { for p in $OLD; do kill -0 "$p" 2>/dev/null && return 1; done; return 0; }
+no_compactor_left() {
+  left=$(compactor_pids)
+  test -z "$left" || { echo "FAIL: compactor processes left: $left"; exit 1; }
+  ! tmux -L "$STAM_TMUX_SOCKET" list-panes -a -F '#{pane_start_command}' 2>/dev/null | grep -- '--resume' | grep -q -- ' -p' || { echo "FAIL: a compactor pane is left"; exit 1; }
+}
+# The resume after a cut-short compaction carries the continue prompt (templates/respawn-compaction-restart.md).
+continued() { test "$(cat "$STAM_HOME"/agents/*/transcript-*.jsonl 2>/dev/null | grep '"type":"user"' | grep -c 'restarted while it was compacting' || true)" -ge "$1"; }
 no_exit() { test "$("$STAM" events "$1" | grep -c ' exited' || true)" = 0 || { echo "FAIL: $1 read as exited $2"; exit 1; }; }
 
 set_settings '{"idleCompaction":{"enabled":false}}'
@@ -49,6 +72,8 @@ set_settings '{"idleCompaction":{"enabled":true,"idleMinutes":0.01,"growthTokens
 poll 400 events_has "$N" 'context:idle-compaction' || { echo "FAIL: no idle compaction"; exit 1; }
 poll 60 compacting "$N" || { echo "FAIL: $N never showed compacting"; exit 1; }
 poll 60 half_written || { echo "FAIL: the held compaction didn't start its transcript row"; exit 1; }
+OLD=$(compactor_pids)
+test -n "$OLD" || { echo "FAIL: no compactor running before the restart"; exit 1; }
 # No second idle compaction after the restart: this one is enough.
 set_settings '{"idleCompaction":{"enabled":false}}'
 daemon_stop main
@@ -56,15 +81,16 @@ daemon_up main
 # The restarted daemon's first reconcile finds the harness down mid-compaction.
 poll 60 events_has "$N" 'exit:compaction' || { echo "FAIL: restart didn't see the compaction; events: $("$STAM" events "$N" | tail -5)"; exit 1; }
 no_exit "$N" "after the restart"
-# The old daemon's compactor still runs (held): the new one stops it before compacting again.
-poll 60 events_has "$N" 'compact:killed' || { echo "FAIL: the running compactor wasn't stopped"; exit 1; }
-poll 60 events_has "$N" '"headless":true' || { echo "FAIL: no compaction after the stop"; exit 1; }
+# The old daemon's compactor (held) doesn't outlive the restart, whichever way it ends.
+poll 60 old_gone || { echo "FAIL: the old daemon's compactor still runs: $OLD"; exit 1; }
 rm -f "$STAM_HOME/fake-compact-hold"
 poll 1100 resumed_idle "$N" 1 || { echo "FAIL: $N not resumed: $(field "$N" lifecycle) $(field "$N" activity) $(field "$N" activity_detail)"; exit 1; }
 events_has "$N" '"compacted":true' || { echo "FAIL: resumed without compacting"; exit 1; }
-# The stopped compactor and the new one, one after the other.
-test "$(runs)" = 2 || { echo "FAIL: $(runs) compactor runs, expected 2"; exit 1; }
+# The cut-short compactor and at most one more, one after the other.
+test "$(runs)" -le 2 || { echo "FAIL: $(runs) compactor runs, expected at most 2"; exit 1; }
 no_overlap
+poll 60 continued 1 || { echo "FAIL: $N resumed without the continue prompt"; exit 1; }
+no_compactor_left
 whole_transcript
 no_exit "$N" "after the resume"
 
@@ -85,18 +111,23 @@ touch "$STAM_HOME/fake-compact-hold"
 CPID=$!
 # A reconcile tick that ran during this compaction, not round one's.
 poll 400 since_has 'reconcile:held' || { echo "FAIL: no reconcile tick during the second compaction: $(cat "$TEST_TMP/compact.out")"; exit 1; }
+R2=$(runs)
+OLD=$(compactor_pids)
+test -n "$OLD" || { echo "FAIL: no compactor running before the second restart"; exit 1; }
 daemon_stop main
 wait "$CPID" || true
 # The test's own tmux server: the restarted daemon finds no server at all.
 tmux -L "$STAM_TMUX_SOCKET" kill-server 2>/dev/null || true
 daemon_up main
 poll 400 since_has 'exit:compaction' || { echo "FAIL: lost-server restart didn't see the compaction; events: $(since | tail -5)"; exit 1; }
-poll 400 since_has 'compact:killed' || { echo "FAIL: the second compactor wasn't stopped"; exit 1; }
+poll 60 old_gone || { echo "FAIL: the old daemon's second compactor still runs: $OLD"; exit 1; }
 rm -f "$STAM_HOME/fake-compact-hold"
 resumed_again() { test "$(field "$N" lifecycle)" = active && test "$(field "$N" activity)" = idle && since_has ' recover '; }
 poll 1100 resumed_again || { echo "FAIL: $N not resumed after the lost server: $(field "$N" lifecycle) $(field "$N" activity) $(field "$N" activity_detail)"; exit 1; }
-test "$(runs)" = 4 || { echo "FAIL: $(runs) compactor runs, expected 4"; exit 1; }
+test "$(runs)" -le $((R2 + 1)) || { echo "FAIL: $(runs) compactor runs, expected at most $((R2 + 1))"; exit 1; }
 no_overlap
+poll 60 continued 2 || { echo "FAIL: $N resumed without the continue prompt after the lost server"; exit 1; }
+no_compactor_left
 whole_transcript
 ! since_has ' exited' || { echo "FAIL: $N read as exited after the lost-server restart"; exit 1; }
 echo "PASS"

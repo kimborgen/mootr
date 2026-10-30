@@ -284,6 +284,8 @@ export function signal(agentId: string, data: { source: string; class: string } 
   if (data.class === 'credits' && settings().cost.accounts?.[account]?.match.harness === 'claude') probes.start(account);
   const message = typeof data.message === 'string' ? data.message : undefined;
   const done = evaluateRules(account, { signal: { class: data.class, source: describe(data), message } });
+  // The credits-out it set keeps a probe, even if the one started above came due first (S-4574).
+  if (data.class === 'credits') void done.then(() => probes.ensure(account)).catch(() => {});
   // A reviewer that dies on a limit right after its spawn goes to the reviewer fallback (S-381).
   if (data.class === 'limit' && (data.source === 'turn/completed' || data.source === 'StopFailure')) void done.then(() => import('./cost-fallback.ts')).then((m) => m.relaunchReviewerAtSpawn(agentId)).catch((e) => console.error(`reviewer relaunch for ${agentId}:`, e));
 }

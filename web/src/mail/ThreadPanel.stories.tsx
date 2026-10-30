@@ -2,6 +2,7 @@ import { ThreadPanel } from './ThreadPanel'
 import { ds, type Story } from '../stories/types'
 import { AGENTS_STOPPED, ASK_ITSA, STATUSES, T_ASK, T_BETWEEN, T_DIALOG, T_GATE, T_INPUT, T_LONG, T_PERM, T_PERM_DONE, T_PLAIN, T_QUESTION, T_RICH, T_UNREAD, T_WITHDRAWN } from '../stories/mailFixtures'
 import type { Mail, MailItsa } from '../types'
+import { humanRowsOf } from './thread-index'
 
 const panel = (mails: Mail[], o: Partial<Parameters<typeof ThreadPanel>[0]> = {}) => <div className="thread-view"><ThreadPanel className="thread-scroll" mails={mails} threadKey={mails[0]?.thread_id ?? ''} {...o} /></div>
 const unreadIds = (mails: Mail[]) => mails.filter((m) => m.recipients.some((r) => r.id === 'human' && !r.read_at)).map((m) => m.id)
@@ -54,13 +55,13 @@ export const stories: Story[] = [{
     { name: 'Linked to ITSAs', data: STATE, render: () => panel(T_PLAIN.mails.map((m, i) => ({ ...m, itsas: i === 0 ? LINKS : i === 1 ? [{ ...LINKS[1], source: 'named' as const }] : [LINKS[2]] }))) },
     { name: 'With attached agents', data: STATE, render: () => panel(T_PLAIN.mails.map((m, i) => ({ ...m, agents: i === 0 ? ['fx-dev', 'fx-review'] : [] }))) },
     { name: 'Each harness as sender', render: () => panel(harnesses) },
-    { name: 'Permission request waiting', data: { perms: [T_PERM.mails[0].permission!], humanThreads: [T_PERM] }, render: () => panel(T_PERM.mails, { onStage: () => {} }) },
+    { name: 'Permission request waiting', data: { perms: [T_PERM.mails[0].permission!], humanRows: humanRowsOf([T_PERM]) }, render: () => panel(T_PERM.mails, { onStage: () => {} }) },
     { name: 'Permission request, read only', render: () => panel(T_PERM.mails) },
     { name: 'Permission request answered', render: () => panel(T_PERM_DONE.mails) },
-    { name: 'Dialog stopping an agent', data: { agents: AGENTS_STOPPED, perms: [T_DIALOG.mails[0].permission!], humanThreads: [T_DIALOG] }, render: () => panel(T_DIALOG.mails, { onStage: () => {} }) },
-    { name: 'Question with choices', data: { perms: [T_QUESTION.mails[0].permission!], humanThreads: [T_QUESTION] }, render: () => panel(T_QUESTION.mails, { onStage: () => {} }) },
+    { name: 'Dialog stopping an agent', data: { agents: AGENTS_STOPPED, perms: [T_DIALOG.mails[0].permission!], humanRows: humanRowsOf([T_DIALOG]) }, render: () => panel(T_DIALOG.mails, { onStage: () => {} }) },
+    { name: 'Question with choices', data: { perms: [T_QUESTION.mails[0].permission!], humanRows: humanRowsOf([T_QUESTION]) }, render: () => panel(T_QUESTION.mails, { onStage: () => {} }) },
     { name: 'Suggested input', render: () => panel(T_INPUT.mails, { onStage: () => {} }) },
-    { name: 'An ITSA waiting on you', data: { ...STATE, agents: AGENTS_STOPPED, humanThreads: [T_ASK] }, render: () => panel(T_ASK.mails, { unread: unreadIds(T_ASK.mails), ask: { mailId: 'fm-41', itsa: ASK_ITSA.id, actions: ASK_ITSA.actions }, onStage: () => {} }) },
+    { name: 'An ITSA waiting on you', data: { ...STATE, agents: AGENTS_STOPPED, humanRows: humanRowsOf([T_ASK]) }, render: () => panel(T_ASK.mails, { unread: unreadIds(T_ASK.mails), ask: { mailId: 'fm-41', itsa: ASK_ITSA.id, actions: ASK_ITSA.actions }, onStage: () => {} }) },
     { name: 'Withdrawn mail', render: () => panel(T_WITHDRAWN.mails) },
     { name: 'Mail between agents', render: () => panel(T_BETWEEN.mails, { humanView: true }) },
     { name: 'File attachments', render: () => panel(T_PLAIN.mails.map((m, i) => ({ ...m, attachments: i === 0 ? [{ name: 'work-table-design.md', size: 4200 }, { name: 'numbers.xlsx', size: 18000 }] : [] })) as Mail[]) },

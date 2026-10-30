@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
-import { link as makeLink, itsa, TREE } from '../stories/itsaFixtures'
-import { AGENTS } from '../stories/fixtures'
+import { link as makeLink, itsa, STATUSES, TREE } from '../stories/itsaFixtures'
+import { agent, AGENTS } from '../stories/fixtures'
 import { ACTIVITY, COSTS } from '../stories/workFixtures'
 import { OnMount, Row } from '../stories/helpers'
 import { ds, type Story } from '../stories/types'
@@ -30,6 +30,8 @@ const FULL: Itsa = {
     makeLink(7, 'url', null, 'https://docs.example.com/fixture/index'),
   ],
 }
+// An epic left in progress with every open child todo or backlog (S-4103); its owner is idle in the story's data.
+const PAUSED: Itsa[] = [itsa(990, null, 'Fixture paused epic', 'in_progress', { owner: 'fx-idle-mgr' }), itsa(991, 990, 'Fixture queued child', 'todo'), itsa(992, 990, 'Fixture parked child', 'backlog')]
 const row = (it: Itsa) => ({ it, depth: 0, context: false })
 const cell = (id: string, it: Itsa = FULL) => WORK_COLUMNS.find((c) => c.id === id)!.render(row(it), cx)
 const withLinks = (links: Itsa['links']): Itsa => ({ ...FULL, links })
@@ -51,6 +53,7 @@ export const stories: Story[] = [{
     'Review reads the branch link\'s recorded verdict (approved, changes requested, commented) and Tests its result ("212 passed", or "2 failed of 14" in the error tone); the words carry the meaning, and the tone is only a second channel (' + ds('State vocabulary') + ').',
     'Time is a bar of working time (`--accent`) and waiting time by kind, then the share working and the review rounds; a tap opens the split. Waiting kinds keep a fixed colour: human `--series-2`, agent `--series-3`, job `--series-4`, tool `--series-5`, throttle `--series-6`, any other `--border-strong`.',
     'Cost is the issue and its sub-issues in API-equivalent dollars (a sub-cent amount reads "<$0.01"), Window the issue\'s share of the 7-day subscription window; both are estimates and their headers say so.',
+    'Status shows an epic left in progress as waiting (S-4103) when every open child is todo or backlog and its owner has been idle for a day; its title says so. Display only: sorting, filtering and search, the API, and the Process view read the stored status.',
     'Health is a dot and a word in the success, warning, or error tone; Updated is the age, with the date in its title (' + ds('Tables, tree, and empty states') + ').',
   ],
   states: [
@@ -78,6 +81,10 @@ export const stories: Story[] = [{
       return [label as string, <span style={{ display: 'flex', gap: 'var(--space-4)' }}>{cell('review', it)}{cell('tests', it)}</span>]
     })) },
     { name: 'Time, opened', height: 320, render: () => <OnMount run={popTime}><div style={{ width: 'calc(var(--space-12) * 4 + var(--space-4))' }}>{cell('time')}</div></OnMount> },
+    { name: 'Status: a paused epic shows as waiting', data: { itsas: PAUSED, itsaStatuses: [...STATUSES, { name: 'waiting', category: 'active', human: false }], agents: [...AGENTS, agent({ id: 'fx-idle-mgr', name: 'fixture-idle-mgr', idle_since: ago(26 * 60) })] }, render: () => list([
+      ['every open child todo or backlog, owner idle 26 h: waiting', cell('status', PAUSED[0])],
+      ['the same epic, its owner idle 10 min: in progress', cell('status', { ...PAUSED[0], owner: 'fx-dev' })],
+    ]) },
     { name: 'Nothing known: empty cells', render: () => list(WORK_COLUMNS.filter((c) => !['work', 'status', 'updated'].includes(c.id)).map((c) => [c.label, c.render(row(itsa(997, null, 'Fixture bare ITSA', 'backlog', { owner: null })), cx) ?? <span className="muted">(empty)</span>])) },
   ],
 }]

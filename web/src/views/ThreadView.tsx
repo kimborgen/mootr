@@ -14,8 +14,8 @@ import * as mb from '../mail/mailblocks'
 import { suggestedPicks, type SuggestedPick } from '../mail/suggestedPicks'
 import { clearPermComment, nameFor, onPermComment, permComment, ThreadPanel, type ItsaAsk, type Stage } from '../mail/ThreadPanel'
 import { takeOpenFocus } from '../mail/diffOpen'
-import { isPhone, refreshTabs, registerView } from '../shell/layout'
-import { getData, refreshSlow, setData, threadWaitsOnHuman, useData } from '../store'
+import { isPhone, refreshTabs, registerView, useShownTick } from '../shell/layout'
+import { getData, hasPendingPermission, humanIndex, humanRow, refreshSlow, setData, threadWaitsOnHuman, useData } from '../store'
 import { answerInput, inputStatus } from '../perm/input'
 import type { ItsaView, Mail, Permission } from '../types'
 import { icon } from '../icons'
@@ -103,6 +103,8 @@ export function replyRecipients(mails: Mail[], answered: string[]) {
 
 export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
   const { mailTick } = useData()
+  // A thread on screen reloads on each tick; one that was hidden reloads once when it shows again.
+  const tick = useShownTick(viewKey, mailTick)
   const [mails, setMails] = useState<Mail[]>([])
   // The mails shown, for a staged ITSA action to name the newest (S-2998).
   const mailsRef = useRef(mails)
@@ -136,11 +138,9 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
   const noteRef = useRef<string | null>(null)
   noteRef.current = noting?.key ?? null
 
-  // The thread last loaded, the mail this view has already marked read, and whether the last
-  // read changed the store (its tick reloads the thread, which the read already did).
+  // The thread last loaded, and the mail this view has already marked read.
   const loaded = useRef<string | null>(null)
   const marked = useRef(new Set<string>())
-  const ownRead = useRef(false)
   const load = useCallback(async (force = false) => {
     let ms: Mail[]
     // Taken before the fetch, so a show while it is in flight doesn't fetch again.
@@ -161,16 +161,14 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
     const fresh = unread.filter((id) => !marked.current.has(id) && !keptUnread.get(tid)?.has(id))
     if (fresh.length && root.current?.offsetParent) {
       fresh.forEach((id) => marked.current.add(id))
-      ownRead.current = true
-      void markMailRead(fresh)
+      void markMailRead(tid, fresh)
     }
   }, [tid])
   // Opening the thread (mounting it, or a new thread) reads its mail, so an earlier `u` on it no longer holds it unread.
   useEffect(() => { keptUnread.delete(tid) }, [tid])
-  useEffect(() => {
-    if (ownRead.current) { ownRead.current = false; return }
-    load()
-  }, [load, mailTick])
+  // Every tick reloads, the read's own too (S-4519): a coalesced round can bring the read and a mail that came in a
+  // stream gap together, and be the last tick for a while. `marked` keeps the reload from reading anything twice.
+  useEffect(() => { load() }, [load, tick])
   // The shell shows every view after each layout render: a show reloads only a thread not yet loaded.
   // On return, the Open button that took the reader away has focus back — only one from this thread's own view (S-2105 review).
   useEffect(() => registerView(viewKey, { show: () => { if (loaded.current !== tid) load() }, focus: () => { const b = takeOpenFocus(root.current); if (b) b.focus(); else box()?.focus() } }), [viewKey, tid, load])
@@ -191,7 +189,7 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
   useEffect(() => {
     if (!askMail?.itsa_id) { setAsked(null); return }
     api<ItsaView>('GET', `/api/itsas/${askMail.itsa_id}`).then((v) => setAsked({ itsa: v.id, actions: v.actions ?? [] }), () => setAsked(null))
-  }, [askMail?.itsa_id, mailTick])
+  }, [askMail?.itsa_id, tick])
   const stagedAct = asked ? staged.get('itsa:' + asked.itsa) : undefined
   const ask: ItsaAsk | null = askMail && asked && asked.actions.length ? { mailId: askMail.id, itsa: asked.itsa, actions: asked.actions, staged: stagedAct?.kind === 'itsa' ? stagedAct.action : null } : null
 
@@ -471,12 +469,14 @@ export function ThreadView({ tid, viewKey }: { tid: string; viewKey: string }) {
 // On a desktop it is the tab bar's pair (S-2286): each icon names its key in its tooltip, and a
 // thread that waits on the human's answer holds Archive too, as the desktop always has.
 export function ThreadArchive({ tid, desktop = false }: { tid: string; desktop?: boolean }) {
-  const { humanThreads, humanArchived, humanDeferred, openThreads } = useData()
-  const t = [...humanThreads, ...humanArchived, ...humanDeferred, ...openThreads].find((x) => x.thread_id === tid)
-  const archived = humanArchived.some((x) => x.thread_id === tid)
-  const perm = !!t?.mails.some((m) => m.permission?.status === 'pending')
+  const d = useData()
+  // The lists' index row (S-4580), else the copy a view has loaded.
+  const row = humanRow(tid, d)
+  const open = d.openThreads.find((x) => x.thread_id === tid)
+  const archived = humanIndex(d, 'archived').some((x) => x.thread_id === tid)
+  const perm = row ? row.ask === 'pending' : !!open && hasPendingPermission(open)
   const needsAnswer = perm || (desktop && threadWaitsOnHuman(tid))
-  const deferred = humanDeferred.some((x) => x.thread_id === tid)
+  const deferred = humanIndex(d, 'deferred').some((x) => x.thread_id === tid)
   const dKey = desktop ? ' (d)' : ''
   const aKey = desktop ? ' (e)' : ''
   return (

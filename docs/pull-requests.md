@@ -34,7 +34,7 @@ The watcher reads it the way it reads `ITSA:`: from anywhere in the body, the fi
   - `build`: `npm run build` in `web/`, on the merged tree.
   - `go`: the Go daemon's build, API-code check, vet and tests in `go/`, then the API contract against the Go daemon, run on a separate server, not the developer's machine.
   - `go` also needs `go test ./...` from `go/`, not only the touched packages: a run of the touched packages alone can pass locally and still fail the gate.
-  - `go-mirror`: `go test -count=1 ./...` in `go/`, on the separate server. Added when a PR changes a TS module the Go tests compare, unless it already selects `go`.
+  - `go-mirror`: `go test -count=1 -timeout 20m ./...` in `go/`, on the separate server. Added when a PR changes a TS module the Go tests compare, unless it already selects `go`.
   - `go-e2e NAME...`: the named tests run against the Go daemon on a separate server. Never added by a path.
   - Merge tooling can add gates for the paths a PR touches; list what your change needs anyway.
 - `Deploy:` how the branch ships

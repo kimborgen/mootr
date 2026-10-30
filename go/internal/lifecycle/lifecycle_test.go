@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"zombiezen.com/go/sqlite"
+	"zombiezen.com/go/sqlite/sqlitex"
 
 	"stam/internal/adapters/claude"
 	"stam/internal/auth"
@@ -97,6 +101,68 @@ setTimeout(function () {}, 600000);
 ' "$dir"
 `
 
+// fixture is the home make-fixture.mjs built once for the package, and when it finished: each live test copies it
+// (freshenFixture) rather than run node again, which was most of a model cell's setup.
+var fixture struct {
+	once sync.Once
+	dir  string
+	at   time.Time
+	err  error
+}
+
+// TestMain removes the package's fixture home when the tests end.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if fixture.dir != "" {
+		os.RemoveAll(fixture.dir)
+	}
+	os.Exit(code)
+}
+
+// copyFixture copies the package's fixture home into home and returns how long ago it was built.
+func copyFixture(t *testing.T, home string) time.Duration {
+	t.Helper()
+	fixture.once.Do(func() {
+		dir, err := os.MkdirTemp("", "stam-life-fixture-")
+		if err != nil {
+			fixture.err = err
+			return
+		}
+		fixture.dir = dir
+		if out, err := exec.Command("node", "../db/testdata/make-fixture.mjs", dir).CombinedOutput(); err != nil {
+			fixture.err = fmt.Errorf("make-fixture.mjs: %v\n%s", err, out)
+		}
+		fixture.at = time.Now()
+	})
+	if fixture.err != nil {
+		t.Fatal(fixture.err)
+	}
+	entries, err := os.ReadDir(fixture.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		b, err := os.ReadFile(filepath.Join(fixture.dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, e.Name()), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return time.Since(fixture.at)
+}
+
+// freshenFixture moves the fixture's times forward by shift, so a copy reads as if make-fixture.mjs had just built it:
+// its starting agent was created a moment ago, not when the first live test of the package ran.
+func freshenFixture(shift time.Duration) string {
+	by := fmt.Sprintf("'+%.3f seconds'", shift.Seconds())
+	at := func(col string) string { return col + " = strftime('%Y-%m-%dT%H:%M:%fZ', " + col + ", " + by + ")" }
+	return "UPDATE agents SET " + at("created_at") + ", " + at("updated_at") + ";\n" +
+		"UPDATE events SET " + at("ts") + ";\n" +
+		"UPDATE migrations SET " + at("done_at") + ";\n"
+}
+
 func newLive(t *testing.T) *live {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
@@ -109,9 +175,7 @@ func newLive(t *testing.T) *live {
 			t.Fatal(err)
 		}
 	}
-	if out, err := exec.Command("node", "../db/testdata/make-fixture.mjs", home).CombinedOutput(); err != nil {
-		t.Fatalf("make-fixture.mjs: %v\n%s", err, out)
-	}
+	shift := copyFixture(t, home)
 	fake := filepath.Join(base, "bin", "fake-claude")
 	if err := os.WriteFile(fake, []byte(strings.Replace(fakeClaude, "BASE", base, 1)), 0o700); err != nil {
 		t.Fatal(err)
@@ -119,6 +183,9 @@ func newLive(t *testing.T) *live {
 	ctx, cancel := context.WithCancel(context.Background())
 	d, err := db.Open(ctx, filepath.Join(home, "stam.db"), db.Options{})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.TestScript(ctx, freshenFixture(shift)); err != nil {
 		t.Fatal(err)
 	}
 	b := make([]byte, 4)
@@ -159,6 +226,12 @@ func newLive(t *testing.T) *live {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	l.opts, l.logs = opts, logs
+	// The fake draws at once and sends no hook (the test plays it after first-prompt:awaiting-hook), so the launch's
+	// waits only add time.
+	prevSteps := firstPromptSteps
+	firstPromptSteps.dialog, firstPromptSteps.look, firstPromptSteps.settle, firstPromptSteps.hook = 10*time.Millisecond,
+		10*time.Millisecond, 50*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { firstPromptSteps = prevSteps })
 	l.life = New(ctx, opts)
 	t.Cleanup(func() {
 		l.releaseNetwork()
@@ -234,6 +307,10 @@ func (l *live) agent(id string) db.Agent {
 	return a
 }
 
+// untilPoll is how often until checks: a state reached between checks waits out the rest of one, and a model's cells
+// wait several times each.
+const untilPoll = 5 * time.Millisecond
+
 func (l *live) until(what string, ok func() bool) {
 	l.t.Helper()
 	end := time.Now().Add(20 * time.Second)
@@ -241,7 +318,7 @@ func (l *live) until(what string, ok func() bool) {
 		if time.Now().After(end) {
 			l.t.Fatalf("timed out waiting for %s", what)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(untilPoll)
 	}
 }
 
@@ -499,4 +576,45 @@ func childrenOf(pid string) []string {
 		}
 	}
 	return kids
+}
+
+// TestStartReconcileRunsFirstPass: after a reboot (no tmux server), StartReconcile returns only once its first pass
+// marked the agent lost, so the API, which listens after it, never serves the idle from before; and the loop's next
+// pass doesn't recover it a second time (S-4371).
+func TestStartReconcileRunsFirstPass(t *testing.T) {
+	l := newLive(t)
+	session := "11111111-2222-4333-8444-" + strings.Repeat("6", 12)
+	if _, err := l.db.CreateAgent(l.ctx, db.NewAgent{ID: "alfe7", Name: "n-alfe7", Role: "developer", Machine: "test-machine", Harness: "claude",
+		Cwd: l.work, SessionID: &session}); err != nil {
+		t.Fatal(err)
+	}
+	workspace := `{"spec":{"kind":"dir","path":"` + l.work + `"},"cwd":"` + l.work + `"}`
+	if err := l.db.UpdateAgent(l.ctx, "alfe7", db.Field{Col: "workspace", Val: workspace}, db.Field{Col: "permission_mode", Val: "auto"},
+		db.Field{Col: "activity", Val: "idle"}, db.Field{Col: "activity_detail", Val: "turn finished"}); err != nil {
+		t.Fatal(err)
+	}
+	// The row was last written before the reboot, so the first pass's snapshot began after it.
+	if err := l.db.Write(l.ctx, func(conn *sqlite.Conn) error {
+		return sqlitex.Execute(conn, "UPDATE agents SET updated_at = '2026-01-01T00:00:00.000Z' WHERE id = 'alfe7'", nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	l.holdNetwork()
+	l.life.StartReconcile()
+	got := l.agent("alfe7")
+	if got.Lifecycle != "shut_down" || got.PendingAction == nil || !strings.Contains(*got.PendingAction, `"type":"recover"`) {
+		t.Fatalf("after StartReconcile: %s %s %q pending %v", got.Lifecycle, got.Activity, detailOf(got), got.PendingAction)
+	}
+	l.releaseNetwork()
+	l.until("alfe7's recovery", func() bool { ok, _ := l.db.HasEvent(l.ctx, "alfe7", "recover"); return ok })
+	// The loop's first tick, after the recovery: nothing is recovered again.
+	l.reconcile(l.life)
+	l.until("alfe7 back up", func() bool { return l.agent("alfe7").Lifecycle == "active" })
+	evs, err := l.db.ListEvents(l.ctx, "alfe7", 100, "recover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 {
+		t.Errorf("%d recover events, want 1", len(evs))
+	}
 }

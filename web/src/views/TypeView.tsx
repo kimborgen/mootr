@@ -16,6 +16,7 @@ import { Glyph } from '../Glyph'
 import { Icon } from '../Icon'
 import { HARNESS, ago, live, model, money, stateLabel } from '../format'
 import { openItsa, StatusGlyph, statusLabel } from '../itsa/itsa'
+import { useShownTick } from '../shell/layout'
 import { useData } from '../store'
 import type { Agent, Itsa, RetrosView } from '../types'
 import { InventoryBody, useInventory } from './InventoryView'
@@ -83,14 +84,15 @@ function Instructions({ name, harnesses, own, def, defaultReviewer, onSaved }: {
   )
 }
 
-function Memory({ name }: { name: string }) {
+function Memory({ name, viewKey }: { name: string; viewKey?: string }) {
   const { mailTick } = useData()
+  const tick = useShownTick(viewKey, mailTick)
   const [data, setData] = useState<RetrosView | 'error' | null>(null)
   useEffect(() => {
     let on = true
     api<RetrosView>('GET', `/api/retros?type=${encodeURIComponent(name)}`).then((r) => on && setData(r), () => on && setData('error'))
     return () => { on = false }
-  }, [name, mailTick])
+  }, [name, tick])
   if (data === 'error') return <p className="muted">The retro items didn't load.</p>
   if (!data) return <Loading className="muted" />
   return data.items.length ? (
@@ -180,7 +182,7 @@ function Proposals({ name }: { name: string }) {
   ) : <p className="muted">No proposal names this type. A proposal shows here when its title, summary or body mentions <code>type-{name}</code>.</p>
 }
 
-export function TypeView({ name }: { name: string }) {
+export function TypeView({ name, viewKey }: { name: string; viewKey?: string }) {
   const [tab, setTab] = useState<Tab>('instructions')
   const [reg, setReg] = useState<Reg | null | 'error'>(null)
   const [rev, setRev] = useState(0)
@@ -210,7 +212,7 @@ export function TypeView({ name }: { name: string }) {
           </div>
           {tab === 'instructions' ? <Instructions name={name} harnesses={harnesses} own={t.harness ?? ''} def={t} defaultReviewer={reg.defaultReviewer} onSaved={() => setRev((n) => n + 1)} />
             : tab === 'skills' ? <TypeSkills name={name} def={t as never} defaultReviewer={reg.defaultReviewer} onSaved={() => setRev((n) => n + 1)} />
-            : tab === 'memory' ? <Memory name={name} />
+            : tab === 'memory' ? <Memory name={name} viewKey={viewKey} />
             : tab === 'agents' ? <Agents name={name} />
             : <Proposals name={name} />}
         </>}

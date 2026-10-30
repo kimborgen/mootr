@@ -5,6 +5,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Tab } from './shell/Tab'
+import { humanRowsOf } from './mail/thread-index'
 import { setData } from './store'
 import type { Agent, Itsa, ItsaStatus, Mail, Thread } from './types'
 import { ThreadChips, WaitThinBar } from './waits'
@@ -61,7 +62,7 @@ afterEach(() => { gapCss.remove() })
 
 const mount = async (r: number, thin = false) => {
   room = r
-  setData({ agents: ['a1', 'a2', 'a3'].map(agent), itsas: ['1', '2', '3'].map(itsa), itsaStatuses: statuses, humanThreads: [thread], humanArchived: [], humanDeferred: [], openThreads: [], decisions: [], attention: [] } as never)
+  setData({ agents: ['a1', 'a2', 'a3'].map(agent), itsas: ['1', '2', '3'].map(itsa), itsaStatuses: statuses, humanRows: humanRowsOf([thread]), openThreads: [], decisions: [], attention: [] } as never)
   await act(async () => { root.render(<><div className="tabs"><Tab id="thread:t1" title="Deploy plan" glyph={null} chips={<ThreadChips tid="t1" tabKey="thread:t1" />} onSelect={() => {}} /></div>{thin ? <WaitThinBar k="thread:t1" /> : null}</>) })
 }
 const tab = () => host.querySelector('.tab')!
@@ -137,7 +138,7 @@ describe('a phone-sized thread tab', () => {
 
   it('keeps the name above its floor by sending the agents to the thin bar', async () => {
     room = 227
-    setData({ agents: ['a1', 'a2', 'a3'].map(agent), itsas: ['1', '2', '3'].map(itsa), itsaStatuses: statuses, humanThreads: [thread], humanArchived: [], humanDeferred: [], openThreads: [], decisions: [], attention: [] } as never)
+    setData({ agents: ['a1', 'a2', 'a3'].map(agent), itsas: ['1', '2', '3'].map(itsa), itsaStatuses: statuses, humanRows: humanRowsOf([thread]), openThreads: [], decisions: [], attention: [] } as never)
     await act(async () => { root.render(<><div className="tabs"><Tab id="thread:t1" title="Deploy plan" glyph={<span className="lucide" />} chips={<ThreadChips tid="t1" tabKey="thread:t1" />} onSelect={() => {}} onClose={() => {}} /></div><WaitThinBar k="thread:t1" /></>) })
     expect(tab().querySelector('.agent-marks')?.children.length).toBe(0)
     expect(host.querySelectorAll('.wait-thin [data-open-agent]').length).toBe(3)
@@ -150,7 +151,7 @@ describe('a phone-sized thread tab', () => {
     const scroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollWidth')
     Object.defineProperty(HTMLElement.prototype, 'scrollWidth', { configurable: true, get(this: HTMLElement) { return this.classList.contains('label') ? 90 : 0 } })
     try {
-      setData({ agents: ['a1', 'a2', 'a3'].map(agent), itsas: ['1', '2', '3'].map(itsa), itsaStatuses: statuses, humanThreads: [thread], humanArchived: [], humanDeferred: [], openThreads: [], decisions: [], attention: [] } as never)
+      setData({ agents: ['a1', 'a2', 'a3'].map(agent), itsas: ['1', '2', '3'].map(itsa), itsaStatuses: statuses, humanRows: humanRowsOf([thread]), openThreads: [], decisions: [], attention: [] } as never)
       await act(async () => { root.render(<div className="tabs"><Tab id="thread:t1" title="Deploy plan" glyph={<span className="lucide" />} chips={<ThreadChips tid="t1" tabKey="thread:t1" />} onSelect={() => {}} onClose={() => {}} /></div>) })
       expect(tab().querySelector('.agent-marks')?.children.length).toBe(0)
       expect(tab().querySelector('[data-itsa]')).toBeNull()
@@ -167,7 +168,7 @@ describe('a thread tab\'s chips follow its width and its agents', () => {
     room = w
     await act(async () => { for (const cb of observers) cb([{ contentRect: { width: w } }]) })
   }
-  const seed = (ids: string[], ms: Mail[] = mails) => setData({ agents: ids.map(agent), itsas: ['1', '2', '3'].map(itsa), itsaStatuses: statuses, humanThreads: [{ thread_id: 't1', mails: ms }], humanArchived: [], humanDeferred: [], openThreads: [], decisions: [], attention: [] } as never)
+  const seed = (ids: string[], ms: Mail[] = mails) => setData({ agents: ids.map(agent), itsas: ['1', '2', '3'].map(itsa), itsaStatuses: statuses, humanRows: humanRowsOf([{ thread_id: 't1', mails: ms }]), openThreads: [], decisions: [], attention: [] } as never)
 
   it('folds the chips as the tab narrows to 150, then brings them all back at 400', async () => {
     await mount(400, true)

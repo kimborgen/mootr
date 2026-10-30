@@ -140,6 +140,10 @@ CREATE TABLE IF NOT EXISTS window_clears (
 -- usage_info's cold-turn and cache-window reads (S-2236): partial, so other events pay nothing.
 CREATE INDEX IF NOT EXISTS events_cache_cold ON events(ts) WHERE type = 'cache:cold';
 CREATE INDEX IF NOT EXISTS events_cache_ttl ON events(agent_id) WHERE type = 'cache:ttl';
+-- The classifier's spend today (activity-classify.ts spentToday, S-4356): the decide events by time, so a
+-- labelling call reads today's rows, not every decide event ever. The query names it (INDEXED BY): SQLite
+-- picks events_agent_type otherwise.
+CREATE INDEX IF NOT EXISTS events_stam_decide ON events(ts) WHERE agent_id = 'stam' AND type = 'decide';
 -- An answer's notice (a permission or input answer, S-3923) until its agent is handed it: the rendered text only, so a
 -- daemon restart before then still delivers it, once. Go's db.EnsureAnswerNotices makes the same table.
 CREATE TABLE IF NOT EXISTS answer_notices (
@@ -642,6 +646,9 @@ CREATE TABLE IF NOT EXISTS activity_items (
 CREATE INDEX IF NOT EXISTS activity_items_start ON activity_items(agent_id, start);
 -- The window read (src/activity-stats.ts): items overlapping [since, now] by start and end.
 CREATE INDEX IF NOT EXISTS activity_items_time ON activity_items(start, "end");
+-- The classifier's unlabelled tool and text items, newest first (activity-classify.ts pending, S-4356):
+-- without it the 5 s tick walked every item since the classifier was switched on, ~185 ms a tick.
+CREATE INDEX IF NOT EXISTS activity_items_unlabelled ON activity_items(start, seq) WHERE category_source IS NULL AND kind IN ('tool', 'text');
 -- How far each agent's transcript has been read into activity_items: the file, a byte offset
 -- at a turn boundary, and the reader's state there (JSON).
 CREATE TABLE IF NOT EXISTS activity_cursors (
@@ -2010,21 +2017,166 @@ export function threadMail(threadId: string, box?: string): ThreadMail[] {
   return rows.map((m) => withRecipients(d, m));
 }
 
+// A mark that moves whenever the database changes (S-4356): total_changes counts this connection's writes and
+// data_version moves on a commit by any other connection (a hook, the CLI), so equal marks mean nothing was written.
+export function changeMark(): string {
+  const d = open();
+  const { n } = d.prepare('SELECT total_changes() AS n').get() as { n: number };
+  const { data_version } = d.prepare('PRAGMA data_version').get() as { data_version: number };
+  return `${data_version}:${n}`;
+}
+
 // The threads a mailbox takes part in, sending or receiving, newest activity first. Each
 // carries every message stored here, so peers' lists merge by thread.
 // `withId` keeps only the threads where that agent sent or received a message (S-1121).
 export function threads(box: string, limit: number, withId?: string): { thread_id: string; mails: ThreadMail[] }[] {
-  const d = open();
-  const ids = d
+  return threadIds(box, limit, withId).map((t) => ({ thread_id: t, mails: threadMail(t) }));
+}
+
+// The ids threads() lists, newest activity first, then by id as the mailbox list orders ties; `only` keeps those among them.
+function threadIds(box: string, limit: number, withId?: string, only?: string[]): string[] {
+  const rows = open()
     .prepare(
       `SELECT m.thread_id AS t, MAX(m.created_at) AS last FROM mail m
        WHERE (m.from_id = ? OR EXISTS (SELECT 1 FROM mail_recipients r WHERE r.mail_id = m.id AND r.agent_id = ?))
          AND (? IS NULL OR EXISTS (SELECT 1 FROM mail w WHERE w.thread_id = m.thread_id AND (w.from_id = ?
               OR EXISTS (SELECT 1 FROM mail_recipients wr WHERE wr.mail_id = w.id AND wr.agent_id = ?))))
-       GROUP BY m.thread_id ORDER BY last DESC LIMIT ?`,
+         AND (? IS NULL OR m.thread_id IN (SELECT value FROM json_each(?)))
+       GROUP BY m.thread_id ORDER BY last DESC, m.thread_id DESC LIMIT ?`,
     )
-    .all(box, box, withId ?? null, withId ?? null, withId ?? null, limit) as { t: string }[];
-  return ids.map(({ t }) => ({ thread_id: t, mails: threadMail(t) }));
+    .all(box, box, withId ?? null, withId ?? null, withId ?? null, only ? JSON.stringify(only) : null, only ? JSON.stringify(only) : null, limit) as { t: string }[];
+  return rows.map((r) => r.t);
+}
+
+// The threads threads() would list, kept to the ids in `only` (S-4520): a list's page, loaded whole once
+// the light pass (threadList) has picked it.
+export function threadsById(box: string, only: string[], withId?: string): { thread_id: string; mails: ThreadMail[] }[] {
+  if (!only.length) return [];
+  return threadIds(box, only.length, withId, only).map((t) => ({ thread_id: t, mails: threadMail(t) }));
+}
+
+// A mail as a thread list orders and splits it, before any page is picked (S-4520): no body, attachments or
+// links, only what the archive, defer and visibility splits read. A whole ThreadMail is one too, as an older
+// peer sends it.
+export interface ListMail {
+  id: string;
+  thread_id?: string | null;
+  from_id: string;
+  created_at: string;
+  notice?: number | null;
+  permission_id?: string | null;
+  kind?: string | null;
+  itsa_id?: string | null;
+  permission?: { status?: string } | null;
+  recipients: { id: string; read_at?: string | null }[];
+  // An index page's mail carries these too (threadList's `index`); a whole ThreadMail has a body instead of a snippet.
+  subject?: string;
+  title?: string | null;
+  from_name?: string | null;
+  snippet?: string;
+  body?: string;
+  // And what an index row's card shows of it (S-4578): its summary, verdict kind, ITSA and linked ITSAs; and for
+  // its tab (S-4579) the agents attached to it.
+  summary?: string | null;
+  verdict?: { kind?: string } | null;
+  about_itsa?: string | null;
+  itsas?: Pick<LinkedItsa, 'id' | 'key' | 'title' | 'status'>[];
+  agents?: string[];
+}
+
+// How much of a body an index page's mail carries, from its first character that isn't whitespace: enough for a
+// one-line snippet once its whitespace is collapsed, and for a card's text (S-4578).
+export const SNIPPET_CHARS = 400;
+// The whitespace JavaScript's trim strips (tab, line breaks, form feed, space, NBSP, the Unicode spaces, the BOM), as
+// SQL ltrim's set: the index form's prefix starts where a client's trim of the whole body does.
+const TRIM_CHARS = 'char(9, 10, 11, 12, 13, 32, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288, 65279)';
+
+// threads() in the light form of ListMail, from three queries however many mails the threads hold. `only` keeps
+// the threads among those ids (a page); `index` adds what an index row shows (S-4520): subject, title, sender name
+// and a snippet of the body, for its card (S-4578) the summary, verdict, ITSA and linked ITSAs, from a fourth, and
+// for its tab (S-4579) the attached agents, from a fifth.
+export function threadList(box: string, limit: number, withId?: string, opts: { only?: string[]; index?: boolean } = {}): { thread_id: string; mails: ListMail[] }[] {
+  if (opts.only && !opts.only.length) return [];
+  const ids = threadIds(box, opts.only ? opts.only.length : limit, withId, opts.only);
+  if (!ids.length) return [];
+  const d = open();
+  const json = JSON.stringify(ids);
+  // The sender's name is resolved here, as withRecipients resolves a whole mail's, so no row looks an agent up.
+  const extra = opts.index
+    ? `, m.subject, m.title, COALESCE(m.from_name, CASE WHEN m.from_id = 'human' THEN 'human' END, (SELECT a.name FROM agents a WHERE a.id = m.from_id OR a.name = m.from_id LIMIT 1), m.from_id) AS from_name, substr(ltrim(m.body, ${TRIM_CHARS}), 1, ${SNIPPET_CHARS}) AS snippet, m.summary, m.verdict, m.about_itsa`
+    : '';
+  const mails = d
+    .prepare(
+      `SELECT m.id, m.thread_id, m.from_id, m.created_at, m.notice, m.permission_id, m.kind, m.itsa_id, p.status AS pstatus${extra} FROM mail m
+       LEFT JOIN permission_requests p ON p.id = m.permission_id
+       WHERE m.thread_id IN (SELECT value FROM json_each(?)) ORDER BY m.created_at`,
+    )
+    .all(json) as unknown as (Omit<ListMail, 'recipients' | 'permission'> & { pstatus: string | null })[];
+  const recipients = new Map<string, ListMail['recipients']>();
+  for (const r of d
+    .prepare('SELECT r.mail_id, r.agent_id AS id, r.read_at FROM mail_recipients r JOIN mail m ON m.id = r.mail_id WHERE m.thread_id IN (SELECT value FROM json_each(?))')
+    .all(json) as { mail_id: string; id: string; read_at: string | null }[]) {
+    let list = recipients.get(r.mail_id);
+    if (!list) recipients.set(r.mail_id, (list = []));
+    list.push({ id: r.id, read_at: r.read_at });
+  }
+  // Each mail's linked ITSAs, in mailItsaLinks' order, and its attached agents, in mailAgentIds' order.
+  const itsas = new Map<string, NonNullable<ListMail['itsas']>>();
+  const agents = new Map<string, string[]>();
+  if (opts.index) {
+    for (const l of d
+      .prepare(`SELECT l.mail_id, i.id, i.key, i.title, i.status FROM mail_itsas l JOIN itsas i ON i.id = l.itsa_id JOIN mail m ON m.id = l.mail_id
+        WHERE m.thread_id IN (SELECT value FROM json_each(?))
+        ORDER BY l.mail_id, CASE l.source WHEN 'itsa' THEN 0 WHEN 'named' THEN 1 WHEN 'attached' THEN 2 ELSE 3 END, i.created_at`)
+      .all(json) as { mail_id: string; id: string; key: string; title: string; status: string }[]) {
+      let list = itsas.get(l.mail_id);
+      if (!list) itsas.set(l.mail_id, (list = []));
+      list.push({ id: l.id, key: l.key, title: l.title, status: l.status });
+    }
+    for (const a of d
+      .prepare('SELECT a.mail_id, a.agent_id FROM mail_agents a JOIN mail m ON m.id = a.mail_id WHERE m.thread_id IN (SELECT value FROM json_each(?)) ORDER BY a.rowid')
+      .all(json) as { mail_id: string; agent_id: string }[]) {
+      let list = agents.get(a.mail_id);
+      if (!list) agents.set(a.mail_id, (list = []));
+      list.push(a.agent_id);
+    }
+  }
+  const byThread = new Map<string, ListMail[]>(ids.map((t) => [t, []]));
+  for (const { pstatus, ...m } of mails) {
+    byThread.get(m.thread_id!)?.push({
+      ...m,
+      ...(m.permission_id && pstatus ? { permission: { status: pstatus } } : {}),
+      ...(opts.index ? { verdict: parseVerdict(m.verdict) } : {}),
+      // Always both, empty or not: a peer reads a mail without `agents` as from a release before them (S-4579).
+      ...(opts.index ? { itsas: itsas.get(m.id) ?? [], agents: agents.get(m.id) ?? [] } : {}),
+      recipients: recipients.get(m.id) ?? [],
+    });
+  }
+  return ids.map((t) => ({ thread_id: t, mails: byThread.get(t)! }));
+}
+
+// foldMails for ListMail: copies of one mail joined, their recipients unioned, a pending permission kept.
+export function foldListMails<M extends ListMail>(mails: M[]): M[] {
+  const byId = new Map<string, M>();
+  for (const m of mails) {
+    const have = byId.get(m.id);
+    if (!have) {
+      byId.set(m.id, { ...m, recipients: m.recipients.map((r) => ({ ...r })) });
+      continue;
+    }
+    for (const r of m.recipients) {
+      const mine = have.recipients.find((x) => x.id === r.id);
+      if (!mine) have.recipients.push({ ...r });
+      else mine.read_at ??= r.read_at;
+    }
+    if (!have.permission && m.permission) have.permission = m.permission;
+    if (have.title == null && m.title != null) have.title = m.title;
+    if (have.summary == null && m.summary != null) have.summary = m.summary;
+    if (have.verdict == null && m.verdict != null) have.verdict = m.verdict;
+    if (!have.itsas?.length && m.itsas?.length) have.itsas = m.itsas;
+    if (!have.agents?.length && m.agents?.length) have.agents = m.agents;
+  }
+  return [...byId.values()];
 }
 
 // The threads holding mail about an ITSA (its `about_itsa`), with every message stored here,

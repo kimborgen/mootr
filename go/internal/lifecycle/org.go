@@ -85,6 +85,7 @@ func (l *Lifecycle) SetAgentGone(fn func(ctx context.Context, id string)) {
 
 // tellAgentGone runs the hook SetAgentGone set, for an agent archived or forgotten, with no lifecycle lock held.
 func (l *Lifecycle) tellAgentGone(ctx context.Context, id string) {
+	l.restForget(id)
 	l.orgMu.Lock()
 	gone := l.agentGone
 	l.orgMu.Unlock()

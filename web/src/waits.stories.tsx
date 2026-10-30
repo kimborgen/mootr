@@ -1,3 +1,4 @@
+import { humanRowsOf } from './mail/thread-index'
 import { AGENTS, agent } from './stories/fixtures'
 import { Row } from './stories/helpers'
 import { ds, type Story } from './stories/types'
@@ -93,8 +94,7 @@ const threadWith = (agents: string[], itsaIds: string[], o: { deferred?: boolean
   agents: AGENTS,
   itsas: [...MANY, PROJECT],
   itsaStatuses: STATUSES,
-  humanThreads: o.deferred ? [] : [THREAD(agents, itsaIds)],
-  humanDeferred: o.deferred ? [THREAD(agents, itsaIds)] : [],
+  humanRows: o.deferred ? humanRowsOf([], [], [THREAD(agents, itsaIds)]) : humanRowsOf([THREAD(agents, itsaIds)]),
 })
 const THREAD = (agents: string[], itsaIds: string[]) => ({
   thread_id: 'tf1',

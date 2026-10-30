@@ -103,10 +103,10 @@ export function seesPlacedAsk(box: string, holders: string[]): boolean {
   });
 }
 
-const holdersOf = (y: db.ThreadMail) => [y.from_id, ...y.recipients.map((r) => r.id)];
+const holdersOf = (y: db.ListMail) => [y.from_id, ...y.recipients.map((r) => r.id)];
 
 // The mail of one thread a mailbox reads whole, without the placed asks it doesn't see (S-3827).
-export function withoutHiddenAsks<T extends db.ThreadMail>(box: string, mails: T[]): T[] {
+export function withoutHiddenAsks<T extends db.ListMail>(box: string, mails: T[]): T[] {
   if (box === HUMAN) return mails;
   return mails.filter((y) => !isPlacedAsk(y) || seesPlacedAsk(box, holdersOf(y)));
 }
@@ -114,7 +114,7 @@ export function withoutHiddenAsks<T extends db.ThreadMail>(box: string, mails: T
 // A thread as a mailbox's list shows it (GET /api/agents/:box/threads): without the placed asks it doesn't see, and,
 // when the box is in the thread only by its own placed ask, only the mail it may read (S-3827): the ask makes it part
 // of the thread for the list, never a reader of the thread's other mail.
-export function listedThread<T extends { thread_id: string; mails: db.ThreadMail[] }>(box: string, t: T): T {
+export function listedThread<T extends { thread_id: string; mails: db.ListMail[] }>(box: string, t: T): T {
   if (box === HUMAN) return t;
   const mails = withoutHiddenAsks(box, t.mails);
   if (mails.some((y) => !isPlacedAsk(y) && holdersOf(y).includes(box))) return { ...t, mails };
@@ -152,14 +152,17 @@ export function mayReadMail(box: string, x: db.Mail, reader = box): boolean {
   return mayReadWholeThread(box, x.thread_id ?? x.id, reader);
 }
 
+// What threadReader's test reads of a mail: a whole Mail, or the ListMail of a thread list (S-4520).
+type ReadTest = Pick<db.ListMail, 'id' | 'thread_id' | 'permission_id' | 'kind' | 'itsa_id'>;
+
 // What a mailbox may read in one thread, decided with one load of the thread: `true` when it may read the whole thread,
 // else a test for a mail of it, by the same rules as mayReadMail. For many mails of one thread.
-export function threadReader(box: string, threadId: string, reader = box): true | ((x: db.Mail) => boolean) {
+export function threadReader(box: string, threadId: string, reader = box): true | ((x: ReadTest) => boolean) {
   const mails = db.threadMail(threadId);
   const holders = new Map(mails.map((y) => [y.id, holdersOf(y)]));
   // A thread with a placed ask isn't read whole by all of its readers: the ask goes by its holders (S-3827).
-  const placed = (x: db.Mail) => isPlacedAsk(x) && box !== HUMAN;
-  const seesAsk = (x: db.Mail) => seesPlacedAsk(box, holders.get(x.id) ?? []);
+  const placed = (x: ReadTest) => isPlacedAsk(x) && box !== HUMAN;
+  const seesAsk = (x: ReadTest) => seesPlacedAsk(box, holders.get(x.id) ?? []);
   if (mayReadWholeThread(box, threadId, reader)) return mails.some(placed) ? (x) => !placed(x) || seesAsk(x) : true;
   const sees = new Map<string, boolean>();
   const seesHolder = (h: string) => {

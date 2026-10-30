@@ -20,6 +20,7 @@ writeFileSync(join(home, 'registry.json'), registryJSON);
 
 const db = await import(new URL('src/db.ts', root));
 const allocations = await import(new URL('src/allocations.ts', root));
+const costNotices = await import(new URL('src/cost-notices.ts', root));
 
 const T0 = Date.parse('2026-10-11T10:00:00.000Z');
 const MIN = 60_000;
@@ -57,6 +58,8 @@ for (const c of cases) {
       d.exec(`DELETE FROM ${t}`);
     } catch {}
   }
+  // The share lines' window shares are kept for 10 s; each case starts from its own data.
+  costNotices.resetSharesMemo();
   noticesSeen = 0;
   mailSeen = 0;
   for (const a of c.agents ?? []) {

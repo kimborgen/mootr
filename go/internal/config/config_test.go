@@ -159,10 +159,13 @@ func TestParseSettings(t *testing.T) {
 		s.IdleCompaction = IdleCompactionSettings{Enabled: true, IdleMinutes: 50, GrowthTokens: 50_000, MinTokens: 100_000}
 		s.ExitRecovery = ExitRecoverySettings{PercentOfWindow: 85, WindowTokens: 350_000, RepeatMinutes: 5}
 		s.Process = ProcessSettings{Run: "dry-run", MaxSpawnsPerHour: 3}
+		s.Rest = RestSettings{Enabled: true, Types: map[string]bool{"cos": false, "assistant": false}}
 		s.CostOnError, s.CostFallbackMinutes, s.CostSoftStopMinutes = &CostAction{Action: "soft-stop", Else: "wait"}, 15, 10
 		s.OpenRouterWarnUSD, s.OpenRouterSystemReserveUSD = 2, 1
 		s.SubscriptionWarnPercent = []float64{80, 95}
+		s.WatchLinear = parseWatchLinear(nil)
 		s.ResourceWarn = parseResourceWarn(nil)
+		s.WatchGithubSeconds = 60
 		s.CostShape = parseCostShape(nil, nil)
 		s.Diff = DiffSettings{Classes: DiffClassDefaults, FetchSeconds: 60, RefreshSeconds: 20, MaxPrRefs: 100}
 		return s
@@ -671,6 +674,15 @@ func TestDiffSettings(t *testing.T) {
 		}
 		if !reflect.DeepEqual(s.Diff, want) {
 			t.Errorf("%s: %+v, want %+v", text, s.Diff, want)
+		}
+	}
+}
+
+func TestWatchGithubSeconds(t *testing.T) {
+	for raw, want := range map[string]float64{`{}`: 60, `{"watch":{"githubSeconds":1}}`: 1, `{"watch":{"githubSeconds":0}}`: 0, `{"watch":{"githubSeconds":"x"}}`: 60} {
+		s, err := ParseSettings([]byte(raw), "m1")
+		if err != nil || s.WatchGithubSeconds != want {
+			t.Errorf("%s: %v %v", raw, s.WatchGithubSeconds, err)
 		}
 	}
 }

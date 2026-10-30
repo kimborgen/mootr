@@ -28,8 +28,10 @@ type Settings struct {
 	Home string
 	// ChiefOfStaff is the chief of staff's name or id; empty when none is set.
 	ChiefOfStaff string
-	Auth         AuthSettings
-	Itsa         ItsaSettings
+	// WatchGithubSeconds is watch.githubSeconds: the GitHub poller's interval in seconds, 60 by default; 0 disables it.
+	WatchGithubSeconds float64
+	Auth               AuthSettings
+	Itsa               ItsaSettings
 	// CostMode is cost.display.mode: api, five_hour, seven_day or subscription, else api (src/cost-display.ts).
 	CostMode string
 	// CostAccounts is cost.accounts (src/accounts.ts): which provider login or key an agent bills to, by name. Empty
@@ -64,6 +66,8 @@ type Settings struct {
 	RequirementsEnabled bool
 	// Requirements are the rest of settings.requirements (src/settings.ts), with its defaults.
 	Requirements RequirementsSettings
+	// WatchLinear is the Linear poller's interval and tool names (settings_watch_linear.go).
+	WatchLinear WatchLinear
 	// DecisionsModel is settings.decisions.model: the decision model stam asks, `provider:model` or an OpenRouter id.
 	DecisionsModel string
 	// ProviderIDs are the keys of settings.providers: the configured providers a model name may start with.
@@ -143,6 +147,8 @@ type Settings struct {
 	Context        ContextSettings
 	IdleCompaction IdleCompactionSettings
 	ExitRecovery   ExitRecoverySettings
+	// Rest is settings.rest: only enabled and types, which a requested rest (wait_for or wake_me with rest) reads.
+	Rest RestSettings
 	// Process is settings.process (S-946): what a stage entry does.
 	Process ProcessSettings
 	// CostShape is cost.accounts' order and match objects and cost.display.prices (costshape.go).
@@ -379,6 +385,13 @@ type IdleCompactionSettings struct {
 	IdleMinutes, GrowthTokens, MinTokens float64
 }
 
+// RestSettings is settings.rest (S-2237): enabled, and types, where false keeps an agent type up (`cos` is the chief of
+// staff). The timing rules' afterMinutes and graceMinutes aren't read yet: the Go daemon rests only on request.
+type RestSettings struct {
+	Enabled bool
+	Types   map[string]bool
+}
+
 // ExitRecoverySettings is settings.exitRecovery: a harness that exits at percentOfWindow of windowTokens is resumed
 // once, to compact first, unless it did within repeatMinutes (S-220).
 type ExitRecoverySettings struct {
@@ -576,7 +589,10 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 	var user struct {
 		Home         any `json:"home"`
 		ChiefOfStaff any `json:"chiefOfStaff"`
-		Auth         struct {
+		Watch        struct {
+			GithubSeconds any `json:"githubSeconds"`
+		} `json:"watch"`
+		Auth struct {
 			SharedTokenClaims any `json:"sharedTokenClaims"`
 			HumanStrict       any `json:"humanStrict"`
 			LocalHuman        any `json:"localHuman"`
@@ -635,7 +651,7 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 			Roots any `json:"roots"`
 		} `json:"files"`
 		// Diff is type-checked by key, as TS reads it, so a wrong type there costs only its own defaults.
-		Diff any `json:"diff"`
+		Diff            any `json:"diff"`
 		ChildNotices    any `json:"childNotices"`
 		DeveloperCap    any `json:"developerCap"`
 		PermissionModes struct {
@@ -668,7 +684,11 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 		Context        map[string]any `json:"context"`
 		IdleCompaction map[string]any `json:"idleCompaction"`
 		ExitRecovery   map[string]any `json:"exitRecovery"`
-		Decisions      struct {
+		Rest           struct {
+			Enabled any            `json:"enabled"`
+			Types   map[string]any `json:"types"`
+		} `json:"rest"`
+		Decisions struct {
 			Model    any `json:"model"`
 			MailGate any `json:"mailGate"`
 		} `json:"decisions"`
@@ -684,6 +704,12 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 	str := func(v any) string { s, _ := v.(string); return s }
 	s := Settings{
 		ChiefOfStaff: str(user.ChiefOfStaff),
+		WatchGithubSeconds: func() float64 {
+			if n, ok := user.Watch.GithubSeconds.(float64); ok {
+				return n
+			}
+			return 60
+		}(),
 		Auth: AuthSettings{
 			SharedTokenClaims: user.Auth.SharedTokenClaims != false,
 			HumanStrict:       user.Auth.HumanStrict == true,
@@ -727,6 +753,7 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 	s.GlobalOnExhausted = str(user.Cost.Global.OnExhausted)
 	s.ResourceWarn = parseResourceWarn(data)
 	s.Tiny = parseTiny(data)
+	s.WatchLinear = parseWatchLinear(data)
 	s.Home = or(str(user.Home), or(str(user.Itsa.Home), machine))
 	s.Itsa.Home = s.Home
 	if m := str(user.Cost.Display.Mode); costModes[m] {
@@ -870,6 +897,14 @@ func ParseSettings(data []byte, machine string) (Settings, error) {
 		GrowthTokens: num(user.IdleCompaction, "growthTokens", 50_000), MinTokens: num(user.IdleCompaction, "minTokens", 100_000)}
 	if v, ok := user.IdleCompaction["enabled"]; ok {
 		s.IdleCompaction.Enabled = v != nil && v != false && v != 0.0 && v != ""
+	}
+	// rest is `{ ...DEFAULTS.rest, ...user.rest, types: { ...DEFAULTS.rest.types, ...user.rest?.types } }`.
+	s.Rest = RestSettings{Enabled: true, Types: map[string]bool{"cos": false, "assistant": false}}
+	if v := user.Rest.Enabled; v != nil {
+		s.Rest.Enabled = v != false && v != 0.0 && v != ""
+	}
+	for k, v := range user.Rest.Types {
+		s.Rest.Types[k] = v != nil && v != false && v != 0.0 && v != ""
 	}
 	s.ExitRecovery = ExitRecoverySettings{PercentOfWindow: num(user.ExitRecovery, "percentOfWindow", 85),
 		WindowTokens: num(user.ExitRecovery, "windowTokens", 350_000), RepeatMinutes: num(user.ExitRecovery, "repeatMinutes", 5)}

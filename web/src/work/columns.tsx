@@ -8,11 +8,12 @@ import { RestBadge } from '../waits'
 import { Icon, type IconName } from '../Icon'
 import { HEALTH, StatusGlyph, statusInfo, statusLabel, toneOf, toneVar } from '../itsa/itsa'
 import { TONE_CLASS, type FieldTone } from '../itsa/fields'
-import { byId } from '../store'
+import { byId, getData } from '../store'
 import { agentIdsOf, since, type WorkRow } from './model'
+import { pausedEpic, PAUSED_STATUS, PAUSED_TITLE } from './paused'
 import { activityOf, costOf, fmtDuration, fmtIssueCost, fmtReviews, fmtTimeShare, fmtWindow, githubSubject, issueCostTitle, LINK_KINDS, linkKind, linkLabel, linkTitle, prState, reviewOf, testsOf, waitColor, waitingKinds, type ItsaActivity, type IssueCost, type WatchState, type LinkKind } from './links'
 import type { WorkExtras } from './data'
-import type { Agent, CostMode, ItsaLink } from '../types'
+import type { Agent, CostMode, Itsa, ItsaLink } from '../types'
 import { prUrlTarget, useDiffRepos } from '../diff/diffRepos'
 import { openDiff } from '../files/open'
 import { takePress } from './press-flag'
@@ -42,6 +43,12 @@ export interface WorkColumn extends SortFilterCol {
   render: (row: WorkRow, cx: CellContext) => ReactNode
   // The item's form on an issue card or an agent card (card-items.tsx).
   card: CardSpec
+}
+
+// The status a cell shows: a paused epic (paused.ts) as waiting, with a title that says why; else the stored one.
+function shownStatus(it: Itsa, now: number): { status: string; title?: string } {
+  const owner = it.owner ? byId(it.owner) : undefined
+  return pausedEpic(it, getData().itsas, owner, now, (s) => statusInfo(s).category) ? { status: PAUSED_STATUS, title: PAUSED_TITLE } : { status: it.status }
 }
 
 export const agentsOf = (row: WorkRow) => agentIdsOf(row.it).map(byId).filter((a) => !!a)
@@ -224,10 +231,10 @@ export const WORK_COLUMNS: WorkColumn[] = ([
     id: 'status', label: 'Status', width: 'minmax(calc(var(--space-12) * 2 + var(--space-8)), 1fr)',
     card: {
       where: ['issue'],
-      inline: ({ it }) => (it ? <span className="bc-status" style={{ color: toneVar(it.status) }}><StatusGlyph status={it.status} />{statusLabel(it.status)}</span> : null),
-      chip: ({ it }) => (it ? badge(statusLabel(it.status), undefined, toneClass(STATUS_TONE[toneOf(statusInfo(it.status))])) : null),
+      inline: ({ it, cx }) => { if (!it) return null; const s = shownStatus(it, cx.now); return <span className="bc-status" style={{ color: toneVar(s.status) }} title={s.title} data-paused={s.title ? '' : undefined}><StatusGlyph status={s.status} />{statusLabel(s.status)}</span> },
+      chip: ({ it, cx }) => { if (!it) return null; const s = shownStatus(it, cx.now); return badge(statusLabel(s.status), s.title, toneClass(STATUS_TONE[toneOf(statusInfo(s.status))])) },
     },
-    render: ({ it }) => <span className="w-status" style={{ color: toneVar(it.status) }}><StatusGlyph status={it.status} />{statusLabel(it.status)}</span>,
+    render: ({ it }, cx) => { const s = shownStatus(it, cx.now); return <span className="w-status" style={{ color: toneVar(s.status) }} title={s.title} data-paused={s.title ? '' : undefined}><StatusGlyph status={s.status} />{statusLabel(s.status)}</span> },
   },
   {
     id: 'agents', label: 'Agents', width: 'minmax(calc(var(--space-12) * 2), 1.5fr)',

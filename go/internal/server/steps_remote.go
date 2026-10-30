@@ -38,6 +38,9 @@ func (s *Server) forwardError(ctx context.Context, ref string, msg string) {
 }
 
 func (s *Server) homePeer() (config.Peer, bool) {
+	if s.peers == nil {
+		return config.Peer{}, false
+	}
 	home := s.settings.Get().Itsa.Home
 	for _, p := range s.peers.Peers() {
 		if p.Name == home {

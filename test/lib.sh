@@ -72,6 +72,14 @@ for v in $(env | sed -n 's/^\(MOOTR_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; do
 # override never leaves one name to be shadowed by the other. VALUE is passed on as written, quotes included.
 env_pair() { printf 'STAM_%s=%s MOOTR_%s=%s' "$1" "$2" "$1" "$2"; }
 
+# with_agent_id ID CMD...: runs CMD as the agent ID, with the id under both names (S-3439). A reader takes MOOTR_AGENT_ID first, so a
+# fixture that sets only STAM_AGENT_ID loses to an inherited MOOTR_AGENT_ID. Works on a shell function, as `on` does.
+with_agent_id() {
+  _aa_id=$1
+  shift
+  STAM_AGENT_ID=$_aa_id MOOTR_AGENT_ID=$_aa_id "$@"
+}
+
 # twin_env NAME...: exports MOOTR_NAME from the STAM_NAME already set in this shell (for each NAME that is set), for a
 # script that assigns a STAM_ name itself after sourcing this file.
 twin_env() {
@@ -161,6 +169,8 @@ daemon_home() {
   cat >"$_h/test.env" <<EOF
 export $(env_pair HOME "'$_h'") $(env_pair PORT "$_p") $(env_pair URL "http://127.0.0.1:$_p") $(env_pair TMUX_SOCKET "stam-test-$STAM_TEST_OWNER-${TEST_TMP##*.}-$1") $(env_pair MACHINE "$1") $(env_pair BIND 127.0.0.1) $(env_pair OPENCODE_PORT "$_o") $(env_pair AGENTS_SKILLS "'$_h/agents-skills'")
 EOF
+  # S-3105: a roomy host unless the script fixes its own /proc (STAM_PROC_DIR), so the real machine's load never queues a developer spawn.
+  [ -n "$STAM_PROC_DIR" ] || printf 'export %s\n' "$(env_pair TEST_HOST_ROOM 1)" >>"$_h/test.env"
   printf '{ "peers": [] }\n' >"$_h/settings.json"
   # The token exists before the daemon starts, so peers can be wired up front.
   (umask 077 && python3 -c 'import secrets; print(secrets.token_urlsafe(24))' >"$_h/token")

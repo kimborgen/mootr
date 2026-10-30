@@ -19,11 +19,12 @@ const short = (k: string) => WIN_SHORT[k] ?? winLabel(k)
 const REFRESH_MS = 5 * 60_000
 const MIN_GAP_MS = 30_000
 
-// The accounts, loaded once and then lightly: on a usage change (at most every 30 s, a change inside
-// the gap lands when it ends), when the page becomes visible, and every 5 minutes.
-function useAccounts(): Account[] | null {
+// The accounts, read only while the pane shows: on show, on a usage change (at most every 30 s, a change
+// inside the gap lands when it ends), when the page becomes visible, and every 5 minutes.
+function useAccounts(shown: boolean): Account[] | null {
   const [accounts, setAccounts] = useState<Account[] | null>(null)
   useEffect(() => {
+    if (!shown) return
     let live = true
     let last = 0
     let later: number | undefined
@@ -42,7 +43,7 @@ function useAccounts(): Account[] | null {
     const t = window.setInterval(load, REFRESH_MS)
     document.addEventListener('visibilitychange', load)
     return () => { live = false; off(); window.clearInterval(t); window.clearTimeout(later); document.removeEventListener('visibilitychange', load) }
-  }, [])
+  }, [shown])
   return accounts
 }
 
@@ -125,8 +126,9 @@ function Entry({ e, phone }: { e: CostEntry; phone: boolean }) {
   )
 }
 
-export function CostSide() {
-  const accounts = useAccounts()
+// `shown`: the pane is on screen (its tab showing, the sidebar open). Hidden, it reads nothing.
+export function CostSide({ shown = true }: { shown?: boolean }) {
+  const accounts = useAccounts(shown)
   useShell()
   const phone = isPhone()
   const entries = costEntries(accounts ?? undefined)

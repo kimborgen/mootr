@@ -4,7 +4,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Icon } from '../Icon'
 import { formatSize } from '../format'
-import { useData } from '../store'
+import { useMachinesShown, useData } from '../store'
+import { useViewShown } from '../shell/layout'
 import { Failure } from './FileView'
 import { baseName, onRecent, parentOf, pathBoxTarget, readRecent, type FileRef } from './fileKey'
 import { FilesFail, listFiles, type Entry, type Listing } from './filesApi'
@@ -107,6 +108,8 @@ function Browse({ host, path, close }: { host: string; path: string; close: () =
 
 export function FilesView() {
   const { machine, machines } = useData()
+  // The peers list reads the machines poll, which runs fast only while this view shows.
+  useMachinesShown(useViewShown('files'))
   const here = machine || 'this machine'
   const peers = machines.map((m) => m.name).filter((n) => n !== machine)
   const [text, setText] = useState('')

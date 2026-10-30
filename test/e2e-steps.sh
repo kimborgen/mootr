@@ -104,7 +104,7 @@ until_logged "$TOOLSTEP" 3
 # Through mcp.ts: a denied call returns an error and doesn't run; a call the step lets through runs.
 MCP="$(dirname "$(readlink -f "$0")")/mcp-call.mjs"
 mcp_send() {
-  STAM_BIN="$STAM" STAM_AGENT_ID="$SENDER" node "$MCP" \
+  STAM_BIN="$STAM" with_agent_id "$SENDER" node "$MCP" \
     "$(python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send_mail","arguments":{"to":[sys.argv[1]],"subject":"Pitch","body":sys.argv[2]}}}))' "$RECV" "$1")"
 }
 DENIED=$(mcp_send "P=0.9 buy now")

@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { apply, emptyLayout, type Layout, type LayoutOp } from '../../src/layout-ops.ts'
 import { MobileNav } from './App'
 import * as shell from './shell/layout'
+import { humanRowsOf } from './mail/thread-index'
 import { setData } from './store'
 import { setUi } from './ui/state'
 
@@ -43,7 +44,7 @@ beforeEach(() => {
   document.body.append(host)
   root = createRoot(host)
   // The bar reads the waiting list and the mail counts; none of them is in these tests.
-  setData({ agents: [], itsas: [], humanThreads: [], humanArchived: [], humanDeferred: [] } as never)
+  setData({ agents: [], itsas: [], humanRows: humanRowsOf() } as never)
 })
 afterEach(() => {
   act(() => root.unmount())

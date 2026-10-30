@@ -331,3 +331,99 @@ test('watchedSubjects lists live subscription and event-wait subjects, distinct'
   await itsa.create({ title: 'linked', by: 'human', owner: 'human', links: [{ url: 'https://github.com/o/r/issues/9' }] });
   assert.deepEqual(watch.watchedSubjects().sort(), ['github:o/r', 'github:o/r#12', 'github:o/r#9']);
 });
+
+// S-4356: a watch whose owner is archived or shut down isn't polled; its subscription stays, so a resumed agent gets it back. A
+// forgotten owner (no row here, no lifecycle on a peer) is not known to be gone, so it keeps polling.
+test('a watch owned by an archived or shut-down agent is not polled, a forgotten one keeps polling, and a resumed owner polls again (S-4356)', () => {
+  for (const [id, lifecycle] of [['live', 'active'], ['paused', 'paused'], ['arch', 'archived'], ['down', 'shut_down'], ['gone', 'active']]) {
+    agent(id, id);
+    db.open().prepare('UPDATE agents SET lifecycle = ? WHERE id = ?').run(lifecycle, id);
+  }
+  for (const id of ['live', 'paused', 'arch', 'down', 'gone']) watch.createSubscription({ subscriber_kind: 'agent', subscriber_id: id, filter: { subjects: [`github:o/r#${id}`] }, by: id });
+  db.open().prepare('DELETE FROM agents WHERE id = ?').run('gone');
+  assert.deepEqual(watch.watchedSubjects().sort(), ['github:o/r#gone', 'github:o/r#live', 'github:o/r#paused']);
+  db.open().prepare('UPDATE agents SET lifecycle = ? WHERE id = ?').run('active', 'arch');
+  assert.deepEqual(watch.watchedSubjects().sort(), ['github:o/r#arch', 'github:o/r#gone', 'github:o/r#live', 'github:o/r#paused']);
+  assert.equal(db.open().prepare("SELECT COUNT(*) AS n FROM event_subscriptions WHERE subscriber_kind = 'agent'").get().n, 5, 'the subscriptions of dead owners are kept');
+});
+
+// S-4356: an ITSA's link watches follow its owner: an archived owner's are not polled, a live or human owner's are.
+test('a PR linked to an ITSA owned by an archived agent is not polled; a live or human owner keeps it (S-4356)', async () => {
+  agent('arch', 'arch');
+  agent('live', 'live');
+  db.open().prepare("UPDATE agents SET lifecycle = 'archived' WHERE id = ?").run('arch');
+  await itsa.create({ title: 'gone owner', by: 'human', owner: 'human', links: [{ url: 'https://github.com/o/r/pull/1' }] });
+  await itsa.create({ title: 'live owner', by: 'human', owner: 'human', links: [{ url: 'https://github.com/o/r/pull/2' }] });
+  await itsa.create({ title: 'human owner', by: 'human', owner: 'human', links: [{ url: 'https://github.com/o/r/pull/3' }] });
+  db.open().prepare('UPDATE itsas SET owner = ? WHERE title = ?').run('arch', 'gone owner');
+  db.open().prepare('UPDATE itsas SET owner = ? WHERE title = ?').run('live', 'live owner');
+  assert.deepEqual(watch.watchedSubjects().sort(), ['github:o/r#2', 'github:o/r#3']);
+});
+
+// S-4356: a PR whose final event is stored is not polled again; an open one still is.
+test('a PR whose merged or closed state is stored is not polled; an open one is (S-4356)', () => {
+  agent('live', 'live');
+  for (const n of [3, 4, 5]) watch.createSubscription({ subscriber_kind: 'agent', subscriber_id: 'live', filter: { subjects: [`github:o/r#${n}`] }, by: 'live' });
+  db.setWatchState('github:o/r#3', { type: 'pr', state: 'merged' }, {});
+  db.setWatchState('github:o/r#4', { type: 'pr', state: 'closed' }, {});
+  db.setWatchState('github:o/r#5', { type: 'pr', state: 'open' }, {});
+  assert.deepEqual(watch.watchedSubjects().sort(), ['github:o/r#5']);
+});
+
+// S-4356: an ITSA owned on a peer follows the peer's lifecycle, as the peer's row says; a peer whose lifecycle is unknown keeps polling.
+test('an open ITSA owned by an active peer agent keeps its link watch; an archived peer owner drops it (S-4356)', async () => {
+  const d = db.open();
+  const seen = new Date().toISOString();
+  d.prepare('INSERT INTO peer_agents (id, name, machine, updated_at, lifecycle) VALUES (?, ?, ?, ?, ?)').run('peer-active', 'pa', 'storage', seen, 'active');
+  d.prepare('INSERT INTO peer_agents (id, name, machine, updated_at, lifecycle) VALUES (?, ?, ?, ?, ?)').run('peer-arch', 'pr', 'storage', seen, 'archived');
+  d.prepare('INSERT INTO peer_agents (id, name, machine, updated_at, lifecycle) VALUES (?, ?, ?, ?, ?)').run('peer-unknown', 'pu', 'storage', seen, null);
+  await itsa.create({ title: 'peer active', by: 'human', owner: 'human', links: [{ url: 'https://github.com/o/r/pull/11' }] });
+  await itsa.create({ title: 'peer archived', by: 'human', owner: 'human', links: [{ url: 'https://github.com/o/r/pull/12' }] });
+  await itsa.create({ title: 'peer unknown', by: 'human', owner: 'human', links: [{ url: 'https://github.com/o/r/pull/13' }] });
+  d.prepare('UPDATE itsas SET owner = ? WHERE title = ?').run('peer-active', 'peer active');
+  d.prepare('UPDATE itsas SET owner = ? WHERE title = ?').run('peer-arch', 'peer archived');
+  d.prepare('UPDATE itsas SET owner = ? WHERE title = ?').run('peer-unknown', 'peer unknown');
+  assert.deepEqual(watch.watchedSubjects().sort(), ['github:o/r#11', 'github:o/r#13']);
+});
+
+// S-4356: each guard in the owner checks. Removing or inverting one of them makes one of these fail.
+test('an unowned ITSA, and an ITSA whose row is missing, keep polling (S-4356)', async () => {
+  await itsa.create({ title: 'unowned', by: 'human', owner: 'human', links: [{ url: 'https://github.com/o/r/pull/21' }] });
+  db.open().prepare('UPDATE itsas SET owner = NULL WHERE title = ?').run('unowned');
+  await itsa.create({ title: 'gone row', by: 'human', owner: 'human', links: [{ url: 'https://github.com/o/r/pull/22' }] });
+  db.open().prepare('DELETE FROM itsas WHERE title = ?').run('gone row');
+  assert.deepEqual(watch.watchedSubjects().sort(), ['github:o/r#21', 'github:o/r#22']);
+});
+
+test('an ITSA whose owner row cannot be read keeps polling; so does a forgotten owner when the peer lookup fails (S-4356)', async () => {
+  const d = db.open();
+  await itsa.create({ title: 'unreadable', by: 'human', owner: 'human', links: [{ url: 'https://github.com/o/r/pull/31' }] });
+  d.prepare('UPDATE itsas SET owner = ? WHERE title = ?').run('arch', 'unreadable');
+  agent('arch', 'arch');
+  d.prepare("UPDATE agents SET lifecycle = 'archived' WHERE id = ?").run('arch');
+  agent('gone3', 'gone3');
+  watch.createSubscription({ subscriber_kind: 'agent', subscriber_id: 'gone3', filter: { subjects: ['github:o/r#32'] }, by: 'gone3' });
+  d.prepare('DELETE FROM agents WHERE id = ?').run('gone3');
+  d.exec('ALTER TABLE itsas RENAME TO itsas_hidden');
+  d.exec('ALTER TABLE peer_agents RENAME TO peer_hidden');
+  try {
+    assert.deepEqual(watch.watchedSubjects().sort(), ['github:o/r#31', 'github:o/r#32']);
+  } finally {
+    d.exec('ALTER TABLE itsas_hidden RENAME TO itsas');
+    d.exec('ALTER TABLE peer_hidden RENAME TO peer_agents');
+  }
+});
+
+test('an event wait of a dead owner is not polled, a paused owner\'s is, and a subject a live wait shares with a dead subscription is polled (S-4356)', async () => {
+  agent('live', 'live');
+  agent('paused', 'paused');
+  agent('arch', 'arch');
+  const d = db.open();
+  d.prepare("UPDATE agents SET lifecycle = 'paused' WHERE id = 'paused'").run();
+  d.prepare("UPDATE agents SET lifecycle = 'archived' WHERE id = 'arch'").run();
+  await waits.declare('arch', { on: 'event', filter: { subjects: ['github:o/r#41'] } });
+  await waits.declare('paused', { on: 'event', filter: { subjects: ['github:o/r#42'] } });
+  await waits.declare('live', { on: 'event', filter: { subjects: ['github:o/r#43'] } });
+  watch.createSubscription({ subscriber_kind: 'agent', subscriber_id: 'arch', filter: { subjects: ['github:o/r#43'] }, by: 'arch' });
+  assert.deepEqual(watch.watchedSubjects().sort(), ['github:o/r#42', 'github:o/r#43']);
+});
