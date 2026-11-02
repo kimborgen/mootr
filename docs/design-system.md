@@ -1073,3 +1073,7 @@ The line falls where derivation begins. Everything a developer would otherwise h
 ## Sidebar defaults (S-3810)
 
 Settings › Sidebar ends with a defaults row of three `.btn`s: **Save current as my default**, **Revert to my default** (disabled, with the title "No default saved yet", until one is saved) and **Revert to mootr's default** (3 panes of 2 tabs, compact strip). The live layout is `sidebarPanes` id `main`; the saved default is id `default` of the same record, which live edits never change. A revert replaces the whole live record and touches no other setting. On a phone the row's buttons are one column of `--size-hit-touch` targets (`.sbs-defaults`).
+
+## Inbox order
+
+The Inbox page, on the desktop and the phone, lists Needs you first (oldest first), then an Unread group of the threads with mail you have not read, then Today and Earlier. Each group is newest first, so an unread thread from last week sits above a read one from this morning (S-4740). A thread opened from the list keeps its row, though it is read at once, while a thread is open, and sorts again once the list is shown with none open, so no row moves under a finger while a thread is read, replied to or archived (S-148). The Unread chip lists only unread threads, so it keeps the Today and Earlier groups. Mail no longer archives itself (`settings.autoArchive`, off by default).

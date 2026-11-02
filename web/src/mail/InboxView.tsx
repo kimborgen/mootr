@@ -7,7 +7,7 @@
 // thread's latest mail to you: its kind, who wrote, the subject, one line of what it says, its ITSA,
 // its age, and a dot while it is unread. Empty, loading and error are words only.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { inboxThread, openAgent, openInboxThread, openWorld, setThreadArchived, setThreadDeferred, stepInbox, toggleInboxUnread, triageInboxThread, undoInboxTriage } from '../actions'
+import { inboxThread, threadIsOpen, openAgent, openInboxThread, openWorld, setThreadArchived, setThreadDeferred, stepInbox, toggleInboxUnread, triageInboxThread, undoInboxTriage } from '../actions'
 import { api } from '../api'
 import { bottomHandle } from '../bottom-slot'
 import { ago, baseSubject, plainSubject } from '../format'
@@ -25,6 +25,7 @@ import { DigestCard } from './DigestCard'
 import { useDigest } from './digest'
 import { sameLine } from './cardSummary'
 import { bodyLines, KIND } from './MailCard'
+import { holdUnread } from './hold'
 import { FILTERS, filtered, grouped, hitGroup, humanLists, isAwaiting, isPending, isUnread, needsIds, unreadCount, waitThread, type Group, type InboxFilter, type SearchHit } from './inbox-model'
 import { setInboxOrder } from './inbox-order'
 import { NeedsYouList } from './NeedsYouList'
@@ -116,8 +117,10 @@ export function InboxView({ selected }: { selected?: string }) {
   const awaitingN = [...active, ...archivedRows, ...deferredRows].filter(isAwaiting).length
   const count = { toanswer: toAnswerN, unread: unreadN, all: 0, awaiting: awaitingN, deferred: filtered('deferred', lists, waiting, deferred).threads.length, archived: archivedRows.length }
   const searching = query.trim() !== ''
+  const world = currentWorld()
+  const held = holdUnread(active.filter(isUnread).map((t) => t.thread_id), !!selected || threadIsOpen())
   const shown = filtered(filter, lists, waiting, deferred)
-  const groups: Group[] = searching ? (search.hits && search.q === query.trim() ? hitGroup(search.hits, lists) : []) : grouped(shown.threads, needs)
+  const groups: Group[] = searching ? (search.hits && search.q === query.trim() ? hitGroup(search.hits, lists) : []) : grouped(shown.threads, needs, new Date(), held)
   // The All list shows what waits on you with no thread in any list (an ITSA's ask whose thread is elsewhere, say), and
   // what is deferred that way under Decide later, as the Mail list did. Plain waits are To answer's alone.
   const threadIds = new Set([...active, ...archivedRows, ...deferredRows].map((t) => t.thread_id))
@@ -152,7 +155,6 @@ export function InboxView({ selected }: { selected?: string }) {
   }, [])
 
   // The scroll is kept across the page being hidden (a phone's thread, another page): record it while the list shows, put it back when it returns.
-  const world = currentWorld()
   useLayoutEffect(() => {
     const el = list.current
     if (el && world === 'w:inbox' && el.scrollTop !== savedScroll) el.scrollTop = savedScroll

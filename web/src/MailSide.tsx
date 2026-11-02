@@ -14,14 +14,15 @@
 // asks whose thread is archived, and the deferred ones, and each leaves when answered or withdrawn (S-984).
 // The Swipe entry opens the inbox's threads as a stack of cards in main (`w:swipe`, S-1003).
 import { useEffect, useRef, useState } from 'react'
-import { openWorld, selectAgent, selectThread, setThreadArchived, setThreadDeferred } from './actions'
+import { threadIsOpen, openWorld, selectAgent, selectThread, setThreadArchived, setThreadDeferred } from './actions'
 import { ago, baseSubject, plainSubject } from './format'
 import { Icon } from './Icon'
 import { Loading } from './Loading'
 import { openedItsa, openItsa, StatusGlyph, statusLabel } from './itsa/itsa'
 import { AskBlockLine } from './itsa/AskBlockLine'
 import { isPlainWait, useDeferred, useToAnswerCount, useWaiting, type WaitingRow } from './itsa/WaitingList'
-import { humanLists, isAwaiting as awaiting, isPending as pending, lastAt, unreadThreads as unreadThreadsOf, type Lists } from './mail/inbox-model'
+import { holdUnread } from './mail/hold'
+import { unreadFirst, humanLists, isAwaiting as awaiting, isPending as pending, lastAt, unreadThreads as unreadThreadsOf, type Lists } from './mail/inbox-model'
 import { NeedsYouList } from './mail/NeedsYouList'
 import { openAskCount } from './mail/needsYou'
 import { swipeRow } from './mail/swipeRow'
@@ -150,7 +151,7 @@ export function MailSide({ leftRef, pane }: { leftRef: React.RefObject<HTMLEleme
   const delegated = view === 'inbox' ? delegateDialogs : []
   const pinned = (t: Thread) => att.some((a) => a.thread === t) || def.some((a) => a.thread === t)
   const awaitingAll = [...humanThreads, ...humanArchived, ...humanDeferred].filter(awaiting)
-  const shown = view === 'toanswer' || view === 'needsyou' ? [] : view === 'archived' ? humanArchived : view === 'deferred' ? humanDeferred : view === 'awaiting' ? awaitingAll : humanThreads.filter((t) => !pinned(t))
+  const shown = view === 'toanswer' || view === 'needsyou' ? [] : view === 'archived' ? humanArchived : view === 'deferred' ? humanDeferred : view === 'awaiting' ? awaitingAll : unreadFirst(humanThreads.filter((t) => !pinned(t)), holdUnread(unreadIds, threadIsOpen()))
   // One count for the To answer toggle and its header, one for "waiting on you": the rows this inbox lists (the phone badges and the Issues header count `useWaiting()`, plain waits included).
   const toAnswerN = useToAnswerCount()
   const nAsk = att.length

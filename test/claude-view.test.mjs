@@ -308,3 +308,93 @@ test('mail in and out during a real-shaped turn sits where it happened, and a st
   const what = (m) => (m.kind === 'mail' ? m.id : m.kind === 'notice' ? `notice: ${m.parts[0].text}` : m.parts.map((p) => (p.type === 'tool' ? p.name.replace('mcp__stam__', '') : p.type)).join(','));
   assert.deepEqual(shown.map(what), ['text', 'itsa_get,Bash', 'mail:m70ccf09', 'read_mail,text,send_mail', 'mail:m3c5851c', 'wait_for,text', 'mail:m9e70048', 'notice: [stam] You have 1 unread mail.', 'read_mail']);
 });
+
+// S-4737: a transcript the cache doesn't hold is parsed from its start. A 650 MB one held the
+// daemon's loop for 5-138 s, unlabelled, since page() read it after an await. The page now reads
+// it in steps that yield to the loop, each labelled, and builds the same messages as one read.
+test('a large uncached transcript (24 MB) is paged in labelled steps that yield to the event loop', async () => {
+  const { Transcript, PAGE_STEP_BYTES } = await import('../src/adapters/claude-view.ts');
+  const stall = await import('../src/stall.ts');
+  const big = 'x'.repeat(64 << 10);
+  // Realistic scale, generated here: 12 steps' worth (24 MB), not committed.
+  const lines = [];
+  let bytes = 0;
+  for (let i = 0; bytes < 12 * PAGE_STEP_BYTES; i++) {
+    const t = new Date(Date.UTC(2026, 9, 12, 9, 0, i)).toISOString();
+    lines.push(JSON.stringify({ type: 'user', uuid: `bu${i}`, isSidechain: false, timestamp: t, message: { role: 'user', content: `prompt ${i}` } }));
+    lines.push(JSON.stringify({ type: 'assistant', uuid: `ba${i}`, isSidechain: false, timestamp: t, message: { id: `bm${i}`, role: 'assistant', content: [{ type: 'text', text: big }] } }));
+    bytes += lines.at(-1).length + lines.at(-2).length + 2;
+  }
+  const f = join(home, 'big.jsonl');
+  writeFileSync(f, lines.join('\n') + '\n');
+  db.createAgent({ id: 'cl-big', name: 'big-dev', role: 'dev', machine: 'x', harness: 'claude', model: 'claude-haiku-5-5', effort: null, cwd: '/tmp/big', parent_id: null, session_id: 'sess-big' });
+  db.updateAgent('cl-big', { transcript_path: f, activity: 'idle' });
+
+  const was = stall.stalls.threshold;
+  stall.stalls.threshold = 0;
+  let turns = 0;
+  let spin = true;
+  const counter = () => {
+    turns++;
+    if (spin) setImmediate(counter);
+  };
+  setImmediate(counter);
+  let page;
+  try {
+    page = await claudeView.page(db.getAgent('cl-big'), { limit: 3 });
+  } finally {
+    spin = false;
+    stall.stalls.threshold = was;
+  }
+  const steps = stall.stalls.recent.filter((s) => s.label === "view: read big-dev's transcript").length;
+  // Counted in loop turns, not wall-clock time: a setImmediate chain runs once per turn, so it
+  // ran between every two steps exactly when page() yielded after each.
+  assert.ok(steps >= 12, `the read ran in steps (${steps})`);
+  assert.ok(turns >= steps - 1, `the loop turned between the steps (${turns} turns, ${steps} steps)`);
+  const whole = new Transcript(f);
+  assert.equal(whole.read().done, true);
+  assert.equal(page.messages.length, 3);
+  assert.deepEqual(ids(page.messages), ids(whole.messages.slice(-3)));
+  assert.equal(page.older, whole.messages.at(-3).id);
+});
+
+test('Transcript.read with a cap reads up to it and says when the file is done', async () => {
+  const { Transcript } = await import('../src/adapters/claude-view.ts');
+  const t = new Transcript(file);
+  const size = readFileSync(file).length;
+  const first = t.read(100);
+  assert.equal(first.done, false);
+  assert.ok(t.position >= 100 && t.position < size);
+  for (let i = 0; i < 1000 && !t.read(100).done; i++);
+  assert.equal(t.position, size);
+  const whole = new Transcript(file);
+  whole.read();
+  assert.deepEqual(t.messages, whole.messages);
+  assert.equal(t.read(100).done, true);
+});
+
+test('capped and unbounded reads interleave into the same messages, and a shorter file mid-catch-up is re-read', async () => {
+  const { Transcript } = await import('../src/adapters/claude-view.ts');
+  const f = join(home, 'interleave.jsonl');
+  writeFileSync(f, rows.join('\n') + '\n');
+  const whole = new Transcript(f);
+  whole.read();
+  // A page's capped step, then the follow poll's unbounded read, then more capped steps.
+  const t = new Transcript(f);
+  assert.equal(t.read(150).done, false);
+  assert.equal(t.read().done, true);
+  assert.equal(t.read(150).done, true);
+  assert.deepEqual(t.messages, whole.messages);
+  // Replaced by a shorter file while a capped catch-up is part way: rebuilt from its start.
+  const r = new Transcript(f);
+  r.read(1500);
+  const resets = r.resets;
+  writeFileSync(f, rows.slice(0, 1).join('\n') + '\n'); // shorter than what's read
+  const first = r.read(150);
+  assert.equal(first.reset, true);
+  assert.equal(r.resets, resets + 1);
+  while (!r.read(150).done);
+  const short = new Transcript(f);
+  short.read();
+  assert.deepEqual(r.messages, short.messages);
+});

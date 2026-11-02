@@ -313,6 +313,9 @@ export const DEFAULTS = {
   // agent's terminal). A box switches for itself; a fresh load starts here.
   promptDefaultMode: 'mail' as 'mail' | 'direct',
   // Where Mail opens on the desktop (S-2310): 'inbox' is the Inbox page (`w:inbox`), 'sidebar' the sidebar's Mail tab.
+  // Whether the daemon archives the human's resolved threads by itself (S-637). Off since S-4740: mail stays
+  // in the inbox until the human archives it; unread threads sort first instead.
+  autoArchive: false,
   mailOpens: 'inbox' as 'inbox' | 'sidebar',
   // Search by meaning (S-141): 'local' embeds mail with a small model under STAM_HOME/embedder
   // (`stam embedder install`, or the daemon in the background on first need); 'off' keeps the
@@ -1254,6 +1257,7 @@ function readSettings(): { value: Settings; cacheable: boolean } {
     permissionModes: permissionModesOf(user.permissionModes),
     agentView: { default: user.agentView?.default === 'terminal' ? 'terminal' : 'conversation' },
     promptDefaultMode: user.promptDefaultMode === 'direct' ? 'direct' : 'mail',
+    autoArchive: user.autoArchive === true,
     mailOpens: user.mailOpens === 'sidebar' ? 'sidebar' : 'inbox',
     developerCap: Number.isInteger(user.developerCap) && user.developerCap >= 0 ? user.developerCap : DEFAULTS.developerCap,
     staleWorkingMinutes: typeof user.staleWorkingMinutes === 'number' && user.staleWorkingMinutes > 0 ? user.staleWorkingMinutes : DEFAULTS.staleWorkingMinutes,

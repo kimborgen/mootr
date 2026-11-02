@@ -5,7 +5,11 @@
 set -e
 export STAM_AUTO_ARCHIVE_QUIET_MS=0 STAM_AUTO_ARCHIVE_FULL_DELAY_MS=0
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
-isolate
+# The pass is off by default (S-4740): this daemon turns it on.
+daemon_home main
+use main
+printf '{ "peers": [], "autoArchive": true }\n' >"$STAM_HOME/settings.json"
+daemon_up main
 TOKEN=$(cat "$STAM_HOME/token")
 api() { curl -s -X "$1" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' "$STAM_URL$2" ${3:+-d "$3"}; }
 # tapi: api for /api/test/* routes; -f fails at the call when the gate answers 404.

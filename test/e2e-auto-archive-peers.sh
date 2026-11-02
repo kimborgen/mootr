@@ -20,6 +20,7 @@ for me, other in (("main", "twin"), ("twin", "main")):
     s = json.load(open(path))
     s["peers"] = [peer(other)]
     s.setdefault("itsa", {})["home"] = "main"
+    s["autoArchive"] = True
     s["mail"] = {"titles": {"model": ""}}
     s["decisions"] = {"mailCheck": False}
     json.dump(s, open(path, "w"), indent=2)

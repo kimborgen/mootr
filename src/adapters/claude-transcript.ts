@@ -46,30 +46,36 @@ export class Transcript {
   }
 
   // Reads what was appended. A file replaced by a shorter one is rebuilt from its start, and
-  // `resets` goes up.
-  read(): { touched: Set<string>; reset: boolean } {
+  // `resets` goes up. `maxBytes` caps one call (S-4737): a caller that yields between calls
+  // catches up on a large transcript without holding the event loop; `done` says the file's end
+  // (as it was at this call) is read. Each call is whole, so calls can interleave.
+  read(maxBytes = Infinity): { touched: Set<string>; reset: boolean; done: boolean } {
     const touched = new Set<string>();
     let reset = false;
     let size: number;
     try {
       size = statSync(this.file).size;
     } catch {
-      return { touched, reset };
+      return { touched, reset, done: true };
     }
     if (size < this.pos) {
       this.clear();
       this.resets++;
       reset = true;
     }
-    if (size === this.pos) return { touched, reset };
+    if (size === this.pos) return { touched, reset, done: true };
+    const end = Math.min(size, this.pos + maxBytes);
     const fd = openSync(this.file, 'r');
     try {
       let pos = this.pos;
-      while (pos < size) {
-        const len = Math.min(CHUNK, size - pos);
+      while (pos < end) {
+        const len = Math.min(CHUNK, end - pos);
         const buf = Buffer.allocUnsafe(len);
         const n = readSync(fd, buf, 0, len, pos);
-        if (n <= 0) break;
+        if (n <= 0) {
+          size = pos; // the file ended early: what's read is all there is
+          break;
+        }
         pos += n;
         const data = this.carry.length ? Buffer.concat([this.carry, buf.subarray(0, n)]) : buf.subarray(0, n);
         let start = 0;
@@ -85,7 +91,7 @@ export class Transcript {
       closeSync(fd);
     }
     if (this.watchers) for (const id of touched) this.pending.add(id);
-    return { touched, reset };
+    return { touched, reset, done: this.pos >= size };
   }
 
   // The ids of messages changed since the last take, for a follower; forgets them.

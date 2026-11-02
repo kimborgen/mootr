@@ -12,6 +12,7 @@ import type { LiveSink, ViewMessage, ViewPermission, ViewSource, ViewStore } fro
 import { claude } from './claude.ts';
 import { restoreTranscript } from '../transcript-gz.ts';
 import { Transcript } from './claude-transcript.ts';
+import { timed } from '../stall.ts';
 
 export { Transcript };
 
@@ -39,6 +40,14 @@ function transcriptFor(file: string): Transcript {
   }
   return t;
 }
+// A page catches up on its transcript this many bytes at a time, yielding to the event loop
+// between steps (S-4737): a transcript dropped from the cache is parsed again from its start,
+// and a 650 MB one held the loop for 5-138 s, unlabelled, when the read ran after page()'s await.
+export const PAGE_STEP_BYTES = 2 << 20;
+async function catchUp(t: Transcript, name: string): Promise<void> {
+  while (!timed(`view: read ${name}'s transcript`, () => t.read(PAGE_STEP_BYTES)).done) await new Promise<void>((r) => setImmediate(r));
+}
+
 // How many transcripts are parsed now, for tests.
 export const cachedTranscripts = (): number => cache.size;
 
@@ -100,7 +109,7 @@ export const claudeView: ViewSource = {
     // A gzipped transcript (an archived agent's) is restored first; a failure is the view's error.
     await restoreTranscript(a.id, cur.transcript_path ?? a.transcript_path);
     const t = transcriptFor(cur.transcript_path ?? a.transcript_path!);
-    t.read();
+    await catchUp(t, cur.name);
     const all = t.messages;
     const end = before ? Math.max(0, all.findIndex((m) => m.id === before)) : all.length;
     const start = Math.max(0, end - limit);
@@ -181,7 +190,7 @@ export const claudeView: ViewSource = {
     tick();
     const timer = setInterval(() => {
       try {
-        tick();
+        timed(`view: follow ${a.name}`, tick);
       } catch {
         // A transcript that vanished mid-read: the next tick finds it again or not.
       }

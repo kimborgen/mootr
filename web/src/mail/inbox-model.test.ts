@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { WaitingRow } from '../itsa/WaitingList'
 import type { IndexRow, Thread } from '../types'
-import { filtered, grouped, hitGroup, isAwaiting, needsIds, unreadCount } from './inbox-model'
+import { filtered, grouped, unreadFirst, hitGroup, isAwaiting, needsIds, unreadCount } from './inbox-model'
 import { indexRow } from './thread-index'
+import { holdUnread, resetHeldUnread } from './hold'
 
 // The lists are index rows (S-4578), built here from whole threads as the store builds them.
 const mail = (from: string, at: string, extra = {}) => ({ id: 'm' + at, from_id: from, from_name: from, subject: 's', body: '', created_at: at, recipients: [], ...extra })
@@ -27,6 +28,49 @@ describe('inbox groups', () => {
     const g = grouped([thread('n1', 'x', today), thread('n2', 'x', yesterday), thread('t1', 'x', yesterday), thread('t2', 'x', today)], new Set(['n1', 'n2']), NOW)
     expect(g[0].threads.map((t) => t.thread_id)).toEqual(['n2', 'n1'])
     expect(g[1].threads.map((t) => t.thread_id)).toEqual(['t2'])
+  })
+})
+
+describe('unread threads first (S-4740)', () => {
+  const unreadMail = { recipients: [{ id: 'human', read_at: null }] }
+  const ids = (g: { threads: { thread_id: string }[] }) => g.threads.map((t) => t.thread_id)
+  it('lists unread threads before read ones, newest first in each, even when older', () => {
+    const g = grouped([thread('r1', 'x', today), thread('u-old', 'x', yesterday, unreadMail), thread('u-new', 'x', today, unreadMail), thread('r2', 'x', yesterday)], new Set(), NOW)
+    expect(g.map((x) => [x.key, ids(x)])).toEqual([['unread', ['u-new', 'u-old']], ['today', ['r1']], ['earlier', ['r2']]])
+  })
+  it('keeps Needs you first and the dates when every thread is unread', () => {
+    const g = grouped([thread('n', 'x', today, unreadMail), thread('a', 'x', today, unreadMail), thread('b', 'x', yesterday, unreadMail)], new Set(['n']), NOW)
+    expect(g.map((x) => [x.key, ids(x)])).toEqual([['needs', ['n']], ['today', ['a']], ['earlier', ['b']]])
+  })
+  it('orders a list of 300 threads, a third unread, with every unread one ahead of every read one', () => {
+    const rows = Array.from({ length: 300 }, (_, i) => thread('t' + i, 'x', new Date(2026, 9, 1 + (i % 18), 8, i % 60).toISOString(), i % 3 === 0 ? unreadMail : {}))
+    const g = grouped(rows, new Set(), NOW)
+    expect(g[0].key).toBe('unread')
+    expect(g[0].threads).toHaveLength(100)
+    expect(g[0].threads.every((t) => t.unread > 0)).toBe(true)
+    expect(g.slice(1).every((x) => x.threads.every((t) => t.unread === 0))).toBe(true)
+    const at = g[0].threads.map((t) => t.last_created_at ?? t.last_at)
+    expect(at).toEqual([...at].sort().reverse())
+  })
+})
+
+describe('holdUnread (S-4740)', () => {
+  it('keeps a read thread in the Unread group while a thread is open, and releases it when none is', () => {
+    resetHeldUnread()
+    const rows = () => [thread('a', 'x', today), thread('b', 'x', today)]
+    const key = (held: Set<string>) => grouped(rows(), new Set(), NOW, held).map((g) => [g.key, g.threads.map((t) => t.thread_id)])
+    expect(key(holdUnread(['b'], false))).toEqual([['unread', ['b']], ['today', ['a']]])
+    // b is read and open: it keeps its place, and a new unread thread joins it.
+    expect([...holdUnread(['a'], true)]).toEqual(['b', 'a'])
+    // The list is shown with nothing open and only a unread: b, read, drops behind it.
+    expect(key(holdUnread(['a'], false))).toEqual([['unread', ['a']], ['today', ['b']]])
+  })
+})
+
+describe('unreadFirst (S-4740)', () => {
+  it('moves unread rows ahead and keeps each side in order', () => {
+    const rows = ['a', 'b', 'c', 'd', 'e'].map((thread_id) => ({ thread_id }))
+    expect(unreadFirst(rows, new Set(['c', 'e'])).map((r) => r.thread_id)).toEqual(['c', 'e', 'a', 'b', 'd'])
   })
 })
 

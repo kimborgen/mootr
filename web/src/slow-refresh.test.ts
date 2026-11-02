@@ -1,5 +1,6 @@
 // The mailbox refresh (S-4519): triggers close together share one round, and mailTick, which every open
 // mail view reloads on, moves only when something it shows may have changed. No network: fetch is stubbed.
+import { holdUnread, resetHeldUnread } from './mail/hold'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const stream = vi.hoisted(() => ({ connected: true, listeners: [] as ((c: boolean) => void)[] }))
@@ -20,6 +21,8 @@ let itsas: unknown[] = []
 let route: 'ok' | 'fail' | 'missing' = 'ok'
 let old: unknown[] = []
 const asked: string[] = []
+let full = false
+let unreadOld: unknown[] = []
 // While set, the decisions read waits for `release`: a round in flight.
 let hold: Promise<void> | null = null
 let release = () => {}
@@ -33,6 +36,8 @@ beforeEach(() => {
   route = 'ok'
   old = []
   asked.length = 0
+  full = false
+  unreadOld = []
   stream.connected = true
   vi.stubGlobal('fetch', vi.fn(async (input: string) => {
     const path = input.split('?')[0]
@@ -41,7 +46,8 @@ beforeEach(() => {
     if (input === '/api/agents/human/threads?limit=60') return ok(old)
     if (path === '/api/rings') rounds++
     if (path === '/api/mail/decisions' && hold) await hold
-    if (input === '/api/agents/human/thread-index?list=active&limit=60') return ok({ threads, next_cursor: null })
+    if (input === '/api/agents/human/thread-index?list=active&limit=60') return ok({ threads, next_cursor: full ? 'c' : null })
+    if (input === '/api/agents/human/thread-index?list=active&limit=60&unread=1') return ok({ threads: unreadOld, next_cursor: null })
     if (path === '/api/agents/human/thread-index') return ok({ threads: [], next_cursor: null })
     if (path === '/api/itsas') return ok(itsas)
     if (path === '/api/itsas/statuses') return ok({ statuses: [] })
@@ -187,6 +193,23 @@ describe('the human\'s lists (S-4617)', () => {
     expect(asked).toEqual(['/api/agents/human/thread-index?list=active&limit=60', '/api/agents/human/thread-index?list=archived&limit=60', '/api/agents/human/thread-index?list=deferred&limit=60'])
     expect(getData().humanRows.active.map((r) => r.thread_id)).toEqual(['a', 'b', 'c'])
     expect(getData().unread).toBe(3)
+  })
+
+  it('adds the unread threads older than a full page, and keeps a read one while its thread is open (S-4740)', async () => {
+    const at = (n: number) => `2026-10-${String(n).padStart(2, '0')}T10:00:00Z`
+    full = true
+    threads = [{ thread_id: 'new', unread: 0, last_at: at(30) }]
+    unreadOld = [{ thread_id: 'oldA', unread: 1, last_at: at(1) }, { thread_id: 'oldB', unread: 1, last_at: at(2) }]
+    await refreshSlowNow()
+    expect(getData().humanRows.active.map((r) => r.thread_id)).toEqual(['new', 'oldB', 'oldA'])
+    holdUnread(['oldA', 'oldB'], false)
+    // oldA is read while open: no read returns it, but its row stays until the hold ends.
+    unreadOld = [{ thread_id: 'oldB', unread: 1, last_at: at(2) }]
+    await refreshSlowNow()
+    expect(getData().humanRows.active.map((r) => [r.thread_id, r.unread])).toEqual([['new', 0], ['oldB', 1], ['oldA', 0]])
+    resetHeldUnread()
+    await refreshSlowNow()
+    expect(getData().humanRows.active.map((r) => r.thread_id)).toEqual(['new', 'oldB'])
   })
 
   it('keeps the rows a failed poll would have replaced', async () => {

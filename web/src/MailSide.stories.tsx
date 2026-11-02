@@ -23,6 +23,7 @@ export const stories: Story[] = [{
   when: 'The sidebar\'s Mail section on the desktop. (On a phone, Mail is the Inbox page, `InboxView`.) A row opens its thread world (`thread:ID`), an ITSA row opens the ITSA, and an agent-waiting row opens the agent. A separator above resizes the list and the height is remembered.',
   code: ['web/src/MailSide.tsx#MailSide', 'web/src/MailSide.tsx#DelegatedGroup', 'web/src/itsa/WaitingList.tsx#useWaiting', 'web/src/mail/swipeRow.ts#swipeRow', 'web/src/itsa/AskBlockLine.tsx#AskBlockLine'],
   rules: [
+    'The inbox view lists threads with unread mail first, then the read ones, each in recency order (S-4740); a thread opened from the list keeps its row while a thread is open; the attention list stays above both.',
     'Rows are `--size-row-tree` tall (the tree\'s row), `--size-hit-touch` on a phone, with the unread dot, semibold subject and `--text-primary` ink for unread; read rows stay `--text-secondary` (' + ds('Density') + ').',
     'Waiting is never colour alone: a status glyph, a shield, a question mark or a clock, and the words (`waits on you`, `decision`) say it (' + ds('State vocabulary') + ').',
     'A row draws from the thread\'s index row alone (S-4578), never its mails: its title, subject, message count, the last mail\'s age and sender, its unread count and pending ask. A pending request\'s thread pins by when the thread started.',

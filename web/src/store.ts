@@ -9,7 +9,8 @@ import { rearmMailTitles } from './mail/mail-titles'
 import { rearmToolSummaries } from './mail/tool-summaries'
 import { rearmToolNames } from './mail/tool-names'
 import { live } from './format'
-import { fetchIndex } from './mail/thread-index'
+import { fetchIndex, withUnread } from './mail/thread-index'
+import { heldUnread } from './mail/hold'
 import { liveConnected, onLiveConnection, onLiveEvent } from './live'
 import type { Agent, Ask, CostMode, DecisionMail, IndexRow, Itsa, ItsaAttention, ItsaQueueRow, ItsaStatus, Machine, Permission, PlainShell, Ring, Thread, ThreadList, Thresholds } from './types'
 
@@ -470,8 +471,10 @@ export async function refreshSlowNow() {
   try {
     // The lists' first pages carry no cursor, so fetchIndex never asks for a restart (IndexRestart); a daemon without
     // the index route answers from the old one.
-    const [active, archived, deferred, rs, decisions, rapidWith, asks] = await allOf([
-      fetchIndex('human', 'active', { limit: LIST_ROWS }),
+    const [activeAll, archived, deferred, rs, decisions, rapidWith, asks] = await allOf([
+      // Unread threads lead the inbox (S-4740): when the newest page is full, the unread ones older than it are read too
+      // (a daemon without the filter answers its first page).
+      fetchIndex('human', 'active', { limit: LIST_ROWS }).then(async (page) => ({ page, unread: page.next_cursor ? await fetchIndex('human', 'active', { limit: LIST_ROWS, unread: true }).then((p) => p.threads).catch((): IndexRow[] => []) : [] })),
       fetchIndex('human', 'archived', { limit: LIST_ROWS }),
       fetchIndex('human', 'deferred', { limit: LIST_ROWS }),
       api<Ring[]>('GET', '/api/rings'),
@@ -483,6 +486,10 @@ export async function refreshSlowNow() {
     ])
     if (seq < slowApplied) return
     slowApplied = seq
+    // A thread read while it is open (still held, S-4740) may no longer be in either read: it keeps its row until the hold ends.
+    const gone = new Set([...archived.threads, ...deferred.threads].map((t) => t.thread_id))
+    const keep = polled.humanRows.active.filter((t) => heldUnread().has(t.thread_id) && !gone.has(t.thread_id)).map((t) => ({ ...t, unread: 0 }))
+    const active = withUnread(activeAll.page, activeAll.unread, keep)
     const humanRows = { active: active.threads, archived: archived.threads, deferred: deferred.threads }
     // A ring shows while it runs and at least one member is running.
     const rings = rs.filter((r) => r.status !== 'done' && (JSON.parse(r.members || '[]') as string[]).some((id) => { const a = byId(id); return a && live(a) }))

@@ -20,10 +20,10 @@ export const FILTERS: { id: InboxFilter; label: string; tip: string }[] = [
 export interface Lists { active: IndexRow[]; archived: IndexRow[]; deferred: IndexRow[] }
 // The human's lists from the store's data.
 export const humanLists = (d: Data): Lists => ({ active: humanIndex(d, 'active'), archived: humanIndex(d, 'archived'), deferred: humanIndex(d, 'deferred') })
-export type GroupKey = 'needs' | 'today' | 'earlier' | 'results'
+export type GroupKey = 'needs' | 'unread' | 'today' | 'earlier' | 'results'
 export interface Group { key: GroupKey; label: string; threads: IndexRow[] }
 
-const LABEL: Record<GroupKey, string> = { needs: 'Needs you', today: 'Today', earlier: 'Earlier', results: 'Results' }
+const LABEL: Record<GroupKey, string> = { needs: 'Needs you', unread: 'Unread', today: 'Today', earlier: 'Earlier', results: 'Results' }
 // The thread's last mail's time, any mail's; a route row without it has the box's last.
 export const lastAt = (r: IndexRow) => r.last_created_at ?? r.last_at
 // Awaiting: the human sent the last message, and nobody has answered it.
@@ -84,17 +84,22 @@ export function filtered(filter: InboxFilter, d: Lists, waiting: WaitingRow[], d
 export const unreadThreads = (d: Lists, waiting: WaitingRow[], deferred: WaitingRow[]): IndexRow[] => filtered('unread', d, waiting, deferred).threads
 export const unreadCount = (d: Lists, waiting: WaitingRow[], deferred: WaitingRow[]) => unreadThreads(d, waiting, deferred).length
 
-// Needs you first (oldest first, as the sidebar's attention list), then today's threads and the earlier
-// ones, newest first. A group with no thread isn't returned.
-export function grouped(threads: IndexRow[], needs: Set<string>, now = new Date()): Group[] {
+// Needs you first (oldest first, as the sidebar's attention list), then the threads with unread mail (S-4740),
+// then today's threads and the earlier ones, newest first within each group. A list of only unread threads
+// (the Unread chip) keeps its Today and Earlier groups. A group with no thread isn't returned.
+export function grouped(threads: IndexRow[], needs: Set<string>, now = new Date(), held: Set<string> = new Set()): Group[] {
   const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  const g: Record<'needs' | 'today' | 'earlier', IndexRow[]> = { needs: [], today: [], earlier: [] }
-  for (const t of threads) g[needs.has(t.thread_id) ? 'needs' : new Date(lastAt(t)).getTime() >= midnight ? 'today' : 'earlier'].push(t)
+  const g: Record<'needs' | 'unread' | 'today' | 'earlier', IndexRow[]> = { needs: [], unread: [], today: [], earlier: [] }
+  const lead = (t: IndexRow) => isUnread(t) || held.has(t.thread_id)
+  const split = !threads.every(lead)
+  for (const t of threads) g[needs.has(t.thread_id) ? 'needs' : split && lead(t) ? 'unread' : new Date(lastAt(t)).getTime() >= midnight ? 'today' : 'earlier'].push(t)
   g.needs.sort((a, b) => lastAt(a).localeCompare(lastAt(b)))
-  g.today.sort((a, b) => lastAt(b).localeCompare(lastAt(a)))
-  g.earlier.sort((a, b) => lastAt(b).localeCompare(lastAt(a)))
-  return (['needs', 'today', 'earlier'] as const).filter((k) => g[k].length).map((k) => ({ key: k, label: LABEL[k], threads: g[k] }))
+  for (const k of ['unread', 'today', 'earlier'] as const) g[k].sort((a, b) => lastAt(b).localeCompare(lastAt(a)))
+  return (['needs', 'unread', 'today', 'earlier'] as const).filter((k) => g[k].length).map((k) => ({ key: k, label: LABEL[k], threads: g[k] }))
 }
+
+// The rows with unread mail ahead of the read ones (S-4740), each keeping its order. The sidebar's and the phone's inbox list.
+export const unreadFirst = <T extends { thread_id: string }>(rows: T[], unread: Set<string>): T[] => [...rows.filter((t) => unread.has(t.thread_id)), ...rows.filter((t) => !unread.has(t.thread_id))]
 
 // A search hit as the API describes it (`MailHit`, src/mail-search.ts).
 export interface SearchHit { thread_id: string; subject?: string; latest?: string; people?: string[]; last?: string; excerpt?: string }

@@ -189,4 +189,10 @@ cmp -s "$TEST_TMP/tied-threads.txt" "$TEST_TMP/tied.txt" || fail "paging four ti
 [ "$(mcode "/api/agents/human/thread-index?cursor=nope")" = 400 ] || fail "a bad cursor wasn't refused with 400"
 [ "$(mcode "/api/agents/human/thread-index?list=all")" = 400 ] || fail "a bad list wasn't refused with 400"
 [ "$(mcode "/api/agents/human/thread-index?limit=0")" = 400 ] || fail "a zero limit wasn't refused with 400"
+# unread=1 (S-4740) lists every active thread with unread mail, however far down the list, whatever the limit.
+WANT=$(mget "/api/agents/human/thread-index?limit=200" | python3 -c 'import json,sys; [print(t["thread_id"]) for t in json.load(sys.stdin)["threads"] if t["unread"] > 0]' | sort)
+GOT=$(mget "/api/agents/human/thread-index?limit=1&unread=1" | tids | sort)
+[ -n "$WANT" ] || fail "the fixture has no unread thread"
+[ "$WANT" = "$GOT" ] || fail "unread=1 lists [$GOT], not [$WANT]"
+[ "$(mget "/api/agents/human/thread-index?limit=1&unread=1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["next_cursor"])')" = None ] || fail "unread=1 has a next page"
 echo "thread-index: ok"

@@ -64,10 +64,10 @@ const titles = (el: HTMLElement) => [...el.querySelectorAll('.irow .ir-top > .s'
 const chip = (el: HTMLElement, id: string) => el.querySelector<HTMLButtonElement>(`[data-filter="${id}"]`)!
 
 describe('Inbox page', () => {
-  it('groups the inbox: Needs you, Today, Earlier', async () => {
+  it('groups the inbox: Needs you, Unread, Today, Earlier', async () => {
     const { el } = await mount()
-    expect([...el.querySelectorAll('.inbox-group')].map((g) => g.getAttribute('data-group'))).toEqual(['needs', 'today', 'earlier'])
-    expect(titles(el)).toEqual(['Pick one', 'I asked', 'Unread today', 'Read earlier'])
+    expect([...el.querySelectorAll('.inbox-group')].map((g) => g.getAttribute('data-group'))).toEqual(['needs', 'unread', 'today', 'earlier'])
+    expect(titles(el)).toEqual(['Pick one', 'Unread today', 'I asked', 'Read earlier'])
   })
   it('counts what waits and what is unread as the waiting list does', async () => {
     const { el, waiting } = await mount()

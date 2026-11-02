@@ -154,6 +154,7 @@
     "queuedShutdownMinutes": 10
   },
   "promptDefaultMode": "mail",
+  "autoArchive": false,
   "mailOpens": "inbox",
   "search": {
     "embedder": "local",

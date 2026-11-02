@@ -1,7 +1,7 @@
 // The thread index (S-4577): rows built from whole threads match the daemon's indexRow (S-4520), the route is
 // asked first and a 404 falls back to the old /threads route, paging included. No network: fetch is stubbed.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fetchIndex, humanRowsOf, INDEX_RECHECK, IndexRestart, indexRow, resetIndexRoute } from './thread-index'
+import { fetchIndex, withUnread, humanRowsOf, INDEX_RECHECK, IndexRestart, indexRow, resetIndexRoute } from './thread-index'
 import { getData, humanIndex, setData } from '../store'
 import type { Mail, Thread } from '../types'
 
@@ -182,5 +182,24 @@ describe('a page of the index', () => {
     indexStatus = 503
     await expect(fetchIndex('human', 'active')).rejects.toMatchObject({ status: 503 })
     expect(calls).toHaveLength(1)
+  })
+})
+
+describe('withUnread (S-4740)', () => {
+  const row = (id: string, at: string, unread: number) => indexRow('human', thread(id, [mail({ id: 'm' + id, created_at: at, recipients: [{ id: 'human', read_at: unread ? null : at }] })]))
+  it('adds an unread thread older than the page, once, in recency order', () => {
+    const page = { threads: [row('n2', '2026-10-29T12:00:00Z', 0), row('n1', '2026-10-29T11:00:00Z', 1)], next_cursor: 'c' }
+    const out = withUnread(page, [row('n1', '2026-10-29T11:00:00Z', 1), row('old', '2026-09-01T10:00:00Z', 1), row('read', '2026-08-01T10:00:00Z', 0)])
+    expect(out.threads.map((t) => t.thread_id)).toEqual(['n2', 'n1', 'old'])
+    expect(out.next_cursor).toBe('c')
+  })
+  it('returns the page itself when every unread thread is on it', () => {
+    const page = { threads: [row('a', '2026-10-29T12:00:00Z', 1)], next_cursor: null }
+    expect(withUnread(page, [row('a', '2026-10-29T12:00:00Z', 1)])).toBe(page)
+  })
+  it('keeps a held row a refresh no longer returns (an old unread thread read since)', () => {
+    const page = { threads: [row('n', '2026-10-29T12:00:00Z', 0)], next_cursor: 'c' }
+    const out = withUnread(page, [row('b', '2026-09-01T10:00:00Z', 1)], [row('a', '2026-09-02T10:00:00Z', 0)])
+    expect(out.threads.map((t) => t.thread_id)).toEqual(['n', 'a', 'b'])
   })
 })

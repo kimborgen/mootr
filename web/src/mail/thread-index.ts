@@ -95,12 +95,12 @@ const listQuery: Record<ThreadList, string> = { active: '', archived: '&archived
 
 // A page of a mailbox's thread list. `limit` defaults to 50, as the route does; `with` keeps the threads with
 // that agent, as on /threads.
-export async function fetchIndex(box: string, list: ThreadList, opts: { limit?: number; cursor?: string | null; with?: string } = {}): Promise<IndexPage> {
+export async function fetchIndex(box: string, list: ThreadList, opts: { limit?: number; cursor?: string | null; with?: string; unread?: boolean } = {}): Promise<IndexPage> {
   const limit = opts.limit ?? 50
   const withQ = opts.with ? `&with=${encodeURIComponent(opts.with)}` : ''
   const cursor = opts.cursor ?? null
   if (Date.now() >= missingUntil && !cursor?.startsWith(FALLBACK)) {
-    const q = `list=${list}&limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}${withQ}`
+    const q = `list=${list}&limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}${withQ}${opts.unread ? '&unread=1' : ''}`
     try {
       return await api<IndexPage>('GET', `/api/agents/${encodeURIComponent(box)}/thread-index?${q}`)
     } catch (e) {
@@ -115,4 +115,14 @@ export async function fetchIndex(box: string, list: ThreadList, opts: { limit?: 
   const ts = await api<Thread[]>('GET', `/api/agents/${encodeURIComponent(box)}/threads?limit=${skip + limit}${listQuery[list]}${withQ}`)
   const threads = indexRows(box, ts.slice(skip))
   return { threads, next_cursor: ts.length >= skip + limit ? FALLBACK + (skip + limit) : null }
+}
+
+// The newest page of the active list plus every unread thread (S-4740), the ones older than the page too, and the
+// rows `keep` names (the held ones, read since but still on screen) that a refresh no longer returns, in the list's
+// order: newest first. A thread on several is listed once.
+export function withUnread(page: IndexPage, unread: IndexRow[], keep: IndexRow[] = []): IndexPage {
+  const have = new Set(page.threads.map((t) => t.thread_id))
+  const extra = [...unread.filter((t) => t.unread > 0), ...keep].filter((t) => !have.has(t.thread_id) && have.add(t.thread_id))
+  if (!extra.length) return page
+  return { ...page, threads: [...page.threads, ...extra].sort((a, b) => b.last_at.localeCompare(a.last_at)) }
 }

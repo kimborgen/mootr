@@ -2402,7 +2402,7 @@ function decodeCursor(raw: string | null): IndexCursor | undefined {
 // mailboxThreads' list, read up to the rows already returned plus this page; when the page may lack a source's threads
 // (newer threads came in, so a source's read stopped above the page's end), it is read again whole. `next_cursor` is null once the list ends.
 // `reader` shares the light pass with the reads that arrive while it runs, as on /threads (S-4356).
-async function threadIndex(box: string, list: 'active' | 'archived' | 'deferred', limit: number, cursor: IndexCursor | undefined, via?: Via, viaDecisions?: Via, withId?: string, reader?: Caller): Promise<{ threads: IndexRow[]; next_cursor: string | null }> {
+async function threadIndex(box: string, list: 'active' | 'archived' | 'deferred', limit: number, cursor: IndexCursor | undefined, via?: Via, viaDecisions?: Via, withId?: string, reader?: Caller, unreadOnly = false): Promise<{ threads: IndexRow[]; next_cursor: string | null }> {
   const read = async (want: number) => {
     const lists = await mailboxThreads(box, want, via, viaDecisions, withId, reader);
     const all = lists[list];
@@ -2418,6 +2418,12 @@ async function threadIndex(box: string, list: 'active' | 'archived' | 'deferred'
     const whole = !cut || (!!end && every.filter((x) => x >= boxLast(box, end.mails)).length < lists.cap);
     return { lists, all, start, cut, whole };
   };
+  // Every active thread with mail the box hasn't read, however old (S-4740): the list's newest page can't hold them all.
+  if (unreadOnly) {
+    const { lists, all } = await read(WHOLE_LIST);
+    const unread = all.filter((t) => t.mails.some((m) => m.recipients.some((r) => r.id === box && !r.read_at)));
+    return { threads: await pageIndex(box, unread, lists.cap, via, withId), next_cursor: null };
+  }
   // One thread past the page, so a page whose last key isn't tied with the next still has fewer than `cap` at or above it.
   let r = await read(list === 'active' ? (cursor?.n ?? 0) + limit + 1 : WHOLE_LIST);
   if (!r.whole) r = await read(WHOLE_LIST);
@@ -2971,7 +2977,8 @@ export async function runDaemon(): Promise<void> {
   itsaHuman.watchHumanStatuses();
   // The human's threads that someone else resolved are archived for them (S-637): every 10 minutes,
   // and soon after an ITSA closes, a request settles, or mail to or from the human moves.
-  const autoArch = autoArchive.start(autoArchiveSources());
+  // Off by default (S-4740): `settings.autoArchive` turns the pass on; the on-demand route stays.
+  const autoArch = settings().autoArchive ? autoArchive.start(autoArchiveSources()) : { nudge: () => {} };
   // Automatic notices whose answer is settled count as read (S-717): every ten minutes, and soon
   // after an ITSA closes, so an agent's unread count means "waiting for you".
   const noticesSweep = notices.start();
@@ -4166,7 +4173,7 @@ export async function runDaemon(): Promise<void> {
         if (!Number.isInteger(rawLimit) || rawLimit < 1) throw new HttpError(400, 'limit must be a whole number from 1');
         const withRef = url.searchParams.get('with');
         const withId = withRef ? boxRef(withRef) : undefined;
-        return threadIndex(box, rawList, Math.min(rawLimit, 200), decodeCursor(url.searchParams.get('cursor')), viaBox(caller, box), viaOf(caller), withId, caller);
+        return threadIndex(box, rawList, Math.min(rawLimit, 200), decodeCursor(url.searchParams.get('cursor')), viaBox(caller, box), viaOf(caller), withId, caller, rawList === 'active' && url.searchParams.get('unread') === '1');
       },
     ],
     [

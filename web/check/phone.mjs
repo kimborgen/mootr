@@ -1083,7 +1083,16 @@ for (const size of SIZES) for (const theme of ['light', 'dark']) {
     await p.locator('[data-nav="mail"]').tap();
     await p.waitForTimeout(400);
     // Every thread row but a decision's: the decision row (S-352) is pinned above the mail, and leaving it out keeps the order these steps have always had.
-    const ids = await p.locator('#inbox-view .mrow[data-thread]:not([data-decision]):not(.ask)').evaluateAll((rs) => rs.map((r) => r.dataset.thread));
+    const rowIds = () => p.locator('#inbox-view .mrow[data-thread]:not([data-decision]):not(.ask)').evaluateAll((rs) => rs.map((r) => r.dataset.thread));
+    // Unread threads list first (S-4740) and opening one moves its row down, so the walk starts from a list of read threads.
+    const unread = await p.locator('#inbox-view .mrow.unread[data-thread]').evaluateAll((rs) => rs.map((r) => r.dataset.thread));
+    if (unread.length) {
+      const mailIds = [];
+      for (const tid of unread) for (const m of (await api(`/api/threads/${tid}`)).mails ?? []) mailIds.push(m.id);
+      await api('/api/agents/human/read', 'POST', { ids: mailIds });
+      await p.waitForTimeout(1500);
+    }
+    const ids = await rowIds();
     check(tag, 'advance: the inbox has four mails to move through', ids.length >= 4, `${ids.length}`);
     if (ids.length < 4) return;
     const open = async (tid) => {

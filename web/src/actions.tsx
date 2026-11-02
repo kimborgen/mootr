@@ -134,6 +134,9 @@ export const inboxThread = (): string | null => {
   const a = inboxPanes().right?.active
   return a?.startsWith('thread:') ? a.slice(7) : null
 }
+// Whether any thread is open: the current world is one, or the Inbox page has one in its pane. The one test that
+// ends the unread hold (S-4740), for the Inbox page and the Mail sidebar alike, so neither releases it under the other.
+export const threadIsOpen = (): boolean => !!(shell.currentWorld()?.startsWith('t:') || inboxThread())
 // A phone shows the world's focused pane alone, and the layout is shared with the desktop, where a thread's pane
 // takes focus: the phone puts the list's pane back in front, so the page opens, and returns, as a list.
 // A thread left open after its list was closed (S-2310) gets the list back, to its left, when the page opens.
