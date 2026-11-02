@@ -72,6 +72,25 @@ describe('a terminal beside its own conversation', () => {
     expect(FakeSocket.opened[1].closed).toBe(false)
     s.destroy()
   })
+
+  // S-4751: a hidden browser tab detaches every terminal, whoever calls show() meanwhile, and showing it reattaches.
+  it('detaches while the page is hidden and reattaches when it shows', async () => {
+    const vis = (hidden: boolean) => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden }); document.dispatchEvent(new Event('visibilitychange')) }
+    const s = new TermSession('oc')
+    s.show()
+    await vi.waitFor(() => expect(FakeSocket.opened.length).toBe(1))
+    vis(true)
+    expect(FakeSocket.opened[0].closed).toBe(true)
+    // The layout shows views on each change, and agent updates sync: neither attaches while hidden.
+    s.show()
+    s.sync()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(FakeSocket.opened.length).toBe(1)
+    vis(false)
+    await vi.waitFor(() => expect(FakeSocket.opened.length).toBe(2))
+    expect(FakeSocket.opened[1].closed).toBe(false)
+    s.destroy()
+  })
 })
 
 // The pure parts of the shared size: when the hint shows, and where a screen sits in its pane.

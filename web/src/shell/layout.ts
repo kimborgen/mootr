@@ -212,7 +212,7 @@ export const resizeAll = () => { for (const h of handles.values()) h.resize?.() 
 // A view that shows takes the focus, except on a phone, where focus raises the keyboard over it.
 export const autoFocus = (key: string) => { if (!isPhone()) requestAnimationFrame(() => viewHandle(key)?.focus?.()) }
 
-// Views not on screen wait here, alive, so terminals stay connected.
+// Views not on screen wait here, alive, so they keep their state (a terminal disconnects meanwhile, S-4751).
 const elements = new Map<string, HTMLDivElement>()
 let storeEl: HTMLDivElement | null = null
 export function viewStore() {

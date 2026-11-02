@@ -19,6 +19,10 @@ const SETTLE_MS = 100
 const FONT = "'Source Code Pro Variable', 'Stam Terminal Symbols', ui-monospace, Menlo, monospace"
 
 export const sessions = new Set<TermSession>()
+// S-4751: no terminal stays attached while the browser tab is hidden or the window minimized, so the daemon
+// streams no pane nobody can see. Every session drops its attach then, and reattaches when the page shows.
+const pageHidden = () => typeof document !== 'undefined' && document.hidden
+if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => { for (const s of sessions) if (document.hidden) s.drop(); else s.sync() })
 export type TermKey = 'esc' | 'tab' | 'backtab' | 'up' | 'down' | 'left' | 'right' | 'ctrl-c' | 'enter'
 
 const ANSI = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white', 'brightBlack', 'brightRed', 'brightGreen', 'brightYellow', 'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite']
@@ -220,6 +224,10 @@ export class TermSession {
   // the human sees, so nothing streams the terminal (S-166).
   hide() {
     this.paused = true
+    this.drop()
+  }
+  // Closes the attach without pausing: a hidden browser tab (S-4751), which sync() reattaches once it shows.
+  drop() {
     this.pending = null
     const ws = this.ws
     if (!ws) return
@@ -250,11 +258,11 @@ export class TermSession {
   }
   // Connects while the agent runs; reconnects after a restart.
   sync() {
-    if (this.sh) { if (!this.ws && !this.pending && this.opened && !this.closed && !this.ended && !this.paused) this.connect(); return }
+    if (this.sh) { if (!this.ws && !this.pending && this.opened && !this.closed && !this.ended && !this.paused && !pageHidden()) this.connect(); return }
     const a = this.agent()
     const running = a && live(a)
     this.status.textContent = !a ? 'This agent is gone.' : running ? '' : `${a.name} is ${stateLabel(a)}. Resume it from its menu.`
-    if (running && !this.ws && !this.pending && this.opened && !this.closed && !this.paused) this.connect()
+    if (running && !this.ws && !this.pending && this.opened && !this.closed && !this.paused && !pageHidden()) this.connect()
   }
   private connect() {
     const own = this.ownSize()

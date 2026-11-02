@@ -21,6 +21,7 @@ export const stories: Story[] = [{
     'The terminal fills its pane on `--term-bg`, with text in `--term-fg`; its 16 ANSI colours come from the `--ansi-0` to `--ansi-15` tokens, not from xterm\'s defaults, and it re-themes when the theme changes.',
     'The status line sits at the bottom right in `--term-muted` at `--type-chrome-xs` and does not take pointer events. It is empty while the agent runs, and otherwise says why: the agent is not running ("Resume it from its menu."), the agent is gone, or the terminal ended.',
     'Closing a plain terminal asks first: "Close this terminal? Its shell ends." An agent\'s tab closes without asking, since its session lives on.',
+    'It is attached only while on screen (S-4751): a background tab, a pane a phone does not show, a view in another world, or a hidden browser tab disconnects, so the daemon streams no pane nobody looks at. Showing it again reattaches and tmux redraws the screen; the scrollback from while it was hidden is not kept.',
     'A new view shows once it is in its pane, and a pane that is being resized settles for 100 ms before the terminal claims the new size, so the program redraws once (' + ds('Motion') + ').',
   ],
   states: [
