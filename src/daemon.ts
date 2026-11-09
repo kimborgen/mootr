@@ -16,7 +16,7 @@ import { LIVE_HOME, MACHINE, PORT, RELEASE, ROOT, STAM_BIN, STAM_HOME, TMUX_SOCK
 import * as db from './db.ts';
 import { hashToken, mintAgentToken, serverTokenHash } from './agent-token.ts';
 import * as tmux from './tmux.ts';
-import { clientCache } from './tmux-clients.ts';
+import { clientWatch } from './tmux-clients.ts';
 import { createStatuslineGate } from './statusline-gate.ts';
 import { adapters } from './adapters/index.ts';
 import * as mail from './mail.ts';
@@ -127,7 +127,7 @@ import { agentInstructionParts } from './agent-instructions.ts';
 import { matchActing, opencodeNamesAgent } from './agent-routes.ts';
 import { agentInventory, typeInventory, withSummaries, composerCatalog } from './inventory.ts';
 import { cleanTitle, cleanSummary, mailTitlesShown } from './mail-title.ts';
-import { defaultGithubRepo } from './github-repo.ts';
+import { callerRepo, defaultGithubRepo, prCallRepo } from './github-repo.ts';
 import { ensureSettings, settings, setSetting, fileProblem, patchSettings, redactSettingsText, writeSettingsText, isSettingsHome, effectiveSettingsText, LOCAL_KEYS, splitSettingsPatch, patchLocalKeys, patchSharedSettings, peerShared } from './settings.ts';
 import { peerUiOrigins, peerUiRoute, peerUiHumanRoute, peerServeOrigin } from './web-origins.ts';
 import { agentIpCache } from './agent-ips.ts';
@@ -1643,13 +1643,20 @@ export function dismissBanners(snap: tmux.Snapshot | null): void {
     if (last && last.pane === pane && activity === last.activity && activity < Math.floor(last.at / 1000) && now - last.at < BANNER_RELOOK_MS) continue;
     due.push({ a, pane, activity, at: last?.at ?? 0 });
   }
-  for (const { a, pane, activity } of pickLooks(due)) {
-    const owner = `${snap.server}\t${a.id}`;
-    const rules = bannerRules;
-    const now = Date.now();
-    bannerCapturing.add(a.id);
-    tmux
-      .capturePaneAsync(pane)
+  // S-4910: the looks run one after another, not all at once. Starting a tmux process forks the daemon, which
+  // blocks the loop for a few ms per process and grows with the daemon's memory; eight started together blocked it
+  // 100-225 ms under the banners label. One at a time, each start is its own turn of the loop.
+  const looks = pickLooks(due);
+  for (const { a } of looks) bannerCapturing.add(a.id);
+  const rules = bannerRules;
+  const now = Date.now();
+  void (async () => {
+    for (const { a, pane, activity } of looks) await look(a, pane, activity);
+  })();
+  function look(a: db.Agent, pane: string, activity: number): Promise<void> {
+    const owner = `${snap!.server}\t${a.id}`;
+    // Every start but the first runs after an await, outside the tick's label, so each carries its own.
+    return timed('banners capture', () => tmux.capturePaneAsync(pane))
       .then(async (screen) => {
         // S-2125: the tmux calls are async; the synchronous parts around them are labelled banners.
         // The agent as it is now, if it can still show a banner under the same harness and rules.
@@ -1919,20 +1926,22 @@ export function bindAddresses(): string[] {
 // Viewers of different sizes would otherwise fight over the window and see each other's
 // layout, padded with dots or wrapped.
 const viewers = new Map<string, { size: [number, number]; ptys: Set<{ ws: import('ws').WebSocket; pty: import('node-pty').IPty }> }>();
-// A statusline refresh asks whether a tmux client is attached; the answer is cached for a few seconds (tmux-clients.ts, S-1025).
-const tmuxClientsOpen = clientCache(tmux.hasClients, 5_000);
+// A statusline refresh asks whether a tmux client is attached; the answer comes from a whole-server list refreshed in the
+// background every few seconds, so the route never waits on tmux (tmux-clients.ts, S-1025, S-4851).
+const tmuxClientsOpen = clientWatch(tmux.clientSessionsAsync, 5_000);
 // Processes one status-line report: the context size, then the usage tables (S-2126: reached through statuslineGate).
 const statuslineGate = createStatuslineGate((slot, body) => {
   const [harness, id] = slot.split('/') as [string, string];
   const a = db.getAgent(id);
   if (!a) return;
-  const f = adapters[harness]?.onStatusLine?.(a, body as Record<string, any>) ?? {};
-  if (f.context_tokens !== undefined || f.context_window !== undefined) db.updateAgent(a.id, { context_tokens: f.context_tokens, context_window: f.context_window });
+  // Each step labelled, so a slow one is named in daemon.log rather than the route (S-4851).
+  const f = timed('statusline: adapter', () => adapters[harness]?.onStatusLine?.(a, body as Record<string, any>) ?? {});
+  if (f.context_tokens !== undefined || f.context_window !== undefined) timed('statusline: context size', () => db.updateAgent(a.id, { context_tokens: f.context_tokens, context_window: f.context_window }));
   // Stores the windows before the cost, so the paid estimate uses this refresh's windows.
-  usage.reportStatusline(a, f);
-  if (f.context_tokens !== undefined) context.onContext(a.id, f.context_tokens);
-  if (f.session) cacheCold.onCacheTurn(a.id, f.session);
-  if (f.cacheTtl) cacheCold.onCacheTtl(a.id, f.cacheTtl);
+  timed('statusline: usage', () => usage.reportStatusline(a, f));
+  if (f.context_tokens !== undefined) timed('statusline: context level', () => context.onContext(a.id, f.context_tokens!));
+  if (f.session) timed('statusline: cache turn', () => cacheCold.onCacheTurn(a.id, f.session!));
+  if (f.cacheTtl) timed('statusline: cache ttl', () => cacheCold.onCacheTtl(a.id, f.cacheTtl));
 });
 
 function attachTerminal(ws: import('ws').WebSocket, agentId: string, cols: number, rows: number): void {
@@ -2200,21 +2209,29 @@ async function buildMailboxThreads(box: string, limit: number, via?: Via, viaDec
   const cap = limit + db.archivedCount(box) + db.deferredCount(box);
   const merged = new Map<string, db.ListMail[]>();
   const withQ = withId ? `&with=${encodeURIComponent(withId)}` : '';
+  // Asked once, not per thread: it reads settings and the agents table (S-4794).
+  const boss = isBoss(box);
   // A peer that predates `light` sends whole mails, which are ListMail too.
-  for (const t of [...db.threadList(box, cap, withId), ...(await fanOut<ListThread>(`/api/agents/${box}/threads?limit=${cap}&light=1${withQ}`, via))])
-    merged.set(t.thread_id, [...(merged.get(t.thread_id) ?? []), ...(isBoss(box) ? t.mails : visibility.listedThread(box, t).mails)]);
-  // A thread's place is its newest message the mailbox sent or received: mail between others
-  // in it doesn't move it up (S-542). Threads at one time go by id, so an index cursor has one place to resume.
-  const all = [...merged]
-    .map(([thread_id, ms]) => ({ thread_id, mails: db.foldListMails(ms).sort((a, b) => a.created_at.localeCompare(b.created_at)) }))
-    .map((t) => ({ t, at: boxLast(box, t.mails) }))
-    .sort((a, b) => listOrder(a, b))
-    .map((x) => x.t);
+  const here = timed('mail list: read', () => db.threadList(box, cap, withId));
+  const from = await fanOut<ListThread>(`/api/agents/${box}/threads?limit=${cap}&light=1${withQ}`, via);
+  // Labelled: this runs after an await, outside the request's own label (S-4794).
+  const all = timed('mail list: merge', () => {
+    for (const t of [...here, ...from]) merged.set(t.thread_id, [...(merged.get(t.thread_id) ?? []), ...(boss ? t.mails : visibility.listedThread(box, t).mails)]);
+    // A thread's place is its newest message the mailbox sent or received: mail between others
+    // in it doesn't move it up (S-542). Threads at one time go by id, so an index cursor has one place to resume.
+    return [...merged]
+      .map(([thread_id, ms]) => ({ thread_id, mails: db.foldListMails(ms).sort((a, b) => a.created_at.localeCompare(b.created_at)) }))
+      .map((t) => ({ t, at: boxLast(box, t.mails) }))
+      .sort((a, b) => listOrder(a, b))
+      .map((x) => x.t);
+  });
   const keep = box === mail.HUMAN ? new Set([...itsaHuman.askThreadIds(), ...(await decisionThreads(false, viaDecisions))]) : undefined;
-  const { active, archived } = db.splitArchived(box, all, keep);
-  // An ask or a decision can be deferred too (S-1068), so `keep` (which holds them in the inbox) doesn't apply.
-  const { rest, deferred } = db.splitDeferred(box, active);
-  return { active: rest, archived, deferred, cap };
+  return timed('mail list: split', () => {
+    const { active, archived } = db.splitArchived(box, all, keep);
+    // An ask or a decision can be deferred too (S-1068), so `keep` (which holds them in the inbox) doesn't apply.
+    const { rest, deferred } = db.splitDeferred(box, active);
+    return { active: rest, archived, deferred, cap };
+  });
 }
 
 // The ids a peer is asked for in one request: a long page (auto-archive's whole inbox) goes in parts, so
@@ -2239,7 +2256,8 @@ async function peerPage<T extends ListThread>(box: string, ids: string[], cap: n
 // error rather than a page without its mail (auto-archive judges threads only with every peer in view).
 async function pageThreads(box: string, page: ListThread[], cap: number, via?: Via, withId?: string, opts: { strict?: boolean } = {}): Promise<FullThread[]> {
   const merged = new Map<string, db.ThreadMail[]>(page.map((t) => [t.thread_id, []]));
-  const add = (t: FullThread) => merged.get(t.thread_id)?.push(...(isBoss(box) ? t.mails : visibility.listedThread(box, t).mails));
+  const boss = isBoss(box);
+  const add = (t: FullThread) => merged.get(t.thread_id)?.push(...(boss ? t.mails : visibility.listedThread(box, t).mails));
   const ids = [...merged.keys()];
   for (const t of db.threadsById(box, ids, withId)) add(t);
   const { rows, unreachable } = await peerPage<FullThread>(box, ids, cap, via, withId, false);
@@ -2357,18 +2375,23 @@ function indexRow(box: string, thread_id: string, ms: db.ListMail[]): IndexRow {
 // predates them answers with its newest `cap` threads whole, once (peerPage), from which the page's are kept.
 async function pageIndex(box: string, page: ListThread[], cap: number, via?: Via, withId?: string): Promise<IndexRow[]> {
   const merged = new Map<string, db.ListMail[]>(page.map((t) => [t.thread_id, []]));
-  const add = (t: ListThread) => merged.get(t.thread_id)?.push(...(isBoss(box) ? t.mails : visibility.listedThread(box, t).mails));
+  const boss = isBoss(box);
+  const add = (t: ListThread) => merged.get(t.thread_id)?.push(...(boss ? t.mails : visibility.listedThread(box, t).mails));
   const ids = [...merged.keys()];
-  for (const t of db.threadList(box, 0, withId, { only: ids, index: true })) add(t);
+  timed('mail index: read', () => {
+    for (const t of db.threadList(box, 0, withId, { only: ids, index: true })) add(t);
+  });
   // A peer on an earlier release sends the index form without attached agents, and its linked ITSAs without id and
   // status (S-4578's): those threads are asked for again whole, which carry both, from every peer.
   const fromPeers = (await peerPage<ListThread>(box, ids, cap, via, withId, true)).rows;
   const older = new Set(fromPeers.filter((t) => t.mails.some((m) => m.snippet !== undefined && m.agents === undefined)).map((t) => t.thread_id));
   for (const t of fromPeers) if (!older.has(t.thread_id)) add(t);
   if (older.size) for (const t of (await peerPage<ListThread>(box, [...older], cap, via, withId, false)).rows) add(t);
-  return [...merged]
-    .filter(([, ms]) => ms.length)
-    .map(([thread_id, ms]) => indexRow(box, thread_id, db.foldListMails(ms).sort((a, b) => a.created_at.localeCompare(b.created_at))));
+  return timed('mail index: rows', () =>
+    [...merged]
+      .filter(([, ms]) => ms.length)
+      .map(([thread_id, ms]) => indexRow(box, thread_id, db.foldListMails(ms).sort((a, b) => a.created_at.localeCompare(b.created_at)))),
+  );
 }
 
 // The most rows a cursor may have passed: a cursor past it is refused rather than read as a light pass that size.
@@ -3156,7 +3179,7 @@ export async function runDaemon(): Promise<void> {
     }
   };
   syncStarts();
-  setInterval(syncStarts, 30_000).unref();
+  setInterval(() => timed('process start subscriptions', syncStarts), 30_000).unref();
   itsa.onChange((c) => {
     if (c.type === 'fields' && 'stage' in c.to) onStage({ itsa: { id: c.itsa.id, kind: c.itsa.kind }, from: c.from.stage, to: c.to.stage, actor: c.actor });
   });
@@ -3174,17 +3197,17 @@ export async function runDaemon(): Promise<void> {
   setInterval(() => void reconcileTick().catch((e) => console.error(`reconcile: ${e instanceof Error ? e.message : e}`)), 5000);
   // A freed slot goes to the head of the developer slot queue (S-2053).
   restoreSlotQueue();
-  setInterval(pumpSlotQueue, 2000);
+  setInterval(() => timed('slot queue', pumpSlotQueue), 2000);
   // Suggested input past its expiry, and held approvals to type (S-422).
   if (ignoredTestOnlyEnv('STAM_TEST_HUMAN_KEY')) console.warn('STAM_TEST_HUMAN_KEY is set outside a test home and is ignored: only tailscale serve proves the human here');
-  setInterval(() => void permissions.retryHeldInputs().catch((e) => console.error(`suggested input: ${e instanceof Error ? e.message : e}`)), 5000);
+  setInterval(() => timed('held inputs', () => permissions.retryHeldInputs().catch((e) => console.error(`suggested input: ${e instanceof Error ? e.message : e}`))), 5000);
   if (ignoredTestOnlyEnv('STAM_PR_MERGE_SCRIPT')) console.warn('STAM_PR_MERGE_SCRIPT is set outside a test home and is ignored: pr_merge runs the deploy checkout\'s merge-pr.mjs');
   // Merge runs that ended (S-2279): their callers get the outcome. Only the ITSA home starts them; STAM_PR_MERGE_POLL_MS is for tests.
   setInterval(() => {
-    if (prMerge.isHome()) void prMerge.tick().catch((e) => console.error(`pr_merge: ${e instanceof Error ? e.message : e}`));
+    if (prMerge.isHome()) timed('pr merge poll', () => prMerge.tick().catch((e) => console.error(`pr_merge: ${e instanceof Error ? e.message : e}`)));
   }, Number(envVar('PR_MERGE_POLL_MS')) || 5000);
   // Harness dialogs nobody answered in time go to the human (S-589).
-  setInterval(() => void permissions.escalateStaleDialogs().catch((e) => console.error(`dialog timeout: ${e instanceof Error ? e.message : e}`)), 5000);
+  setInterval(() => timed('stale dialogs', () => permissions.escalateStaleDialogs().catch((e) => console.error(`dialog timeout: ${e instanceof Error ? e.message : e}`))), 5000);
   // The model classifier for activity items the rules leave NULL (S-214); off unless settings say so.
   activityClassify.startClassifier();
   // The activity summary's digests (S-1009), built in slices after the start-up ingest has begun.
@@ -3194,14 +3217,14 @@ export async function runDaemon(): Promise<void> {
   setInterval(() => {
     if (staleRunning) return;
     staleRunning = true;
-    reconcileStaleWorking()
+    timed('stale working', reconcileStaleWorking)
       .catch(() => {})
       .finally(() => (staleRunning = false));
   }, 10_000);
   setInterval(() => timed('context idle sweep', context.idleSweep), 60_000);
   lifecycle.startRestWaking();
   setInterval(() => timed('standing rest sweep', lifecycle.restSweep), 60_000);
-  setInterval(() => timed('standing growth sweep', () => void growthSweep().catch((e) => console.error('standing growth sweep:', e))), 60_000);
+  setInterval(() => timed('standing growth sweep', () => growthSweep().catch((e) => console.error('standing growth sweep:', e))), 60_000);
   // On the ITSA home: GitHub PR heads follow storage's branches (S-667). A config that
   // prOpenConfig refuses (a fresh install with no repo) skips the tick, logged once per
   // message, and never throws out of the timer, which would kill the daemon (S-2140).
@@ -3218,7 +3241,7 @@ export async function runDaemon(): Promise<void> {
       prSyncConfigError = msg;
       return;
     }
-    prSync.syncTick(cfg)?.catch((e) => console.error(`pr-sync: ${e instanceof Error ? e.message : e}`));
+    timed('pr sync', () => prSync.syncTick(cfg))?.catch((e) => console.error(`pr-sync: ${e instanceof Error ? e.message : e}`));
   }, 60_000);
   // Declared-wait timeouts and wake_me timers, fired from `until`. Its first tick also
   // catches up on what came due while the daemon was down (once, not per missed tick).
@@ -3239,7 +3262,8 @@ export async function runDaemon(): Promise<void> {
     peerBusyRunning = true;
     try {
       // Every state, so a peer agent that stopped or was archived is remembered as such.
-      for (const a of await fanOut<db.Agent>('/api/agents?state=all')) if (a.machine !== MACHINE && a.id) db.rememberPeerAgent(a);
+      // Only the fields rememberPeerAgent keeps (S-4913); a peer on older code ignores fields and sends full rows.
+      for (const a of await fanOut<db.PeerListed>('/api/agents?state=all&fields=peer')) if (a.machine !== MACHINE && a.id) db.rememberPeerAgent(a);
       for (const id of db.expiredPeerBusy()) org.peerBusyChanged(id);
     } catch (e) {
       console.error(`peer busy sweep: ${e instanceof Error ? e.message : e}`);
@@ -3247,16 +3271,16 @@ export async function runDaemon(): Promise<void> {
       peerBusyRunning = false;
     }
   };
-  setInterval(() => timed('peer busy sweep', () => void peerBusyTick()), 2 * 60_000).unref();
+  setInterval(() => timed('peer busy sweep', () => peerBusyTick()), 2 * 60_000).unref();
   // The retro digest to the Retros owner, or the chief of staff (S-161, S-1059): checked every minute, sent daily (or weekly)
   // at settings.retro.digest. See src/retro-digest.ts.
   setInterval(() => {
-    retroDigest.digestTick().catch((e) => console.error(`retro digest: ${e instanceof Error ? e.message : e}`));
+    timed('retro digest', retroDigest.digestTick).catch((e) => console.error(`retro digest: ${e instanceof Error ? e.message : e}`));
   }, 60_000);
   // The periodic tree check timer (S-915) follows settings.treeCheck: reconciled at start and every 30 s.
   const treeCheckTick = () => { try { syncTreeCheck(); } catch (e) { console.error(`tree check: ${e instanceof Error ? e.message : e}`); } };
   treeCheckTick();
-  setInterval(treeCheckTick, 30_000);
+  setInterval(() => timed('tree check', treeCheckTick), 30_000);
   // This machine's CPU, RAM, and swap, sampled every 5 s for the sidebar's meters.
   machines.startSampler();
   // Mail queued for a peer that didn't answer is redelivered (S-235).
@@ -3291,10 +3315,10 @@ export async function runDaemon(): Promise<void> {
   // STAM_HOME/busy is touched while any active agent here is starting, working, blocked, or
   // waiting (db.BUSY_ACTIVITIES), or resting with a wait (S-1982), so a machine that shuts itself
   // down when idle (such as storage) doesn't shut down under an agent waiting for a reply or a timer.
-  setInterval(() => {
+  setInterval(() => timed('busy flag', () => {
     if (db.listAgents().some(db.keepsMachineUp))
       writeFileSync(join(STAM_HOME, 'busy'), new Date().toISOString());
-  }, 30_000);
+  }), 30_000);
 
   // `local` is true for requests from a peer daemon, which must not fan out again.
   // `human` is true for the web UI and the CLI outside an agent (x-stam-human). Agents run as
@@ -3791,10 +3815,20 @@ export async function runDaemon(): Promise<void> {
     [
       'GET',
       /^\/api\/agents$/,
-      async (_m, _b, url, _r, local) => {
+      async (_m, _b, url, _r, local, _h, _q, caller) => {
         // Live agents unless `state` or `ids` asks for others (S-3816); a peer that ignores them is filtered here too.
         const keep = listFilter(url.searchParams.get('state'), url.searchParams.get('ids'));
         if (!keep) throw new HttpError(400, `state is a comma list of ${LIST_STATES.join(', ')}`);
+        // S-4913: a peer's busy sweep asks every agent with fields=peer, every 2 minutes, and reads only what
+        // db.rememberPeerAgent keeps. Building the full rows (costs, views, asks) for every agent and sending them
+        // stalled the loop about 120 ms each time. Only that caller gets this form: a peer daemon's own call (never
+        // an agent forwarded through it, whom visibility would filter), which never fans out, with no search, role
+        // or viewer, which the full list filters by.
+        if (url.searchParams.get('fields') === 'peer') {
+          if (!local || caller.kind !== 'shared') throw new HttpError(403, 'fields=peer is a peer daemon\'s own call');
+          if (['q', 'role', 'as'].some((k) => url.searchParams.has(k))) throw new HttpError(400, 'fields=peer takes no q, role or as');
+          return timed('agents: peer fields', () => db.peerListing(keep));
+        }
         // Whether each agent belongs to at least one open ITSA (step 10), for the tree's
         // mark. With ITSAs not required, or the home unreachable, nobody is marked. Awaited before the reads below (S-3840).
         const itsaOn = settings().itsa.required;
@@ -4143,7 +4177,8 @@ export async function runDaemon(): Promise<void> {
         // A peer asks in two steps (S-4520): `light=1` for every thread in db.ListMail form, then `ids=A,B` for its page
         // whole, or, for the thread index, `ids=A,B&light=1` for the page's index fields.
         if (local) {
-          const listed = <T extends ListThread>(ts: T[]) => ts.map((t) => (isBoss(box) ? t : visibility.listedThread(box, t)));
+          const boss = isBoss(box);
+          const listed = <T extends ListThread>(ts: T[]) => ts.map((t) => (boss ? t : visibility.listedThread(box, t)));
           const ids = url.searchParams.get('ids');
           const light = url.searchParams.get('light') === '1';
           if (ids !== null && light) return listed(db.threadList(box, 0, withId, { only: ids.split(',').filter(Boolean), index: true }));
@@ -5866,7 +5901,7 @@ export async function runDaemon(): Promise<void> {
           // On a machine that isn't the ITSA home, the home fetches the branch from this machine's origin: push it first (S-667).
           const me = by ? db.getAgent(by) : undefined;
           // body_file is read here, on the caller's machine, before any push or peer call (S-2677).
-          const input = prOpen.resolveBody({ branch: body?.branch, title: body?.title, body: body?.body, body_file: body?.body_file, itsa: body?.itsa, by }, me);
+          const input = prOpen.resolveBody({ branch: body?.branch, title: body?.title, body: body?.body, body_file: body?.body_file, itsa: body?.itsa, by, repo: callerRepo(body?.repo, me) }, me);
           // The worktree's head travels with the call (S-3486), over a peer too: the home refuses a branch whose fetched head differs.
           const head = me?.machine === MACHINE ? await prOpen.callerHead(me.cwd, String(body?.branch ?? ''), via, body?.itsa ?? null) : typeof body?.head === 'string' ? body.head : null;
           const pr = await prOpen.openPrRouted(head ? { ...input, head } : input, via);
@@ -5886,7 +5921,7 @@ export async function runDaemon(): Promise<void> {
           // From storage the home reads the branch from storage's bare repo, so it is pushed there first, as a real call does (not to GitHub).
           const me = by ? db.getAgent(by) : undefined;
           const head = me?.machine === MACHINE ? await prOpen.callerHead(me.cwd, String(body?.branch ?? ''), via, null) : typeof body?.head === 'string' ? body.head : null;
-          const pr = await prOpen.predictRouted({ branch: body?.branch, by, ...(head ? { head } : {}) }, via);
+          const pr = await prOpen.predictRouted({ branch: body?.branch, by, repo: callerRepo(body?.repo, me), ...(head ? { head } : {}) }, via);
           // The head callerHead pushed (S-3740), so the output says what the push put on origin; none when this call pushed nothing.
           const pushed = prOpen.predictPushedHead(me?.machine === MACHINE, head);
           return pushed ? { ...pr, pushed } : pr;
@@ -5900,7 +5935,7 @@ export async function runDaemon(): Promise<void> {
         itsaRoute(async () => {
           const by = itsaActor(body, human);
           const via = viaBox(caller, caller.kind === 'opencode' ? by : undefined);
-          return prOpen.prStatusRouted({ branch: body?.branch, body: body?.body, itsa: body?.itsa, by }, via);
+          return prOpen.prStatusRouted({ branch: body?.branch, body: body?.body, itsa: body?.itsa, by, repo: callerRepo(body?.repo, by ? db.getAgent(by) : undefined) }, via);
         }),
     ],
     [
@@ -5964,7 +5999,10 @@ export async function runDaemon(): Promise<void> {
           // A peer's forward carries its own proof of boss and assistant (the peer token verified them); viaBox recomputes both from
           // this daemon's agents, which don't include the peer's, so they're taken back from the authenticated caller.
           if (via && caller.forwarded) Object.assign(via, { boss: Boolean(caller.boss), assistant: Boolean(caller.assistant), reviewRole: caller.reviewRole, ownBranches: caller.ownBranches });
-          return prReview.reviewPrRouted({ pr: body?.pr, verdict: body?.verdict, summary: body?.summary, head: body?.head }, via);
+          // S-4831: the PR's repo is the one given (repo, or pr as OWNER/REPO#N), else the reviewer's worktree origin on this machine;
+          // a pr that names its repo never gets the worktree's, which would conflict with it.
+          const repo = prCallRepo(body?.pr, body?.repo, via && !caller.forwarded ? db.getAgent(via.agent) : undefined);
+          return prReview.reviewPrRouted({ pr: body?.pr, verdict: body?.verdict, summary: body?.summary, head: body?.head, ...(repo ? { repo } : {}) }, via);
         }),
     ],
     [
@@ -5980,10 +6018,14 @@ export async function runDaemon(): Promise<void> {
         }),
     ],
     [
-      // The default GitHub repo for a bare PR number (S-614): asked of the ITSA home, so a peer's watch_pr gets the home's.
+      // The default GitHub repo for a bare PR number (S-614): asked of the ITSA home, so a peer's watch_pr gets the home's. With agent, that
+      // agent's worktree origin comes first when it works on this machine (S-4831).
       'GET',
       /^\/api\/pr\/github-repo$/,
-      async () => ({ github: await prOpen.githubRepoRouted() }),
+      async (_m, _b, url) => {
+        const agent = url.searchParams.get('agent');
+        return { github: callerRepo(null, agent ? db.getAgent(agent) : undefined) ?? (await prOpen.githubRepoRouted()) };
+      },
     ],
     [
       // Who owns a branch, from this daemon's agents, for the daemon that asks (S-581): the answer is relative to `agent`.
@@ -6921,13 +6963,13 @@ export async function runDaemon(): Promise<void> {
   // While no serve is found, the origin is asked again in the background, never on a request. Stops
   // once one is found.
   if (!webServed) {
-    const retry = setInterval(() => {
+    const retry = setInterval(() => timed('web origin retry', () => {
       if (webServed) {
         clearInterval(retry);
         return;
       }
       void discoverWebOrigin();
-    }, WEB_RETRY_MS);
+    }), WEB_RETRY_MS);
     retry.unref();
   }
   // Primes the bound hosts (bindAddresses runs tailscale ip -4) here, so no request spawns it.

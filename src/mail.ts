@@ -22,6 +22,7 @@ import { indexMail } from './vectors.ts';
 import * as events from './events.ts';
 import { embedFiles } from './mail-embed.ts';
 import { envVar } from './env.ts';
+import { timed } from './stall.ts';
 
 export const HUMAN = 'human';
 // About 5,000 tokens at roughly 4 characters per token. Overflow becomes an attachment.
@@ -738,7 +739,7 @@ export function drainOutbox(): Promise<void> {
 
 export function startOutbox(): void {
   const every = Number(envVar('OUTBOX_MS')) || 30_000;
-  setInterval(() => void drainOutbox(), every).unref();
+  setInterval(() => timed('mail outbox', () => drainOutbox()), every).unref();
 }
 
 // stam itself has no mailbox, so the first running agent stands in as the sender of mail

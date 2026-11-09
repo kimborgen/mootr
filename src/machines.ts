@@ -9,6 +9,7 @@ import { peers, peerCall } from './peers.ts';
 import { settings, setSetting, type Settings } from './settings.ts';
 import * as db from './db.ts';
 import { envVar } from './env.ts';
+import { timed } from './stall.ts';
 
 export interface CpuCounters {
   // Busy and total jiffies since boot; the difference between two reads is the load.
@@ -310,8 +311,8 @@ async function mailWarning(subject: string, body: string): Promise<void> {
 
 export function startSampler(): void {
   tick();
-  setInterval(() => {
+  setInterval(() => timed('machine sampler', () => {
     const s = tick();
     if (s) warnResources(s, settings().resourceWarn, (subject, body) => void mailWarning(subject, body).catch(() => {}));
-  }, SAMPLE_MS);
+  }), SAMPLE_MS);
 }

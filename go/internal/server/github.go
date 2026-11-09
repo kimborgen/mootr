@@ -85,9 +85,12 @@ type githubRepo struct {
 	Github *string `json:"github"`
 }
 
-// prGithubRepo is the default GitHub repo for a bare PR number (S-614), asked of the ITSA home so a peer's watch_pr gets the
-// home's.
+// prGithubRepo is the default GitHub repo for a bare PR number (S-614): the origin of ?agent='s worktree when that agent works
+// here (S-4831, as the TS route), else the ITSA home's default, asked of the home so a peer's watch_pr gets the home's.
 func (s *Server) prGithubRepo(r *http.Request, _ auth.Resolved) (any, error) {
+	if t := s.agentRepo(r.Context(), r.URL.Query().Get("agent")); t != "" {
+		return githubRepo{Github: &t}, nil
+	}
 	if !s.onItsaHome() {
 		v, err := s.toHome(r.Context(), "GET", "/api/pr/github-repo", nil, 15*time.Second, nil)
 		if err != nil {
@@ -124,13 +127,31 @@ func (s *Server) defaultGithubRepo(ctx context.Context) string {
 	if path == "" {
 		return ""
 	}
+	return originRepo(ctx, path, it.PrOpenOrigin)
+}
+
+// originRepo is src/github-repo.ts originRepo: OWNER/NAME of the checkout's remote, or "" when it has none on GitHub.
+func originRepo(ctx context.Context, path, remote string) string {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", path, "remote", "get-url", it.PrOpenOrigin).Output()
+	out, err := exec.CommandContext(ctx, "git", "-C", path, "remote", "get-url", remote).Output()
 	if err != nil {
 		return ""
 	}
 	return parseGithubRepo(string(out))
+}
+
+// agentRepo is the fallback of src/github-repo.ts callerRepo (S-4831): the repo the origin of an agent's worktree names, when
+// the agent works on this machine; else "".
+func (s *Server) agentRepo(ctx context.Context, id string) string {
+	if id == "" {
+		return ""
+	}
+	a, err := s.db.GetAgent(ctx, id)
+	if err != nil || a.Machine != s.cfg.Machine || a.Cwd == "" {
+		return ""
+	}
+	return originRepo(ctx, a.Cwd, "origin")
 }
 
 var reGithubRemote = regexp.MustCompile(`^(?:https?://(?:[^@/]+@)?|ssh://(?:[^@/]+@)?|[^@/\s]+@)github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$`)

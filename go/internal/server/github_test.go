@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -31,6 +32,29 @@ func TestGithubRepoRoute(t *testing.T) {
 	f.sql("UPDATE agents SET id = id")
 	if rec := f.post2("GET", "/api/pr/github-repo", ""); rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"github":null}` {
 		t.Errorf("no default repo: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// S-4831: ?agent= names the caller, whose worktree origin is the repo of its bare PR numbers when it works on this machine, as the
+// TS route; an agent elsewhere, or one without a GitHub origin, gets the home's default.
+func TestGithubRepoRouteAgentWorktree(t *testing.T) {
+	f, _ := eventsFixture(t)
+	wt := t.TempDir()
+	for _, args := range [][]string{{"init", "-q"}, {"remote", "add", "origin", "git@github.com:acme/wt.git"}} {
+		if out, err := exec.Command("git", append([]string{"-C", wt}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	f.sql("UPDATE agents SET machine = 'test-machine', cwd = ? WHERE id = 'achild'", wt)
+	f.sql("UPDATE agents SET machine = 'elsewhere', cwd = ? WHERE id = 'aboss'", wt)
+	for _, c := range []struct{ agent, want string }{
+		{"achild", `{"github":"acme/wt"}`},
+		{"aboss", `{"github":null}`},
+		{"nosuch", `{"github":null}`},
+	} {
+		if rec := f.post2("GET", "/api/pr/github-repo?agent="+c.agent, ""); rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != c.want {
+			t.Errorf("agent %s: %d %s, want %s", c.agent, rec.Code, rec.Body.String(), c.want)
+		}
 	}
 }
 

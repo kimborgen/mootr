@@ -22,6 +22,8 @@ const calls = [];
 let seq = 0;
 // What the ITSA home says the default repo is (null: it has none, S-614). The tool asks the daemon, never reads settings.
 let homeRepo = 'example/stam';
+// The origin repo of an agent's worktree, as the daemon reads it (S-4831).
+const worktreeRepo = { 'agent-in-bai': 'acme/bai2' };
 const daemon = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
@@ -47,7 +49,8 @@ const daemon = createServer((req, res) => {
       subs = subs.filter((s) => s.id !== id);
       return send(200, { ok: true });
     }
-    if (req.method === 'GET' && req.url === '/api/pr/github-repo') return send(200, { github: homeRepo });
+    // With agent (S-4831) the daemon answers that agent's worktree origin first; the fake answers by the agent it names.
+    if (req.method === 'GET' && req.url.startsWith('/api/pr/github-repo')) return send(200, { github: worktreeRepo[new URL(req.url, 'http://x').searchParams.get('agent')] ?? homeRepo });
     send(404, { error: 'not here' });
   });
 });
@@ -161,5 +164,25 @@ test('a bare number takes the ITSA home\'s default repo; with none known it asks
   await assert.rejects(mcp.callTool('watch_pr', { self, pr: 6 }), /no default GitHub repo/);
   calls.length = 0;
   await mcp.callTool('watch_pr', { self, pr: 'o/r#7' });
-  assert.equal(calls.some((c) => c.path === '/api/pr/github-repo'), false);
+  assert.equal(calls.some((c) => c.path.startsWith('/api/pr/github-repo')), false);
+});
+
+test('a bare number with repo watches that repo\'s PR, with no lookup; a repo that differs from OWNER/REPO#N is refused (S-4831)', async () => {
+  await mcp.callTool('watch_pr', { self, pr: 10, repo: 'acme/bai2' });
+  assert.equal(posted()[0].filter.subjects[0], 'github:acme/bai2#10');
+  assert.equal(calls.some((c) => c.path.startsWith('/api/pr/github-repo')), false);
+  await mcp.callTool('watch_pr', { self, pr: 'acme/bai2#11', repo: 'acme/bai2' });
+  assert.equal(posted()[1].filter.subjects[0], 'github:acme/bai2#11');
+  await assert.rejects(mcp.callTool('watch_pr', { self, pr: 'acme/bai2#12', repo: 'acme/stam2' }), /is in acme\/bai2, but repo says acme\/stam2/);
+  await assert.rejects(mcp.callTool('watch_pr', { self, pr: 12, repo: 'not a repo' }), /repo is OWNER\/NAME/);
+  await mcp.callTool('unwatch_pr', { self, pr: 10, repo: 'acme/bai2' });
+  assert.equal(subs.some((x) => x.filter.subjects[0] === 'github:acme/bai2#10'), false, 'unwatch_pr finds the watch by the same repo');
+});
+
+test('a bare number asks the daemon with the agent, so the agent\'s worktree origin wins over the home\'s default (S-4831)', async () => {
+  await mcp.callTool('watch_pr', { self: 'agent-in-bai', pr: 2 });
+  assert.equal(posted()[0].filter.subjects[0], 'github:acme/bai2#2');
+  assert.ok(calls.some((c) => c.path === '/api/pr/github-repo?agent=agent-in-bai'));
+  await mcp.callTool('watch_pr', { self, pr: 3 });
+  assert.equal(posted()[1].filter.subjects[0], 'github:example/stam#3', 'an agent whose worktree has no GitHub origin keeps the default repo');
 });

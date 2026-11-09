@@ -57,6 +57,19 @@ test('undeferring returns the thread; archive and defer exclude each other', () 
   assert.equal(db.splitArchived('human', [thread('t6', mail('f1'))]).archived.length, 1);
 });
 
+test("splitArchived reads every thread's recorded mail at once, each thread's and mailbox's its own (S-4794)", () => {
+  db.archiveThread('human', 'g1', ['g1a']);
+  db.archiveThread('human', 'g2', ['g2a']);
+  db.archiveThread('a7', 'g3', ['g3a', 'g3b']);
+  db.archiveThread('human', 'g3', ['g3a']);
+  // g2's recorded mail doesn't archive g1's new mail; a7's record of g3b doesn't count for the human.
+  const ts = [thread('g1', mail('g1a'), mail('g2a')), thread('g2', mail('g2a')), thread('g3', mail('g3a'), mail('g3b')), thread('g4', mail('g4a'))];
+  const { active, archived } = db.splitArchived('human', ts);
+  assert.deepEqual(active.map((x) => x.thread_id), ['g1', 'g3', 'g4']);
+  assert.deepEqual(archived.map((x) => x.thread_id), ['g2']);
+  assert.deepEqual(db.splitArchived('a7', [thread('g3', mail('g3a', 'a7'), mail('g3b', 'a7'))]).archived.map((x) => x.thread_id), ['g3']);
+});
+
 test('deferred unread mail is skipped by inbox, a read without ids and the idle push, and returns once undeferred (S-1880)', () => {
   const send = (id, thread_id) => db.createMail({ id, from_id: 'a9', from_name: 'a9', subject: id, body: id, thread_id, reply_to: null }, ['agent-d']);
   send('g1', 'tg1');

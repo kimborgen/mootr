@@ -4,7 +4,7 @@
 // head. With an ITSA it links the PR and the branch to it. The body is the one docs/pull-requests.md
 // describes. Before any push it runs the merge gate's stories and export-overrides checks (S-1942).
 // Names come from settings.itsa.prOpen, so a test can point them at throwaway repos.
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,7 +21,7 @@ import { itsaRefusal, mayEditItsa } from './mail-visibility.ts';
 import * as db from './db.ts';
 import { branchScope, foreignRefusal, linkRefusal, localScope } from './branch-scope.ts';
 import { peerByName, peerCall, type Via } from './peers.ts';
-import { primaryRepoName, settings } from './settings.ts';
+import { primaryRepoName, settings, storageRemoteFallback } from './settings.ts';
 import { defaultGithubRepo, originRepo } from './github-repo.ts';
 import { isAncestor, noteSynced, readSyncState } from './pr-sync.ts';
 import { mirrorPrHead, storageRemote } from './pr-mirror.ts';
@@ -42,6 +42,8 @@ export interface PrOpenInput {
   // The head of the calling worktree, as the caller's daemon read it when it pushed the branch (S-3486): the ITSA home refuses when the
   // head it fetched differs. Unset when the caller has no worktree on the branch, or is on the home itself.
   head?: string | null;
+  // The GitHub repo (OWNER/NAME) the branch's PR is in (S-4831): given, or the caller's worktree origin. Unset is the home's default repo.
+  repo?: string | null;
 }
 
 export interface PrOpenConfig {
@@ -57,6 +59,8 @@ export interface PrOpenConfig {
   github: string;
   // The branch a PR merges into; never pushed from.
   base: string;
+  // A checkout with no storage remote (S-4831, another repo than the home's own): its branches are only its local ones.
+  noStorage?: boolean;
   // The timeout of each git and tar call of the stories and overrides checks (default CHECK_GIT_MS); a test sets it small.
   checkTimeoutMs?: number;
   // Whether pr_open runs the LIGHT tests the gate adds itself (S-2480; default on). A test fixture with no test tree sets it false.
@@ -98,6 +102,29 @@ export function prOpenConfig(): PrOpenConfig {
   const repo = s.itsa.repos[repoName];
   if (!repo) throw new Error(`pr_open: no repo ${repoName} in settings.itsa.repos`);
   return { repoName, repo, storage, origin, gh, github: github || originRepo(repo, origin) || '', base: s.itsa.mainBranch };
+}
+
+const GITHUB_REPO = /^[\w.-]+\/[\w.-]+$/;
+
+// S-4831: the config for the PRs of GitHub repo `github` (OWNER/NAME): the home's own (prOpenConfig) when it is unset or the default
+// repo, else the settings.itsa.repos checkout whose origin is that repo. That checkout's branches are its own refs, so a caller on the
+// home opens its local branch, and storage is used only when the checkout has the storage remote. A repo no checkout has is refused.
+export function prOpenConfigFor(github?: string | null, cfg: PrOpenConfig = prOpenConfig()): PrOpenConfig {
+  const want = String(github ?? '').trim();
+  if (!want || want.toLowerCase() === cfg.github.toLowerCase()) return cfg;
+  if (!GITHUB_REPO.test(want)) throw new Error(`a repo is OWNER/NAME, not ${JSON.stringify(want)}`);
+  const remote = settings().itsa.prOpen.origin;
+  const found = Object.entries(settings().itsa.repos).find(([, path]) => originRepo(path, remote)?.toLowerCase() === want.toLowerCase());
+  if (!found) throw new Error(`${want} is not the ${remote} of a repo in settings.itsa.repos on the ITSA home, so its PRs can't be handled here; give the repo as OWNER/NAME of one of them`);
+  const [repoName, repo] = found;
+  let remotes: string[] = [];
+  try {
+    remotes = execFileSync('git', ['remote'], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n');
+  } catch {
+    /* no remotes read: no storage */
+  }
+  const storage = storageRemoteFallback(remotes);
+  return { ...cfg, repoName, repo, github: originRepo(repo, remote) ?? want, storage: '', noStorage: !storage || !remotes.includes(storage) };
 }
 
 // The merge gate's parser, loaded on first use: the public export drops scripts/gate.mjs (export/exclude.txt), and a
@@ -244,6 +271,22 @@ export async function headNote(cfg: PrOpenConfig, branch: string, current: strin
   return `GitHub's ${branch} ${what}; pushed it to GitHub. Later pushes to ${branch} from storage reach only storage's bare repo, not GitHub: run pr_open again after each one.`;
 }
 
+// The pr-sync.json key of a branch (S-4831): the bare name for the home's own repo, which pr-sync.ts syncs, and REPO:BRANCH for another
+// repo (a branch name has no colon), so a same-named branch there never stands in for the home's last synced head.
+function syncKey(cfg: PrOpenConfig, branch: string): string {
+  return cfg.repoName === primaryRepoName(settings().itsa) ? branch : `${cfg.repoName}:${branch}`;
+}
+
+// A branch link's meta.repo, from its stored JSON; null when it names none or can't be read.
+function linkRepo(meta: string | null): string | null {
+  try {
+    const repo = meta ? JSON.parse(meta)?.repo : null;
+    return typeof repo === 'string' && repo ? repo : null;
+  } catch {
+    return null;
+  }
+}
+
 // Whether the checkout has refs/heads/BRANCH, checked out or not (S-754, S-2316).
 async function hasLocalBranch(cfg: PrOpenConfig, branch: string): Promise<boolean> {
   return (await git(cfg, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).catch(() => '')) !== '';
@@ -255,7 +298,7 @@ async function hasLocalBranch(cfg: PrOpenConfig, branch: string): Promise<boolea
 // first copies GitHub's head there as gh/BRANCH (S-675), since a storage agent can't reach GitHub to merge it.
 // Returns the head the run settles on: `current`, or `head` when the read of `current` lagged a push (S-3664).
 export async function checkGithubHead(cfg: PrOpenConfig, branch: string, current: string, head: string, ref: string, storage = ''): Promise<string> {
-  if (readSyncState()[branch] === current) return current;
+  if (readSyncState()[syncKey(cfg, branch)] === current) return current;
   await git(cfg, ['fetch', '--no-tags', cfg.origin, `+refs/heads/${branch}:${ref}`]);
   const got = await git(cfg, ['rev-parse', '--verify', ref]);
   if (got !== current) {
@@ -659,6 +702,13 @@ function checkWorktreeHead(branch: string, fetched: string, worktree?: string | 
 // branch is the fallback only when storage lacks it (S-754, S-2316): storage may not have it yet.
 async function resolveSource(cfg: PrOpenConfig, branch: string, local: boolean, scratch: string): Promise<{ storage: string; source: string }> {
   const storage = local && !cfg.storage ? '' : await storageRemote(cfg);
+  if (!storage && cfg.noStorage && !(await hasLocalBranch(cfg, branch))) {
+    // S-4831: another repo's checkout with no storage remote: a branch not checked out on the home is taken from origin, where its
+    // worktree pushed it; one on neither is named, not left to fail as an unresolved ref.
+    const gone = await git(cfg, ['fetch', '--no-tags', cfg.origin, `+refs/heads/${branch}:${scratch}`]).then(() => '', (e: Error) => e.message);
+    if (gone) throw new Error(`${branch} is neither a branch of ${cfg.repoName}'s checkout on the ITSA home nor on its ${cfg.origin} (${gone}): push it to ${cfg.origin}, then pr_open again`);
+    return { storage, source: scratch };
+  }
   if (!storage) return { storage, source: `refs/heads/${branch}` };
   const missing = await git(cfg, ['fetch', '--no-tags', storage, `+refs/heads/${branch}:${scratch}`]).then(
     () => false,
@@ -745,9 +795,9 @@ export async function predictOpen(given: PrOpenConfig, input: Pick<PrOpenInput, 
 }
 
 // On the ITSA home: the same push rule as a real call (a branch that is another agent's refuses), then the dry run.
-export async function predictHere(input: Pick<PrOpenInput, 'branch' | 'by' | 'head'>, via?: Via, cfg: PrOpenConfig = prOpenConfig()): Promise<PrPrediction> {
+export async function predictHere(input: Pick<PrOpenInput, 'branch' | 'by' | 'head' | 'repo'>, via?: Via, cfg: PrOpenConfig = prOpenConfigFor(input.repo)): Promise<PrPrediction> {
   if (via && !via.boss) {
-    const why = await pushRefusal(via, String(input.branch ?? ''));
+    const why = await pushRefusal(via, String(input.branch ?? ''), cfg.repoName);
     if (why) throw new itsa.ForbiddenError(why);
   }
   const local = input.by ? db.getAgent(input.by)?.machine === MACHINE : false;
@@ -755,7 +805,7 @@ export async function predictHere(input: Pick<PrOpenInput, 'branch' | 'by' | 'he
 }
 
 // Runs on the ITSA home, as openPrRouted does: a dry run from storage reaches the home over the peer link.
-export async function predictRouted(input: Pick<PrOpenInput, 'branch' | 'by' | 'head'>, via?: Via): Promise<PrPrediction> {
+export async function predictRouted(input: Pick<PrOpenInput, 'branch' | 'by' | 'head' | 'repo'>, via?: Via): Promise<PrPrediction> {
   const home = settings().itsa.home ?? MACHINE;
   if (home === MACHINE) return predictHere(input, via);
   const peer = peerByName(home);
@@ -798,7 +848,7 @@ async function openOrUpdate(given: PrOpenConfig, input: PrOpenInput, local: bool
     await git(cfg, ['push', `--force-with-lease=refs/heads/${branch}:${current}`, cfg.origin, `${head}:refs/heads/${branch}`]);
 
     // The sync (pr-sync.ts) treats this head as already on GitHub, and a later run may replace it (checkGithubHead).
-    noteSynced(branch, head);
+    noteSynced(syncKey(cfg, branch), head);
     // GitHub's head was behind the branch and this push moved it: say so, since later pushes need pr_open again (S-2267).
     const warning = await headNote(cfg, branch, current, head);
     const opened = (r: PrOpened): PrOpened => ({ ...r, ...(warning ? { warning } : {}), ...(advisory.length ? { advisory } : {}) });
@@ -831,13 +881,27 @@ async function openOrUpdate(given: PrOpenConfig, input: PrOpenInput, local: bool
   }
 }
 
+// S-4831: whether an ITSA link is PR `number` of cfg's repo (its url names the repo), or `branch` of cfg's checkout (its meta.repo).
+// One ITSA may link the same number or branch name in two repos. A link that names no repo (made before repos were told apart) is
+// taken as this repo's, as it always was.
+const prUrlRepo = (url: string): string | null => /github\.com\/([^/\s]+\/[^/\s]+)\/pull\/\d+/i.exec(url ?? '')?.[1] ?? null;
+export function isPrLink(l: itsa.ItsaLink, cfg: Pick<PrOpenConfig, 'github'>, number: number): boolean {
+  if (l.system !== 'github' || l.external_id !== String(number)) return false;
+  const repo = prUrlRepo(l.url);
+  return !repo || repo.toLowerCase() === cfg.github.toLowerCase();
+}
+export function isBranchLink(l: itsa.ItsaLink, cfg: Pick<PrOpenConfig, 'repoName'>, branch: string): boolean {
+  if (l.system !== 'branch' || l.external_id !== branch) return false;
+  return !l.meta?.repo || l.meta.repo === cfg.repoName;
+}
+
 // Links the PR and the branch to the ITSA, skipping links it already has (an update adds none).
 async function linkPr(cfg: PrOpenConfig, pr: PrOpened, ref: string, by: string | null): Promise<void> {
   const have = itsa.links(ref);
-  if (!have.some((l) => l.system === 'github' && l.external_id === String(pr.number))) {
+  if (!have.some((l) => isPrLink(l, cfg, pr.number))) {
     await itsa.addLink(ref, { system: 'github', url: pr.url, external_id: String(pr.number) }, by);
   }
-  if (!have.some((l) => l.system === 'branch' && l.external_id === pr.branch)) {
+  if (!have.some((l) => isBranchLink(l, cfg, pr.branch))) {
     await itsa.addLink(ref, { system: 'branch', external_id: pr.branch, repo: cfg.repoName, url: '' }, by);
   }
 }
@@ -849,7 +913,7 @@ async function recordInstruction(cfg: PrOpenConfig, pr: PrOpened, ref: string): 
   try {
     await git(cfg, ['fetch', '--no-tags', cfg.origin, `+refs/heads/${cfg.base}:${baseRef}`], 60_000);
     const digest = (await gate()).instructionDigest(cfg.repo, await git(cfg, ['rev-parse', '--verify', baseRef]), pr.head);
-    itsa.recordPush(ref, pr.branch, pr.head, digest);
+    itsa.recordPush(ref, pr.branch, pr.head, digest, cfg.repoName);
   } catch (e) {
     console.error(`pr_open: instruction digest not recorded: ${e instanceof Error ? e.message : e}`);
   } finally {
@@ -871,10 +935,12 @@ async function markReview(ref: string, by: string | null): Promise<void> {
 // Why an agent may not push a branch (S-581), or null when it may. Rule 1: a branch that is another
 // agent's worktree branch, on either machine, is refused whatever its links. Rule 2: otherwise the branch
 // is the caller's own tree's, or linked to an ITSA the caller owns or takes part in. The chief of staff
-// and the assistant (via.boss) keep full rights, as on every ITSA route.
-export async function pushRefusal(via: Via, branch: string): Promise<string | null> {
+// and the assistant (via.boss) keep full rights, as on every ITSA route. With repoName (S-4831), rule 2 counts only branch links of
+// that repo (or links that name none), so a link to another repo's same-named branch grants nothing here.
+export async function pushRefusal(via: Via, branch: string, repoName?: string): Promise<string | null> {
   if (via.boss) return null;
-  const linked = db.open().prepare("SELECT itsa_id FROM itsa_links WHERE system = 'branch' AND external_id = ?").all(branch) as { itsa_id: string }[];
+  const rows = db.open().prepare("SELECT itsa_id, meta FROM itsa_links WHERE system = 'branch' AND external_id = ?").all(branch) as { itsa_id: string; meta: string | null }[];
+  const linked = repoName ? rows.filter((r) => { const repo = linkRepo(r.meta); return !repo || repo === repoName; }) : rows;
   // A process proposal's branch is fixed once filed (S-1085): the human approved that diff, so no agent pushes to it.
   if (linked.some((l) => itsa.find(l.itsa_id)?.kind === 'proposal' && processProposalOf(itsa.find(l.itsa_id)!))) return `${branch} is a process proposal's branch: nobody pushes to it after it is filed. Edit the process again and file a new proposal.`;
   const scope = await branchScope(via, branch);
@@ -882,26 +948,26 @@ export async function pushRefusal(via: Via, branch: string): Promise<string | nu
   if (scope === 'foreign') return foreignRefusal(via, branch, 'push');
   if (linked.some((l) => mayEditItsa(via.agent, l.itsa_id))) return null;
   const name = db.getAgent(via.agent)?.name ?? via.agent;
-  const link = `itsa_link (itsa: the ITSA, system: "branch", external_id: "${branch}", repo: "${primaryRepoName(settings().itsa)}")`;
+  const link = `itsa_link (itsa: the ITSA, system: "branch", external_id: "${branch}", repo: "${repoName ?? primaryRepoName(settings().itsa)}")`;
   return `${name} can't push ${branch}: it is not the branch of ${name}'s own worktree or a child's, and no ITSA ${name} owns or takes part in links it (rule 2). Run ${link} on an ITSA you own, then pr_open again.`;
 }
 
 // The push refusal, after linking the branch to ITSA `ref` when the caller owns that ITSA and rule 2 is all that refuses it (S-2269):
 // the link is the one itsa_link makes, so a second branch in the caller's own worktree opens in one pr_open. A rule 1 refusal stays.
-async function pushRefusalLinking(via: Via, branch: string, ref: string | null): Promise<string | null> {
-  const why = await pushRefusal(via, branch);
+async function pushRefusalLinking(via: Via, branch: string, ref: string | null, repoName?: string): Promise<string | null> {
+  const why = await pushRefusal(via, branch, repoName);
   // Only the owner links: a participant, a creator or an ancestor's owner may change the ITSA but doesn't own the branch's link (S-2390).
   if (!why || !ref || !why.includes('rule 2') || itsa.must(ref).owner !== via.agent || (await linkRefusal(via, branch))) return why;
-  await itsa.addLink(ref, { system: 'branch', external_id: branch, repo: primaryRepoName(settings().itsa), url: '' }, via.agent);
-  return pushRefusal(via, branch);
+  await itsa.addLink(ref, { system: 'branch', external_id: branch, repo: repoName ?? primaryRepoName(settings().itsa), url: '' }, via.agent);
+  return pushRefusal(via, branch, repoName);
 }
 
 // On the ITSA home: refuses an unknown ITSA or one the asker may not change before any push.
-export async function openPrHere(input: PrOpenInput, via?: Via, cfg: PrOpenConfig = prOpenConfig()): Promise<PrOpened> {
+export async function openPrHere(input: PrOpenInput, via?: Via, cfg: PrOpenConfig = prOpenConfigFor(input.repo)): Promise<PrOpened> {
   const ref = input.itsa ? itsa.must(input.itsa).id : null;
   if (ref && via && !via.boss && !mayEditItsa(via.agent, ref)) throw new itsa.ForbiddenError(itsaRefusal(via.agent, ref, 'change'));
   if (via && !via.boss) {
-    const why = await pushRefusalLinking(via, String(input.branch ?? ''), ref);
+    const why = await pushRefusalLinking(via, String(input.branch ?? ''), ref, cfg.repoName);
     if (why) throw new itsa.ForbiddenError(why);
   }
   // A caller on this machine (the ITSA home) works in a worktree of this checkout, so its branch is a local ref.
@@ -938,6 +1004,8 @@ export interface PrStatusInput {
   body?: string | null;
   itsa?: string | null;
   by?: string | null;
+  // The GitHub repo (OWNER/NAME) of the branch's PR, as pr_open's (S-4831).
+  repo?: string | null;
 }
 
 export interface PrStatus {
@@ -952,14 +1020,14 @@ export interface PrStatus {
   itsa_linked?: boolean | null;
 }
 
-export async function prStatusHere(input: PrStatusInput, via?: Via, cfg: PrOpenConfig = prOpenConfig()): Promise<PrStatus> {
+export async function prStatusHere(input: PrStatusInput, via?: Via, cfg: PrOpenConfig = prOpenConfigFor(input.repo)): Promise<PrStatus> {
   const branch = String(input.branch ?? '');
   if (!BRANCH.test(branch)) throw new Error(`a branch name is letters, digits, . _ / and -, not starting with -: ${branch}`);
   const ref = input.itsa ? itsa.must(input.itsa).id : null;
   // The same checks as openPrHere, before anything is read from GitHub: the ITSA, then the branch's owner (S-581).
   if (ref && via && !via.boss && !mayEditItsa(via.agent, ref)) throw new itsa.ForbiddenError(itsaRefusal(via.agent, ref, 'change'));
   if (via && !via.boss) {
-    const why = await pushRefusal(via, branch);
+    const why = await pushRefusal(via, branch, cfg.repoName);
     if (why) throw new itsa.ForbiddenError(why);
   }
   const open = await openPrFor(cfg, branch);
@@ -973,7 +1041,7 @@ export async function prStatusHere(input: PrStatusInput, via?: Via, cfg: PrOpenC
     url: open.url,
     head: view.head,
     body_written: input.body == null ? null : view.body === input.body,
-    itsa_linked: ref ? links.some((l) => l.system === 'github' && l.external_id === String(open.number)) && links.some((l) => l.system === 'branch' && l.external_id === branch) : null,
+    itsa_linked: ref ? links.some((l) => isPrLink(l, cfg, open.number)) && links.some((l) => isBranchLink(l, cfg, branch)) : null,
   };
 }
 

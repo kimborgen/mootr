@@ -11,6 +11,7 @@ import { peers, peerPoll } from './peers.ts';
 import { STALE_MS } from './readings.ts';
 import type { Win } from './rules.ts';
 import { envVar } from './env.ts';
+import { timed } from './stall.ts';
 
 export const REFRESH_MS = Number(envVar('PEER_READINGS_MS')) || 30_000;
 
@@ -67,5 +68,5 @@ export async function refresh(now: number = Date.now()): Promise<void> {
 export function start(listener: () => void): void {
   onChange = listener;
   void refresh();
-  setInterval(() => void refresh(), REFRESH_MS).unref?.();
+  setInterval(() => timed('peer readings', () => refresh()), REFRESH_MS).unref?.();
 }

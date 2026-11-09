@@ -11,6 +11,7 @@ import { locateAgent, peerByName } from './peers.ts';
 import { render } from './templates.ts';
 import { waitingItsaOfThread } from './itsa-human.ts';
 import { sanitizeFilter, type EventFilter } from './watch.ts';
+import { timed } from './stall.ts';
 
 const minutesFromNow = (n: number) => new Date(Date.now() + n * 60_000).toISOString();
 
@@ -344,7 +345,7 @@ export function startScheduler(intervalMs = 1000): void {
   started = true;
   const run = () => tick().catch((e) => console.error(`waits: ${e instanceof Error ? e.message : e}`));
   run();
-  setInterval(run, intervalMs);
+  setInterval(() => timed('waits', run), intervalMs);
 }
 
 // --- A small 5-field cron parser ---------------------------------------------------------

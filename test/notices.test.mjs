@@ -183,3 +183,41 @@ test('ordinary mail from a live agent stays unread, and the human is never touch
   assert.equal(unread('a1').length, 1);
   assert.equal(unread('human').length, 1);
 });
+// S-4908: the sweep runs after every agent mail. It read every agent row and every archive event in the events
+// table (200 ms a pass with a million events); it now asks only about the agents in the mail it reads.
+test('the sweep reads only the senders it needs, by index, and judges by the latest archive', () => {
+  const d = db.open();
+  const ins = d.prepare('INSERT INTO events (agent_id, ts, type, data) VALUES (?, ?, ?, NULL)');
+  const at = (ms) => new Date(Date.now() + ms).toISOString();
+  d.exec('BEGIN');
+  for (let i = 0; i < 3000; i++) ins.run(`old${i}`, at(-3 * DAY), i % 3 ? 'hook' : 'archive');
+  d.exec('COMMIT');
+  agent('a1', 'alice');
+  agent('a2', 'twice');
+  send('a2', ['a1'], 'all done', { notice: true });
+  // Archived three days ago, resumed, and archived again now: the latest archive is the one that counts.
+  ins.run('a2', at(-3 * DAY), 'archive');
+  ins.run('a2', at(0), 'archive');
+  db.updateAgent('a2', { lifecycle: 'archived' });
+  db.markPushed('a1');
+  const seen = [];
+  const realPrepare = d.prepare.bind(d);
+  d.prepare = (sql) => (seen.push(sql), realPrepare(sql));
+  let half, later;
+  try {
+    half = notices.sweep({ now: Date.now() + DAY / 2 });
+    later = notices.sweep({ now: Date.now() + 2 * DAY });
+  } finally {
+    d.prepare = realPrepare;
+  }
+  assert.equal(half, 0, 'archived again under a day ago');
+  assert.equal(later, 1, 'a day after the latest archive, the notice is read');
+  assert.ok(!seen.some((s) => /^SELECT \* FROM agents ORDER BY/.test(s)), 'no read of every agent row');
+  const events = seen.filter((s) => /FROM events/.test(s));
+  assert.ok(events.length && events.every((s) => /agent_id = \?/.test(s)), `events read by agent: ${events.join(' | ')}`);
+  const plan = d.prepare(`EXPLAIN QUERY PLAN ${events[0]}`).all('a2').map((r) => r.detail).join('; ');
+  // The (agent_id, type) index, whose rows sit in id order, so the latest is read without a sort.
+  assert.match(plan, /USING (COVERING )?INDEX events_agent_type\b/, plan);
+  assert.doesNotMatch(plan, /TEMP B-TREE/, plan);
+  d.prepare("DELETE FROM events WHERE agent_id LIKE 'old%' OR agent_id = 'a2'").run();
+});

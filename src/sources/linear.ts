@@ -13,6 +13,7 @@ import * as db from '../db.ts';
 import * as watch from '../watch.ts';
 import { settings } from '../settings.ts';
 import { callTool, jsonOf } from './mcp-client.ts';
+import { timed } from '../stall.ts';
 
 // The stam name of the Linear MCP server in mcpServers.
 export const SERVER = 'linear';
@@ -359,6 +360,6 @@ export function start(): void {
   if (!(seconds > 0)) return;
   started = true;
   const run = () => tickOnce().catch((e) => console.error(`linear: ${e instanceof Error ? e.message : e}`));
-  const timer = setInterval(run, seconds * 1000);
+  const timer = setInterval(() => timed('linear poll', run), seconds * 1000);
   timer.unref?.();
 }

@@ -123,17 +123,17 @@ export function report(
     if (value !== base[k]) changed = true;
   }
   if (!changed && COUNTERS.every((k) => delta[k] <= 0)) return;
-  db.updateAgent(a.id, { usage_last: JSON.stringify(next) });
+  timed('usage: baseline', () => db.updateAgent(a.id, { usage_last: JSON.stringify(next) }));
   if (COUNTERS.every((k) => delta[k] <= 0)) return;
   const account = accountFor(a) ?? '';
   // A paid account's statusline cost counts as paid estimate only while a reported window
   // reads 100%: that is when the harness has left the subscription and started charging
   // (docs/cost-policy.md, build step 3).
-  const paidEstimate = account !== '' && settings().cost.accounts[account]?.paid === true && windowAt100(a.harness) ? delta.cost : 0;
+  const paidEstimate = account !== '' && settings().cost.accounts[account]?.paid === true && timed('usage: window at 100', () => windowAt100(a.harness)) ? delta.cost : 0;
   // The same growth on a paid: false account is paid spend the user's rule forbids.
   if (account !== '' && settings().cost.accounts[account]?.paid === false && delta.cost > 0 && windowAt100(a.harness, now))
     void evaluateRules(account, { paid: { source: `${a.name}'s cost grew $${delta.cost.toFixed(4)} while a window read 100%` } }, now);
-  db.open()
+  timed('usage: ledger', () => db.open()
     .prepare(
       `INSERT INTO usage (agent_id, day, harness, model, account, cost_usd, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, paid_estimate_usd, unreconciled_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (agent_id, day, account) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd,
@@ -142,15 +142,15 @@ export function report(
          paid_estimate_usd = paid_estimate_usd + excluded.paid_estimate_usd,
          unreconciled_usd = unreconciled_usd + excluded.unreconciled_usd, model = excluded.model`,
     )
-    .run(a.id, dayOf(now), a.harness, a.model, account, delta.cost, delta.tin, delta.tout, delta.tcr, delta.tcw, paidEstimate, orAccount(account) ? delta.cost : 0);
-  recordSample(a, account, delta, now);
-  pruneSamples(now);
+    .run(a.id, dayOf(now), a.harness, a.model, account, delta.cost, delta.tin, delta.tout, delta.tcr, delta.tcw, paidEstimate, orAccount(account) ? delta.cost : 0));
+  timed('usage: sample', () => recordSample(a, account, delta, now));
+  timed('usage: prune', () => pruneSamples(now));
   // The system view's cost animation (S-456): the agent's total is filled in at flush.
   events.agentChanged(a.id, {});
   // The tree allocations on this account get a usd check when paid spend grows (step 10).
-  if (account) allocations.checkUsd(account, now);
-  if (account) void budgets.onSpend(account, now);
-  checkDailySpend();
+  if (account) timed('usage: usd allocations', () => allocations.checkUsd(account, now));
+  if (account) void timed('usage: budgets', () => budgets.onSpend(account, now));
+  timed('usage: daily spend', checkDailySpend);
 }
 
 // Adds this report's delta to its 5-minute bucket, the same numbers as the daily row, so a
@@ -207,7 +207,7 @@ export function reportStatusline(
     const now = Date.now();
     if (!last || last.text !== text || now - last.at >= SUBSCRIPTION_SAME_MS) {
       lastSubscription.set(a.harness, { text, at: now });
-      reportSubscription(a.harness, f.subscription);
+      timed('usage: subscription', () => reportSubscription(a.harness, f.subscription!));
     }
   }
   if (f.cost !== undefined || f.tokensIn !== undefined || f.tokensCacheRead !== undefined) report(a, f);
@@ -247,7 +247,7 @@ export function reportSubscription(name: string, windows: Record<string, unknown
   for (const [window, value] of Object.entries(windows)) {
     const w = value as { used_percentage: number; resets_at?: number } | null;
     if (w?.used_percentage == null) continue;
-    recordWindowReading(name, window, w, at);
+    timed('usage: window reading', () => recordWindowReading(name, window, w, at));
     for (const threshold of settings().cost.subscriptionWarnPercent) {
       const key = `${name}:${window}:${threshold}:${w.resets_at}`;
       if (w.used_percentage < threshold || warned.has(key)) continue;
@@ -268,19 +268,19 @@ export function reportSubscription(name: string, windows: Record<string, unknown
       );
     }
     // A window burning toward 100% within 30 minutes warns its managers (throttled).
-    costNotices.checkProjection(name, window, now);
+    timed('usage: projection', () => costNotices.checkProjection(name, window, now));
     // A tree allocation on this window is checked at 80% and 100% of the allocation, once
     // per reset (step 10); it never sets a blocker.
-    allocations.checkWindow(name, window, now);
+    timed('usage: window allocations', () => allocations.checkWindow(name, window, now));
   }
-  pruneSamples(now);
+  timed('usage: prune', () => pruneSamples(now));
   let prev: Record<string, any> | null = null;
   try {
     prev = prevRow ? JSON.parse(prevRow.data) : null;
   } catch {}
-  void onReading(name, prev, windows as Record<string, any>, now);
+  void timed('usage: rules', () => onReading(name, prev, windows as Record<string, any>, now));
   // A cost pause waiting on this account's window may now be clearable.
-  onPauseReading(name, now);
+  timed('usage: pauses', () => onPauseReading(name, now));
   // Subscription windows changed (an unchanged reading is the common case on every
   // statusline refresh): tell the web to refetch /api/usage (S-456).
   if (JSON.stringify(prev) !== JSON.stringify(windows)) events.emitEvent('usage.changed', {});

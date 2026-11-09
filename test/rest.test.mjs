@@ -1140,3 +1140,36 @@ test('a mail wake that beats the web-view prompt leaves the prompt delivered to 
   assert.equal(events(a.id, 'view-prompt').length, 1);
   assert.equal(events(a.id, 'view-prompt')[0].data.includes('"woke":true'), false);
 });
+
+// S-4895: the idle sweep runs every minute. Its 5-day average read every event ever (180 ms at a million rows), and
+// it read every agent row, archived ones included. It now reads the average through a partial index and only the
+// live agents.
+test('the idle sweep reads the compaction average through its index and only the live agents', async () => {
+  const context = await import('../src/context.ts');
+  const d = db.open();
+  const ins = d.prepare('INSERT INTO events (agent_id, ts, type, data) VALUES (?, ?, ?, ?)');
+  const at = (days) => new Date(Date.now() - days * 86_400_000).toISOString();
+  d.exec('BEGIN');
+  for (let i = 0; i < 5000; i++) ins.run('noise', at(i / 1000), 'hook', '{"tokens":1}');
+  ins.run('m', at(1), 'compaction:measured', '{"tokens":40000}');
+  ins.run('m', at(2), 'compaction:measured', '{"tokens":60000}');
+  ins.run('m', at(3), 'compaction:measured', '{"tokens":0}'); // no measurement
+  ins.run('m', at(9), 'compaction:measured', '{"tokens":900000}'); // older than 5 days
+  d.exec('COMMIT');
+  const seen = [];
+  const realPrepare = d.prepare.bind(d);
+  d.prepare = (sql) => (seen.push(sql), realPrepare(sql));
+  let avg;
+  try {
+    avg = context.avgAfterCompaction();
+    context.idleSweep();
+  } finally {
+    d.prepare = realPrepare;
+  }
+  assert.equal(avg, 50000, 'the last 5 days, measured ones only');
+  const avgSql = seen.find((s) => s.includes("'compaction:measured'"));
+  const plan = d.prepare(`EXPLAIN QUERY PLAN ${avgSql}`).all(at(5)).map((r) => r.detail).join('; ');
+  assert.match(plan, /events_compaction_measured/, plan);
+  assert.ok(!seen.some((s) => /^SELECT \* FROM agents ORDER BY/.test(s)), 'no read of every agent row');
+  d.prepare("DELETE FROM events WHERE agent_id IN ('noise', 'm')").run();
+});

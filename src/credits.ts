@@ -13,6 +13,7 @@ import { reconcile, snapshot } from './reconcile.ts';
 import { evaluateBudgets } from './budgets.ts';
 import { setCreditPoller } from './credit-poller.ts';
 import { openrouter, openRouterKey } from './llm/openrouter.ts';
+import { timed } from './stall.ts';
 
 const POLL_MS = 5 * 60_000;
 // A turn ended just now, so the balance just moved: refresh it, but not more often than this.
@@ -167,7 +168,7 @@ export function pollCreditsAfterTurn(agent: db.Agent): void {
 // Once at daemon start when a key exists, then on the interval.
 export function startCreditPolling(): void {
   if (apiKey()) void pollCredits();
-  setInterval(pollIfActive, 60_000);
+  setInterval(() => timed('credits poll', pollIfActive), 60_000);
 }
 
 // Mail to the human, from the `system:cost` sender. Returns false when sending failed,

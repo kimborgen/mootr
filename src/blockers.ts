@@ -51,6 +51,12 @@ export function blockersByAgent(): Map<string, Blocker[]> {
   return out;
 }
 
+// Every blocker of one kind, in blockers(agent) order (S-4882): one query over the small blockers table, where a
+// scan of every agent and its blockers cost two queries per agent.
+export function blockersOfKind(kind: BlockerKind): Blocker[] {
+  return (db.open().prepare('SELECT * FROM blockers WHERE kind = ? ORDER BY since, rowid').all(kind) as unknown as Row[]).map(parse);
+}
+
 export function blockersFor(account: string): Blocker[] {
   return (db.open().prepare('SELECT * FROM blockers WHERE account = ? ORDER BY since, rowid').all(account) as unknown as Row[]).map(parse);
 }

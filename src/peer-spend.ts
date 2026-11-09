@@ -7,6 +7,7 @@ import { settings } from './settings.ts';
 import { peers, peerPoll } from './peers.ts';
 import { paidSpentIn, paidSpentAll } from './readings.ts';
 import { envVar } from './env.ts';
+import { timed } from './stall.ts';
 
 const PERS = ['day', 'week', 'month', 'cap'] as const;
 type Per = (typeof PERS)[number];
@@ -83,7 +84,7 @@ export function perMachine(machine: string, now: number = Date.now()): Record<st
 export function start(listener: () => void): void {
   onChange = listener;
   void refresh();
-  setInterval(() => void refresh(), REFRESH_MS).unref?.();
+  setInterval(() => timed('peer spend', () => refresh()), REFRESH_MS).unref?.();
 }
 
 // Test seams.

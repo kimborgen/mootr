@@ -1107,10 +1107,12 @@ export function recordLink(ref: string, n: number, rec: LinkRecord, by: string |
 
 // Records the instruction-file digest of a head pr_open pushed on the ITSA's link for `branch` (S-3833); nothing when the
 // ITSA has no such link or the newest record already has this head. The daemon writes it, so it is the time of the push.
-export function recordPush(ref: string, branch: string, head: string, digest: string): void {
+// With repo (S-4831), the link is that repo's branch link (or one that names no repo), so a same-named branch in another repo keeps its own record.
+export function recordPush(ref: string, branch: string, head: string, digest: string, repo?: string): void {
   tx(() => {
     const x = must(ref);
-    const row = db.open().prepare("SELECT n, meta FROM itsa_links WHERE itsa_id = ? AND system = 'branch' AND external_id = ? ORDER BY n LIMIT 1").get(x.id, branch) as any;
+    const rows = db.open().prepare("SELECT n, meta FROM itsa_links WHERE itsa_id = ? AND system = 'branch' AND external_id = ? ORDER BY n").all(x.id, branch) as any[];
+    const row = repo ? rows.find((r) => { const named = parseMeta(r.meta)?.repo; return !named || named === repo; }) : rows[0];
     if (!row) return;
     const meta: LinkMeta = { ...(parseMeta(row.meta) ?? {}) };
     const list = meta.instr ?? [];

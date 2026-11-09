@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { STAM_HOME } from './config.ts';
 import { apply, deadImageTabOps, emptyLayout, validLayout, type Layout, type LayoutOp } from './layout-ops.ts';
 import { PageLiveness } from './page-liveness.ts';
+import { timed } from './stall.ts';
 
 // One op as a short phrase, for the agent's event log: `open agent:X in main`.
 export function describeOp(op: LayoutOp): string {
@@ -124,7 +125,7 @@ export function dropDeadImageTabs(now = Date.now()): void {
   if (ops.length) applyOps(ops);
 }
 setInterval(() => {
-  try { dropDeadImageTabs(); } catch (e) { console.error(`layout: couldn't close the image tabs of dead pages (${e instanceof Error ? e.message : e})`); }
+  try { timed('layout image tabs', dropDeadImageTabs); } catch (e) { console.error(`layout: couldn't close the image tabs of dead pages (${e instanceof Error ? e.message : e})`); }
 }, SWEEP).unref();
 
 // Server-sent events: the layout on connect and after every change. A client that falls

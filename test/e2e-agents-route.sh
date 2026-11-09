@@ -52,4 +52,42 @@ ids() { curl -sf -m 60 -H "$auth" "$STAM_URL/api/agents$1" | python3 -c 'import 
 [ "$(ids '?state=stopped,archived')" = "id-10 id-11" ] || fail "state=stopped,archived: $(ids '?state=stopped,archived')"
 [ "$(ids '?ids=id-11,ag-10')" = "id-10 id-11" ] || fail "ids by id and name: $(ids '?ids=id-11,ag-10')"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -m 60 -H "$auth" "$STAM_URL/api/agents?state=gone")" = 400 ] || fail "an unknown state isn't refused"
-echo "ok: one GET /api/agents at 300 agents runs $statements statement executions and keeps each agent's data"
+
+# A peer's busy sweep asks fields=peer (S-4913): the same agents, with only what it keeps, from a handful of reads.
+# Only a peer daemon's own call gets it: its token with x-stam-local, no agent forwarded, and no q, role or as.
+peer_auth="authorization: Bearer $(cat "$STAM_HOME/peer-token")"
+code() { curl -s -o /dev/null -w "%{http_code}" -m 60 "$@"; }
+[ "$(code -H "$auth" "$STAM_URL/api/agents?state=all&fields=peer")" = 403 ] || fail "fields=peer is served to the owner token"
+[ "$(code -H "$peer_auth" "$STAM_URL/api/agents?state=all&fields=peer")" = 403 ] || fail "fields=peer is served without x-stam-local"
+[ "$(code -H "$peer_auth" -H "x-stam-local: 1" -H "x-stam-agent: id-3" "$STAM_URL/api/agents?state=all&fields=peer")" = 403 ] || fail "fields=peer is served to a forwarded agent"
+for extra in "q=nonexistent" "role=dev" "as=id-3"; do
+  [ "$(code -H "$peer_auth" -H "x-stam-local: 1" "$STAM_URL/api/agents?state=all&fields=peer&$extra")" = 400 ] || fail "fields=peer with $extra is not refused"
+done
+counts=""
+for _i in 1 2 3; do
+  post statements '{"action":"start"}' | grep -q '"ok":true' || fail "the statement count didn't start"
+  curl -sf -m 60 -H "$peer_auth" -H "x-stam-local: 1" "$STAM_URL/api/agents?state=all&fields=peer" >"$TEST_TMP/peer.json"
+  counts="$counts $(post statements '{"action":"stop"}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["statements"])')"
+done
+peer_statements=$(echo $counts | tr ' ' '\n' | sort -n | head -1)
+echo "statement executions per GET /api/agents?state=all&fields=peer at 300 agents (3 windows):$counts; least: $peer_statements"
+[ "$peer_statements" -le 10 ] || fail "$peer_statements statement executions for the peer fields (at most 10)"
+# The full list read right after, so both see the same state.
+curl -sf -m 60 -H "$auth" "$STAM_URL/api/agents?state=all" >"$TEST_TMP/full.json"
+python3 - "$TEST_TMP/full.json" "$TEST_TMP/peer.json" <<'PY' || fail "the peer fields differ from the full list"
+import json, sys
+full = {a["id"]: a for a in json.load(open(sys.argv[1]))}
+peer = {a["id"]: a for a in json.load(open(sys.argv[2]))}
+assert set(peer) == set(full), (len(full), len(peer))
+assert {"id-10", "id-11"} <= set(peer), "stopped and archived agents are listed"
+keys = {"id", "name", "machine", "lifecycle", "activity", "parent_id", "paused_by", "parents", "pending_requests", "waits"}
+for id, p in peer.items():
+    f = full[id]
+    assert set(p) == keys, sorted(p)
+    for k in ("name", "machine", "lifecycle", "activity", "parent_id", "paused_by", "pending_requests"):
+        assert p[k] == f[k], (id, k, p[k], f[k])
+    assert sorted(p["parents"]) == sorted(f["parents"]), (id, p["parents"], f["parents"])
+    assert sorted(w["id"] for w in p["waits"]) == sorted(w["id"] for w in f["waits"]), (id, p["waits"])
+assert any(p["waits"] for p in peer.values()), "some agent has waits"
+PY
+echo "ok: one GET /api/agents at 300 agents runs $statements statement executions and keeps each agent's data; the peer fields run $peer_statements"

@@ -48,10 +48,13 @@ var (
 	rePrNumber = regexp.MustCompile(`^#?(\d+)$`)
 	rePrRepo   = regexp.MustCompile(`^([^/#\s]+/[^/#\s]+)#(\d+)$`)
 	rePrURL    = regexp.MustCompile(`^https?://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)(?:[/?#].*)?$`)
+	reGhRepo   = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
 )
 
-// prSubject is a pull request as its subject key: a number (the default repo), OWNER/REPO#N, or a url.
-func prSubject(ctx context.Context, s *Server, pr jsfmt.Value, set bool) (key string, number int, err error) {
+// prSubject is a pull request as its subject key: a number, OWNER/REPO#N, or a url. A number is in given (OWNER/NAME), else the
+// origin repo of agent by's worktree, else the ITSA home's default repo (S-4831; the daemon answers both). A given repo that
+// differs from pr's is refused.
+func prSubject(ctx context.Context, s *Server, pr jsfmt.Value, set bool, given jsfmt.Value, by string) (key string, number int, err error) {
 	text := ""
 	if set && pr.Kind != jsfmt.Null {
 		text = jsString(pr)
@@ -74,8 +77,23 @@ func prSubject(ctx context.Context, s *Server, pr jsfmt.Value, set bool) (key st
 		return "", 0, fmt.Errorf("pr must be a number, OWNER/REPO#N, or a pull request url, not %s", q.String())
 	}
 	n, _ := strconv.ParseFloat(num, 64)
+	field := ""
+	if given.Kind == jsfmt.String {
+		field = jsjson.Trim(given.Str)
+	}
+	if field != "" && !reGhRepo.MatchString(field) {
+		var q strings.Builder
+		jsjson.Quote(&q, field)
+		return "", 0, fmt.Errorf("repo is OWNER/NAME, not %s", q.String())
+	}
+	if field != "" && repo != "" && strings.ToLower(field) != strings.ToLower(repo) {
+		return "", 0, fmt.Errorf("pr %s is in %s, but repo says %s", text, repo, field)
+	}
+	if repo == "" && field != "" {
+		repo = field
+	}
 	if repo == "" {
-		r, err := s.apiJSON(ctx, "GET", "/api/pr/github-repo", nil)
+		r, err := s.apiJSON(ctx, "GET", "/api/pr/github-repo?agent="+uriComponent(by), nil)
 		if err != nil {
 			return "", 0, err
 		}
@@ -135,7 +153,8 @@ func watchPr(ctx context.Context, s *Server, a jsfmt.Value) (string, error) {
 		return "", err
 	}
 	pr, set := a.Get("pr")
-	key, number, err := prSubject(ctx, s, pr, set)
+	given, _ := a.Get("repo")
+	key, number, err := prSubject(ctx, s, pr, set, given, by)
 	if err != nil {
 		return "", err
 	}
@@ -214,12 +233,14 @@ func watchPr(ctx context.Context, s *Server, a jsfmt.Value) (string, error) {
 }
 
 func unwatchPr(ctx context.Context, s *Server, a jsfmt.Value) (string, error) {
-	pr, set := a.Get("pr")
-	key, number, err := prSubject(ctx, s, pr, set)
+	// `prSubject(a.pr, a.repo, me(a))`: me runs first, as an argument.
+	by, err := s.me(a)
 	if err != nil {
 		return "", err
 	}
-	by, err := s.me(a)
+	pr, set := a.Get("pr")
+	given, _ := a.Get("repo")
+	key, number, err := prSubject(ctx, s, pr, set, given, by)
 	if err != nil {
 		return "", err
 	}

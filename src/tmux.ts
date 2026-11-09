@@ -119,6 +119,14 @@ export function hasClients(name: string): boolean {
   return r.status === 0 && r.stdout.trim() !== '';
 }
 
+// The sessions some tmux client has open, from one call for the whole server and without holding the event loop
+// (S-4851): an empty set when no server runs, null when tmux didn't answer or failed otherwise.
+export async function clientSessionsAsync(): Promise<Set<string> | null> {
+  const r = await runner(['-L', TMUX_SOCKET, 'list-clients', '-F', '#{session_name}']);
+  if (r.status !== 0) return r.status === 1 && noServer(r.stderr) ? new Set() : null;
+  return new Set(r.stdout.split('\n').filter(Boolean));
+}
+
 // Ends the session and stops what its agent started (S-323): the pane's tree, sandboxed
 // children in sessions of their own, and orphans that carry the agent's id.
 export function killSession(name: string): void {

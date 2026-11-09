@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { STAM_HOME } from './config.ts';
 import { SKILLS_DIR, agentsSkillsDir } from './instructions.ts';
+import { timed } from './stall.ts';
 
 export class ImportError extends Error {}
 
@@ -130,12 +131,12 @@ function git(args: string[], cwd: string | undefined, allowFile: boolean, input?
     );
     let big = false;
     const timer = watch
-      ? setInterval(() => {
+      ? setInterval(() => timed('skill import size', () => {
           if (dirBytes(watch, limits.cloneBytes) > limits.cloneBytes) {
             big = true;
             child.kill('SIGKILL');
           }
-        }, limits.pollMs)
+        }), limits.pollMs)
       : undefined;
     // A git that exits before reading fails this write with EPIPE; the callback reports the exit (S-2040).
     child.stdin?.on('error', () => {});

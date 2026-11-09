@@ -29,6 +29,10 @@ func (s *stub) eventsRoutes(w http.ResponseWriter, r *http.Request, body any) bo
 		if r.URL.Query().Get("none") != "" {
 			return reply(200, `{"github":null}`)
 		}
+		// S-4831: with agent the daemon answers that agent's worktree origin first; a3's worktree is o/wt.
+		if r.URL.Query().Get("agent") == "a3" {
+			return reply(200, `{"github":"o/wt"}`)
+		}
 		return reply(200, `{"github":"example/stam"}`)
 	case r.Method == "DELETE" && (r.URL.Path == "/api/subscriptions/es-1" || r.URL.Path == "/api/subscriptions/es-old"):
 		return reply(200, `{"removed":true}`)
@@ -107,15 +111,23 @@ func TestWatchPrMatchesTS(t *testing.T) {
 		// As a3 itself (env nil): the earlier watch on that one PR goes, the watches on other PRs and the plain ones stay.
 		call(13, "watch_pr", `{"pr":"o/r#7","self":"a3"}`),
 		call(14, "unwatch_pr", `{"pr":"o/r#7","self":"a3"}`),
+		// S-4831: a number with repo takes that repo with no lookup; a repo that differs from OWNER/REPO#N or a url, or isn't
+		// OWNER/NAME, is refused; a bare number asks with the agent, whose worktree origin answers first.
+		call(15, "watch_pr", `{"pr":7,"repo":" o/b "}`),
+		call(16, "watch_pr", `{"pr":"o/r#7","repo":"x/y"}`),
+		call(17, "watch_pr", `{"pr":"https://github.com/o/r/pull/7","repo":"O/R"}`),
+		call(18, "watch_pr", `{"pr":7,"repo":"not a repo"}`),
+		call(19, "unwatch_pr", `{"pr":7,"repo":"o/b"}`),
+		call(20, "watch_pr", `{"pr":5,"self":"a3"}`),
 	}
 	for _, env := range []map[string]string{{"STAM_AGENT_ID": "a1"}, nil} {
-		ts, g := both(t, env, lines, 14, 0, "")
+		ts, g := both(t, env, lines, 20, 0, "")
 		for id, want := range ts.byID {
 			if g.byID[id] != want {
 				t.Errorf("env %v: id %s differs\n ts: %s\n go: %s", env, id, want, g.byID[id])
 			}
 		}
-		if len(g.byID) != 14 {
+		if len(g.byID) != 20 {
 			t.Errorf("env %v: go answered %d requests", env, len(g.byID))
 		}
 		sameCalls(t, ts.calls, g.calls)
@@ -132,6 +144,19 @@ func TestWatchPrMatchesTS(t *testing.T) {
 		}
 		if env == nil && !strings.Contains(g.byID["14"], "Stopped watching PR #7.") {
 			t.Errorf("unwatch_pr as a3: %s", g.byID["14"])
+		}
+		// With no agent env, calls 15-19 name no agent, so they fail on that first, as TS does; call 20 runs as a3 only then (the
+		// env's agent wins over self).
+		for id, want := range map[string]string{"16": "is in o/r, but repo says x/y", "18": "repo is OWNER/NAME, not", "20": "github:o/wt#5"} {
+			if (env == nil) != (id == "20") {
+				continue
+			}
+			if !strings.Contains(g.byID[id], want) {
+				t.Errorf("env %v: id %s lacks %q: %s", env, id, want, g.byID[id])
+			}
+		}
+		if env != nil && !strings.Contains(g.byID["15"], "github:o/b#7") {
+			t.Errorf("watch_pr with repo: %s", g.byID["15"])
 		}
 	}
 }

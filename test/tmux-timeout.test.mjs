@@ -79,6 +79,7 @@ test('the async tmux calls read no answer as the sync ones do, and never hold th
   try {
     const at = Date.now();
     assert.equal(await tmux.hasSessionAsync('a1'), true, 'hasSessionAsync: present');
+    assert.equal(await tmux.clientSessionsAsync(), null, 'clientSessionsAsync: unknown, which clientWatch reads as attached (S-4851)');
     for (const [name, fn] of Object.entries({
       capturePaneByNameAsync: () => tmux.capturePaneByNameAsync('a1'),
       capturePaneAnsiAsync: () => tmux.capturePaneAnsiAsync('a1'),
@@ -88,5 +89,21 @@ test('the async tmux calls read no answer as the sync ones do, and never hold th
     assert.ok(ticks > 10, `the loop ran ${ticks} ticks while tmux hung`);
   } finally {
     clearInterval(timer);
+  }
+});
+
+test('clientSessionsAsync lists the sessions with a client from one call; no server is none, an error unknown (S-4851)', async () => {
+  const asked = [];
+  const answer = (r) => tmux.setTmuxRunner(async (args) => (asked.push(args), r));
+  try {
+    answer({ status: 0, stdout: 'a1\na2\na1\n', stderr: '' });
+    assert.deepEqual([...(await tmux.clientSessionsAsync())].sort(), ['a1', 'a2']);
+    assert.deepEqual(asked[0].slice(2), ['list-clients', '-F', '#{session_name}']);
+    answer({ status: 1, stdout: '', stderr: 'no server running on /tmp/tmux-1000/x\n' });
+    assert.equal((await tmux.clientSessionsAsync()).size, 0);
+    answer({ status: 1, stdout: '', stderr: 'lost server\n' });
+    assert.equal(await tmux.clientSessionsAsync(), null);
+  } finally {
+    tmux.setTmuxRunner(null);
   }
 });

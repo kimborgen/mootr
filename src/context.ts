@@ -80,7 +80,8 @@ export function onContext(agentId: string, tokens: number): void {
   if (level === 3) warmLessons(a).then((lessons) => requestCompaction(a, { prompt: withRetroReminder(render('compacted-forced', { ...vars, lessons, workspace: workspacePrompt(a) })), reason: 'enforcement threshold' })).catch(() => {});
 }
 
-function avgAfterCompaction(): number | undefined {
+// Reads the last 5 days' compaction:measured events through their partial index (db.ts events_compaction_measured).
+export function avgAfterCompaction(): number | undefined {
   const r = db
     .open()
     .prepare(`SELECT AVG(json_extract(data, '$.tokens')) AS avg FROM events WHERE type = 'compaction:measured' AND json_extract(data, '$.tokens') > 0 AND ts > ?`)
@@ -93,7 +94,8 @@ export function idleSweep(): void {
   const s = settings().idleCompaction;
   if (!s.enabled) return;
   const avg = avgAfterCompaction();
-  for (const a of db.listAgents()) {
+  // Live agents only (S-4895): the loop skips the archived ones, which are most of the table.
+  for (const a of db.listLiveAgents()) {
     if ((a.lifecycle !== 'active' && a.lifecycle !== 'paused') || !a.idle_since || a.context_tokens == null) continue;
     // A resting agent is compacted headless and stays resting (S-2238), on a harness whose compaction quits it
     // (Claude Code); one with another pause owner is left alone.

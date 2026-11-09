@@ -13,6 +13,7 @@ import * as itsa from './itsa.ts';
 import { STAM_HOME } from './config.ts';
 import { threadResolved } from './thread-resolved.ts';
 import { envVar } from './env.ts';
+import { timed } from './stall.ts';
 
 const HUMAN = 'human';
 // Tests set STAM_AUTO_ARCHIVE_QUIET_MS, so they wait on state, not on minutes.
@@ -232,7 +233,7 @@ export function start(src: Sources): { nudge: () => void } {
   const run = () => {
     if (running) return;
     running = true;
-    archiveResolved(src)
+    timed('auto-archive', () => archiveResolved(src))
       .catch((e) => console.error(`auto-archive: ${e instanceof Error ? e.message : e}`))
       .finally(() => (running = false));
   };

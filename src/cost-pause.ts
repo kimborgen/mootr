@@ -233,12 +233,20 @@ function cleared(c: PauseClear, now: number): { text: string; unconfirmed: boole
   return null;
 }
 
+// The agents carrying a manual pause with a clear condition (S-4882): one blockers query, run on every reading, where
+// a scan of every agent row and its blockers took 140 ms with ~3,600 agents. Only candidates: evaluatePauses rereads
+// each one's blocker before it acts, since clearing an earlier one awaits and a pause can be refreshed meanwhile.
+function pausedIds(): string[] {
+  return [...new Set(blockers.blockersOfKind(KIND).filter((b) => b.clear).map((b) => b.agent_id))];
+}
+
 // Lifts every manual pause whose clear condition is met, then schedules the next timer. Called
 // on every reading and at each pause's clear time (and once at daemon start).
 export async function evaluatePauses(now: number = Date.now()): Promise<void> {
-  for (const a of db.listAgents()) {
-    const b = manualBlocker(a);
-    if (!b?.clear) continue;
+  for (const id of pausedIds()) {
+    const a = db.getAgent(id);
+    const b = a && manualBlocker(a);
+    if (!a || !b?.clear) continue;
     const verdict = cleared(b.clear as unknown as PauseClear, now);
     if (!verdict) continue;
     db.addEvent(a.id, 'cost:pause', { action: 'clear', cleared: verdict.text, ...(verdict.unconfirmed ? { unconfirmed: true } : {}) });
@@ -257,9 +265,13 @@ function schedule(now: number = Date.now()): void {
   clearTimeout(timer);
   timer = undefined;
   let due = Infinity;
-  for (const a of db.listAgents()) {
-    const c = manualBlocker(a)?.clear as PauseClear | undefined;
-    if (!c) continue;
+  // Synchronous, so the rows read here are current; the first per agent is manualBlocker's.
+  const seen = new Set<string>();
+  for (const b of blockers.blockersOfKind(KIND)) {
+    if (seen.has(b.agent_id)) continue;
+    seen.add(b.agent_id);
+    const c = b.clear as unknown as PauseClear | null;
+    if (!c || !db.getAgent(b.agent_id)) continue;
     if (c.kind === 'time') {
       const at = Date.parse(String(c.until ?? ''));
       if (Number.isFinite(at)) due = Math.min(due, at);

@@ -160,12 +160,14 @@ test('a forwarded \'tree\' can\'t hide an owner on the home, and a caller\'s own
   // A peer that never answers: a local caller's own branch still passes, a free branch is judged by rule 2 alone (S-1477: a peer that doesn't answer isn't an owner).
   const file = join(base, 'home', 'settings.json');
   mkdirSync(join(base, 'home'), { recursive: true });
-  writeFileSync(file, JSON.stringify({ peers: [{ name: 'down', url: 'http://127.0.0.1:9', token: 'x' }] }));
+  // The settings it replaces (settings.itsa.repos among them) come back after, so later tests still know the stam2 repo (S-4831).
+  const saved = existsSync(file) ? readFileSync(file, 'utf8') : '{}';
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(saved), peers: [{ name: 'down', url: 'http://127.0.0.1:9', token: 'x' }] }));
   try {
     assert.equal((await push('stam/own', as('aaaa2'))).branch, 'stam/own');
     await assert.rejects(push('stam/free', as('aaaa2')), (e) => /rule 2/.test(e.message) && !/didn't answer/.test(e.message));
   } finally {
-    writeFileSync(file, '{}');
+    writeFileSync(file, saved);
   }
 });
 
@@ -227,4 +229,23 @@ test('a branch outside the caller\'s worktree metadata is refused naming itsa_li
   const y = await itsa.create({ title: 'Grab second', owner: 'aaaa2', by: 'human' });
   await assert.rejects(openPrHere({ branch: 'stam/gone', title: 't', body: BODY, itsa: y.key, by: 'aaaa2' }, as('aaaa2'), cfg), /rule 1/);
   assert.equal(itsa.links(y.key).some((l) => l.external_id === 'stam/gone'), false);
+});
+
+// S-4831: rule 2 counts only the repo's own branch links, so an ITSA linking another repo's same-named branch grants no push here.
+// Without a repo (the push check before a storage caller's own push) every link counts, as before.
+test('rule 2 is per repo: a link to bai2\'s branch lets the owner push it in bai2, not stam2\'s same-named one (S-4831)', async () => {
+  const { pushRefusal } = await import('../src/pr-open.ts');
+  const settings = await import('../src/settings.ts');
+  const before = settings.settings().itsa;
+  settings.setSetting('itsa', { ...before, repos: { stam2: work, bai2: work } });
+  try {
+    agent('aaac9', 'xrepo-a', null, 'stam/xrepo-own');
+    const x = await itsa.create({ title: 'Bai work', owner: 'aaac9', by: 'human' });
+    await itsa.addLink(x.key, { system: 'branch', external_id: 'stam/xrepo', repo: 'bai2', url: '' }, 'human');
+    assert.equal(await pushRefusal(as('aaac9'), 'stam/xrepo', 'bai2'), null);
+    assert.match(await pushRefusal(as('aaac9'), 'stam/xrepo', 'stam2'), /rule 2\). Run itsa_link .*repo: "stam2"/s);
+    assert.equal(await pushRefusal(as('aaac9'), 'stam/xrepo'), null, 'no repo: every link counts');
+  } finally {
+    settings.setSetting('itsa', before);
+  }
 });

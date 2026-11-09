@@ -172,13 +172,17 @@ function presetType(name: string): string {
   return t;
 }
 
-// A pull request as its subject key: a number (the default repo), OWNER/REPO#N, or a url.
-async function prSubject(pr: unknown): Promise<{ key: string; number: number }> {
+// A pull request as its subject key: a number, OWNER/REPO#N, or a url. A number is in `given` (OWNER/NAME), else the origin repo of
+// agent `by`'s worktree, else the ITSA home's default repo (S-4831; the daemon answers both). A repo that differs from pr's is refused.
+async function prSubject(pr: unknown, given: unknown, by: string): Promise<{ key: string; number: number }> {
   const s = String(pr ?? '').trim();
   const m = /^#?(\d+)$/.exec(s) ?? /^([^/#\s]+\/[^/#\s]+)#(\d+)$/.exec(s) ?? /^https?:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/.exec(s);
   if (!m) throw new Error(`pr must be a number, OWNER/REPO#N, or a pull request url, not ${JSON.stringify(s)}`);
   const number = Number(m[m.length - 1]);
-  const repo = m.length === 3 ? m[1] : (await api<{ github: string | null }>('GET', '/api/pr/github-repo')).github;
+  const field = typeof given === 'string' ? given.trim() : '';
+  if (field && !/^[\w.-]+\/[\w.-]+$/.test(field)) throw new Error(`repo is OWNER/NAME, not ${JSON.stringify(field)}`);
+  if (field && m.length === 3 && field.toLowerCase() !== m[1].toLowerCase()) throw new Error(`pr ${s} is in ${m[1]}, but repo says ${field}`);
+  const repo = m.length === 3 ? m[1] : field || (await api<{ github: string | null }>('GET', `/api/pr/github-repo?agent=${encodeURIComponent(by)}`)).github;
   if (!repo) throw new Error('no default GitHub repo: set settings.itsa.prOpen.github on the ITSA home, or give the pr as OWNER/REPO#N');
   return { key: `github:${repo}#${number}`, number };
 }
@@ -1545,6 +1549,7 @@ export const tools: Tool[] = [
         body: { type: 'string', description: 'The PR body, in the docs/pull-requests.md format. Exactly one of body and body_file.' },
         body_file: { type: 'string', description: 'The path of a file holding the PR body, in your worktree or your scratch dir (read on your machine, at most 256 KiB). Exactly one of body and body_file.' },
         itsa: { type: 'string', description: 'The ITSA the branch delivers (id or key), to link the PR and branch to.' },
+        repo: { type: 'string', description: 'The GitHub repo (OWNER/NAME) the PR is in, one of settings.itsa.repos on the ITSA home. Default: your worktree\'s origin, else the home\'s default repo.' },
       },
       required: ['branch'],
     },
@@ -1554,11 +1559,11 @@ export const tools: Tool[] = [
       if (unknown.length) throw new Error(`pr_open has no parameter ${unknown.join(', ')}: its parameters are ${PR_OPEN_PARAMS.join(', ')}`);
       if (a.predict) {
         // A dry run: never a timeout recovery, since it opened nothing. A failure throws; the list is never made up (S-3287).
-        return text(formatPrediction(await api<PrPrediction>('POST', '/api/pr/predict', { branch: a.branch, by }, PR_OPEN_CALL_MS)));
+        return text(formatPrediction(await api<PrPrediction>('POST', '/api/pr/predict', { branch: a.branch, by, repo: a.repo }, PR_OPEN_CALL_MS)));
       }
       if (!String(a.title ?? '').trim()) throw new Error('pr_open needs a title (or predict: true for a dry run)');
       try {
-        const r = await api<any>('POST', '/api/pr/open', { branch: a.branch, title: a.title, body: a.body, body_file: a.body_file, itsa: a.itsa, by }, PR_OPEN_CALL_MS);
+        const r = await api<any>('POST', '/api/pr/open', { branch: a.branch, title: a.title, body: a.body, body_file: a.body_file, itsa: a.itsa, by, repo: a.repo }, PR_OPEN_CALL_MS);
         return text(`${r.created ? 'Opened' : 'Updated'} PR #${r.number} for ${r.branch}: ${r.url}\nEvery later push to ${r.branch} needs pr_open again: a push to origin reaches storage only, not GitHub.${r.warning ? `\nWARNING: ${r.warning}` : ''}${r.advisory?.length ? `\nADVISORY (LIGHT tests, not a refusal): ${r.advisory.join('; ')}` : ''}`);
       } catch (e) {
         if (!isTimeout(e)) throw e;
@@ -1684,7 +1689,8 @@ export const tools: Tool[] = [
       type: 'object',
       properties: {
         self,
-        pr: { type: 'number', description: 'The PR number.' },
+        pr: { type: ['number', 'string'], description: 'The PR number, or OWNER/REPO#N.' },
+        repo: { type: 'string', description: 'The GitHub repo (OWNER/NAME) of a numbered PR, one of settings.itsa.repos on the ITSA home. Default: your worktree\'s origin, else the home\'s default repo.' },
         verdict: { type: 'string', enum: ['approve', 'request_changes'], description: 'Your verdict.' },
         summary: { type: 'string', description: 'One line: why.' },
         head: { type: 'string', description: 'The sha of the commit you reviewed: the full 40 characters, or a unique prefix of at least 7. The status is posted on the PR\'s full head.' },
@@ -1695,7 +1701,7 @@ export const tools: Tool[] = [
       // Longer than the home's peer wait (pr-review.ts forwardMs), so this call doesn't give up before the home answers (S-2631).
       let r: any;
       try {
-        r = await api<any>('POST', '/api/pr/review', { pr: a.pr, verdict: a.verdict, summary: a.summary, head: a.head, by: me(a) }, 190_000);
+        r = await api<any>('POST', '/api/pr/review', { pr: a.pr, repo: a.repo, verdict: a.verdict, summary: a.summary, head: a.head, by: me(a) }, 190_000);
       } catch (e: any) {
         // No HTTP answer at all: the call timed out or the connection dropped, so the verdict may be posted (S-2631).
         if (e?.status === undefined) throw new Error(unconfirmedVerdict(a.pr, 'this daemon timed out or lost its connection'));
@@ -1767,12 +1773,13 @@ export const tools: Tool[] = [
   {
     name: 'watch_pr',
     description:
-      'Watch a pull request: its checks, reviews, comments, pushes, and merge or close reach you as they happen, as notices while you work or as mail when you are idle. pr is a number (in the default repo of the ITSA home: settings.itsa.prOpen.github there, else its origin), OWNER/REPO#N, or a PR url. events narrows what you hear: checks, reviews, comments, pushes, merged, closed (default all). A merge or close always ends the watch, and is always delivered. To wait for CI, use wait_for on event with subject github:OWNER/REPO#N and type checks.completed. Watching again replaces the earlier watch. Pass for to watch on another agent\'s behalf.',
+      'Watch a pull request: its checks, reviews, comments, pushes, and merge or close reach you as they happen, as notices while you work or as mail when you are idle. pr is a number (in repo when given, else your worktree\'s origin repo, else the default repo of the ITSA home: settings.itsa.prOpen.github there, else its origin), OWNER/REPO#N, or a PR url. events narrows what you hear: checks, reviews, comments, pushes, merged, closed (default all). A merge or close always ends the watch, and is always delivered. To wait for CI, use wait_for on event with subject github:OWNER/REPO#N and type checks.completed. Watching again replaces the earlier watch. Pass for to watch on another agent\'s behalf.',
     inputSchema: {
       type: 'object',
       properties: {
         self,
         pr: { type: ['string', 'number'], description: 'The PR number, OWNER/REPO#N, or its url.' },
+        repo: { type: 'string', description: 'The GitHub repo (OWNER/NAME) of a numbered PR. Default: your worktree\'s origin, else the ITSA home\'s default repo.' },
         events: { type: 'array', items: { type: 'string', enum: Object.keys(PR_EVENT_PRESETS) }, description: 'What to hear: checks, reviews, comments, pushes, merged, closed. Default all.' },
         for: { type: 'string', description: 'Watch for another agent (id) in your tree, or "human". Defaults to you.' },
       },
@@ -1781,7 +1788,7 @@ export const tools: Tool[] = [
     group: 'events',
     run: async (a) => {
       const by = me(a);
-      const { key, number } = await prSubject(a.pr);
+      const { key, number } = await prSubject(a.pr, a.repo, by);
       const types = [...new Set([...(a.events?.length ? a.events : Object.keys(PR_EVENT_PRESETS)).map((e: string) => presetType(e)), ...PR_END_TYPES])];
       // Create first: the daemon resolves `for` (an id or a name) and refuses one it can't, so a
       // refused watch leaves the earlier one in place. Then the earlier watch on this PR goes.
@@ -1799,10 +1806,10 @@ export const tools: Tool[] = [
   {
     name: 'unwatch_pr',
     description: 'Stop watching a pull request you watch with watch_pr. pr is as watch_pr takes it.',
-    inputSchema: { type: 'object', properties: { self, pr: { type: ['string', 'number'], description: 'The PR number, OWNER/REPO#N, or its url.' }, for: { type: 'string', description: 'The agent (id) or "human" you watched for, if not you.' } }, required: ['pr'] },
+    inputSchema: { type: 'object', properties: { self, pr: { type: ['string', 'number'], description: 'The PR number, OWNER/REPO#N, or its url.' }, repo: { type: 'string', description: 'The GitHub repo (OWNER/NAME) of a numbered PR, as watch_pr takes it.' }, for: { type: 'string', description: 'The agent (id) or "human" you watched for, if not you.' } }, required: ['pr'] },
     group: 'events',
     run: async (a) => {
-      const { key, number } = await prSubject(a.pr);
+      const { key, number } = await prSubject(a.pr, a.repo, me(a));
       const n = await dropPrWatches(a.for === 'human' ? 'human' : (a.for ?? me(a)), key, me(a), undefined);
       return text(n ? `Stopped watching PR #${number}.` : `No watch on PR #${number}.`);
     },
@@ -1884,7 +1891,7 @@ export function toolCatalog(opts: { requirements?: boolean } = {}): {
 // PR_OPEN_PEER_MS), so a slow storage fetch doesn't end the wait while the PR is still being made (S-1332).
 const PR_OPEN_CALL_MS = 360_000;
 // pr_open's parameters (S-2677): any other key is refused by name, so a misspelt one (body-file) isn't taken as no body.
-const PR_OPEN_PARAMS = ['self', 'branch', 'predict', 'title', 'body', 'body_file', 'itsa'];
+const PR_OPEN_PARAMS = ['self', 'branch', 'predict', 'title', 'body', 'body_file', 'itsa', 'repo'];
 
 // Whether a call gave up waiting (the client's or a peer's timeout), not a refusal.
 const isTimeout = (e: unknown): boolean => e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError' || /aborted due to timeout/.test(e.message));
@@ -1895,7 +1902,7 @@ async function prOpenTimedOut(a: any, by: string, e: unknown): Promise<string> {
   const why = e instanceof Error ? e.message : String(e);
   const again = 'pr_open is safe to run again: it reuses the open PR on the branch';
   try {
-    const s = await api<any>('POST', '/api/pr/open-status', { branch: a.branch, body: a.body, itsa: a.itsa, by }, 30_000);
+    const s = await api<any>('POST', '/api/pr/open-status', { branch: a.branch, body: a.body, itsa: a.itsa, by, repo: a.repo }, 30_000);
     if (!s.found) return `pr_open timed out (${why}); no open PR is on ${a.branch} yet. ${again}.`;
     const yes = (ok: boolean | null) => (ok === null ? 'n/a' : ok ? 'written' : 'NOT written: run pr_open again');
     return `pr_open timed out (${why}), but PR #${s.number} is open on ${s.branch}: ${s.url}\nhead ${s.head}; body ${yes(s.body_written)}; ITSA link ${yes(s.itsa_linked)}.`;

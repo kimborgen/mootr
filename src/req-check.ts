@@ -24,6 +24,7 @@ import { branchDiff } from './itsa-queue.ts';
 import type { ExtEvent } from './watch.ts';
 import type { Requirement, Verdict, WaiverKind } from './requirements.ts';
 import { envVar } from './env.ts';
+import { timed } from './stall.ts';
 
 export type SubjectKind = 'mail' | 'mail-to-human' | 'itsa' | 'branch' | 'tool' | 'event' | 'manual';
 
@@ -679,7 +680,7 @@ function watchRemote(): void {
   // A synced setting that turns requirements on (the cache write) brings the first fetch.
   onSettingsChange(() => void (!remoteIndex && fetchRemoteIndex()));
   void fetchRemoteIndex();
-  setInterval(() => void fetchRemoteIndex(), INDEX_POLL_MS).unref();
+  setInterval(() => timed('requirements index', () => fetchRemoteIndex()), INDEX_POLL_MS).unref();
 }
 
 // --- Preview ---------------------------------------------------------------------------------

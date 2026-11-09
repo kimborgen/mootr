@@ -9,6 +9,7 @@ import * as db from './db.ts';
 import { find as findItsa, isClosedStatus } from './itsa.ts';
 import { liveSubscriptionNotes } from './watch.ts';
 import { envVar } from './env.ts';
+import { timed } from './stall.ts';
 
 // A notice from an agent archived more than this ago counts as handled, once it was pushed to the
 // recipient. A test sets STAM_NOTICE_ARCHIVED_MS, so it waits on state, not on a real day.
@@ -52,13 +53,26 @@ interface Row {
 export function sweep(opts: { now?: number } = {}): number {
   const nowMs = opts.now ?? Date.now();
   const notes = liveSubscriptionNotes();
-  const agents = new Map(db.listAgents().map((a) => [a.id, a]));
   const waits = db.listWaitsByAgent();
-  // When each agent was archived, from its `archive` event (src/lifecycle.ts; the sender of a stale notice).
-  const archivedAt = new Map<string, number>();
-  for (const e of db.open().prepare("SELECT agent_id, ts FROM events WHERE type = 'archive' ORDER BY id").all() as unknown as { agent_id: string; ts: string }[]) {
-    archivedAt.set(e.agent_id, Date.parse(e.ts) || 0);
-  }
+  // The agents the pass asks about, by id, read as it needs them (S-4908): reading every agent row, and every
+  // archive event in the events table, made each pass 200 ms with a million events. Cached for the pass.
+  const agentRow = db.open().prepare('SELECT name, lifecycle FROM agents WHERE id = ?');
+  const agents = new Map<string, { name: string; lifecycle: string } | undefined>();
+  const agent = (id: string) => {
+    if (!agents.has(id)) agents.set(id, agentRow.get(id) as { name: string; lifecycle: string } | undefined);
+    return agents.get(id);
+  };
+  // When an agent was archived, from its latest `archive` event (src/lifecycle.ts; the sender of a stale notice),
+  // through the events_agent_type index.
+  const archiveRow = db.open().prepare("SELECT ts FROM events WHERE agent_id = ? AND type = 'archive' ORDER BY id DESC LIMIT 1");
+  const archivedAt = new Map<string, number | undefined>();
+  const archivedAtOf = (id: string) => {
+    if (!archivedAt.has(id)) {
+      const e = archiveRow.get(id) as { ts: string } | undefined;
+      archivedAt.set(id, e ? Date.parse(e.ts) || 0 : undefined);
+    }
+    return archivedAt.get(id);
+  };
   // Whether a mail's ITSA reference names a closed ITSA; cached, since relays share one.
   const closedItsa = new Map<string, boolean>();
   const isClosedItsa = (ref: string | null | undefined): boolean => {
@@ -86,11 +100,13 @@ export function sweep(opts: { now?: number } = {}): number {
   const rows = db
     .open()
     .prepare(
-      `SELECT r.mail_id, r.agent_id, m.from_id, m.subject, m.body, m.created_at, m.thread_id, m.notice, r.pushed_at, m.itsa_id, m.about_itsa
+      // Only an automatic notice or the deploy watcher's mail can be settled, and only the watcher's checks read
+      // a body, so the rest are left in the database (S-4908).
+      `SELECT r.mail_id, r.agent_id, m.from_id, m.subject, CASE WHEN m.from_id = ? THEN m.body ELSE '' END AS body, m.created_at, m.thread_id, m.notice, r.pushed_at, m.itsa_id, m.about_itsa
          FROM mail_recipients r JOIN mail m ON m.id = r.mail_id
-        WHERE r.read_at IS NULL AND r.agent_id <> 'human'`,
+        WHERE r.read_at IS NULL AND r.agent_id <> 'human' AND (m.notice = 1 OR m.from_id = ?)`,
     )
-    .all() as unknown as Row[];
+    .all(DEPLOY, DEPLOY) as unknown as Row[];
   const settled = (r: Row): boolean => {
     if (waitedOn(r)) return false;
     // A deploy-hold alert waits on the human until the hold is removed: leave it for them.
@@ -110,8 +126,9 @@ export function sweep(opts: { now?: number } = {}): number {
     }
     // A notice from an agent archived over a day ago, already pushed to the recipient. An agent that
     // was archived and resumed keeps its old archive event, so only one still archived counts (S-717).
-    const at = archivedAt.get(r.from_id);
-    return r.notice === 1 && pushed && agents.get(r.from_id)?.lifecycle === 'archived' && at !== undefined && nowMs - at >= ARCHIVED_MS;
+    if (r.notice !== 1 || !pushed || agent(r.from_id)?.lifecycle !== 'archived') return false;
+    const at = archivedAtOf(r.from_id);
+    return at !== undefined && nowMs - at >= ARCHIVED_MS;
   };
   const byAgent = new Map<string, string[]>();
   for (const r of rows) if (settled(r)) byAgent.set(r.agent_id, [...(byAgent.get(r.agent_id) ?? []), r.mail_id]);
@@ -120,7 +137,7 @@ export function sweep(opts: { now?: number } = {}): number {
     const n = db.markRead(agentId, ids);
     if (n) {
       total += n;
-      console.log(`notices: read ${n} settled automatic notice(s) for ${agents.get(agentId)?.name ?? agentId}`);
+      console.log(`notices: read ${n} settled automatic notice(s) for ${agent(agentId)?.name ?? agentId}`);
     }
   }
   return total;
@@ -133,7 +150,7 @@ export function start(): { nudge: () => void; run: () => void } {
     if (running) return;
     running = true;
     try {
-      sweep();
+      timed('notices sweep', () => sweep());
     } catch (e) {
       console.error(`notices: ${e instanceof Error ? e.message : e}`);
     } finally {

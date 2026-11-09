@@ -13,6 +13,7 @@ import { settings } from '../settings.ts';
 import { ghToken } from '../mcp-auth.ts';
 import { mirrorEventMain, mirrorEventPr } from '../pr-mirror.ts';
 import { envVar } from '../env.ts';
+import { timed } from '../stall.ts';
 
 const DEFAULT_BASE = 'https://api.github.com';
 const base = () => (envVar('GITHUB_API') || DEFAULT_BASE).replace(/\/+$/, '');
@@ -550,6 +551,6 @@ export function start(): void {
   if (!(seconds > 0)) return;
   started = true;
   const run = () => tick().catch((e) => console.error(`github: ${e instanceof Error ? e.message : e}`));
-  const timer = setInterval(run, seconds * 1000);
+  const timer = setInterval(() => timed('github poll', run), seconds * 1000);
   timer.unref?.();
 }

@@ -375,6 +375,51 @@ test('snapshot memo > a narrower range is cut from the widest one read, and noth
   assert.notDeepEqual(after, wide);
 });
 
+// S-4910: the Usage snapshot's tree totals read every agent row twice, with every column, about 40 ms of a 110 ms
+// stall at 3,600 agents. They now read each agent's id, name and parent once.
+test('tree totals > a DAG nests under each parent, and agents are read once, without the rest of each row', () => {
+  const root = agent('tt-root');
+  const x = agent('tt-x', root);
+  const y = agent('tt-y', root);
+  const z = agent('tt-z', x);
+  db.addParent(z, y);
+  const lone = agent('tt-lone');
+  const day = iso(T0).slice(0, 10);
+  const spend = db.open().prepare('INSERT INTO usage (agent_id, day, harness, model, account, cost_usd, tokens_in) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  for (const [id, cost] of [[root, 1], [x, 2], [y, 4], [z, 8], [lone, 16]]) spend.run(id, day, 'claude', 'test-a', 'claude', cost, 10);
+  const shares = { agents: { [x]: 1.5, [z]: 2 }, since: iso(T0), change: 3.5, other: 0 };
+  const d = db.open();
+  const prepare = d.prepare;
+  const sqls = [];
+  d.prepare = function (sql) {
+    sqls.push(sql);
+    return prepare.call(this, sql);
+  };
+  let trees;
+  try {
+    trees = attr.treeTotals(1, T0 + 10 * MIN, [{ account: 'claude', window: 'five_hour', shares }]);
+  } finally {
+    d.prepare = prepare;
+  }
+  d.exec('DELETE FROM usage');
+  const shape = (t) => ({ name: t.name, cost: t.cost_usd, tokens: t.tokens, percent: t.shares.claude?.five_hour.percent ?? 0, children: t.children.map(shape) });
+  assert.deepEqual(trees.map(shape), [
+    { name: 'tt-lone', cost: 16, tokens: 10, percent: 0, children: [] },
+    {
+      name: 'tt-root',
+      cost: 15,
+      tokens: 40,
+      percent: 3.5,
+      children: [
+        { name: 'tt-y', cost: 12, tokens: 20, percent: 2, children: [{ name: 'tt-z', cost: 8, tokens: 10, percent: 2, children: [] }] },
+        { name: 'tt-x', cost: 10, tokens: 20, percent: 3.5, children: [{ name: 'tt-z', cost: 8, tokens: 10, percent: 2, children: [] }] },
+      ],
+    },
+  ]);
+  const agentReads = sqls.filter((s) => /\bFROM agents\b/.test(s));
+  assert.deepEqual(agentReads, ['SELECT id, name, parent_id FROM agents ORDER BY created_at'], 'one read of the agents, three columns');
+});
+
 test('kindCosts prices each token kind and the total (S-1440)', () => {
   const t = { tokens_in: 1_000_000, tokens_out: 500_000, tokens_cache_read: 10_000_000, tokens_cache_write: 200_000 };
   const c = attr.kindCosts('claude-opus-5-5', t);

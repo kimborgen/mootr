@@ -124,8 +124,9 @@ export async function syncPrs(cfg: PrOpenConfig, log: (line: string) => void = c
   }
   // Merge at write time (S-675): a noteSynced that pr_open wrote since the read at the top of the tick is newer than this tick's view.
   // Read and write are synchronous, as noteSynced's are, so none lands between them.
+  // Another repo's REPO:BRANCH entries (S-4831; a branch name has no colon) are pr_open's alone: this tick syncs only the home's repo, so it keeps them.
   const latest = readSyncState(file);
-  for (const [branch, sha] of Object.entries(latest)) if (sha !== old[branch]) state[branch] = sha;
+  for (const [branch, sha] of Object.entries(latest)) if (branch.includes(':') || sha !== old[branch]) state[branch] = sha;
   writeSyncState(state, file);
   // Conflicts of branches whose PR is no longer open are forgotten (S-675).
   const openBranches = new Set(open.map((p) => p.headRefName));

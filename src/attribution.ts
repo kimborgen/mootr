@@ -424,8 +424,10 @@ function project(account: string, cal: Calibration, now: number, window: string)
 
 // The agents and parent links of one snapshot, loaded once: the tree walks read them instead of a
 // query per node. Outside indexed() the walks query the database.
+// The walks use only an agent's id, name and parents, so only those columns are read (S-4910).
 interface TreeIndex {
-  byRef: Map<string, db.Agent>;
+  agents: db.AgentRef[];
+  byRef: Map<string, db.AgentRef>;
   parents: Map<string, Set<string>>;
   children: Map<string, Set<string>>;
 }
@@ -433,8 +435,8 @@ let treeIndex: TreeIndex | null = null;
 
 function indexed<T>(fn: () => T): T {
   if (treeIndex) return fn();
-  const agents = db.listAgents();
-  const idx: TreeIndex = { byRef: new Map(), parents: new Map(), children: new Map() };
+  const agents = db.listAgentRefs();
+  const idx: TreeIndex = { agents, byRef: new Map(), parents: new Map(), children: new Map() };
   const link = (child: string, parent: string) => {
     (idx.parents.get(child) ?? idx.parents.set(child, new Set()).get(child)!).add(parent);
     (idx.children.get(parent) ?? idx.children.set(parent, new Set()).get(parent)!).add(child);
@@ -451,8 +453,8 @@ function indexed<T>(fn: () => T): T {
   }
 }
 
-const agentRef = (ref: string): db.Agent | undefined => (treeIndex ? treeIndex.byRef.get(ref) : db.getAgent(ref));
-const parentIdsOf = (a: db.Agent): string[] => (treeIndex ? [...(treeIndex.parents.get(a.id) ?? [])] : db.parentsOf(a));
+const agentRef = (ref: string): db.AgentRef | undefined => (treeIndex ? treeIndex.byRef.get(ref) : db.getAgent(ref));
+const parentIdsOf = (a: db.AgentRef): string[] => (treeIndex ? [...(treeIndex.parents.get(a.id) ?? [])] : db.parentsOf(a));
 const childIdsOf = (id: string): string[] => (treeIndex ? [...(treeIndex.children.get(id) ?? [])] : tree.childrenOf(id));
 
 // The agent and everything below it, each once, even where the tree is a DAG.
@@ -750,7 +752,8 @@ function treeTotalsIndexed(days: number, now: number, windows: { account: string
     totals.set(r.agent_id, t);
   }
 
-  const agents = db.listAgents();
+  // The index's rows, read once by indexed(): a second read of every agent row cost about 18 ms at 3,600 agents.
+  const agents = treeIndex!.agents;
   const byId = new Map(agents.map((a) => [a.id, a]));
   const children = new Map<string, string[]>();
   const hasParent = new Set<string>();

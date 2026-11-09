@@ -153,3 +153,116 @@ test('a GC entry that arrives only later is noted when the deferred line is writ
   for (const fn of deferred.splice(0)) fn();
   assert.match(lines[0], / during block \(gc 280 ms, major\)$/);
 });
+
+// S-4913: work an async call does after an await runs outside its label. The unlabelled line names the labels
+// in flight, and those that settled since the last tick, so a stall in a timer's later part points at the timer.
+test('an unlabelled stall names the async labels in flight or settled in its window', async () => {
+  const lines = [];
+  const { meter, clock } = meterAt(lines);
+  let release;
+  const held = new Promise((r) => (release = r));
+  const sweep = meter.timed('growth sweep', async () => {
+    await held;
+    clock.t += 300; // the part after the await, outside the label
+  });
+  const done = meter.timed('pr sync', async () => {});
+  await done;
+  meter.tick(clock.t);
+  release();
+  await sweep;
+  meter.tick(clock.t);
+  assert.deepEqual(meter.recent.map((s) => [s.ms, s.label]), [[290, 'unlabelled (in flight: growth sweep)']]);
+  // Settled ones are named for one window only, and a window with nothing in flight says only unlabelled.
+  clock.t += 200;
+  meter.tick(clock.t);
+  assert.equal(meter.recent.at(-1).label, 'unlabelled');
+  assert.equal(lines.length, 1);
+  // A sync call is not counted in flight.
+  meter.timed('sync', () => 1);
+  clock.t += 200;
+  meter.tick(clock.t);
+  assert.equal(meter.recent.at(-1).label, 'unlabelled');
+});
+
+test('an async label passes its value and its rejection through', async () => {
+  const lines = [];
+  const { meter } = meterAt(lines);
+  assert.equal(await meter.timed('ok', async () => 7), 7);
+  const boom = meter.timed('fails', async () => {
+    throw new Error('boom');
+  });
+  await assert.rejects(boom, /boom/);
+});
+
+// Review of #1453: tracking is bounded. A promise is tracked once however often it is timed, and at most
+// IN_FLIGHT_LABELS labels are held; a still-pending label is named, and settling frees its place.
+test('a held promise timed again and again is tracked once, and named while pending', async () => {
+  const lines = [];
+  const { meter, clock } = meterAt(lines);
+  let release;
+  const shared = new Promise((r) => (release = r));
+  const first = meter.timed('outbox', () => shared);
+  for (let i = 0; i < 1000; i++) assert.equal(meter.timed('outbox', () => shared), first, 'the same tracked promise, no new reaction');
+  meter.tick(clock.t);
+  clock.t += 300; // unlabelled sync work while the shared promise is still pending
+  meter.tick(clock.t);
+  assert.equal(meter.recent.at(-1).label, 'unlabelled (in flight: outbox)');
+  release();
+  await first;
+  clock.t += 300;
+  meter.tick(clock.t);
+  assert.equal(meter.recent.at(-1).label, 'unlabelled (in flight: outbox)', 'settled in this window');
+  clock.t += 300;
+  meter.tick(clock.t);
+  assert.equal(meter.recent.at(-1).label, 'unlabelled', 'gone once settled');
+});
+
+test('held promises under many labels are capped, and a settled one frees its place', async () => {
+  const { IN_FLIGHT_LABELS } = await import('../src/stall.ts');
+  const lines = [];
+  const { meter, clock } = meterAt(lines);
+  const held = [];
+  for (let i = 0; i < 200; i++) {
+    let release;
+    const p = new Promise((r) => (release = r));
+    held.push({ p, release, out: meter.timed(`req ${String(i).padStart(3, '0')}`, () => p) });
+  }
+  assert.notEqual(held[IN_FLIGHT_LABELS - 1].out, held[IN_FLIGHT_LABELS - 1].p, 'the last label under the cap is tracked');
+  assert.equal(held[IN_FLIGHT_LABELS].out, held[IN_FLIGHT_LABELS].p, 'past the cap the call is not tracked');
+  meter.tick(clock.t);
+  clock.t += 300;
+  meter.tick(clock.t);
+  assert.match(meter.recent.at(-1).label, new RegExp(`^unlabelled \\(in flight: req 000, .* \\+${IN_FLIGHT_LABELS - 8}\\)$`));
+  for (const h of held) h.release();
+  await Promise.all(held.map((h) => h.out));
+  clock.t += 300;
+  meter.tick(clock.t);
+  clock.t += 300;
+  meter.tick(clock.t);
+  assert.equal(meter.recent.at(-1).label, 'unlabelled', 'every label released');
+  // With room again, a new label is tracked.
+  const p = new Promise(() => {});
+  assert.notEqual(meter.timed('req new', () => p), p);
+});
+
+test('distinct held promises under one label are capped in total, and settling frees the places', async () => {
+  const { IN_FLIGHT_MAX } = await import('../src/stall.ts');
+  const lines = [];
+  const { meter, clock } = meterAt(lines);
+  const held = [];
+  for (let i = 0; i < IN_FLIGHT_MAX + 50; i++) {
+    let release;
+    const p = new Promise((r) => (release = r));
+    held.push({ p, release, out: meter.timed('poll', () => p) });
+    meter.tick((clock.t += 1));
+  }
+  assert.notEqual(held[IN_FLIGHT_MAX - 1].out, held[IN_FLIGHT_MAX - 1].p, 'the last one under the cap is tracked');
+  assert.ok(held.slice(IN_FLIGHT_MAX).every((h) => h.out === h.p), 'past the cap, calls are not tracked');
+  // A new label is refused too while the total is full.
+  const other = new Promise(() => {});
+  assert.equal(meter.timed('other', () => other), other);
+  for (const h of held) h.release();
+  await Promise.all(held.map((h) => h.out));
+  const again = new Promise(() => {});
+  assert.notEqual(meter.timed('poll', () => again), again, 'tracked again once places are free');
+});

@@ -180,3 +180,62 @@ test('calling it acknowledges the tree\'s open cost notices', async () => {
   assert.ok(r.acked.includes(notice.id), 'the notice was acknowledged');
   assert.equal(costNotices.notice(notice.id).acked_by, mgr.id);
 });
+
+// S-4882: every subscription reading checks the manual pauses. It read every agent row and each one's blockers,
+// twice: 140 ms a reading with ~3,600 agents. It now reads only the pause rows.
+test('a reading checks the pauses with a few queries among many agents, and still clears them', async () => {
+  const d = db.open();
+  const ins = d.prepare("INSERT INTO agents (id, name, role, machine, harness, cwd, lifecycle, created_at, updated_at) VALUES (?, ?, '', 'test', 'claude', ?, ?, ?, ?)");
+  d.exec('BEGIN');
+  for (let i = 0; i < 3000; i++) ins.run(`bulk${i}`, `bulk-${i}`, home, i % 10 ? 'archived' : 'active', new Date(Date.now() - i).toISOString(), new Date().toISOString());
+  d.exec('COMMIT');
+  const root = agent('root', mgr.id);
+  const child = agent('child', root.id);
+  const t0 = Date.now();
+  const resets = R();
+  usage.reportSubscription('claude', { five_hour: { used_percentage: 90, resets_at: resets } }, t0);
+  await settle();
+  await costPause.costPause({ root: root.id, by: mgr.id, until: 'reset' });
+  assert.equal(get(child).lifecycle, 'paused');
+
+  // A reading that clears nothing: count the queries its pause check makes.
+  let queries = 0;
+  const realPrepare = d.prepare.bind(d);
+  d.prepare = (sql) => (queries++, realPrepare(sql));
+  try {
+    costPause.onReading('claude', t0 + 1000);
+    await settle();
+  } finally {
+    d.prepare = realPrepare;
+  }
+  assert.ok(queries <= 12, `${queries} queries for one reading's pause check`);
+  assert.ok(manual(root) && manual(child), 'nothing cleared');
+
+  usage.reportSubscription('claude', { five_hour: { used_percentage: 40, resets_at: resets } }, t0 + 5000);
+  await settle();
+  for (const a of [root, child]) {
+    assert.equal(manual(a), undefined);
+    assert.equal(get(a).lifecycle, 'active');
+  }
+});
+
+// S-4882 review: the pause check finds its candidates in one query, then awaits each clear. A pause refreshed while
+// an earlier one clears must be judged on its new condition, not the one read before the loop.
+test('a pause refreshed while an earlier one clears keeps its new condition', async () => {
+  const a = agent('a', mgr.id);
+  const b = agent('b', mgr.id);
+  const due = new Date(Date.now() + 3600_000).toISOString();
+  await costPause.costPause({ root: a.id, by: mgr.id, until: due });
+  await costPause.costPause({ root: b.id, by: mgr.id, until: due });
+  const later = Date.now() + 2 * 3600_000; // both are due
+  const run = costPause.evaluatePauses(later);
+  // The loop is now suspended in a's clear. The manager refreshes b's pause to a later time.
+  const fresh = { ...manual(b).clear, until: new Date(later + 3600_000).toISOString() };
+  db.open().prepare("UPDATE blockers SET clear = ? WHERE agent_id = ? AND kind = 'manual'").run(JSON.stringify(fresh), b.id);
+  await run;
+  await settle();
+  assert.equal(manual(a), undefined, 'a was due and cleared');
+  assert.equal(get(a).lifecycle, 'active');
+  assert.equal(manual(b)?.clear.until, fresh.until, 'b keeps its refreshed pause');
+  assert.equal(get(b).lifecycle, 'paused');
+});

@@ -122,3 +122,39 @@ test('a refreshed busy flag stays counted past the bound, and a stale one that i
     mock.timers.reset();
   }
 });
+
+// S-4913: the busy sweep asks a peer for GET /api/agents?state=all&fields=peer, which sends only what rememberPeerAgent
+// keeps, built from a few columns, not the web UI's full rows. Remembered from those fields, each agent is busy exactly
+// when the peer itself judges it busy.
+test('the peer fields of the agent list carry what the sweep needs to judge each agent busy', async () => {
+  const { listFilter } = await import('../src/agent-public.ts');
+  mk('lr', null, { activity: 'idle' });
+  mk('lw', 'lr', { activity: 'working' });
+  mk('li', 'lr', { activity: 'idle' });
+  mk('lrest', 'lr', { activity: 'idle', lifecycle: 'paused', paused_by: db.REST_PAUSED_BY });
+  db.addWait({ agent_id: 'lrest', kind: 'mail', source: 'agent' });
+  mk('lnowait', 'lr', { activity: 'idle', lifecycle: 'paused', paused_by: db.REST_PAUSED_BY });
+  mk('lask', 'lr', { activity: 'idle' });
+  db.createPermissionRequest('lask', 'push', 'why', 'details');
+  mk('lgone', 'lr', { activity: 'working', lifecycle: 'archived' });
+  db.addParent('li', 'lw');
+  const rows = db.peerListing(listFilter('all', null));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  assert.deepEqual(Object.keys(byId.get('li')).sort(), ['activity', 'id', 'lifecycle', 'machine', 'name', 'parent_id', 'parents', 'paused_by', 'pending_requests', 'waits']);
+  assert.deepEqual(byId.get('li').parents.sort(), ['lr', 'lw'], 'adopting parents too');
+  assert.equal(byId.get('lask').pending_requests, 1);
+  assert.equal(byId.get('lrest').waits.length, 1);
+  assert.ok(byId.has('lgone'), 'state=all lists archived agents');
+  assert.ok(!db.peerListing(listFilter(null, null)).some((r) => r.id === 'lgone'), 'the live list leaves them out');
+  for (const id of ['lw', 'li', 'lrest', 'lnowait', 'lask', 'lgone']) {
+    const local = db.getAgent(id);
+    const expect = local.lifecycle !== 'archived' && db.isBusy(local);
+    db.rememberPeerAgent({ ...byId.get(id), id: `${id}-p`, machine: 'there' });
+    assert.equal(db.peerAgentBusy(`${id}-p`), expect, `${id}: busy ${expect}`);
+  }
+});
+
+test('the peer fields judge both ways: busy for working, resting with a wait, or asking; idle otherwise', () => {
+  const busy = ['lw', 'li', 'lrest', 'lnowait', 'lask', 'lgone'].filter((id) => db.peerAgentBusy(`${id}-p`));
+  assert.deepEqual(busy, ['lw', 'lrest', 'lask']);
+});

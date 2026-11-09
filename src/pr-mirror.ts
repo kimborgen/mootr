@@ -29,6 +29,8 @@ export interface MirrorConfig {
   origin: string;
   storage: string;
   github: string;
+  // No storage remote (S-4831): a checkout of another repo than the home's own that lacks one.
+  noStorage?: boolean;
 }
 
 // Runs git in its own process group, so a deadline reaches the whole tree (a push's ssh too). On abort the group
@@ -83,6 +85,7 @@ export function checkMirror(number: number, sha: string): void {
 // The remote the branch is fetched from and the mirror pushes to: the configured name, else the remote the
 // checkout has that is named like a configured peer (settings.ts storageRemoteFallback), else '' (no storage, so no mirror).
 export async function storageRemote(cfg: MirrorConfig, signal?: AbortSignal): Promise<string> {
+  if (cfg.noStorage) return '';
   return cfg.storage || storageRemoteFallback((await git(cfg, ['remote'], signal)).split('\n'));
 }
 

@@ -140,6 +140,9 @@ CREATE TABLE IF NOT EXISTS window_clears (
 -- usage_info's cold-turn and cache-window reads (S-2236): partial, so other events pay nothing.
 CREATE INDEX IF NOT EXISTS events_cache_cold ON events(ts) WHERE type = 'cache:cold';
 CREATE INDEX IF NOT EXISTS events_cache_ttl ON events(agent_id) WHERE type = 'cache:ttl';
+-- The idle compaction's 5-day average size after a compaction (context.ts avgAfterCompaction, S-4895): read every
+-- minute by the idle sweep, where a scan of every event ever took 180 ms at a million rows.
+CREATE INDEX IF NOT EXISTS events_compaction_measured ON events(ts) WHERE type = 'compaction:measured';
 -- The classifier's spend today (activity-classify.ts spentToday, S-4356): the decide events by time, so a
 -- labelling call reads today's rows, not every decide event ever. The query names it (INDEXED BY): SQLite
 -- picks events_agent_type otherwise.
@@ -1265,6 +1268,46 @@ export function listAgents(): Agent[] {
   return open().prepare('SELECT * FROM agents ORDER BY created_at').all() as unknown as Agent[];
 }
 
+// Every agent's id, name and spawning parent, in listAgents' order: what a tree walk needs, without the
+// rest of each row. At 3,600 agents it reads in a fraction of listAgents' time (S-4910).
+export type AgentRef = Pick<Agent, 'id' | 'name' | 'parent_id'>;
+export function listAgentRefs(): AgentRef[] {
+  return open().prepare('SELECT id, name, parent_id FROM agents ORDER BY created_at').all() as unknown as AgentRef[];
+}
+
+// A row of GET /api/agents?fields=peer (S-4913): what a peer's busy sweep keeps of each agent (rememberPeerAgent), in
+// listAgents' order. A wait is sent as its id only: the sweep counts them.
+export interface PeerListed {
+  id: string;
+  name: string;
+  machine: string;
+  lifecycle: string;
+  activity: string;
+  parent_id: string | null;
+  paused_by: string | null;
+  parents: string[];
+  pending_requests: number;
+  waits: { id: string }[];
+}
+export function peerListing(keep: (a: { id: string; name: string; lifecycle: string }) => boolean): PeerListed[] {
+  const rows = (open().prepare('SELECT id, name, machine, lifecycle, activity, parent_id, paused_by FROM agents ORDER BY created_at').all() as unknown as Agent[]).filter(keep);
+  const parents = parentsByChild(rows);
+  const pending = pendingRequestCounts();
+  const waits = listWaitsByAgent();
+  return rows.map((a) => ({
+    id: a.id,
+    name: a.name,
+    machine: a.machine,
+    lifecycle: a.lifecycle,
+    activity: a.activity,
+    parent_id: a.parent_id,
+    paused_by: a.paused_by,
+    parents: parents.get(a.id) ?? [],
+    pending_requests: pending.get(a.id) ?? 0,
+    waits: (waits.get(a.id) ?? []).map((w) => ({ id: w.id })),
+  }));
+}
+
 // S-2128: the agents the daemon's timers act on, without the ~1300 archived rows listAgents also reads. The
 // WHERE terms match the partial indexes above, so only these rows are visited.
 export function listLiveAgents(): Agent[] {
@@ -1381,7 +1424,7 @@ export function setParents(childId: string, parentIds: string[]): void {
 }
 
 // Every parent: the one that spawned the agent plus any that adopted it.
-export function parentsOf(a: Agent): string[] {
+export function parentsOf(a: Pick<Agent, 'id' | 'parent_id'>): string[] {
   const rows = open().prepare('SELECT parent_id FROM agent_parents WHERE child_id = ?').all(a.id) as { parent_id: string }[];
   return [...new Set([...(a.parent_id ? [a.parent_id] : []), ...rows.map((r) => r.parent_id)])];
 }
@@ -2342,15 +2385,25 @@ export function splitArchived<T extends { thread_id: string; mails: { id: string
   const d = open();
   const rows = d.prepare('SELECT thread_id FROM thread_archive WHERE mailbox_id = ?').all(mailbox) as { thread_id: string }[];
   const taken = new Set(rows.map((r) => r.thread_id));
-  const idsFor = d.prepare('SELECT mail_id FROM thread_archive_mail WHERE mailbox_id = ? AND thread_id = ?');
+  // Every archived thread's recorded mail in one read, not a query per thread (S-4794).
+  const recorded = new Map<string, Set<string>>();
+  for (const r of d.prepare('SELECT thread_id, mail_id FROM thread_archive_mail WHERE mailbox_id = ?').all(mailbox) as { thread_id: string; mail_id: string }[]) {
+    let ids = recorded.get(r.thread_id);
+    if (!ids) recorded.set(r.thread_id, (ids = new Set()));
+    ids.add(r.mail_id);
+  }
+  const none = new Set<string>();
   const isArchived = (t: T) => {
     if (!taken.has(t.thread_id) || keep.has(t.thread_id)) return false;
     if (t.mails.some((m) => m.permission?.status === 'pending')) return false;
-    const known = new Set((idsFor.all(mailbox, t.thread_id) as { mail_id: string }[]).map((r) => r.mail_id));
+    const known = recorded.get(t.thread_id) ?? none;
     // A message whose recipients aren't known counts as sent to the mailbox.
     return t.mails.every((m) => known.has(m.id) || !(m.recipients?.some((r) => r.id === mailbox) ?? true));
   };
-  return { active: threads.filter((t) => !isArchived(t)), archived: threads.filter(isArchived) };
+  const active: T[] = [];
+  const archived: T[] = [];
+  for (const t of threads) (isArchived(t) ? archived : active).push(t);
+  return { active, archived };
 }
 
 // Mail withdrawn from the human's attention (src/withdraw.ts): marks the human's copy read and

@@ -12,7 +12,7 @@ import { isReviewerType } from './agent-types.ts';
 import { MACHINE } from './config.ts';
 import * as db from './db.ts';
 import { releaseReviewer } from './itsa-owners.ts';
-import { prOpenConfig, type PrOpenConfig } from './pr-open.ts';
+import { prOpenConfig, prOpenConfigFor, type PrOpenConfig } from './pr-open.ts';
 import { approveRefusal } from './ring.ts';
 import { unconfirmedVerdict } from './pr-review-message.ts';
 import { PeerUnreachable, peerByName, peerCall, type Via } from './peers.ts';
@@ -36,8 +36,10 @@ export class ReviewError extends Error {
 }
 
 export interface ReviewInput {
-  // The PR number (a bare number or its string).
+  // The PR number (a bare number or its string), or OWNER/REPO#N (S-4831).
   pr: number | string;
+  // The PR's GitHub repo (OWNER/NAME, S-4831): given, or the reviewer's worktree origin. Unset is the home's default repo.
+  repo?: string | null;
   verdict: 'approve' | 'request_changes' | string;
   summary: string;
   // The sha (full, or a prefix of at least 7 characters) of the commit the reviewer reviewed: refused when the PR's head is another.
@@ -94,21 +96,39 @@ export function parseReviewHeaders(h: Record<string, string | string[] | undefin
   return { reviewRole: role, ownBranches: Array.isArray(own) && own.every((b) => typeof b === 'string') ? (own as string[]) : null };
 }
 
-function checkInput(input: ReviewInput): { pr: string; verdict: string; summary: string; head: string } {
-  const pr = String(input.pr ?? '');
-  if (!/^[1-9]\d*$/.test(pr)) throw new ReviewError(400, `a PR is a number: ${pr}`);
+function checkInput(input: ReviewInput): { pr: string; verdict: string; summary: string; head: string; repo: string } {
+  const given = String(input.pr ?? '').trim();
+  // S-4831: OWNER/REPO#N names the repo; a repo field that names another one is refused, never guessed between.
+  const keyed = /^([\w.-]+\/[\w.-]+)#([1-9]\d*)$/.exec(given);
+  const pr = keyed ? keyed[2] : given;
+  if (!/^[1-9]\d*$/.test(pr)) throw new ReviewError(400, `a PR is a number or OWNER/REPO#N: ${given}`);
+  const field = typeof input.repo === 'string' ? input.repo.trim() : '';
+  if (keyed && field && field.toLowerCase() !== keyed[1].toLowerCase()) throw new ReviewError(400, `pr ${given} is in ${keyed[1]}, but repo says ${field}`);
+  const repo = keyed ? keyed[1] : field;
   if (!VERDICTS.includes(String(input.verdict))) throw new ReviewError(400, `unknown verdict "${input.verdict}": use approve or request_changes`);
   const summary = String(input.summary ?? '').trim();
   if (!summary || /[\r\n]/.test(summary)) throw new ReviewError(400, 'a verdict needs a one-line summary');
   const head = String(input.head ?? '');
   if (!/^[0-9a-f]{7,40}$/.test(head)) throw new ReviewError(400, 'head is the sha of the commit you reviewed: the full 40 characters, or at least 7');
-  return { pr, verdict: String(input.verdict), summary, head };
+  return { pr, verdict: String(input.verdict), summary, head, repo };
+}
+
+// The PR's repo config (S-4831): `home` for the home's default repo, else the settings.itsa.repos checkout whose origin is `repo`.
+function targetOf(repo: string, home: PrOpenConfig): PrOpenConfig {
+  try {
+    return prOpenConfigFor(repo, home);
+  } catch (e: any) {
+    throw new ReviewError(403, String(e.message));
+  }
 }
 
 // Runs on the ITSA home. `via` is the reviewer: the agent whose own token (or a peer's forwarded one) asks.
 // The shared token, the human's, and a daemon's own call name no reviewer, so they're refused.
-export async function reviewPrHere(input: ReviewInput, via?: Via, cfg: PrOpenConfig = prOpenConfig()): Promise<ReviewPosted> {
+export async function reviewPrHere(input: ReviewInput, via?: Via, home: PrOpenConfig = prOpenConfig()): Promise<ReviewPosted> {
   const v = checkInput(input);
+  // `home` runs the verdict script (its checkout and gh); `cfg` is the PR's own repo, the same as home's for the default repo.
+  const cfg = targetOf(v.repo, home);
+  const other = cfg.github !== home.github;
   if (!via) throw new ReviewError(403, 'only an agent posts a review: this request names no reviewing agent (S-1061)');
   // Who may post (S-1065), decided from the home's own database or the facts the caller's daemon proved; fail closed.
   if (!via.boss) {
@@ -117,7 +137,7 @@ export async function reviewPrHere(input: ReviewInput, via?: Via, cfg: PrOpenCon
   }
   if (!via.boss && !Array.isArray(via.ownBranches)) throw new ReviewError(403, `can't tell which branches ${via.agent} owns, so can't rule out a review of its own PR (S-1065)`);
   // Checked before gh runs: only the script's absence refuses. Any other failure of the script surfaces as it always has.
-  const script = reviewScript(cfg);
+  const script = reviewScript(home);
   if (!existsSync(script)) {
     // The body is single-quoted for the shell, with each ' written as '\'' so a summary's quotes, $ or backticks paste as they are.
     const body = `'${`Review (${via.agent}): ${v.verdict}. ${v.summary}`.replace(/'/g, "'\\''")}'`;
@@ -127,7 +147,7 @@ export async function reviewPrHere(input: ReviewInput, via?: Via, cfg: PrOpenCon
   let branch = '';
   let shown = '';
   try {
-    const pr = JSON.parse((await run(cfg.gh, ['pr', 'view', v.pr, '--json', 'headRefName,headRefOid'], { cwd: cfg.repo, timeout: 60_000 })).stdout);
+    const pr = JSON.parse((await run(cfg.gh, ['pr', 'view', v.pr, ...(other ? ['--repo', cfg.github] : []), '--json', 'headRefName,headRefOid'], { cwd: home.repo, timeout: 60_000 })).stdout);
     branch = String(pr.headRefName ?? '');
     shown = String(pr.headRefOid ?? '');
   } catch {
@@ -137,9 +157,9 @@ export async function reviewPrHere(input: ReviewInput, via?: Via, cfg: PrOpenCon
   if (!via.boss && via.ownBranches?.includes(branch)) throw new ReviewError(403, `${via.agent} owns ${branch} and may not review its own PR (S-1065)`);
   try {
     const { stdout } = await run(process.execPath, [script, v.pr, v.verdict, v.summary, '--head', v.head], {
-      cwd: cfg.repo,
-      // The gh binary is settings.itsa.prOpen.gh, as pr_open runs it (the script's gate reads STAM_GH).
-      env: { ...process.env, ...withTwins({ STAM_AGENT_ID: via.agent, STAM_GH: cfg.gh }) },
+      cwd: home.repo,
+      // The gh binary is settings.itsa.prOpen.gh, as pr_open runs it (the script's gate reads STAM_GH). Another repo's PR is named to it (S-4831).
+      env: { ...process.env, ...withTwins({ STAM_AGENT_ID: via.agent, STAM_GH: cfg.gh, ...(other ? { STAM_PR_REVIEW_REPO: cfg.github } : {}) }) },
       timeout: 120_000,
     });
     // S-3015: an approve ends the reviewer's review, so it leaves the ITSAs linked to this PR (its branch, or its github link,

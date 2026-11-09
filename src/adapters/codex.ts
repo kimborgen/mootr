@@ -46,6 +46,7 @@ import { envVar, withMootrTwins } from '../env.ts';
 import { dialogClosed, dialogShown } from '../permissions.ts';
 import { codexAsk, codexReply, codexRequestOf, isCodexAsk, requestKey, type CodexDialogRequest } from './codex-dialog.ts';
 import { randomUUID } from 'node:crypto';
+import { timed } from '../stall.ts';
 
 const BIN = envVar('CODEX_BIN') ?? (existsSync(join(homedir(), '.local/bin/codex')) ? join(homedir(), '.local/bin/codex') : 'codex');
 const HOOK_COMMAND = `${STAM_BIN} hook codex`;
@@ -997,10 +998,10 @@ export const codex: Adapter = {
     // One timer for the daemon, not per agent: rate limits are per account, and one shared
     // read every 5 minutes keeps them fresh while any Codex agent runs.
     if (!rateLimitTimer)
-      rateLimitTimer = setInterval(() => {
+      rateLimitTimer = setInterval(() => timed('codex rate limits', () => {
         if (!db.listAgents().some((x) => running(x))) return;
         readRateLimits();
-      }, 300_000);
+      }), 300_000);
   },
 
   async afterUpgrade() {

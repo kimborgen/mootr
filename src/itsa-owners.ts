@@ -17,6 +17,7 @@ import { itsaRefusal, mayEditItsa, mayReadItsaThreads } from './mail-visibility.
 import { chainMarked, homeSaysMarked } from './developer-cap.ts';
 import { envVar } from './env.ts';
 import { subjectsForUrl } from './watch.ts';
+import { timed } from './stall.ts';
 
 const log = (what: string, e: unknown) => console.error(`ITSA owners: ${what}: ${e instanceof Error ? e.message : e}`);
 const isHome = () => settings().itsa.home === MACHINE;
@@ -452,11 +453,11 @@ export function watchOwnerStops(): void {
   itsa.onStatus(statusChanged);
   const every = Number(envVar('ITSA_RETRY_MS')) || 30_000;
   retryPendingUnowns().catch((e) => log('retry', e));
-  setInterval(() => retryPendingUnowns().catch((e) => log('retry', e)), every).unref();
+  setInterval(() => timed('itsa unown retry', () => retryPendingUnowns().catch((e) => log('retry', e))), every).unref();
   // A switch's hand-off to the home that failed before a restart, or fails now, is asked again (S-3636).
   seedSwitchedItsas();
   retrySwitchedItsas().catch((e) => log('retry switch', e));
-  setInterval(() => retrySwitchedItsas().catch((e) => log('retry switch', e)), every).unref();
+  setInterval(() => timed('itsa switch retry', () => retrySwitchedItsas().catch((e) => log('retry switch', e))), every).unref();
   db.onLifecycleChange((_before, after) => {
     if (after.lifecycle !== 'shut_down' || after.activity === 'errored') return;
     if (/^(restarting|archiving)/.test(after.activity_detail ?? '')) return;

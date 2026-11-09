@@ -10,6 +10,12 @@ const KEEP = 20;
 const EVERY_MS = 10_000;
 // The GC entries kept for matching against a stall (a stall's line says which GC overlapped it).
 const GC_KEEP = 8;
+// The most in-flight labels an unlabelled line names (S-4913); the rest are counted.
+const IN_FLIGHT_SHOWN = 8;
+// The most labels held in flight at once; a call under a new label past it is not tracked (review of #1453).
+export const IN_FLIGHT_LABELS = 64;
+// The most promises tracked at once, under any labels; a call past it is not tracked (review of #1453).
+export const IN_FLIGHT_MAX = 256;
 // V8's GC kinds (node's perf_hooks constants): major, minor, incremental marking, weak callbacks.
 const GC_KINDS: Record<number, string> = { 1: 'minor', 4: 'major', 8: 'incremental', 16: 'weak' };
 
@@ -57,8 +63,9 @@ export class StallMeter {
     const outerChild = this.childMs;
     this.childMs = 0;
     const t0 = this.now();
+    let out: T;
     try {
-      return fn();
+      out = fn();
     } finally {
       const d = this.now() - t0;
       const own = d - this.childMs;
@@ -75,6 +82,46 @@ export class StallMeter {
         this.shortBy.set(label, by);
       }
     }
+    return out instanceof Promise ? (this.track(label, out) as T) : out;
+  }
+
+  // S-4913: the work an async call does after its first await runs outside its label, so a stall in it is
+  // unlabelled. Its label is counted in flight until its promise settles, and a window's unlabelled line names
+  // the labels in flight or settled in it. The caller gets a promise that settles as the call's does, so a
+  // rejection nobody handles is still unhandled.
+  // Bounded (review of #1453): the meter keeps a count per label and nothing per call. A promise is tracked once,
+  // however often it is timed (a shared one a timer returns again while it runs gets no new reaction each time).
+  // At most IN_FLIGHT_MAX promises are tracked at once, under at most IN_FLIGHT_LABELS labels; a call past either
+  // gets its own promise back, untracked. A promise that never settles keeps its count, so a stuck caller can fill
+  // the caps, which then only stop the naming.
+  private readonly inFlight = new Map<string, number>();
+  private inFlightTotal = 0;
+  private readonly settled = new Set<string>();
+  private readonly tracked = new WeakMap<Promise<unknown>, Promise<unknown>>();
+  private track(label: string, p: Promise<unknown>): Promise<unknown> {
+    const known = this.tracked.get(p);
+    if (known) return known;
+    const n = this.inFlight.get(label);
+    if (this.inFlightTotal >= IN_FLIGHT_MAX || (n === undefined && this.inFlight.size >= IN_FLIGHT_LABELS)) return p;
+    this.inFlight.set(label, (n ?? 0) + 1);
+    this.inFlightTotal++;
+    const q = p.finally(() => {
+      const left = (this.inFlight.get(label) ?? 1) - 1;
+      if (left > 0) this.inFlight.set(label, left);
+      else this.inFlight.delete(label);
+      this.inFlightTotal--;
+      this.settled.add(label);
+    });
+    this.tracked.set(p, q);
+    return q;
+  }
+
+  // The labels in flight now or settled since the last tick, at most IN_FLIGHT_SHOWN of them, sorted.
+  private suspects(): string {
+    const all = [...new Set([...this.inFlight.keys(), ...this.settled])].sort();
+    if (!all.length) return '';
+    const more = all.length > IN_FLIGHT_SHOWN ? ` +${all.length - IN_FLIGHT_SHOWN}` : '';
+    return ` (in flight: ${all.slice(0, IN_FLIGHT_SHOWN).join(', ')}${more})`;
   }
 
   // The timer's check: the lateness since the last tick, less the stalls already logged. If the rest is
@@ -91,8 +138,9 @@ export class StallMeter {
           .map(([label, by]) => `${label} ${Math.round(by.ms)} ms/${by.n}`)
           .join(', ');
         this.log(rest, `many short calls (n=${this.shortN}, top: ${top})`, this.lastTick, now);
-      } else this.log(rest, 'unlabelled', this.lastTick, now);
+      } else this.log(rest, `unlabelled${this.suspects()}`, this.lastTick, now);
     }
+    this.settled.clear();
     this.lastTick = now;
     this.recordedMs = 0;
     this.shortMs = 0;

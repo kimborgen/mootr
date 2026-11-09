@@ -11,6 +11,7 @@ import { decideWithFailure, type DecideFailure, type DecisionResult, type Questi
 import { settings } from './settings.ts';
 import { ACTIVITY_DEFINITIONS } from './activity-categories.ts';
 import { touched } from './activity-changes.ts';
+import { timed } from './stall.ts';
 
 export const CLASSIFY_PURPOSE = 'decide:activity';
 const INSTRUCTIONS =
@@ -397,7 +398,7 @@ export async function classifyTick(now = Date.now()): Promise<number> {
 export function startClassifier(): ReturnType<typeof setInterval> {
   resumeIfDue(Date.now());
   return setInterval(() => {
-    classifyTick().catch((e) => db.addEvent('stam', 'activity:classify-error', String(e instanceof Error ? e.message : e)));
+    timed('activity classify', classifyTick).catch((e) => db.addEvent('stam', 'activity:classify-error', String(e instanceof Error ? e.message : e)));
   }, TICK_MS);
 }
 

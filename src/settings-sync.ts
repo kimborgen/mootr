@@ -12,6 +12,7 @@ import { isSettingsHome, onSettingsChange, readSettingsText, readSharedCache, se
 import { peers, peerByName, peerCall, peerNotify } from './peers.ts';
 import { originOf } from './web-origins.ts';
 import { envVar } from './env.ts';
+import { timed } from './stall.ts';
 
 const POLL_MS = Number(envVar('SETTINGS_SYNC_MS')) || 60_000;
 const FETCH_MS = 5000;
@@ -274,5 +275,5 @@ export function startSettingsSync(): void {
   homeWeb = c?.web && originOf(c.web) === c.web ? c.web : null;
   void syncShared();
   void pruneTypeFiles();
-  setInterval(() => void syncShared(), POLL_MS);
+  setInterval(() => timed('settings sync', () => syncShared()), POLL_MS);
 }

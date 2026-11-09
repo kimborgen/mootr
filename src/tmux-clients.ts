@@ -1,16 +1,20 @@
-// Whether a tmux client has an agent's session open, asked at most once per `ttlMs` per agent.
-// A statusline refresh asks on every call, and each ask is a synchronous tmux spawn on the event
-// loop (about 50 ms under load, S-1025), so a burst of refreshes stalls every hook behind it.
-// A client that attaches or detaches is seen within `ttlMs`, which the statusline's cache TTL
-// already tolerates.
-export function clientCache(check: (id: string) => boolean, ttlMs: number, now: () => number = Date.now): (id: string) => boolean {
-  const seen = new Map<string, { at: number; value: boolean }>();
+// Whether a tmux client has an agent's session open, never waiting on tmux (S-4851). The statusline route used to run
+// a synchronous `tmux list-clients` per agent every `ttlMs` (about 50 ms under load, S-1025), and its label led the live
+// stall lines after S-4794. This answers from the last whole-server list and, once that is `ttlMs` old, starts one
+// refresh in the background. Before the first answer, and after a failed one, every session reads as open, as
+// hasClients reads a timeout.
+export function clientWatch(list: () => Promise<Set<string> | null>, ttlMs: number, now: () => number = Date.now): (id: string) => boolean {
+  let open: Set<string> | null = null;
+  let at = -Infinity;
+  let busy = false;
   return (id) => {
-    const t = now();
-    const hit = seen.get(id);
-    if (hit && t - hit.at < ttlMs) return hit.value;
-    const value = check(id);
-    seen.set(id, { at: t, value });
-    return value;
+    if (!busy && now() - at >= ttlMs) {
+      busy = true;
+      at = now();
+      list()
+        .then((s) => (open = s), () => (open = null))
+        .finally(() => (busy = false));
+    }
+    return open ? open.has(id) : true;
   };
 }

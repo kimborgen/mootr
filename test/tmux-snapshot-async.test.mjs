@@ -27,7 +27,8 @@ echo "done $cmd" >> "$D/calls"
 agent=$(cat "$D/agent" 2>/dev/null || echo none)
 srv=$(cat "$D/server" 2>/dev/null || echo 4242)
 case "$cmd" in
-  list-panes) printf '%s 1700000000\\t%s\\t1\\t0\\t1700000001\\t1\\t%%1\\n' "$srv" "$agent" ;;
+  # The agent file may name several agents, space-separated: pane %1, %2, ... in order.
+  list-panes) i=0; for a in $agent; do i=$((i+1)); printf '%s 1700000000\\t%s\\t1\\t0\\t1700000001\\t1\\t%%%s\\n' "$srv" "$a" "$i"; done ;;
   display-message) printf '%s 1700000000\\t%s\\n' "$srv" "$agent" ;;
   capture-pane) echo 'MENU shown' ;;
   send-keys) ;;
@@ -166,6 +167,31 @@ test('banners: an agent that starts working during the owner lookup gets no keys
   assert.equal(calls(/ send-keys /).length, baseline.keys, 'no keys after the agent started working');
   assert.equal(db.listEvents(id, 50).some((e) => e.type === 'banner:dismissed'), false);
   for (const f of ['hold-display-message', 'release-display-message', 'sleep-display-message']) rmSync(join(dir, f));
+});
+
+// S-4910: each tmux start forks the daemon, a few ms each at its size; eight started on one tick blocked the loop
+// 100-225 ms. A tick's captures now run one at a time, so no two are in flight at once.
+test('banners: a tick captures its panes one at a time', async () => {
+  await sleep(1100);
+  const ids = [agent(), agent(), agent()];
+  set('agent', ids.join(' '));
+  set('sleep-list-panes', 0);
+  set('sleep-display-message', 0);
+  set('sleep-capture-pane', 0.15);
+  const from = calls().length;
+  const done = calls(/^done capture-pane/).length;
+  await daemon.bannersTick();
+  await until(() => calls(/^done capture-pane/).length >= done + 3);
+  const captures = calls().slice(from).filter((l) => /capture-pane/.test(l));
+  let inFlight = 0;
+  let most = 0;
+  for (const l of captures) {
+    inFlight += l.startsWith('done') ? -1 : 1;
+    most = Math.max(most, inFlight);
+  }
+  assert.equal(captures.filter((l) => !l.startsWith('done')).length, 3, captures.join('\n'));
+  assert.equal(most, 1, `captures overlapped:\n${captures.join('\n')}`);
+  rmSync(join(dir, 'sleep-capture-pane'));
 });
 
 test('reconcile: an agent resumed after the snapshot began is not taken for exited', async () => {
